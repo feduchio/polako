@@ -67,6 +67,15 @@ describe("FakeClock", () => {
     expect(clock.pendingSleepers()).toBe(0);
   });
 
+  it("rejects an infinite chain of zero-delay re-entrant sleepers", async () => {
+    const clock = new FakeClock(0);
+    const again = (): void => {
+      void clock.sleep(0).then(again);
+    };
+    void clock.sleep(0).then(again);
+    await expect(clock.advance(0)).rejects.toThrow(/re-registering/);
+  });
+
   it("rejects an aborted sleep", async () => {
     const clock = new FakeClock(0);
     const ac = new AbortController();

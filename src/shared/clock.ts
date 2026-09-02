@@ -77,7 +77,9 @@ export class FakeClock implements Clock {
     const dueAtStart = this.waiters.filter((w) => w.at <= target).length;
     const maxIterations = 100_000 + 100_000 * Math.max(1, dueAtStart);
     for (let guard = 0; ; guard++) {
-      if (guard > maxIterations && this.waiters.some((w) => w.at <= target)) {
+      // Re-entrant sleep(0) chains register the next waiter during flushMicrotasks after
+      // resolve(), so a pending check here would miss them and never trip on infinite loops.
+      if (guard > maxIterations) {
         throw new Error("FakeClock.advance: sleepers keep re-registering at the current time");
       }
       await flushMicrotasks();
