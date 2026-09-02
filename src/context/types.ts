@@ -86,7 +86,8 @@ export interface BuildWorkerInput {
 }
 
 export function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
+  if (text.length === 0) return 0;
+  return Math.ceil(text.length / 4);
 }
 
 export function formatFactForPrompt(fact: Fact): string {
@@ -99,14 +100,15 @@ export function formatFactForPrompt(fact: Fact): string {
 }
 
 export function buildMissionContext(mission: Mission): MissionContext {
-  return {
+  const ctx: MissionContext = {
     missionId: mission.id,
     projectPath: mission.projectPath,
     text: mission.text,
-    userConstraints: [...mission.userConstraints],
-    userDecisions: [...mission.userDecisions],
+    userConstraints: Object.freeze([...mission.userConstraints]) as string[],
+    userDecisions: Object.freeze([...mission.userDecisions]) as string[],
     hash: mission.hash,
   };
+  return Object.freeze(ctx);
 }
 
 export function discloseFailedAttempts(

@@ -25,6 +25,7 @@ export function buildSupervisorView(input: BuildSupervisorInput): SupervisorView
 
   const decisions = input.facts
     .filter((f) => f.kind === "decision" && f.supersededBy === null)
+    .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id))
     .slice(0, 20)
     .map(formatFactForPrompt);
 

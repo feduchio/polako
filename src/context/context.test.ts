@@ -76,7 +76,11 @@ describe("context builders + FactsService", () => {
     expect(ctx.text).toBe("fix the bug");
     expect(ctx.hash).toBe(mission.hash);
     expect(ctx.userConstraints).toEqual(["no scope creep"]);
-    ctx.userConstraints.push("mut");
+    expect(Object.isFrozen(ctx)).toBe(true);
+    expect(Object.isFrozen(ctx.userConstraints)).toBe(true);
+    expect(() => {
+      (ctx as { text: string }).text = "mut";
+    }).toThrow();
     expect(mission.userConstraints).toEqual(["no scope creep"]);
   });
 
@@ -146,7 +150,7 @@ describe("context builders + FactsService", () => {
     await clock.advance(1);
     facts.record({
       runId,
-      kind: "convention",
+      kind: "invariant",
       statement: "use  esm",
       provenanceKind: "user_stated",
       provenanceRefs: [id("evt", NOW + 1)],
@@ -249,7 +253,18 @@ describe("context builders + FactsService", () => {
     });
     expect(pack.included).toContain("task");
     expect(pack.estimatedTokens).toBeLessThanOrEqual(200);
-    // failedAttempts dropped or protocol trimmed via DROP_ORDER
     expect(!pack.sections["failedAttempts"]?.includes("TypeError")).toBe(true);
+
+    const tiny = buildWorkerContextPack({
+      task,
+      facts: [],
+      findings: [],
+      fileFragments: [],
+      failedAttempts: [],
+      attemptNumber: 1,
+      tools: [],
+      maxPackTokens: 1,
+    });
+    expect(tiny.estimatedTokens).toBeLessThanOrEqual(1);
   });
 });

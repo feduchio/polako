@@ -71,7 +71,7 @@ export class FactsService {
     const byKey = new Map<string, Fact>();
     let superseded = 0;
     for (const f of [...current].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))) {
-      const key = `${f.kind}|${normalizeStatement(f.statement)}`;
+      const key = normalizeStatement(f.statement);
       const winner = byKey.get(key);
       if (winner === undefined) {
         byKey.set(key, f);

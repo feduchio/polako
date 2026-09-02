@@ -106,10 +106,12 @@ export function fitWorkerPack(
   protocolHash: string | null,
 ): WorkerContextPack {
   const included = Object.keys(sections);
+  const local: Record<string, string> = { ...sections };
+
   const pack = (): WorkerContextPack => {
-    const text = included.map((k) => `## ${k}\n${sections[k] ?? ""}`).join("\n\n");
+    const text = included.map((k) => `## ${k}\n${local[k] ?? ""}`).join("\n\n");
     return {
-      sections: Object.fromEntries(included.map((k) => [k, sections[k] ?? ""])),
+      sections: Object.fromEntries(included.map((k) => [k, local[k] ?? ""])),
       included: [...included],
       estimatedTokens: estimateTokens(text),
       protocolHash,
@@ -125,6 +127,35 @@ export function fitWorkerPack(
     included.splice(idx, 1);
     result = pack();
     if (result.estimatedTokens <= maxPackTokens) return result;
+  }
+
+  // Hard cap: shrink remaining section bodies (task/mission last) until under budget.
+  const shrinkOrder = [...included].sort((a, b) => {
+    const protect = (k: string) => (k === "task" || k === "mission" ? 1 : 0);
+    return protect(a) - protect(b) || (local[b]?.length ?? 0) - (local[a]?.length ?? 0);
+  });
+  while (result.estimatedTokens > maxPackTokens) {
+    let shrunk = false;
+    for (const key of shrinkOrder) {
+      const cur = local[key] ?? "";
+      if (cur.length === 0) continue;
+      local[key] = cur.slice(0, Math.max(0, Math.floor(cur.length / 2)));
+      shrunk = true;
+      result = pack();
+      if (result.estimatedTokens <= maxPackTokens) return result;
+    }
+    if (!shrunk) break;
+  }
+  // Absolute ceiling: clip serialized pack (keeps task key, may empty other content).
+  if (result.estimatedTokens > maxPackTokens) {
+    const maxChars = Math.max(0, maxPackTokens * 4);
+    const serialized = included.map((k) => `## ${k}\n${local[k] ?? ""}`).join("\n\n").slice(0, maxChars);
+    return {
+      sections: { task: serialized },
+      included: ["task"],
+      estimatedTokens: estimateTokens(serialized),
+      protocolHash,
+    };
   }
   return result;
 }
