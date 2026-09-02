@@ -38,6 +38,11 @@ export interface SchedulerOptions {
   /** per-provider llm lane overrides: lane name -> limit */
   laneOverrides?: Record<string, number>;
   leaseMs: number;
+  /**
+   * Called when a job's terminal state could not be persisted (store failure). The job stays
+   * RUNNING in the store and will be reclaimed when its lease expires.
+   */
+  onPersistError?: (error: unknown, job: Job) => void;
 }
 
 interface InFlight {
@@ -57,7 +62,7 @@ interface InFlight {
 export class Scheduler {
   private readonly handlers = new Map<string, JobHandler>();
   private readonly inFlight = new Map<string, InFlight>();
-  private readonly controlCache = new Map<string, RunControl>();
+  private readonly controlCache = new Map<string, RunControl | null>();
 
   constructor(
     private readonly store: Store,
@@ -72,6 +77,7 @@ export class Scheduler {
 
   enqueue(input: EnqueueInput): Job {
     const now = this.clock.now();
+    if (!this.store.repos.runs.get(input.runId)) throw new PolishError("NOT_FOUND", `run ${input.runId} not found`);
     const deps = input.dependsOn ?? [];
     const depsDone = deps.every((d) => this.store.repos.jobs.get(d)?.state === "SUCCEEDED");
     const job: Job = {
@@ -97,18 +103,25 @@ export class Scheduler {
     return job;
   }
 
-  /** Called once on startup: reclaim jobs left RUNNING by a previous process or an expired lease. */
+  /**
+   * Called once on startup. Every RUNNING job that this process is not executing is orphaned
+   * (the previous process died — commonly with the *same* workerId), whatever its lease says:
+   * v1 runs a single daemon per home, so nobody else can legitimately own a lease.
+   */
   recover(): Job[] {
-    const now = this.clock.now();
     const reclaimed: Job[] = [];
     for (const job of this.store.repos.jobs.listByState(["RUNNING"])) {
       if (this.inFlight.has(job.id)) continue;
-      const foreign = job.leaseOwner !== this.options.workerId;
-      const expired = job.leaseUntil === null || job.leaseUntil < now;
-      if (!foreign && !expired) continue;
-      reclaimed.push(this.setState(job, "READY", { leaseOwner: null, leaseUntil: null }));
+      reclaimed.push(this.reclaim(job, "orphaned by previous process"));
     }
     return reclaimed;
+  }
+
+  /** Return an orphaned RUNNING job to READY, or FAILED when its attempt budget is spent. */
+  private reclaim(job: Job, reason: string): Job {
+    return job.attempts >= job.maxAttempts
+      ? this.setState(job, "FAILED", { error: `${reason}; attempts exhausted`, leaseOwner: null, leaseUntil: null })
+      : this.setState(job, "READY", { error: reason, leaseOwner: null, leaseUntil: null });
   }
 
   /**
@@ -130,7 +143,12 @@ export class Scheduler {
         this.setState(job, "CANCELLED", { error: "cancelled before start" });
         continue;
       }
-      if (!mayDispatchJobs(this.controlFor(job.runId))) continue;
+      const control = this.controlFor(job.runId);
+      if (control === null) {
+        this.setState(job, "FAILED", { error: `run ${job.runId} not found` });
+        continue;
+      }
+      if (!mayDispatchJobs(control)) continue;
       const used = running.get(job.lane) ?? 0;
       if (used >= this.laneLimit(job.lane)) continue;
       if (!this.handlers.has(job.type)) {
@@ -199,8 +217,11 @@ export class Scheduler {
         this.renewLease(running.id);
       },
     };
-    const promise = this.runHandler(running, handler, ctx, controller);
-    this.inFlight.set(running.id, { job: running, controller, promise });
+    // Register before invoking: a handler that throws synchronously completes `runHandler`
+    // before it returns, and the `finally` must find (and remove) the entry.
+    const entry: InFlight = { job: running, controller, promise: Promise.resolve() };
+    this.inFlight.set(running.id, entry);
+    entry.promise = this.runHandler(running, handler, ctx, controller);
     return running;
   }
 
@@ -219,12 +240,19 @@ export class Scheduler {
       } else {
         outcome = { state: "FAILED", patch: { error: errorToString(err) } };
       }
+    }
+    try {
+      const current = this.store.repos.jobs.get(job.id);
+      if (current?.state === "RUNNING") {
+        this.setState(current, outcome.state, { ...outcome.patch, leaseOwner: null, leaseUntil: null });
+      }
+    } catch (err) {
+      // The job stays RUNNING in the store; lease expiry will reclaim it. Never let this
+      // become an unhandled rejection: `settle()` awaits these promises.
+      this.options.onPersistError?.(err, job);
     } finally {
       this.inFlight.delete(job.id);
     }
-    const current = this.store.repos.jobs.get(job.id);
-    if (current?.state !== "RUNNING") return;
-    this.setState(current, outcome.state, { ...outcome.patch, leaseOwner: null, leaseUntil: null });
   }
 
   private promoteAndCascade(): void {
@@ -246,31 +274,29 @@ export class Scheduler {
     for (const job of this.store.repos.jobs.listByState(["RUNNING"])) {
       if (this.inFlight.has(job.id)) continue;
       if (job.leaseUntil !== null && job.leaseUntil >= now) continue;
-      if (job.attempts >= job.maxAttempts) {
-        this.setState(job, "FAILED", { error: "lease expired and attempts exhausted", leaseOwner: null, leaseUntil: null });
-      } else {
-        this.setState(job, "READY", { error: "lease expired", leaseOwner: null, leaseUntil: null });
-      }
+      this.reclaim(job, "lease expired");
     }
   }
 
   private applyRunControl(): void {
     for (const flying of [...this.inFlight.values()]) {
-      if (mustCancelInFlight(this.controlFor(flying.job.runId)) && !flying.controller.signal.aborted) {
+      const control = this.controlFor(flying.job.runId);
+      if (control !== null && mustCancelInFlight(control) && !flying.controller.signal.aborted) {
         this.markCancelRequested(flying.job);
         flying.controller.abort(new PolishError("CANCELLED", "run stopped"));
       }
     }
     for (const job of this.store.repos.jobs.listByState(["PENDING", "READY"])) {
-      if (mustCancelInFlight(this.controlFor(job.runId))) this.setState(job, "CANCELLED", { error: "run stopped" });
+      const control = this.controlFor(job.runId);
+      if (control !== null && mustCancelInFlight(control)) this.setState(job, "CANCELLED", { error: "run stopped" });
     }
   }
 
-  private controlFor(runId: string): RunControl {
+  /** Run control, or null when the run does not exist (its jobs must never dispatch). */
+  private controlFor(runId: string): RunControl | null {
     const cached = this.controlCache.get(runId);
-    if (cached) return cached;
-    const run = this.store.repos.runs.get(runId);
-    const control: RunControl = run?.control ?? "RUNNING";
+    if (cached !== undefined) return cached;
+    const control = this.store.repos.runs.get(runId)?.control ?? null;
     this.controlCache.set(runId, control);
     return control;
   }

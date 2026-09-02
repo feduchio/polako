@@ -283,4 +283,110 @@ describe("Scheduler", () => {
     sched.tick();
     expect(store.repos.jobs.get(j.id)?.state).toBe("FAILED");
   });
+
+  it("a synchronously throwing handler does not leave a phantom in-flight entry (settle terminates)", async () => {
+    const run = makeRun(store, clock);
+    sched.register("boom", () => {
+      throw new Error("sync");
+    });
+    const j = sched.enqueue({ runId: run.id, type: "boom", lane: "local.shell", maxAttempts: 1 });
+    sched.tick();
+    await flushMicrotasks();
+    expect(store.repos.jobs.get(j.id)?.state).toBe("FAILED");
+    expect(sched.inFlightCount()).toBe(0);
+    await sched.settle();
+  });
+
+  function persistRunning(run: Run, j: ReturnType<Scheduler["enqueue"]>, patch: { attempts: number; leaseOwner: string; leaseUntil: number }): void {
+    store.events.append([
+      {
+        id: id("evt"),
+        runId: run.id,
+        ts: NOW,
+        type: "job.state_changed",
+        payload: { job: { ...j, state: "RUNNING", ...patch } },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
+    ]);
+  }
+
+  it("recover() reclaims orphaned jobs even with a fresh lease under the same workerId, and fails those with exhausted attempts", async () => {
+    const run = makeRun(store, clock);
+    sched.register("noop", async () => ({}));
+    const a = sched.enqueue({ runId: run.id, type: "noop", lane: "local.shell", maxAttempts: 2 });
+    const b = sched.enqueue({ runId: run.id, type: "noop", lane: "local.shell", maxAttempts: 1 });
+    persistRunning(run, a, { attempts: 1, leaseOwner: "w1", leaseUntil: NOW + 10_000 }); // same id, fresh lease
+    persistRunning(run, b, { attempts: 1, leaseOwner: "other", leaseUntil: NOW + 10_000 }); // foreign, exhausted
+
+    const restarted = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 1000 });
+    restarted.register("noop", async () => ({}));
+    const reclaimed = restarted.recover().map((x) => [x.id, x.state]);
+    expect(reclaimed).toEqual([
+      [a.id, "READY"],
+      [b.id, "FAILED"],
+    ]);
+    restarted.tick();
+    await restarted.settle();
+    expect(store.repos.jobs.get(a.id)).toMatchObject({ state: "SUCCEEDED", attempts: 2 });
+    expect(store.repos.jobs.get(b.id)).toMatchObject({ state: "FAILED", attempts: 1 });
+  });
+
+  it("jobs of a non-existent run are never dispatched", () => {
+    expect(() => sched.enqueue({ runId: id("run"), type: "noop", lane: "local.shell" })).toThrow(/not found/);
+    // a job whose run projection vanished after creation
+    const run = makeRun(store, clock);
+    let calls = 0;
+    sched.register("noop", async () => {
+      calls++;
+      return {};
+    });
+    const j = sched.enqueue({ runId: run.id, type: "noop", lane: "local.shell" });
+    store.db.prepare("DELETE FROM runs WHERE id = ?").run(run.id);
+    sched.tick();
+    expect(calls).toBe(0);
+    expect(store.repos.jobs.get(j.id)?.state).toBe("FAILED");
+  });
+
+  it("dispatch order is total: priority, then creation time, then creation order within the same millisecond", async () => {
+    const run = makeRun(store, clock);
+    const order: string[] = [];
+    sched.register("rec", async (ctx) => {
+      order.push(ctx.job.payload["n"] as string);
+      return {};
+    });
+    const ids: string[] = [];
+    for (let i = 0; i < 25; i++) ids.push(sched.enqueue({ runId: run.id, type: "rec", lane: "llm.default", payload: { n: `j${i}` } }).id);
+    // ids are random within one FakeClock millisecond, so lexical order would not reproduce creation order
+    expect([...ids].sort()).not.toEqual(ids);
+    const listed = store.repos.jobs.listByState(["READY"]).map((j) => j.id);
+    expect(listed).toEqual(ids);
+    store.events.rebuildProjections(run.id);
+    expect(store.repos.jobs.listByState(["READY"]).map((j) => j.id)).toEqual(ids);
+  });
+
+  it("a failing terminal write is reported through onPersistError instead of an unhandled rejection", async () => {
+    const run = makeRun(store, clock);
+    const errors: unknown[] = [];
+    const s = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 1000, onPersistError: (e) => errors.push(e) });
+    let release: () => void = () => undefined;
+    s.register("long", () => new Promise<undefined>((r) => (release = () => { r(undefined); })));
+    const j = s.enqueue({ runId: run.id, type: "long", lane: "local.shell" });
+    s.tick();
+    const original = store.events.append.bind(store.events);
+    store.events.append = () => {
+      throw new Error("terminal write failed");
+    };
+    release();
+    await s.settle();
+    store.events.append = original;
+    expect(errors).toHaveLength(1);
+    expect(store.repos.jobs.get(j.id)?.state).toBe("RUNNING");
+    expect(s.inFlightCount()).toBe(0);
+    // lease expiry reclaims it later
+    await clock.advance(2000);
+    s.tick();
+    expect(store.repos.jobs.get(j.id)?.state).toBe("FAILED");
+  });
 });
