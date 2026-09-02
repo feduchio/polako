@@ -81,7 +81,7 @@ export class FakeClock implements Clock {
   async advance(ms: number): Promise<void> {
     const target = this.current + ms;
     const dueAtStart = this.waiters.filter((w) => w.at <= target).length;
-    const maxFirings = this.maxReentrantFirings + this.maxReentrantFirings * Math.max(1, dueAtStart);
+    const maxFirings = this.maxReentrantFirings * Math.max(1, dueAtStart);
     let firings = 0;
     for (let guard = 0; ; guard++) {
       await flushMicrotasks();
