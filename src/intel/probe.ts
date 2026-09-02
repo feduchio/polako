@@ -23,7 +23,7 @@ export async function probeCodeGraph(
       timeoutMs: 5_000,
       maxOutputBytes: 64_000,
     });
-    if (versionRun.exitCode !== 0 && versionRun.exitCode !== null) {
+    if (versionRun.exitCode !== 0 || versionRun.timedOut || versionRun.aborted || versionRun.signal !== null) {
       // some CLIs use `version` subcommand
       const alt = await runProcess({
         argv: [binary, "version"],
@@ -32,13 +32,13 @@ export async function probeCodeGraph(
         timeoutMs: 5_000,
         maxOutputBytes: 64_000,
       });
-      if (alt.exitCode !== 0) {
+      if (alt.exitCode !== 0 || alt.timedOut || alt.aborted || alt.signal !== null) {
         return {
           available: false,
           version: null,
           fts5: false,
           nativeEligible: false,
-          reason: `codegraph version failed: ${(versionRun.stderr || alt.stderr).slice(0, 200)}`,
+          reason: `codegraph version failed: ${versionRun.stderr.slice(0, 200) || alt.stderr.slice(0, 200) || "signal/non-zero exit"}`,
         };
       }
       return await interpretProbe(binary, cwd, (alt.stdout || alt.stderr).trim());

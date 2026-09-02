@@ -246,10 +246,10 @@ export class BasicIntel implements RepositoryIntelligence {
         continue;
       }
       const imports = new Set<string>();
-      const re = /from\s+["'](\.[^"']+)["']/g;
+      const re = /(?:from\s+["'](\.[^"']+)["']|import\s+["'](\.[^"']+)["'])/g;
       let m: RegExpExecArray | null;
       while ((m = re.exec(text)) !== null) {
-        const spec = m[1];
+        const spec = m[1] ?? m[2];
         if (spec === undefined) continue;
         const resolved = resolveImport(this.workspacePath, rel, spec);
         if (resolved) imports.add(resolved);

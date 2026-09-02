@@ -103,7 +103,12 @@ export class CodeGraphCli implements RepositoryIntelligence {
     this.stale = true;
     const args = ["refresh", "--json", ...changedFiles.flatMap((f) => ["--file", f])];
     const result = await this.exec(args);
-    if (result.exitCode === 0) this.stale = false;
+    if (result.exitCode === 0) {
+      this.stale = false;
+      this.lastError = null;
+      return;
+    }
+    this.lastError = result.stderr || result.stdout || `refresh exit ${String(result.exitCode)}`;
   }
 
   async health(): Promise<IntelHealth> {
@@ -113,8 +118,9 @@ export class CodeGraphCli implements RepositoryIntelligence {
     }
     const indexPath = join(this.workspacePath, ".codegraph");
     const hasIndex = existsSync(indexPath);
+    const ok = hasIndex && this.lastError === null && !this.stale;
     return {
-      ok: hasIndex && this.lastError === null,
+      ok,
       backend: "codegraph-cli",
       detail: [
         `version=${probe.version ?? "?"}`,

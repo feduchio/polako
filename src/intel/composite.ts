@@ -45,19 +45,33 @@ export class CompositeIntel implements RepositoryIntelligence {
     } catch {
       /* degrade */
     }
+    await this.useFallback();
+  }
+
+  private async useFallback(): Promise<void> {
     await this.options.fallback.prepare();
     this.active = this.options.fallback;
     this.degraded = true;
   }
 
+  private async ensureHealthyActive(): Promise<void> {
+    if (this.active === this.options.fallback) return;
+    try {
+      const h = await this.active.health();
+      if (h.ok) return;
+    } catch {
+      /* degrade */
+    }
+    await this.useFallback();
+  }
+
   private async withFallback<T>(op: (backend: RepositoryIntelligence) => Promise<T>): Promise<T> {
+    await this.ensureHealthyActive();
     try {
       return await op(this.active);
     } catch (err) {
       if (this.active === this.options.fallback) throw err;
-      await this.options.fallback.prepare();
-      this.active = this.options.fallback;
-      this.degraded = true;
+      await this.useFallback();
       return op(this.active);
     }
   }
@@ -85,6 +99,7 @@ export class CompositeIntel implements RepositoryIntelligence {
   }
 
   async health(): Promise<IntelHealth> {
+    await this.ensureHealthyActive();
     const h = await this.active.health();
     if (this.degraded) {
       return {

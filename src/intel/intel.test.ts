@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import { BasicIntel } from "./basic.js";
 import { CodeGraphCli } from "./codegraphCli.js";
 import { CompositeIntel } from "./composite.js";
 import { probeCodeGraph } from "./probe.js";
+import type { RepositoryIntelligence } from "./types.js";
 
 const repoRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const fixture = join(repoRoot, "fixtures/intel-sample");
@@ -28,6 +29,18 @@ describe("BasicIntel", () => {
     const health = await intel.health();
     expect(health.ok).toBe(true);
     expect(health.backend.startsWith("basic:")).toBe(true);
+  });
+
+  it("includes side-effect imports in the impact graph", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-basic-imp-"));
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "a.ts"), "export const a = 1;\n");
+    writeFileSync(join(dir, "src", "b.ts"), 'import "./a.js";\n');
+    const intel = new BasicIntel(dir);
+    await intel.prepare();
+    const impact = await intel.impact({ files: ["src/a.ts"] }, 2);
+    expect(impact.files).toContain("src/b.ts");
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
@@ -70,8 +83,33 @@ describe("CodeGraphCli + probe", () => {
     const health = await cli.health();
     expect(health.ok).toBe(true);
     expect(health.backend).toBe("codegraph-cli");
-
+    expect(health.stale).toBeUndefined();
     rmSync(other, { recursive: true, force: true });
+  });
+
+  it("marks health not ok when refresh fails and leaves the index stale", async () => {
+    dir = mkdtempSync(join(tmpdir(), "polish-cg-stale-"));
+    const failBin = join(dir, "fail-cg.mjs");
+    writeFileSync(
+      failBin,
+      `#!/usr/bin/env node
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+const cmd = process.argv[2];
+if (cmd === "--version" || cmd === "version") { process.stdout.write("1.0.0\\n"); process.exit(0); }
+if (cmd === "probe") { process.stdout.write(JSON.stringify({ ok: true, fts5: true }) + "\\n"); process.exit(0); }
+if (cmd === "init") { mkdirSync(join(process.cwd(), ".codegraph"), { recursive: true }); process.stdout.write("{}\\n"); process.exit(0); }
+if (cmd === "refresh") { process.exit(9); }
+process.exit(0);
+`,
+    );
+    chmodSync(failBin, 0o755);
+    const cli = new CodeGraphCli(dir, { binary: failBin });
+    await cli.prepare();
+    await cli.refresh(["x.ts"]);
+    const health = await cli.health();
+    expect(health.stale).toBe(true);
+    expect(health.ok).toBe(false);
   });
 
   it("health is not ok when binary is missing", async () => {
@@ -94,6 +132,32 @@ describe("CompositeIntel", () => {
     await composite.prepare();
     const health = await composite.health();
     expect(health.degradedFrom).toBe("codegraph-cli");
+    expect(health.ok).toBe(true);
+    const hits = await composite.explore("mul");
+    expect(hits.some((h) => h.path.includes("math.ts"))).toBe(true);
+  });
+
+  it("re-checks primary health and fails over when it becomes unhealthy", async () => {
+    let primaryOk = true;
+    const primary: RepositoryIntelligence = {
+      workspacePath: fixture,
+      prepare: async () => undefined,
+      explore: async () => [{ path: "primary.ts", line: 1, text: "p" }],
+      symbol: async () => [],
+      callers: async () => [],
+      callees: async () => [],
+      impact: async () => ({ files: [], symbols: [], depth: 0 }),
+      affectedTests: async () => [],
+      refresh: async () => undefined,
+      health: async () => ({ ok: primaryOk, backend: "primary" }),
+    };
+    const fallback = new BasicIntel(fixture);
+    const composite = new CompositeIntel(fixture, { primary, fallback, primaryName: "primary" });
+    await composite.prepare();
+    expect((await composite.health()).backend.startsWith("primary")).toBe(true);
+    primaryOk = false;
+    const health = await composite.health();
+    expect(health.degradedFrom).toBe("primary");
     expect(health.ok).toBe(true);
     const hits = await composite.explore("mul");
     expect(hits.some((h) => h.path.includes("math.ts"))).toBe(true);
