@@ -75,20 +75,24 @@ export class BasicIntel implements RepositoryIntelligence {
   }
 
   async callees(name: string): Promise<SymbolRef[]> {
-    // Approximate: inside files that define `name`, collect other call-like tokens — limited heuristic.
+    // Approximate: inside the defining symbol's region only, collect call-like tokens.
     const defs = await this.symbol(name);
     const out: SymbolRef[] = [];
     for (const def of defs.slice(0, 5)) {
       const abs = resolve(this.workspacePath, def.path);
       if (!existsSync(abs)) continue;
       const text = readFileSync(abs, "utf8");
+      const region = sliceFunctionRegion(text, def.line);
+      if (region.length === 0) continue;
       const re = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
       let m: RegExpExecArray | null;
-      while ((m = re.exec(text)) !== null) {
+      while ((m = re.exec(region)) !== null) {
         const callee = m[1];
         if (callee === undefined) continue;
-        if (callee === name || callee === "if" || callee === "for" || callee === "while" || callee === "switch") continue;
-        const line = text.slice(0, m.index).split("\n").length;
+        if (callee === name || callee === "if" || callee === "for" || callee === "while" || callee === "switch" || callee === "function") {
+          continue;
+        }
+        const line = def.line + region.slice(0, m.index).split("\n").length - 1;
         out.push({ name: callee, path: def.path, line, kind: "callee" });
         if (out.length >= 40) return out;
       }
@@ -321,6 +325,26 @@ function isTestPath(p: string): boolean {
 function basenameNoExt(p: string): string {
   const base = p.split("/").pop() ?? p;
   return base.replace(/\.[^.]+$/, "");
+}
+
+/** Lines from `startLine` until the next top-level declaration (heuristic function body slice). */
+function sliceFunctionRegion(text: string, startLine: number): string {
+  const lines = text.split("\n");
+  const start = startLine - 1;
+  if (start < 0 || start >= lines.length) return "";
+  const region: string[] = [];
+  for (let i = start; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === undefined) break;
+    if (
+      i > start &&
+      /^(?:export\s+)?(?:async\s+)?(?:function|class|const|let|var|type|interface|enum)\b/.test(line)
+    ) {
+      break;
+    }
+    region.push(line);
+  }
+  return region.join("\n");
 }
 
 function resolveImport(workspace: string, fromRel: string, spec: string): string | null {

@@ -162,4 +162,11 @@ describe("CompositeIntel", () => {
     const hits = await composite.explore("mul");
     expect(hits.some((h) => h.path.includes("math.ts"))).toBe(true);
   });
+
+  it("callees only scans within the defining symbol region", async () => {
+    const intel = new BasicIntel(fixture);
+    await intel.prepare();
+    const callees = await intel.callees("add");
+    expect(callees.some((c) => c.name === "mul")).toBe(false);
+  });
 });
