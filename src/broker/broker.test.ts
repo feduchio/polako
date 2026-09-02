@@ -135,6 +135,52 @@ describe("ModelBroker", () => {
     fresh2.restore(runId);
     expect(fresh.snapshot(runId)).toEqual({ runUsd: 0.2, runTokens: 400, perTask: { task_x: 400 } });
   });
+
+  it("persists attempt outcomes so restore rebuilds retry stats", async () => {
+    provider.script("mid", [
+      { kind: "error", error: new ProviderError("p1", "server", "1") },
+      { kind: "error", error: new ProviderError("p1", "server", "2") },
+      { kind: "reply", content: "ok", usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } },
+    ]);
+    const p = broker.complete(req(runId, "mid"));
+    await clock.advance(100);
+    await clock.advance(200);
+    await p;
+    expect(catalog.get({ provider: "p1", model: "mid" })!.stats).toMatchObject({ calls: 3, failures: 2 });
+
+    const restoredCatalog = new ModelCatalog();
+    restoredCatalog.register(provider);
+    await restoredCatalog.refresh();
+    const restored = new ModelBroker({
+      store,
+      clock,
+      catalog: restoredCatalog,
+      quota: new QuotaTracker(clock, { concurrency: 1, rpm: null }),
+      budget: new BudgetTracker({ maxRunUsd: null, maxRunTokens: null, maxTaskTokens: null }),
+      secrets: SecretStore.fromValues({}),
+    });
+    restored.restore(runId);
+    expect(restoredCatalog.get({ provider: "p1", model: "mid" })!.stats).toMatchObject({ calls: 3, failures: 2 });
+  });
+
+  it("records a failed model.call when the caller aborts and stores generation controls", async () => {
+    provider.script("big", [
+      {
+        kind: "fn",
+        fn: async () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          throw err;
+        },
+      },
+    ]);
+    await expect(broker.complete({ ...req(runId, "big"), maxTokens: 123, temperature: 0.25 })).rejects.toThrow(/aborted/);
+    const events = store.events.list(runId, { types: ["model.call"] });
+    expect(events).toHaveLength(1);
+    expect(events[0]!.payload).toMatchObject({ ok: false, attempts: 1 });
+    const reqText = store.artifacts.getText(events[0]!.artifacts[0]!.sha256);
+    expect(JSON.parse(reqText)).toMatchObject({ maxTokens: 123, temperature: 0.25 });
+  });
 });
 
 describe("QuotaTracker", () => {
@@ -225,7 +271,7 @@ describe("ModelRouter", () => {
 });
 
 describe("SecretStore", () => {
-  it("parses dotenv, warns on loose permissions, redacts and never exposes values in names()", () => {
+  it("parses dotenv, warns on non-600 permissions, redacts and never exposes values in names()", () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-secrets-"));
     try {
       const file = join(dir, "secrets.env");
@@ -239,6 +285,18 @@ describe("SecretStore", () => {
       expect(s.redact("key gsk_12345678 and sk-or-abcdefgh")).toBe("key <redacted:GROQ_API_KEY> and <redacted:OPENROUTER_API_KEY>");
       expect(() => s.get("NOPE")).toThrow(/not configured/);
       expect(parseDotenv("A='x y'\nB=z")).toEqual([["A", "x y"], ["B", "z"]]);
+
+      chmodSync(file, 0o400);
+      const strict = SecretStore.fromFile(file, {});
+      expect(strict.warnings[0]).toMatch(/mode is 400/);
+
+      process.env["POLISH_TEST_REPRO_API_KEY"] = "repro-secret-key";
+      try {
+        const fromEnv = SecretStore.fromFile(join(dir, "missing.env"));
+        expect(fromEnv.has("POLISH_TEST_REPRO_API_KEY")).toBe(true);
+      } finally {
+        delete process.env["POLISH_TEST_REPRO_API_KEY"];
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -364,6 +422,24 @@ describe("OpenAICompatProvider", () => {
     }
     expect(kinds).toEqual(["rate_limit", "auth", "server", "bad_request", "not_found"]);
     expect(retryAfter[0]).toBe(7000);
+  });
+
+  it("rejects a pre-aborted signal without calling fetch", async () => {
+    let fetches = 0;
+    const p = new OpenAICompatProvider({
+      id: "or",
+      kind: "openrouter",
+      baseUrl: "https://example.test",
+      apiKey: "k",
+      fetch: fakeFetch(() => {
+        fetches += 1;
+        return { status: 200, body: { choices: [{ message: { content: "x" }, finish_reason: "stop" }] } };
+      }),
+    });
+    const ac = new AbortController();
+    ac.abort();
+    await expect(p.complete({ ...req("run_a", "m", "or"), signal: ac.signal })).rejects.toThrow(/aborted/);
+    expect(fetches).toBe(0);
   });
 
   it("infers families and tiers without hard-coded model names", () => {

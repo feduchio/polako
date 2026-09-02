@@ -9,11 +9,11 @@ export class SecretStore {
   private readonly values = new Map<string, string>();
   readonly warnings: string[] = [];
 
-  static fromFile(path: string, fallbackEnv: Readonly<Record<string, string | undefined>> = {}): SecretStore {
+  static fromFile(path: string, fallbackEnv: Readonly<Record<string, string | undefined>> = process.env): SecretStore {
     const store = new SecretStore();
     if (existsSync(path)) {
       const mode = statSync(path).mode & 0o777;
-      if (mode & 0o077) store.warnings.push(`${path} is readable by others (mode ${mode.toString(8)}); chmod 600 recommended`);
+      if (mode !== 0o600) store.warnings.push(`${path} mode is ${mode.toString(8)}; chmod 600 recommended`);
       for (const [k, v] of parseDotenv(readFileSync(path, "utf8"))) store.values.set(k, v);
     }
     for (const [k, v] of Object.entries(fallbackEnv)) {

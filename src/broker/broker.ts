@@ -35,6 +35,13 @@ export interface ModelCallRecord {
   attempts: number;
 }
 
+interface AttemptOutcome {
+  ok: boolean;
+  latencyMs: number;
+  errorKind?: string;
+  at: number;
+}
+
 /**
  * The single entry point for LLM calls. Enforces budgets and quotas, retries retryable
  * provider errors with backoff, records every call (request + response as artifacts,
@@ -57,31 +64,59 @@ export class ModelBroker {
 
     let attempt = 0;
     let lastError: unknown;
+    const outcomes: AttemptOutcome[] = [];
+
+    const failCancelled = (err: unknown): never => {
+      this.recordEvent(request, null, Math.max(attempt, 1), outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
+      throw err instanceof PolishError ? err : new PolishError("CANCELLED", "model call cancelled", { cause: err });
+    };
+
     while (attempt < this.retry.maxAttempts) {
       attempt++;
-      if (request.signal?.aborted) throw new PolishError("CANCELLED", "model call cancelled");
+      if (request.signal?.aborted) {
+        outcomes.push({ ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() });
+        catalog.recordCall(request.model, { ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() });
+        failCancelled(new PolishError("CANCELLED", "model call cancelled"));
+      }
       const release = await quota.acquire(adapter.id, request.signal);
+      if (request.signal?.aborted) {
+        release();
+        outcomes.push({ ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() });
+        catalog.recordCall(request.model, { ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() });
+        failCancelled(new PolishError("CANCELLED", "model call cancelled"));
+      }
       const started = clock.now();
       try {
         const response = await adapter.complete(request);
         release();
         const latency = Math.max(0, clock.now() - started) || response.latencyMs;
-        catalog.recordCall(request.model, { ok: true, latencyMs: latency, at: clock.now() });
+        const outcome: AttemptOutcome = { ok: true, latencyMs: latency, at: clock.now() };
+        outcomes.push(outcome);
+        catalog.recordCall(request.model, outcome);
         const snapshot = budget.record(request.metadata.runId, response.usage, request.metadata.taskId);
-        const eventId = this.recordEvent(request, response, attempt, null, snapshot.runUsd);
+        const eventId = this.recordEvent(request, response, attempt, outcomes, null, snapshot.runUsd);
         return { eventId, response, attempts: attempt };
       } catch (err) {
         release();
         lastError = err;
-        if (isAbortError(err)) throw err;
-        const kind = err instanceof ProviderError ? err.kind : "unknown";
-        catalog.recordCall(request.model, { ok: false, latencyMs: clock.now() - started, errorKind: kind, at: clock.now() });
+        const kind = isAbortError(err)
+          ? "cancelled"
+          : err instanceof ProviderError
+            ? err.kind
+            : "unknown";
+        const outcome: AttemptOutcome = { ok: false, latencyMs: clock.now() - started, errorKind: kind, at: clock.now() };
+        outcomes.push(outcome);
+        catalog.recordCall(request.model, outcome);
+        if (isAbortError(err) || (err instanceof PolishError && err.code === "CANCELLED")) {
+          this.recordEvent(request, null, attempt, outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
+          throw err;
+        }
         if (err instanceof ProviderError && err.kind === "rate_limit") {
           quota.coolDown(adapter.id, err.retryAfterMs ?? this.backoff(attempt));
         }
         const retryable = err instanceof ProviderError ? err.retryable : false;
         if (!retryable || attempt >= this.retry.maxAttempts) {
-          this.recordEvent(request, null, attempt, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
+          this.recordEvent(request, null, attempt, outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
           if (err instanceof ProviderError && err.kind === "auth") catalog.setProviderAvailable(adapter.id, false);
           throw err;
         }
@@ -100,12 +135,26 @@ export class ModelBroker {
     request: CompletionRequest,
     response: CompletionResponse | null,
     attempts: number,
+    attemptOutcomes: readonly AttemptOutcome[],
     error: string | null,
     runUsdSoFar: number,
   ): string {
     const { store, secrets, clock } = this.deps;
     const reqArtifact = store.artifacts.put(
-      secrets.redact(JSON.stringify({ model: request.model, messages: request.messages, tools: request.tools, responseFormat: request.responseFormat }, null, 0)),
+      secrets.redact(
+        JSON.stringify(
+          {
+            model: request.model,
+            messages: request.messages,
+            tools: request.tools,
+            responseFormat: request.responseFormat,
+            maxTokens: request.maxTokens ?? null,
+            temperature: request.temperature ?? null,
+          },
+          null,
+          0,
+        ),
+      ),
       "model_request",
       `${modelRefKey(request.model)} ${request.metadata.purpose}`,
     );
@@ -122,6 +171,7 @@ export class ModelBroker {
         purpose: request.metadata.purpose,
         taskId: request.metadata.taskId ?? null,
         attempts,
+        attemptOutcomes,
         ok: response !== null,
         error,
         usage: response?.usage ?? null,
@@ -140,6 +190,7 @@ export class ModelBroker {
   /** Rebuild budget usage and catalog stats for a run from its `model.call` events. */
   restore(runId: string): void {
     const { store, budget, catalog } = this.deps;
+    catalog.resetCallStats();
     const snapshot = { runUsd: 0, runTokens: 0, perTask: {} as Record<string, number> };
     for (const e of store.events.list(runId, { types: ["model.call"] })) {
       const p = e.payload as {
@@ -149,11 +200,21 @@ export class ModelBroker {
         latencyMs?: number | null;
         taskId?: string | null;
         error?: string | null;
+        attemptOutcomes?: AttemptOutcome[];
+        attempts?: number;
       };
       if (p.model) {
-        const outcome: Parameters<ModelCatalog["recordCall"]>[1] = { ok: p.ok === true, latencyMs: p.latencyMs ?? 0, at: e.ts };
-        if (p.error) outcome.errorKind = p.error;
-        catalog.recordCall(p.model, outcome);
+        if (p.attemptOutcomes && p.attemptOutcomes.length > 0) {
+          for (const o of p.attemptOutcomes) {
+            const outcome: Parameters<ModelCatalog["recordCall"]>[1] = { ok: o.ok, latencyMs: o.latencyMs, at: o.at };
+            if (o.errorKind !== undefined) outcome.errorKind = o.errorKind;
+            catalog.recordCall(p.model, outcome);
+          }
+        } else {
+          const outcome: Parameters<ModelCatalog["recordCall"]>[1] = { ok: p.ok === true, latencyMs: p.latencyMs ?? 0, at: e.ts };
+          if (p.error) outcome.errorKind = p.error;
+          catalog.recordCall(p.model, outcome);
+        }
       }
       if (p.usage) {
         const tokens = p.usage.inputTokens + p.usage.outputTokens;

@@ -98,6 +98,13 @@ export class ModelCatalog {
     e.stats.lastUsedAt = outcome.at;
   }
 
+  /** Zero observed call stats (used by ModelBroker.restore before replaying events). */
+  resetCallStats(): void {
+    for (const e of this.entries.values()) {
+      e.stats = { calls: 0, failures: 0, latencyMs: 0, quality: e.stats.quality, lastErrorKind: null, lastUsedAt: null };
+    }
+  }
+
   /** Feed back an outcome quality signal in 0..1 (e.g. candidate passed gates = 1, failed = 0). */
   recordQuality(ref: ModelRef, quality: number): void {
     const e = this.entries.get(modelRefKey(ref));

@@ -105,6 +105,11 @@ export class OpenAICompatProvider implements ProviderAdapter {
   }
 
   private async request(method: string, path: string, body: string | undefined, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) {
+      const err = new Error("aborted");
+      err.name = "AbortError";
+      throw err;
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => {
       controller.abort();
