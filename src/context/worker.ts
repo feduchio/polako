@@ -1,4 +1,5 @@
 import { isGroundTruth } from "../domain/fact.js";
+import { PolishError } from "../shared/errors.js";
 import {
   discloseFailedAttempts,
   estimateTokens,
@@ -129,33 +130,10 @@ export function fitWorkerPack(
     if (result.estimatedTokens <= maxPackTokens) return result;
   }
 
-  // Hard cap: shrink remaining section bodies (task/mission last) until under budget.
-  const shrinkOrder = [...included].sort((a, b) => {
-    const protect = (k: string) => (k === "task" || k === "mission" ? 1 : 0);
-    return protect(a) - protect(b) || (local[b]?.length ?? 0) - (local[a]?.length ?? 0);
-  });
-  while (result.estimatedTokens > maxPackTokens) {
-    let shrunk = false;
-    for (const key of shrinkOrder) {
-      const cur = local[key] ?? "";
-      if (cur.length === 0) continue;
-      local[key] = cur.slice(0, Math.max(0, Math.floor(cur.length / 2)));
-      shrunk = true;
-      result = pack();
-      if (result.estimatedTokens <= maxPackTokens) return result;
-    }
-    if (!shrunk) break;
-  }
-  // Absolute ceiling: clip serialized pack (keeps task key, may empty other content).
-  if (result.estimatedTokens > maxPackTokens) {
-    const maxChars = Math.max(0, maxPackTokens * 4);
-    const serialized = included.map((k) => `## ${k}\n${local[k] ?? ""}`).join("\n\n").slice(0, maxChars);
-    return {
-      sections: { task: serialized },
-      included: ["task"],
-      estimatedTokens: estimateTokens(serialized),
-      protocolHash,
-    };
-  }
-  return result;
+  // Never truncate task/mission/acceptance content. If protected sections alone exceed the
+  // budget, fail loudly — callers must raise maxPackTokens.
+  throw new PolishError(
+    "BUDGET_EXCEEDED",
+    `worker pack protected sections require ~${result.estimatedTokens} tokens > max ${maxPackTokens}`,
+  );
 }

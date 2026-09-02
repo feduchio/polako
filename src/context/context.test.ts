@@ -254,17 +254,19 @@ describe("context builders + FactsService", () => {
     expect(pack.included).toContain("task");
     expect(pack.estimatedTokens).toBeLessThanOrEqual(200);
     expect(!pack.sections["failedAttempts"]?.includes("TypeError")).toBe(true);
+    expect(pack.sections["task"]).toContain("Acceptance:");
 
-    const tiny = buildWorkerContextPack({
-      task,
-      facts: [],
-      findings: [],
-      fileFragments: [],
-      failedAttempts: [],
-      attemptNumber: 1,
-      tools: [],
-      maxPackTokens: 1,
-    });
-    expect(tiny.estimatedTokens).toBeLessThanOrEqual(1);
+    expect(() =>
+      buildWorkerContextPack({
+        task,
+        facts: [],
+        findings: [],
+        fileFragments: [],
+        failedAttempts: [],
+        attemptNumber: 1,
+        tools: [],
+        maxPackTokens: 1,
+      }),
+    ).toThrow(PolishError);
   });
 });
