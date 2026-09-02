@@ -54,6 +54,20 @@ module.exports = {
       to: { path: "^src/(?!protocols/|domain/|shared/)" },
     },
     {
+      name: "intel-depends-only-on-foundation",
+      comment: "A10 RepositoryIntelligence may use domain/shared/sandbox process runner only",
+      severity: "error",
+      from: { path: "^src/intel/" },
+      to: { path: "^src/(?!intel/|domain/|shared/|sandbox/)" },
+    },
+    {
+      name: "context-depends-on-allowed",
+      comment: "A11 context builders may use domain/shared/store/protocols/project and intel types",
+      severity: "error",
+      from: { path: "^src/context/" },
+      to: { path: "^src/(?!context/|domain/|shared/|store/|protocols/|project/|intel/)" },
+    },
+    {
       name: "engine-is-not-imported-by-lower-layers",
       severity: "error",
       from: { path: "^src/(?!engine/|daemon/)" },
