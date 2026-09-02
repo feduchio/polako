@@ -16,13 +16,23 @@ export function parseTestOutput(framework: string, stdout: string, stderr: strin
 }
 
 function parseVitest(text: string): TestSummary | null {
-  const files = /Tests\s+(\d+)\s+passed(?:\s*\|\s*(\d+)\s+failed)?(?:\s*\|\s*(\d+)\s+skipped)?/i.exec(text);
-  if (files) {
-    const passed = Number(files[1]);
-    const failed = files[2] ? Number(files[2]) : 0;
-    const skipped = files[3] ? Number(files[3]) : 0;
+  const passedFirst = /Tests\s+(\d+)\s+passed(?:\s*\|\s*(\d+)\s+failed)?(?:\s*\|\s*(\d+)\s+skipped)?(?:\s*\((\d+)\))?/i.exec(text);
+  if (passedFirst) {
+    const passed = Number(passedFirst[1]);
+    const failed = passedFirst[2] ? Number(passedFirst[2]) : 0;
+    const skipped = passedFirst[3] ? Number(passedFirst[3]) : 0;
+    const total = passedFirst[4] ? Number(passedFirst[4]) : passed + failed + skipped;
     const failingTests = [...text.matchAll(/FAIL\s+.*?(\S+\.test\.\w+)/g)].map((m) => m[1] ?? "unknown");
-    return { total: passed + failed + skipped, passed, failed, skipped, failingTests };
+    return { total, passed, failed, skipped, failingTests };
+  }
+  const failedFirst = /Tests\s+(\d+)\s+failed(?:\s*\|\s*(\d+)\s+passed)?(?:\s*\|\s*(\d+)\s+skipped)?(?:\s*\((\d+)\))?/i.exec(text);
+  if (failedFirst) {
+    const failed = Number(failedFirst[1]);
+    const passed = failedFirst[2] ? Number(failedFirst[2]) : 0;
+    const skipped = failedFirst[3] ? Number(failedFirst[3]) : 0;
+    const total = failedFirst[4] ? Number(failedFirst[4]) : passed + failed + skipped;
+    const failingTests = [...text.matchAll(/FAIL\s+.*?(\S+\.test\.\w+)/g)].map((m) => m[1] ?? "unknown");
+    return { total, passed, failed, skipped, failingTests };
   }
   return null;
 }

@@ -28,9 +28,10 @@ export async function runChecks(opts: CheckRunOptions): Promise<CheckResult[]> {
 async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise<CheckResult> {
   const started = Date.now();
   try {
-    const runOpts: { timeoutMs?: number; signal?: AbortSignal } = {};
+    const runOpts: { timeoutMs?: number; signal?: AbortSignal; cwd?: string } = {};
     if (def.timeoutMs !== undefined) runOpts.timeoutMs = def.timeoutMs;
     if (opts.signal !== undefined) runOpts.signal = opts.signal;
+    if (def.cwd !== undefined) runOpts.cwd = def.cwd;
     const result = await opts.sandbox.run(def.command, runOpts);
     const status = statusFromProcess(result.timedOut, result.aborted, result.exitCode);
     const summary = def.kind === "test" ? parseTestOutput(opts.profile.framework, result.stdout, result.stderr) : null;
@@ -95,11 +96,14 @@ export function detectSilencing(input: {
   }
   for (const [path, hash] of Object.entries(input.baseline.configHashes)) {
     const cand = input.candidateConfigHashes[path];
-    if (cand !== undefined && cand !== hash) {
+    if (cand === undefined) {
+      findings.push({ kind: "weakened_config", path, detail: "config file removed vs baseline" });
+    } else if (cand !== hash) {
       findings.push({ kind: "weakened_config", path, detail: "config file hash changed vs baseline" });
     }
   }
   for (const line of input.diffText.split("\n")) {
+    if (!line.startsWith("+") || line.startsWith("+++")) continue;
     if (/\.(only|skip)\(/.test(line)) {
       findings.push({ kind: "skip_only", path: "diff", detail: line.trim() });
     }
@@ -136,8 +140,8 @@ export async function runIndependentGates(input: {
   sandbox: SandboxHandle;
   profile: ProjectProfile;
   acceptanceArtifacts: readonly AcceptanceArtifact[];
-  verifyAcceptance: (checkoutDir: string) => { path: string; reason: string }[];
-  materializeAcceptance: (checkoutDir: string) => void;
+  verifyAcceptance: (checkoutDir: string, artifacts: readonly AcceptanceArtifact[]) => { path: string; reason: string }[];
+  materializeAcceptance: (checkoutDir: string, artifacts: readonly AcceptanceArtifact[]) => void;
   candidateConfigHashes: Record<string, string>;
   candidateScriptsHash: string;
   changedFiles: readonly string[];
@@ -145,8 +149,8 @@ export async function runIndependentGates(input: {
   baseline: BaselineSnapshot;
   signal?: AbortSignal;
 }): Promise<GateResult> {
-  input.materializeAcceptance(input.sandbox.path);
-  const acceptanceProblems = input.verifyAcceptance(input.sandbox.path);
+  input.materializeAcceptance(input.sandbox.path, input.acceptanceArtifacts);
+  const acceptanceProblems = input.verifyAcceptance(input.sandbox.path, input.acceptanceArtifacts);
   const checkOpts: CheckRunOptions = {
     runId: input.runId,
     commitHash: input.commitHash,

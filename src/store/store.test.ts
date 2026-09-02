@@ -159,6 +159,48 @@ describe("Store", () => {
     expect(store.db.prepare("SELECT id FROM interpretations WHERE id = ?").get(staleId)).toBeUndefined();
   });
 
+  it("rebuild purges all mission-scoped rows with no backing event", () => {
+    const runId = id("run");
+    const missionId = id("msn");
+    store.events.append([ev(runId, "run.created", { run: run(runId, missionId) })]);
+    const staleInterpretation = {
+      id: id("mint"),
+      missionId,
+      version: 1,
+      supersedes: null,
+      basedOn: { profileHash: "c".repeat(64), baselineId: id("base") },
+      goals: ["g"],
+      requirements: [{ ref: "R1", statement: "s", acceptance: ["a"] }],
+      constraints: [],
+      nonGoals: [],
+      definitionOfSuccess: ["d"],
+      ambiguities: [],
+      createdBy: { kind: "supervisor" },
+      createdAt: NOW,
+    };
+    store.db
+      .prepare("INSERT INTO interpretations (id, mission_id, version, json) VALUES (?, ?, ?, ?)")
+      .run(staleInterpretation.id, missionId, 1, JSON.stringify(staleInterpretation));
+    const staleMissionId = id("msn");
+    const staleMission = {
+      id: staleMissionId,
+      projectPath: "/tmp/stale",
+      projectAlias: null,
+      text: "stale",
+      userConstraints: [],
+      userDecisions: [],
+      createdAt: NOW,
+      hash: "a".repeat(64),
+    };
+    store.db
+      .prepare("INSERT INTO missions (id, hash, json) VALUES (?, ?, ?)")
+      .run(staleMissionId, staleMission.hash, JSON.stringify(staleMission));
+
+    store.events.rebuildProjections(runId);
+    expect(store.db.prepare("SELECT id FROM interpretations WHERE id = ?").get(staleInterpretation.id)).toBeUndefined();
+    expect(store.db.prepare("SELECT id FROM missions WHERE id = ?").get(staleMissionId)).toBeUndefined();
+  });
+
   it("an event may only project entities of its own run", () => {
     const a = id("run");
     const b = id("run");

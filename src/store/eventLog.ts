@@ -127,8 +127,8 @@ export class EventLog {
 
   /**
    * Rebuild all projections for a run from its events. Run-scoped rows are cleared by `run_id`.
-   * Mission-scoped rows: delete entity ids this run will re-upsert, then purge same-mission rows
-   * whose ids appear in no event anywhere (stale manual inserts). Rows backed by other runs' events
+   * Mission-scoped rows: delete entity ids this run will re-upsert, then purge any row whose id
+   * appears in no ruled event anywhere (stale manual inserts). Rows backed by other runs' events
    * are preserved (shared-mission case).
    */
   rebuildProjections(runId: string): number {
@@ -136,16 +136,12 @@ export class EventLog {
       const events = this.list(runId);
       const missionIds = new Set<string>();
       const interpretationIds = new Set<string>();
-      const interpretationMissionIds = new Set<string>();
       for (const e of events) {
         for (const rule of rulesByType.get(e.type) ?? []) {
           const entity = e.payload[rule.payloadField] as Record<string, unknown> | undefined;
           if (!entity || typeof entity["id"] !== "string") continue;
           if (rule.table === "missions") missionIds.add(entity["id"]);
-          if (rule.table === "interpretations") {
-            interpretationIds.add(entity["id"]);
-            if (typeof entity["missionId"] === "string") interpretationMissionIds.add(entity["missionId"]);
-          }
+          if (rule.table === "interpretations") interpretationIds.add(entity["id"]);
         }
       }
       const globalMissionIds = this.ruledEntityIds("missions");
@@ -156,10 +152,10 @@ export class EventLog {
           this.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
         } else if (table === "missions") {
           for (const mid of missionIds) this.db.prepare("DELETE FROM missions WHERE id = ?").run(mid);
-          this.deleteOrphanMissionRows(missionIds, globalMissionIds);
+          this.deleteOrphanMissionRows(globalMissionIds);
         } else if (table === "interpretations") {
           for (const iid of interpretationIds) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(iid);
-          this.deleteOrphanInterpretationRows(interpretationMissionIds, globalInterpretationIds);
+          this.deleteOrphanInterpretationRows(globalInterpretationIds);
         } else if (RUN_SCOPED_TABLES.has(table)) {
           this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
         }
@@ -184,18 +180,17 @@ export class EventLog {
     return ids;
   }
 
-  private deleteOrphanMissionRows(missionIds: Set<string>, globalIds: Set<string>): void {
-    for (const mid of missionIds) {
-      if (!globalIds.has(mid)) this.db.prepare("DELETE FROM missions WHERE id = ?").run(mid);
+  private deleteOrphanMissionRows(globalIds: Set<string>): void {
+    const rows = this.db.prepare("SELECT id FROM missions").all() as { id: string }[];
+    for (const row of rows) {
+      if (!globalIds.has(row.id)) this.db.prepare("DELETE FROM missions WHERE id = ?").run(row.id);
     }
   }
 
-  private deleteOrphanInterpretationRows(missionIds: Set<string>, globalIds: Set<string>): void {
-    for (const mid of missionIds) {
-      const rows = this.db.prepare("SELECT id FROM interpretations WHERE mission_id = ?").all(mid) as { id: string }[];
-      for (const row of rows) {
-        if (!globalIds.has(row.id)) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(row.id);
-      }
+  private deleteOrphanInterpretationRows(globalIds: Set<string>): void {
+    const rows = this.db.prepare("SELECT id FROM interpretations").all() as { id: string }[];
+    for (const row of rows) {
+      if (!globalIds.has(row.id)) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(row.id);
     }
   }
 

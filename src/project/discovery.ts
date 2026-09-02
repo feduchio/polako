@@ -8,6 +8,8 @@ const MANIFEST_FILES = [
   "pnpm-lock.yaml",
   "package-lock.json",
   "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
   "vitest.config.ts",
   "vitest.config.mjs",
   "jest.config.js",

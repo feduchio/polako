@@ -14,7 +14,7 @@ export interface SandboxHandle {
   readonly baseCommit: string;
   readonly git: Git;
   /** run an allowlisted command inside the sandbox */
-  run(argv: readonly string[], opts?: { timeoutMs?: number; signal?: AbortSignal; env?: Record<string, string>; bypassPolicy?: boolean }): Promise<ProcessResult>;
+  run(argv: readonly string[], opts?: { timeoutMs?: number; signal?: AbortSignal; env?: Record<string, string>; bypassPolicy?: boolean; cwd?: string }): Promise<ProcessResult>;
   headCommit(): Promise<string>;
   commitAll(message: string): Promise<string | null>;
   changedFiles(): Promise<string[]>;
@@ -95,7 +95,7 @@ export class WorktreeSandbox implements Sandbox {
         }
         return runProcess({
           argv,
-          cwd: path,
+          cwd: opts.cwd ? join(path, opts.cwd) : path,
           env: { ...baseEnv, ...(opts.env ?? {}) },
           timeoutMs: opts.timeoutMs ?? cfg.commandTimeoutMs,
           maxOutputBytes: cfg.maxOutputBytes,
