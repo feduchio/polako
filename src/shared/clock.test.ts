@@ -46,6 +46,27 @@ describe("FakeClock", () => {
     expect(clock.pendingSleepers()).toBe(0);
   });
 
+  it("completes two concurrent finite chains of zero-delay re-entrant sleepers", async () => {
+    const clock = new FakeClock(0);
+    const limit = 50_001;
+    let firedA = 0;
+    let firedB = 0;
+    const againA = (): void => {
+      firedA++;
+      if (firedA < limit) void clock.sleep(0).then(againA);
+    };
+    const againB = (): void => {
+      firedB++;
+      if (firedB < limit) void clock.sleep(0).then(againB);
+    };
+    void clock.sleep(0).then(againA);
+    void clock.sleep(0).then(againB);
+    await clock.advance(0);
+    expect(firedA).toBe(limit);
+    expect(firedB).toBe(limit);
+    expect(clock.pendingSleepers()).toBe(0);
+  });
+
   it("rejects an aborted sleep", async () => {
     const clock = new FakeClock(0);
     const ac = new AbortController();
