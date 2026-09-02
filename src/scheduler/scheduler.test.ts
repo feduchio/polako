@@ -333,20 +333,35 @@ describe("Scheduler", () => {
     expect(store.repos.jobs.get(b.id)).toMatchObject({ state: "FAILED", attempts: 1 });
   });
 
-  it("jobs of a non-existent run are never dispatched", () => {
+  it("jobs of a non-existent run are never dispatched, and a vanished run does not strand PENDING or RUNNING work", async () => {
     expect(() => sched.enqueue({ runId: id("run"), type: "noop", lane: "local.shell" })).toThrow(/not found/);
-    // a job whose run projection vanished after creation
     const run = makeRun(store, clock);
     let calls = 0;
     sched.register("noop", async () => {
       calls++;
       return {};
     });
-    const j = sched.enqueue({ runId: run.id, type: "noop", lane: "local.shell" });
+    sched.register(
+      "long",
+      (ctx) =>
+        new Promise<undefined>((_, reject) => {
+          ctx.signal.addEventListener("abort", () => {
+            reject(ctx.signal.reason as Error);
+          });
+        }),
+    );
+    const root = sched.enqueue({ runId: run.id, type: "long", lane: "local.shell" });
+    sched.tick(); // root is now RUNNING
+    const child = sched.enqueue({ runId: run.id, type: "noop", lane: "local.shell", dependsOn: [root.id] });
+    const ready = sched.enqueue({ runId: run.id, type: "noop", lane: "llm.default" });
     store.db.prepare("DELETE FROM runs WHERE id = ?").run(run.id);
     sched.tick();
+    await sched.settle();
     expect(calls).toBe(0);
-    expect(store.repos.jobs.get(j.id)?.state).toBe("FAILED");
+    for (const j of [ready, root, child]) {
+      expect(store.repos.jobs.get(j.id)).toMatchObject({ state: "CANCELLED", error: expect.stringMatching(/run .* not found/) as string });
+    }
+    expect(sched.inFlightCount()).toBe(0);
   });
 
   it("dispatch order is total: priority, then creation time, then creation order within the same millisecond", async () => {
@@ -364,12 +379,30 @@ describe("Scheduler", () => {
     expect(listed).toEqual(ids);
     store.events.rebuildProjections(run.id);
     expect(store.repos.jobs.listByState(["READY"]).map((j) => j.id)).toEqual(ids);
+
+    // rebuilding one run must not reorder ties involving other runs
+    const run2 = makeRun(store, clock);
+    const other = sched.enqueue({ runId: run2.id, type: "rec", lane: "llm.default", payload: { n: "other" } }).id;
+    const before = store.repos.jobs.listByState(["READY"]).map((j) => j.id);
+    expect(before).toContain(other);
+    store.events.rebuildProjections(run.id);
+    expect(store.repos.jobs.listByState(["READY"]).map((j) => j.id)).toEqual(before);
+    store.events.rebuildProjections(run2.id);
+    expect(store.repos.jobs.listByState(["READY"]).map((j) => j.id)).toEqual(before);
   });
 
   it("a failing terminal write is reported through onPersistError instead of an unhandled rejection", async () => {
     const run = makeRun(store, clock);
     const errors: unknown[] = [];
-    const s = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 1000, onPersistError: (e) => errors.push(e) });
+    const s = new Scheduler(store, clock, {
+      workerId: "w1",
+      laneLimits: defaultConfig().lanes,
+      leaseMs: 1000,
+      onPersistError: (e) => {
+        errors.push(e);
+        throw new Error("reporter failed"); // must not escape
+      },
+    });
     let release: () => void = () => undefined;
     s.register("long", () => new Promise<undefined>((r) => (release = () => { r(undefined); })));
     const j = s.enqueue({ runId: run.id, type: "long", lane: "local.shell" });
@@ -382,6 +415,8 @@ describe("Scheduler", () => {
     await s.settle();
     store.events.append = original;
     expect(errors).toHaveLength(1);
+    expect(s.drainPersistErrors().map((p) => p.job.id)).toEqual([j.id]);
+    expect(s.drainPersistErrors()).toEqual([]);
     expect(store.repos.jobs.get(j.id)?.state).toBe("RUNNING");
     expect(s.inFlightCount()).toBe(0);
     // lease expiry reclaims it later

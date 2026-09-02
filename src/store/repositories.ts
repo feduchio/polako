@@ -119,9 +119,10 @@ class JobRepo extends ByRunRepo<Job> {
   listByState(states: readonly Job["state"][], runId?: string): Job[] {
     if (states.length === 0) return [];
     const inList = states.map(() => "?").join(",");
-    // rowid is the insertion order of the projection row, which is the `job.created` event order
-    // (also after a rebuild, since events replay in seq order) — a total, deterministic tie-break.
-    const order = "priority DESC, created_at ASC, rowid ASC";
+    // Total, rebuild-stable order. Within a run, rowid is `job.created` event order (a per-run
+    // rebuild reinserts that run's rows in seq order, preserving their relative order); across
+    // runs tied on created_at, run_id decides, so rebuilding one run cannot reorder others.
+    const order = "priority DESC, created_at ASC, run_id ASC, rowid ASC";
     return runId === undefined
       ? this.query(`state IN (${inList})`, [...states], order)
       : this.query(`run_id = ? AND state IN (${inList})`, [runId, ...states], order);

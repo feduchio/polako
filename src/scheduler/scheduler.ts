@@ -40,9 +40,16 @@ export interface SchedulerOptions {
   leaseMs: number;
   /**
    * Called when a job's terminal state could not be persisted (store failure). The job stays
-   * RUNNING in the store and will be reclaimed when its lease expires.
+   * RUNNING in the store and will be reclaimed when its lease expires. Exceptions thrown by
+   * the callback are swallowed. The failure is always also queued in `drainPersistErrors()`.
    */
   onPersistError?: (error: unknown, job: Job) => void;
+}
+
+export interface PersistError {
+  job: Job;
+  error: unknown;
+  at: number;
 }
 
 interface InFlight {
@@ -63,6 +70,7 @@ export class Scheduler {
   private readonly handlers = new Map<string, JobHandler>();
   private readonly inFlight = new Map<string, InFlight>();
   private readonly controlCache = new Map<string, RunControl | null>();
+  private persistErrors: PersistError[] = [];
 
   constructor(
     private readonly store: Store,
@@ -144,11 +152,7 @@ export class Scheduler {
         continue;
       }
       const control = this.controlFor(job.runId);
-      if (control === null) {
-        this.setState(job, "FAILED", { error: `run ${job.runId} not found` });
-        continue;
-      }
-      if (!mayDispatchJobs(control)) continue;
+      if (control === null || !mayDispatchJobs(control)) continue; // vanished runs were failed in applyRunControl
       const used = running.get(job.lane) ?? 0;
       if (used >= this.laneLimit(job.lane)) continue;
       if (!this.handlers.has(job.type)) {
@@ -192,6 +196,13 @@ export class Scheduler {
       if (pending.length === 0) return;
       await Promise.allSettled(pending.map((f) => f.promise));
     }
+  }
+
+  /** Terminal-state writes that failed since the last drain (see `onPersistError`). */
+  drainPersistErrors(): PersistError[] {
+    const out = this.persistErrors;
+    this.persistErrors = [];
+    return out;
   }
 
   inFlightCount(runId?: string): number {
@@ -249,7 +260,12 @@ export class Scheduler {
     } catch (err) {
       // The job stays RUNNING in the store; lease expiry will reclaim it. Never let this
       // become an unhandled rejection: `settle()` awaits these promises.
-      this.options.onPersistError?.(err, job);
+      this.persistErrors.push({ job, error: err, at: this.clock.now() });
+      try {
+        this.options.onPersistError?.(err, job);
+      } catch {
+        /* reporter failures must not escape */
+      }
     } finally {
       this.inFlight.delete(job.id);
     }
@@ -278,17 +294,23 @@ export class Scheduler {
     }
   }
 
+  /**
+   * Stop/kill aborts in-flight work and cancels queued work. A run whose projection has
+   * vanished is treated the same way (its jobs must not linger), with a distinct reason.
+   */
   private applyRunControl(): void {
     for (const flying of [...this.inFlight.values()]) {
       const control = this.controlFor(flying.job.runId);
-      if (control !== null && mustCancelInFlight(control) && !flying.controller.signal.aborted) {
+      if (flying.controller.signal.aborted) continue;
+      if (control === null || mustCancelInFlight(control)) {
         this.markCancelRequested(flying.job);
-        flying.controller.abort(new PolishError("CANCELLED", "run stopped"));
+        flying.controller.abort(new PolishError("CANCELLED", control === null ? "run not found" : "run stopped"));
       }
     }
     for (const job of this.store.repos.jobs.listByState(["PENDING", "READY"])) {
       const control = this.controlFor(job.runId);
-      if (control !== null && mustCancelInFlight(control)) this.setState(job, "CANCELLED", { error: "run stopped" });
+      if (control === null) this.setState(job, "CANCELLED", { error: `run ${job.runId} not found` });
+      else if (mustCancelInFlight(control)) this.setState(job, "CANCELLED", { error: "run stopped" });
     }
   }
 
