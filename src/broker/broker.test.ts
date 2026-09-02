@@ -194,6 +194,7 @@ describe("ModelBroker", () => {
       retry: { maxAttempts: 2, baseDelayMs: 100, maxDelayMs: 1000 },
       jitter: () => 1,
     });
+    const callsBeforeQuota = catalog.get({ provider: "p1", model: "big" })?.stats.calls ?? 0;
     const releaseSlot = await sharedQuota.acquire("p1");
     const ac1 = new AbortController();
     const waiting = quotaBroker.complete({ ...req(runId, "big"), signal: ac1.signal });
@@ -202,11 +203,17 @@ describe("ModelBroker", () => {
     ac1.abort();
     await clock.advance(60);
     await waitingSettled;
-    expect(store.events.list(runId, { types: ["model.call"] })).toHaveLength(1);
-    expect(store.events.list(runId, { types: ["model.call"] })[0]!.payload).toMatchObject({ ok: false });
+    const quotaEvents = store.events.list(runId, { types: ["model.call"] });
+    expect(quotaEvents).toHaveLength(1);
+    expect(quotaEvents[0]!.payload).toMatchObject({ ok: false });
+    expect(provider.calls.filter((c) => c.metadata.runId === runId)).toHaveLength(0);
+    expect(catalog.get({ provider: "p1", model: "big" })?.stats.calls ?? 0).toBe(callsBeforeQuota);
+    expect((quotaEvents[0]!.payload["attemptOutcomes"] as unknown[]).length).toBe(0);
     releaseSlot();
 
     const run2 = id("run");
+    const midBeforeCalls = catalog.get({ provider: "p1", model: "mid" })!.stats.calls;
+    const midBeforeFailures = catalog.get({ provider: "p1", model: "mid" })!.stats.failures;
     provider.script("mid", [{ kind: "error", error: new ProviderError("p1", "server", "retry me") }]);
     const ac2 = new AbortController();
     const backoff = broker.complete({ ...req(run2, "mid"), signal: ac2.signal });
@@ -215,8 +222,13 @@ describe("ModelBroker", () => {
     ac2.abort();
     await clock.advance(200);
     await backoffSettled;
-    expect(store.events.list(run2, { types: ["model.call"] })).toHaveLength(1);
-    expect(store.events.list(run2, { types: ["model.call"] })[0]!.payload).toMatchObject({ ok: false });
+    const backoffEvents = store.events.list(run2, { types: ["model.call"] });
+    expect(backoffEvents).toHaveLength(1);
+    expect(backoffEvents[0]!.payload).toMatchObject({ ok: false, attempts: 1 });
+    expect(provider.calls.filter((c) => c.metadata.runId === run2)).toHaveLength(1);
+    expect((backoffEvents[0]!.payload["attemptOutcomes"] as unknown[]).length).toBe(1);
+    expect(catalog.get({ provider: "p1", model: "mid" })!.stats.calls).toBe(midBeforeCalls + 1);
+    expect(catalog.get({ provider: "p1", model: "mid" })!.stats.failures).toBe(midBeforeFailures + 1);
   });
 });
 

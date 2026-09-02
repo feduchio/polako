@@ -67,14 +67,9 @@ export class ModelBroker {
     const outcomes: AttemptOutcome[] = [];
 
     const failCancelled = (err: unknown): never => {
-      this.recordEvent(request, null, Math.max(attempt, 1), outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
+      // attempts = real provider invocations only (outcomes), not cancelled waits
+      this.recordEvent(request, null, Math.max(outcomes.length, 1), outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
       throw err instanceof PolishError ? err : new PolishError("CANCELLED", "model call cancelled", { cause: err });
-    };
-
-    const noteCancelled = (): void => {
-      const outcome: AttemptOutcome = { ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() };
-      outcomes.push(outcome);
-      catalog.recordCall(request.model, outcome);
     };
 
     const isCancel = (err: unknown): boolean =>
@@ -83,22 +78,17 @@ export class ModelBroker {
     while (attempt < this.retry.maxAttempts) {
       attempt++;
       if (request.signal?.aborted) {
-        noteCancelled();
         failCancelled(new PolishError("CANCELLED", "model call cancelled"));
       }
       let release: () => void;
       try {
         release = await quota.acquire(adapter.id, request.signal);
       } catch (err) {
-        if (isCancel(err)) {
-          noteCancelled();
-          failCancelled(err);
-        }
+        if (isCancel(err)) failCancelled(err);
         throw err;
       }
       if (request.signal?.aborted) {
         release();
-        noteCancelled();
         failCancelled(new PolishError("CANCELLED", "model call cancelled"));
       }
       const started = clock.now();
@@ -135,10 +125,8 @@ export class ModelBroker {
         try {
           await clock.sleep(err instanceof ProviderError && err.retryAfterMs !== null ? err.retryAfterMs : this.backoff(attempt), request.signal);
         } catch (sleepErr) {
-          if (isCancel(sleepErr)) {
-            noteCancelled();
-            failCancelled(sleepErr);
-          }
+          // Cancel during backoff: keep the failed attempt outcome only; do not invent another call.
+          if (isCancel(sleepErr)) failCancelled(sleepErr);
           throw sleepErr;
         }
       }
