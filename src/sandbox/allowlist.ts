@@ -31,6 +31,9 @@ export const SEARCH_RULES: readonly CommandRule[] = [
 
 const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 
+/** Programs whose argv may contain tokens that look like shell names or `-c` flags. */
+const PATTERN_ARG_PROGRAMS = new Set(["rg", "ls", "cat", "wc", "head", "tail", "find", "git"]);
+
 function shellBasename(token: string): string {
   const slash = token.lastIndexOf("/");
   return slash >= 0 ? token.slice(slash + 1) : token;
@@ -53,8 +56,12 @@ function shellScriptFlagsAfter(argv: readonly string[], shellIndex: number): boo
 /** True when argv invokes a shell to run a script string (-c / combined short opts). */
 export function invokesShellScript(argv: readonly string[]): boolean {
   if (argv.length === 0) return false;
-  const candidates: number[] = [0];
-  if (argv[0]?.toLowerCase() === "env" && argv.length > 1) candidates.push(1);
+  const scanAll = !PATTERN_ARG_PROGRAMS.has(argv[0] ?? "");
+  const candidates: number[] = [];
+  if (isShellName(argv[0] ?? "")) candidates.push(0);
+  if (scanAll) {
+    for (let i = 1; i < argv.length; i++) candidates.push(i);
+  }
   for (const i of candidates) {
     const token = argv[i];
     if (token === undefined || !isShellName(token)) continue;

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -121,6 +121,11 @@ describe("CommandPolicy", () => {
     expect(arbitrary.check(["bash", "-lc", "echo hi"])).toMatch(/shell -c/);
     expect(arbitrary.check(["/bin/bash", "-c", "echo hi"])).toMatch(/shell -c/);
     expect(arbitrary.check(["BASH", "-c", "echo hi"])).toMatch(/shell -c/);
+    expect(arbitrary.check(["/usr/bin/env", "bash", "-c", "echo hi"])).toMatch(/shell -c/);
+    expect(arbitrary.check(["env", "-i", "bash", "-c", "echo hi"])).toMatch(/shell -c/);
+    expect(arbitrary.check(["nice", "bash", "-c", "echo hi"])).toMatch(/shell -c/);
+    const strict = CommandPolicy.forProject([["pnpm", "test"]], "pnpm");
+    expect(strict.check(["pnpm", "exec", "bash", "-lc", "echo hi"])).toMatch(/shell -c/);
     expect(arbitrary.check(["pnpm", "test", "&&", "git", "push"])).toMatch(/shell operators/);
     expect(arbitrary.check(["rg", "-c", "sh"])).toBeNull();
     expect(arbitrary.check(["rg", "sh", "-c"])).toBeNull();
@@ -139,7 +144,7 @@ describe("WorktreeSandbox", () => {
     repoDir = mkdtempSync(join(tmpdir(), "polish-repo-"));
     root = mkdtempSync(join(tmpdir(), "polish-wt-"));
     repo = await Git.init(repoDir);
-    writeFileSync(join(repoDir, "a.txt"), "one\n");
+    writeFileSync(join(repoDir, "a.txt"), "one\ntwo\nthree\n");
     base = (await repo.commitAll("init"))!;
     sandbox = new WorktreeSandbox(repoDir, root, cfg);
   });
@@ -209,6 +214,16 @@ describe("WorktreeSandbox", () => {
     await h.destroy();
   });
 
+  it("rejects symlink cwd that escapes the worktree", async () => {
+    const policy = CommandPolicy.forProject([["node", "-e"]], null);
+    const victim = await sandbox.create({ id: "victim", baseCommit: base, policy });
+    const attacker = await sandbox.create({ id: "attacker", baseCommit: base, policy });
+    symlinkSync(victim.path, join(attacker.path, "peer"));
+    await expect(attacker.run(["node", "-e", "process.exit(0)"], { cwd: "peer" })).rejects.toThrow(/cwd escapes/);
+    await victim.destroy();
+    await attacker.destroy();
+  });
+
   it("exposes isolates=false and supports bypassPolicy, destroyAll, commitAll null, and fastForward", async () => {
     expect(sandbox.isolates).toBe(false);
     const policy = CommandPolicy.forProject([["node", "-e"]], null);
@@ -255,11 +270,21 @@ describe("WorktreeSandbox", () => {
     expect(conflictWithWork.ok).toBe(false);
     expect(readFileSync(join(b.path, "keep.txt"), "utf8")).toBe("precious\n");
 
-    writeFileSync(join(b.path, "a.txt"), "worker edit\n");
-    const overlap = await b.git.cherryPick(ca);
-    expect(overlap.ok).toBe(false);
-    expect(readFileSync(join(b.path, "a.txt"), "utf8")).toBe("worker edit\n");
-    expect((await b.git.out(["stash", "list"])).includes("polish:pre-cherry-pick")).toBe(false);
+    const pickSrc = await sandbox.create({ id: "pick-src", baseCommit: base, branch: "polish/pick-src", policy });
+    writeFileSync(join(pickSrc.path, "a.txt"), "one\nPICKED\nthree\n");
+    const pickCommit = (await pickSrc.commitAll("picked line"))!;
+    const dirty = await sandbox.create({ id: "dirty", baseCommit: base, branch: "polish/dirty", policy });
+    writeFileSync(join(dirty.path, "a.txt"), "one\nWORKER\nthree\n");
+    const stashOverlap = await dirty.git.cherryPick(pickCommit);
+    expect(stashOverlap.ok).toBe(false);
+    expect(stashOverlap.conflicts).toContain("a.txt");
+    expect(readFileSync(join(dirty.path, "a.txt"), "utf8")).toBe("one\nWORKER\nthree\n");
+    expect(readFileSync(join(dirty.path, "a.txt"), "utf8")).not.toContain("<<<<<<<");
+    expect(await dirty.git.out(["stash", "list"])).toBe("");
+    const afterFail = (await dirty.commitAll("after failed stash pop"))!;
+    expect((await dirty.git.out(["show", afterFail, "--", "a.txt"])).includes("<<<<<<<")).toBe(false);
+    await pickSrc.destroy();
+    await dirty.destroy();
 
     const c = await sandbox.create({ id: "c", baseCommit: base, branch: "polish/c", policy });
     writeFileSync(join(c.path, "c.txt"), "c\n");

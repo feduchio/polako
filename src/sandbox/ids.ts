@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { PolishError } from "../shared/errors.js";
 
@@ -26,15 +27,27 @@ export function assertGitCommitish(commitish: string): void {
   }
 }
 
-/** Resolve a relative cwd under a sandbox worktree; rejects escapes. */
+/** Resolve a relative cwd under a sandbox worktree; rejects escapes (including via symlinks). */
 export function sandboxCwd(worktreePath: string, cwd: string): string {
   if (cwd.startsWith("/") || cwd.includes("\0")) {
     throw new PolishError("SANDBOX_ERROR", `invalid cwd: ${cwd}`);
   }
-  const resolved = resolve(worktreePath, cwd);
-  const prefix = worktreePath.endsWith(sep) ? worktreePath : worktreePath + sep;
-  if (resolved !== worktreePath && !resolved.startsWith(prefix)) {
+  const worktreeReal = realpathSync(worktreePath);
+  const resolved = resolve(worktreeReal, cwd);
+  const prefix = worktreeReal.endsWith(sep) ? worktreeReal : worktreeReal + sep;
+  let resolvedReal: string;
+  try {
+    resolvedReal = realpathSync(resolved);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") throw err;
+    if (resolved !== worktreeReal && !resolved.startsWith(prefix)) {
+      throw new PolishError("SANDBOX_ERROR", `cwd escapes sandbox: ${cwd}`);
+    }
+    return resolved;
+  }
+  if (resolvedReal !== worktreeReal && !resolvedReal.startsWith(prefix)) {
     throw new PolishError("SANDBOX_ERROR", `cwd escapes sandbox: ${cwd}`);
   }
-  return resolved;
+  return resolvedReal;
 }
