@@ -37,7 +37,51 @@ const SEARCH_TOOLS = new Set(["rg", "ls", "cat", "wc", "head", "tail", "find", "
 const PACKAGE_MANAGERS = new Set(["pnpm", "npm", "yarn", "bun"]);
 
 /** Flags that cause the following token to be executed as a child program. */
-const EXECUTION_MARKERS = new Set(["-exec", "-execdir", "-ok", "-okdir", "--pre", "--pre-glob"]);
+const EXECUTION_MARKERS = new Set([
+  "-exec",
+  "-execdir",
+  "-ok",
+  "-okdir",
+  "--pre",
+  "--pre-glob",
+  "--hostname-bin",
+  "-O",
+  "--open-files-in-pager",
+  "--pager",
+]);
+
+function shellScriptFlagsIn(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    if (token === undefined || !isShellName(token)) continue;
+    if (shellScriptFlagsAfter(argv, i)) return true;
+  }
+  return false;
+}
+
+/** Expand a single argv token into pseudo-argv (handles `--flag=value` and `-O<cmd>`). */
+function pseudoArgvFromToken(token: string): string[] {
+  const out: string[] = [];
+  for (const word of token.split(/\s+/).filter(Boolean)) {
+    const oMatch = /^-O(.+)$/i.exec(word);
+    if (oMatch?.[1]) {
+      out.push(...oMatch[1].split(/\s+/).filter(Boolean));
+      continue;
+    }
+    const eqIdx = word.indexOf("=");
+    if (eqIdx > 0 && word.startsWith("--")) {
+      out.push(...word.slice(eqIdx + 1).split(/\s+/).filter(Boolean));
+      continue;
+    }
+    out.push(word);
+  }
+  return out;
+}
+
+/** Detect shell `-c` hidden inside one argv token (e.g. git pager options). */
+function embeddedShellScript(token: string): boolean {
+  return shellScriptFlagsIn(pseudoArgvFromToken(token));
+}
 
 function shellBasename(token: string): string {
   const slash = token.lastIndexOf("/");
@@ -101,6 +145,9 @@ function isPatternContext(argv: readonly string[], shellIndex: number): boolean 
 /** True when argv invokes a shell to run a script string (-c / combined short opts). */
 export function invokesShellScript(argv: readonly string[]): boolean {
   if (argv.length === 0) return false;
+  for (const token of argv) {
+    if (embeddedShellScript(token)) return true;
+  }
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (token === undefined || !isShellName(token)) continue;

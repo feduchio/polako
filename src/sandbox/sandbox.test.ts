@@ -128,6 +128,10 @@ describe("CommandPolicy", () => {
     expect(strict.check(["pnpm", "exec", "bash", "-lc", "echo hi"])).toMatch(/shell -c/);
     expect(strict.check(["find", ".", "-exec", "bash", "-c", "echo pwned", "{}", "+"])).toMatch(/shell -c/);
     expect(strict.check(["find", ".", "-execdir", "zsh", "-c", "echo pwned", "{}", "+"])).toMatch(/shell -c/);
+    expect(strict.check(["git", "grep", "--open-files-in-pager=sh -c \"echo pwned\"", "-e", "one"])).toMatch(/shell -c/);
+    expect(strict.check(["git", "grep", "-Osh -c \"echo pwned\"", "-e", "one"])).toMatch(/shell -c/);
+    expect(strict.check(["git", "grep", "-O", "sh", "-c", "echo pwned", "-e", "one"])).toMatch(/shell -c/);
+    expect(strict.check(["git", "grep", "-e", "bash", "-i"])).toBeNull();
     expect(arbitrary.check(["pnpm", "test", "&&", "git", "push"])).toMatch(/shell operators/);
     expect(arbitrary.check(["rg", "-c", "sh"])).toBeNull();
     expect(arbitrary.check(["rg", "sh", "-c"])).toBeNull();
