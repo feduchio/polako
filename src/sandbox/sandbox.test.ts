@@ -1,0 +1,213 @@
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { defaultConfig } from "../domain/config.js";
+import { CommandPolicy } from "./allowlist.js";
+import { scrubEnv, suspiciousEnvNames } from "./env.js";
+import { Git } from "./git.js";
+import { compressOutput, renderCompressed } from "./outputCompressor.js";
+import { runProcess } from "./process.js";
+import { WorktreeSandbox } from "./worktree.js";
+
+const cfg = defaultConfig().sandbox;
+
+describe("scrubEnv", () => {
+  it("keeps only allowlisted names, drops secret-looking ones even if allowlisted, and applies fixed vars", () => {
+    const env = scrubEnv(
+      { PATH: "/bin", HOME: "/h", OPENROUTER_API_KEY: "sk-x", GH_TOKEN: "t", RANDOM_VAR: "1", MY_SECRET_THING: "s" },
+      { allowlist: ["PATH", "HOME", "OPENROUTER_API_KEY", "MY_SECRET_THING"], denyPatterns: cfg.envDenyPatterns },
+      { EXTRA: "yes", AWS_SECRET_ACCESS_KEY: "nope" },
+    );
+    expect(env).toMatchObject({ PATH: "/bin", HOME: "/h", EXTRA: "yes", CI: "1", NO_COLOR: "1" });
+    expect(env).not.toHaveProperty("OPENROUTER_API_KEY");
+    expect(env).not.toHaveProperty("GH_TOKEN");
+    expect(env).not.toHaveProperty("RANDOM_VAR");
+    expect(env).not.toHaveProperty("MY_SECRET_THING");
+    expect(env).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
+  });
+
+  it("lists suspicious names for doctor", () => {
+    expect(suspiciousEnvNames({ PATH: "x", GEMINI_API_KEY: "y", npm_config_token: "z" }, cfg.envDenyPatterns)).toEqual([
+      "GEMINI_API_KEY",
+      "npm_config_token",
+    ]);
+  });
+});
+
+describe("runProcess", () => {
+  it("captures output and exit code without a shell", async () => {
+    const r = await runProcess({ argv: ["node", "-e", "console.log('hi $HOME'); process.exit(3)"], cwd: tmpdir(), env: { PATH: process.env["PATH"]! }, timeoutMs: 10_000, maxOutputBytes: 1024 });
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout.trim()).toBe("hi $HOME");
+    expect(r.truncated).toBe(false);
+  });
+
+  it("caps output and flags truncation", async () => {
+    const r = await runProcess({ argv: ["node", "-e", "process.stdout.write('x'.repeat(10000))"], cwd: tmpdir(), env: { PATH: process.env["PATH"]! }, timeoutMs: 10_000, maxOutputBytes: 100 });
+    expect(r.stdout.length).toBe(100);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("kills the whole process group on timeout", async () => {
+    const marker = join(mkdtempSync(join(tmpdir(), "polish-proc-")), "child.pid");
+    const script = `
+      const { spawn } = require('node:child_process');
+      const fs = require('node:fs');
+      const c = spawn('sleep', ['30'], { stdio: 'ignore' });
+      fs.writeFileSync(${JSON.stringify(marker)}, String(c.pid));
+      setTimeout(() => {}, 30000);
+    `;
+    const started = Date.now();
+    const r = await runProcess({ argv: ["node", "-e", script], cwd: tmpdir(), env: { PATH: process.env["PATH"]! }, timeoutMs: 500, maxOutputBytes: 1024 });
+    expect(r.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5000);
+    await new Promise((res) => setTimeout(res, 200));
+    const childPid = Number((await import("node:fs")).readFileSync(marker, "utf8"));
+    let alive = true;
+    try {
+      process.kill(childPid, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(false);
+  });
+
+  it("aborts via signal", async () => {
+    const ac = new AbortController();
+    const p = runProcess({ argv: ["sleep", "30"], cwd: tmpdir(), env: { PATH: process.env["PATH"]! }, timeoutMs: 30_000, maxOutputBytes: 1024, signal: ac.signal });
+    setTimeout(() => {
+      ac.abort();
+    }, 100);
+    const r = await p;
+    expect(r.aborted).toBe(true);
+    expect(r.exitCode === null || r.exitCode !== 0).toBe(true);
+  });
+
+  it("rejects on spawn failure", async () => {
+    await expect(runProcess({ argv: ["definitely-not-a-binary-xyz"], cwd: tmpdir(), env: {}, timeoutMs: 1000, maxOutputBytes: 10 })).rejects.toThrow(/failed to spawn/);
+  });
+});
+
+describe("CommandPolicy", () => {
+  const policy = CommandPolicy.forProject([["pnpm", "test"], ["pnpm", "typecheck"]], "pnpm");
+
+  it("allows project checks, read-only git and search; denies the rest", () => {
+    expect(policy.check(["pnpm", "test", "--", "src/x.test.ts"])).toBeNull();
+    expect(policy.check(["git", "diff", "HEAD~1"])).toBeNull();
+    expect(policy.check(["rg", "foo|bar", "src"])).toBeNull();
+    expect(policy.check(["git", "push", "origin", "main"])).toMatch(/not in allowlist/);
+    expect(policy.check(["rm", "-rf", "/"])).toMatch(/not in allowlist/);
+    expect(policy.check(["curl", "http://x"])).toMatch(/not in allowlist/);
+  });
+
+  it("never allows shell -c or shell operators, even in arbitrary mode", () => {
+    const arbitrary = CommandPolicy.forProject([], "pnpm", true);
+    expect(arbitrary.check(["sh", "-c", "echo hi"])).toMatch(/shell -c/);
+    expect(arbitrary.check(["pnpm", "test", "&&", "git", "push"])).toMatch(/shell operators/);
+    expect(arbitrary.check(["curl", "http://x"])).toBeNull();
+  });
+});
+
+describe("WorktreeSandbox", () => {
+  let repoDir: string;
+  let root: string;
+  let repo: Git;
+  let base: string;
+  let sandbox: WorktreeSandbox;
+
+  beforeEach(async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "polish-repo-"));
+    root = mkdtempSync(join(tmpdir(), "polish-wt-"));
+    repo = await Git.init(repoDir);
+    writeFileSync(join(repoDir, "a.txt"), "one\n");
+    base = (await repo.commitAll("init"))!;
+    sandbox = new WorktreeSandbox(repoDir, root, cfg);
+  });
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("creates an isolated worktree on its own branch, commits, diffs and destroys it", async () => {
+    const policy = CommandPolicy.forProject([], null);
+    const h = await sandbox.create({ id: "cand1", baseCommit: base, branch: "polish/cand1", policy });
+    expect(existsSync(join(h.path, "a.txt"))).toBe(true);
+    writeFileSync(join(h.path, "b.txt"), "two\n");
+    expect(await h.changedFiles()).toEqual(["b.txt"]);
+    const commit = await h.commitAll("add b");
+    expect(commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(await h.headCommit()).toBe(commit);
+    expect(await h.diffStat()).toEqual({ files: 1, insertions: 1, deletions: 0 });
+    expect(await h.diff()).toContain("+two");
+    expect(await repo.revParse("main")).toBe(base);
+    expect(existsSync(join(repoDir, "b.txt"))).toBe(false);
+    expect(await sandbox.list()).toEqual([h.path]);
+
+    await h.destroy();
+    expect(existsSync(h.path)).toBe(false);
+    expect(await sandbox.list()).toEqual([]);
+    expect(await repo.branchExists("polish/cand1")).toBe(true);
+  });
+
+  it("enforces the command policy and scrubs the environment for commands", async () => {
+    const policy = CommandPolicy.forProject([["node", "-e"]], null);
+    const h = await sandbox.create({ id: "c2", baseCommit: base, policy });
+    await expect(h.run(["git", "push"])).rejects.toThrow(/not in allowlist/);
+    process.env["POLISH_TEST_SECRET_TOKEN"] = "leak";
+    try {
+      const r = await h.run(["node", "-e", "console.log(JSON.stringify(process.env))"]);
+      const env = JSON.parse(r.stdout) as Record<string, string>;
+      expect(env).not.toHaveProperty("POLISH_TEST_SECRET_TOKEN");
+      expect(env["CI"]).toBe("1");
+      expect(env["PATH"]).toBeDefined();
+    } finally {
+      delete process.env["POLISH_TEST_SECRET_TOKEN"];
+    }
+    await h.destroy();
+  });
+
+  it("refuses duplicate ids and branches", async () => {
+    const policy = CommandPolicy.forProject([], null);
+    const h = await sandbox.create({ id: "dup", baseCommit: base, branch: "polish/dup", policy });
+    await expect(sandbox.create({ id: "dup", baseCommit: base, policy })).rejects.toThrow(/already exists/);
+    await expect(sandbox.create({ id: "dup2", baseCommit: base, branch: "polish/dup", policy })).rejects.toThrow(/branch already exists/);
+    await h.destroy();
+  });
+
+  it("cherry-picks a candidate commit onto another checkout and reports conflicts", async () => {
+    const policy = CommandPolicy.forProject([], null);
+    const a = await sandbox.create({ id: "a", baseCommit: base, branch: "polish/a", policy });
+    writeFileSync(join(a.path, "a.txt"), "from a\n");
+    const ca = (await a.commitAll("a"))!;
+    const b = await sandbox.create({ id: "b", baseCommit: base, branch: "polish/b", policy });
+    writeFileSync(join(b.path, "a.txt"), "from b\n");
+    await b.commitAll("b");
+    const conflict = await b.git.cherryPick(ca);
+    expect(conflict.ok).toBe(false);
+    expect(conflict.conflicts).toEqual(["a.txt"]);
+    expect(await b.git.isClean()).toBe(true);
+
+    const c = await sandbox.create({ id: "c", baseCommit: base, branch: "polish/c", policy });
+    writeFileSync(join(c.path, "c.txt"), "c\n");
+    await c.commitAll("c");
+    const ok = await c.git.cherryPick(ca);
+    expect(ok.ok).toBe(true);
+    expect(await c.commitAll("integrate a")).not.toBeNull();
+    expect((await c.git.diff(base)).includes("from a")).toBe(true);
+  });
+});
+
+describe("compressOutput", () => {
+  it("surfaces error-like lines and keeps head/tail", () => {
+    const lines = ["Progress: 1%", "starting", ...Array.from({ length: 100 }, (_, i) => `line ${i}`), "FAIL src/x.test.ts > does thing", "AssertionError: expected 1 to be 2", "Tests: 1 failed, 4 passed"];
+    const c = compressOutput(lines.join("\n"), { headLines: 3, tailLines: 3 });
+    expect(c.errorLines.some((l) => l.includes("AssertionError"))).toBe(true);
+    expect(c.errorLines.some((l) => l.includes("FAIL src/x.test.ts"))).toBe(true);
+    expect(c.head.split("\n")).toEqual(["starting", "line 0", "line 1"]);
+    expect(c.tail.split("\n")).toHaveLength(3);
+    const rendered = renderCompressed(c, 500);
+    expect(rendered.length).toBeLessThanOrEqual(500);
+    expect(rendered).toContain("error-like lines");
+  });
+});

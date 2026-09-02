@@ -89,6 +89,8 @@ export const SandboxConfigSchema = z.object({
     .default(["_API_KEY$", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "^AWS_", "^GH_", "^GITHUB_", "^OPENAI", "^GEMINI", "^GOOGLE", "^GROQ", "^OPENROUTER"]),
 });
 
+export type SandboxConfig = z.infer<typeof SandboxConfigSchema>;
+
 export const SupervisorRoleConfigSchema = z.object({
   role: z.enum(["planner", "scope_guardian", "adversarial_auditor", "judge"]),
   /** provider/model reference as configured by the user, e.g. "gemini:gemini-3.8-flash" */
