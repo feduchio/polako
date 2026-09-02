@@ -1,0 +1,203 @@
+import { SYSTEM_ACTOR } from "../domain/common.js";
+import type { NewEvent } from "../domain/event.js";
+import {
+  applyControlCommand,
+  RUN_CONTROL_TABLE,
+  RUN_PHASE_TABLE,
+  transitionPhase,
+  type ControlCommand,
+  type Run,
+  type RunPhase,
+  type TerminalReason,
+} from "../domain/run.js";
+import { isTerminal } from "../domain/fsm.js";
+import type { Scheduler } from "../scheduler/index.js";
+import type { Clock } from "../shared/clock.js";
+import { PolishError } from "../shared/errors.js";
+import { id } from "../shared/ids.js";
+import type { Store } from "../store/index.js";
+import { installStubDrivers } from "./stubs.js";
+import type { EngineOptions, PhaseDriver } from "./types.js";
+
+export type { EngineOptions, PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
+
+/**
+ * Orchestrates run phase progression and the user control plane over the scheduler.
+ * Phase business logic is pluggable via `registerPhase`; A5 installs stub drivers by default.
+ */
+export class RunEngine {
+  private readonly store: Store;
+  private readonly clock: Clock;
+  private readonly scheduler: Scheduler;
+  private readonly config: EngineOptions["config"];
+  private readonly drivers = new Map<RunPhase, PhaseDriver>();
+
+  constructor(options: EngineOptions, installStubs = true) {
+    this.store = options.store;
+    this.clock = options.clock;
+    this.scheduler = options.scheduler;
+    this.config = options.config;
+    if (installStubs) installStubDrivers((phase, driver) => {
+      this.registerPhase(phase, driver);
+    });
+  }
+
+  registerPhase(phase: RunPhase, driver: PhaseDriver): void {
+    this.drivers.set(phase, driver);
+  }
+
+  createRun(input: { projectPath: string; missionId?: string; runBranch?: string }): Run {
+    const now = this.clock.now();
+    const runId = id("run", now);
+    const missionId = input.missionId ?? id("msn", now);
+    const run: Run = {
+      id: runId,
+      missionId,
+      projectPath: input.projectPath,
+      runBranch: input.runBranch ?? `polish/${runId}`,
+      phase: "CREATED",
+      control: "RUNNING",
+      currentCheckpointHash: null,
+      baselineId: null,
+      interpretationId: null,
+      createdAt: now,
+      updatedAt: now,
+      terminalReason: null,
+    };
+    this.append(run.id, "run.created", { run }, SYSTEM_ACTOR);
+    return run;
+  }
+
+  /** User control command. Returns the updated run projection. */
+  control(runId: string, command: Exclude<ControlCommand, "quiesced" | "stopped">): Run {
+    const run = this.requireRun(runId);
+    if (isTerminal(RUN_CONTROL_TABLE, run.control) && command !== "kill") {
+      return run;
+    }
+    const next = applyControlCommand(run.control, command);
+    if (next === run.control) return run;
+    const updated: Run = { ...run, control: next, updatedAt: this.clock.now() };
+    this.append(runId, "run.control_changed", { run: updated }, { kind: "user" });
+
+    if (command === "kill" && next === "KILLED") {
+      this.terminate(updated, { code: "killed_by_user", summary: "run killed by user" });
+    }
+    this.scheduler.tick();
+    return this.requireRun(runId);
+  }
+
+  /**
+   * Update `currentCheckpointHash` on the run (e.g. after integration). Prior clean rounds for
+   * other hashes remain stored but are ignored by `hasConverged`.
+   */
+  setCurrentCheckpoint(runId: string, checkpointHash: string): Run {
+    const run = this.requireRun(runId);
+    const updated: Run = { ...run, currentCheckpointHash: checkpointHash, updatedAt: this.clock.now() };
+    this.append(runId, "run.phase_changed", { run: updated }, SYSTEM_ACTOR);
+    return updated;
+  }
+
+  /** Reclaim orphaned scheduler jobs; active runs continue from projections on the next tick. */
+  recover(): void {
+    this.scheduler.recover();
+  }
+
+  /**
+   * One orchestration round: for each active run, acknowledge control quiescence, then drive
+   * the current phase. Explicit so tests drive it with a FakeClock.
+   */
+  async tick(): Promise<void> {
+    this.scheduler.tick();
+    for (const run of this.store.repos.runs.listActive()) {
+      await this.tickRun(run.id);
+    }
+  }
+
+  /** Drive a single run until its current phase driver waits or the run leaves the active set. */
+  async tickRun(runId: string): Promise<void> {
+    let run = this.store.repos.runs.get(runId);
+    if (!run) throw new PolishError("NOT_FOUND", `run ${runId} not found`);
+    if (this.isInactive(run)) return;
+
+    await this.acknowledgeControl(runId);
+    run = this.requireRun(runId);
+    if (this.isInactive(run)) return;
+    if (run.control !== "RUNNING") return;
+
+    const driver = this.drivers.get(run.phase);
+    if (!driver) return;
+
+    const result = await driver({
+      run,
+      store: this.store,
+      scheduler: this.scheduler,
+      clock: this.clock,
+      config: this.config,
+    });
+    this.scheduler.tick();
+    if (result.status === "waiting") return;
+
+    await this.scheduler.settle(runId);
+    run = this.requireRun(runId);
+    if (this.isInactive(run) || run.control !== "RUNNING") return;
+    const next = transitionPhase(run, result.nextPhase, this.clock.now());
+    this.append(runId, "run.phase_changed", { run: next }, SYSTEM_ACTOR);
+    if (result.nextPhase === "DONE") {
+      this.terminate(next, { code: "converged", summary: "required clean rounds reached" });
+    }
+  }
+
+  private async acknowledgeControl(runId: string): Promise<void> {
+    await this.scheduler.settle(runId);
+    const run = this.requireRun(runId);
+    if (this.scheduler.inFlightCount(runId) > 0) return;
+
+    if (run.control === "PAUSE_REQUESTED") {
+      const paused = applyControlCommand(run.control, "quiesced");
+      if (paused !== run.control) {
+        this.append(runId, "run.control_changed", { run: { ...run, control: paused, updatedAt: this.clock.now() } }, SYSTEM_ACTOR);
+      }
+      return;
+    }
+
+    if (run.control === "STOP_REQUESTED") {
+      const stopped = applyControlCommand(run.control, "stopped");
+      if (stopped !== run.control) {
+        const updated: Run = { ...run, control: stopped, updatedAt: this.clock.now() };
+        this.append(runId, "run.control_changed", { run: updated }, SYSTEM_ACTOR);
+        this.terminate(updated, { code: "stopped_by_user", summary: "run stopped by user" });
+      }
+    }
+  }
+
+  private terminate(run: Run, reason: TerminalReason): void {
+    if (run.terminalReason !== null) return;
+    const updated: Run = { ...run, terminalReason: reason, updatedAt: this.clock.now() };
+    this.append(run.id, "run.terminated", { run: updated }, SYSTEM_ACTOR);
+  }
+
+  private isInactive(run: Run): boolean {
+    return isTerminal(RUN_PHASE_TABLE, run.phase) || isTerminal(RUN_CONTROL_TABLE, run.control);
+  }
+
+  private requireRun(runId: string): Run {
+    const run = this.store.repos.runs.get(runId);
+    if (!run) throw new PolishError("NOT_FOUND", `run ${runId} not found`);
+    return run;
+  }
+
+  private append(runId: string, type: string, payload: Record<string, unknown>, actor: NewEvent["actor"]): void {
+    this.store.events.append([
+      {
+        id: id("evt", this.clock.now()),
+        runId,
+        ts: this.clock.now(),
+        type,
+        payload,
+        causedBy: [],
+        actor,
+        artifacts: [],
+      },
+    ]);
+  }
+}

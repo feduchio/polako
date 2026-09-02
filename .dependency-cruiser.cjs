@@ -47,6 +47,13 @@ module.exports = {
       to: { path: "^src/(engine|scheduler|agents|council|verify|findings|convergence|broker|providers|sandbox|intel|context|protocols|project|store)/" },
     },
     {
+      name: "engine-depends-only-on-foundation",
+      comment: "A5 engine orchestrates domain + store + scheduler only; later blocks widen via new rules",
+      severity: "error",
+      from: { path: "^src/engine/" },
+      to: { path: "^src/(?!engine/|domain/|shared/|store/|scheduler/)" },
+    },
+    {
       name: "engine-is-not-imported-by-lower-layers",
       severity: "error",
       from: { path: "^src/(?!engine/|daemon/)" },
