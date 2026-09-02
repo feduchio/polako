@@ -31,6 +31,8 @@ export class RunEngine {
   private readonly scheduler: Scheduler;
   private readonly config: EngineOptions["config"];
   private readonly drivers = new Map<RunPhase, PhaseDriver>();
+  /** Driver returned complete while jobs were still in flight; applied once drained. */
+  private readonly pendingPhase = new Map<string, RunPhase>();
 
   constructor(options: EngineOptions, installStubs = true) {
     this.store = options.store;
@@ -83,6 +85,7 @@ export class RunEngine {
     this.append(runId, "run.control_changed", { run: updated }, { kind: "user" });
 
     if (command === "kill" && next === "KILLED") {
+      this.pendingPhase.delete(runId);
       this.terminate(updated, { code: "killed_by_user", summary: "run killed by user" }, true);
     }
 
@@ -112,17 +115,23 @@ export class RunEngine {
   }
 
   /**
-   * One orchestration round: acknowledge control for any run still settling pause/stop, then
-   * drive non-terminal phases. Active runs are driven concurrently so one run's in-flight
-   * work cannot starve another's tick.
+   * One orchestration round: scheduler dispatch, then concurrent control ack + phase drive.
+   * Pause/stop settle for one run must not gate sibling runs.
    */
   async tick(): Promise<void> {
+    this.scheduler.tick();
     const settling = this.store.repos.runs
       .listAll()
-      .filter((r) => r.control === "PAUSE_REQUESTED" || r.control === "STOP_REQUESTED");
-    await Promise.all(settling.map((r) => this.acknowledgeControl(r.id)));
-    this.scheduler.tick();
-    await Promise.all(this.store.repos.runs.listActive().map((r) => this.tickRun(r.id)));
+      .filter(
+        (r) =>
+          (r.control === "PAUSE_REQUESTED" || r.control === "STOP_REQUESTED") &&
+          isTerminal(RUN_PHASE_TABLE, r.phase),
+      );
+    // Terminal-phase pause/stop are not in listActive; ack them alongside active tickRuns.
+    await Promise.all([
+      ...settling.map((r) => this.acknowledgeControl(r.id)),
+      ...this.store.repos.runs.listActive().map((r) => this.tickRun(r.id)),
+    ]);
   }
 
   /** Drive a single run until its current phase driver waits or the run leaves the active set. */
@@ -136,10 +145,22 @@ export class RunEngine {
       await this.acknowledgeControl(runId);
       run = this.requireRun(runId);
       if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
+      if (run.control === "STOP_REQUESTED" || run.control === "STOPPED") {
+        this.pendingPhase.delete(runId);
+      }
     }
     if (run.control !== "RUNNING") return;
     // Terminal phase: no further phase-driver work (control acks already handled above).
     if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
+
+    // Apply a deferred complete once this run's jobs have drained (do not re-invoke the driver).
+    const pending = this.pendingPhase.get(runId);
+    if (pending !== undefined) {
+      if (this.scheduler.inFlightCount(runId) > 0) return;
+      this.pendingPhase.delete(runId);
+      this.applyPhaseAdvance(runId, pending);
+      return;
+    }
 
     const driver = this.drivers.get(run.phase);
     if (!driver) return;
@@ -153,15 +174,21 @@ export class RunEngine {
     });
     this.scheduler.tick();
     if (result.status === "waiting") return;
-    // Defer phase advance until this run's jobs finish — do not block awaiting them here.
-    if (this.scheduler.inFlightCount(runId) > 0) return;
 
-    run = this.requireRun(runId);
+    if (this.scheduler.inFlightCount(runId) > 0) {
+      this.pendingPhase.set(runId, result.nextPhase);
+      return;
+    }
+    this.applyPhaseAdvance(runId, result.nextPhase);
+  }
+
+  private applyPhaseAdvance(runId: string, nextPhase: RunPhase): void {
+    const run = this.requireRun(runId);
     if (isTerminal(RUN_CONTROL_TABLE, run.control) || run.control !== "RUNNING") return;
     if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
-    const next = transitionPhase(run, result.nextPhase, this.clock.now());
+    const next = transitionPhase(run, nextPhase, this.clock.now());
     this.append(runId, "run.phase_changed", { run: next }, SYSTEM_ACTOR);
-    if (result.nextPhase === "DONE") {
+    if (nextPhase === "DONE") {
       this.terminate(next, { code: "converged", summary: "required clean rounds reached" });
     }
   }
@@ -186,6 +213,7 @@ export class RunEngine {
     if (run.control === "STOP_REQUESTED") {
       const stopped = applyControlCommand(run.control, "stopped");
       if (stopped !== run.control) {
+        this.pendingPhase.delete(runId);
         const updated: Run = { ...run, control: stopped, updatedAt: this.clock.now() };
         this.append(runId, "run.control_changed", { run: updated }, SYSTEM_ACTOR);
         this.terminate(updated, { code: "stopped_by_user", summary: "run stopped by user" }, true);

@@ -262,6 +262,75 @@ describe("RunEngine", () => {
     release();
     await tickPromise;
   });
+
+  it("remembers complete across in-flight jobs and advances after settle without re-driving", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    sched.register("work", async () => {
+      await gate;
+      return {};
+    });
+    let driverCalls = 0;
+    engine.registerPhase("CREATED", () => {
+      driverCalls += 1;
+      if (driverCalls === 1) {
+        sched.enqueue({ runId: run.id, type: "work", lane: "local.shell" });
+        return { status: "complete", nextPhase: "DISCOVERING_PROJECT" };
+      }
+      return { status: "waiting" };
+    });
+
+    await engine.tickRun(run.id);
+    expect(store.repos.runs.get(run.id)!.phase).toBe("CREATED");
+    expect(sched.inFlightCount(run.id)).toBe(1);
+    expect(driverCalls).toBe(1);
+
+    release();
+    await flushMicrotasks();
+    await engine.tickRun(run.id);
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
+    expect(driverCalls).toBe(1);
+  });
+
+  it("draining pause does not prevent sibling active runs from being driven", async () => {
+    const pausing = engine.createRun({ projectPath: "/tmp/a" });
+    const sibling = engine.createRun({ projectPath: "/tmp/b" });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    sched.register("hang", async () => {
+      await gate;
+      return {};
+    });
+    let siblingDrives = 0;
+    engine.registerPhase("CREATED", (ctx) => {
+      if (ctx.run.id === pausing.id) {
+        if (ctx.store.repos.jobs.listByRun(ctx.run.id).length === 0) {
+          ctx.scheduler.enqueue({ runId: ctx.run.id, type: "hang", lane: "local.shell" });
+        }
+        return { status: "waiting" };
+      }
+      siblingDrives += 1;
+      return { status: "complete", nextPhase: "DISCOVERING_PROJECT" };
+    });
+
+    await engine.tickRun(pausing.id);
+    engine.control(pausing.id, "pause");
+    expect(store.repos.runs.get(pausing.id)!.control).toBe("PAUSE_REQUESTED");
+
+    const tickPromise = engine.tick();
+    await Promise.race([tickPromise, flushMicrotasks().then(() => flushMicrotasks())]);
+    expect(siblingDrives).toBeGreaterThanOrEqual(1);
+    expect(store.repos.runs.get(sibling.id)!.phase).toBe("DISCOVERING_PROJECT");
+    release();
+    await flushMicrotasks();
+    await tickPromise;
+    expect(store.repos.runs.get(pausing.id)!.control).toBe("PAUSED");
+  });
   it("changing checkpoint hash invalidates prior clean rounds for convergence", async () => {
     const run = engine.createRun({ projectPath: "/tmp/p" });
     await advanceTo(run.id, "CONVERGENCE_CHECK");
