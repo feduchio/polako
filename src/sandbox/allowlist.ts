@@ -106,17 +106,23 @@ function isPatternContext(argv: readonly string[], shellIndex: number): boolean 
   return false;
 }
 
-/** Git pager options run their value through a shell; reject any spelling outright. */
+/** Git pager options run their value through a shell; reject any parse-options spelling. */
 function gitExternalCommandDenial(argv: readonly string[]): string | null {
   if (shellBasename(argv[0] ?? "").toLowerCase() !== "git") return null;
   for (const a of argv) {
-    if (a === "-O" || a === "--open-files-in-pager" || a === "--pager") {
+    // Short -O, including fused values with or without a following space ("-Otouch", "-O touch").
+    if (a.startsWith("-O")) return "git pager/external-command options are not allowed";
+    if (!a.startsWith("--")) continue;
+    const name = a.slice(2).split("=", 1)[0] ?? "";
+    if (name.length === 0) continue;
+    // Unique prefixes of --open-files-in-pager (--op…; not --oneline / --output).
+    if (name.startsWith("op") && "open-files-in-pager".startsWith(name)) {
       return "git pager/external-command options are not allowed";
     }
-    if (a.startsWith("--open-files-in-pager=") || a.startsWith("--pager=")) {
+    // Unique prefixes of --pager (--pag…; not --patch / --parents).
+    if (name.length >= 3 && "pager".startsWith(name)) {
       return "git pager/external-command options are not allowed";
     }
-    if (/^-O\S/.test(a)) return "git pager/external-command options are not allowed";
   }
   return null;
 }
