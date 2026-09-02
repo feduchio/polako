@@ -11,7 +11,8 @@ export const JOB_TABLE: TransitionTable<JobState> = {
   terminal: ["SUCCEEDED", "FAILED", "CANCELLED"],
   edges: {
     PENDING: ["READY", "CANCELLED"],
-    READY: ["RUNNING", "CANCELLED"],
+    /** READY -> FAILED: cannot be started at all (no handler registered / misconfiguration) */
+    READY: ["RUNNING", "FAILED", "CANCELLED"],
     /** RUNNING -> READY happens on lease expiry (crash recovery) or retry */
     RUNNING: ["SUCCEEDED", "FAILED", "CANCELLED", "READY"],
     SUCCEEDED: [],
