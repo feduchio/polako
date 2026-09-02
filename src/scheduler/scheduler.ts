@@ -59,6 +59,11 @@ interface InFlight {
   promise: Promise<void>;
 }
 
+/** Realm-independent promise detection (`instanceof Promise` fails for vm-created promises). */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
+}
+
 /**
  * Persistent job scheduler. All job state lives in the store (events + `jobs` projection);
  * the in-memory part is only the set of in-flight promises. A crashed process leaves RUNNING
@@ -265,7 +270,7 @@ export class Scheduler {
       try {
         // A reporter may be async despite the void signature; swallow rejections too.
         const maybePromise: unknown = this.options.onPersistError?.(err, job);
-        if (maybePromise instanceof Promise) maybePromise.catch(() => undefined);
+        if (isThenable(maybePromise)) maybePromise.then(undefined, () => undefined);
       } catch {
         /* reporter failures must not escape */
       }
