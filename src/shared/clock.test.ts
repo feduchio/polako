@@ -17,6 +17,21 @@ describe("FakeClock", () => {
     expect(order).toEqual(["a", "b", "c"]);
   });
 
+  it("fires sleepers registered re-entrantly at the current time during advance", async () => {
+    const clock = new FakeClock(0);
+    const order: string[] = [];
+    void clock.sleep(10).then(async () => {
+      // a long promise chain before scheduling the nested sleep
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      order.push("outer");
+      await clock.sleep(0);
+      order.push("nested");
+    });
+    await clock.advance(10);
+    expect(order).toEqual(["outer", "nested"]);
+    expect(clock.pendingSleepers()).toBe(0);
+  });
+
   it("rejects an aborted sleep", async () => {
     const clock = new FakeClock(0);
     const ac = new AbortController();

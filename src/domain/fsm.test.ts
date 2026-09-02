@@ -6,6 +6,7 @@ import { canTransition, validateTable, type TransitionTable } from "./fsm.js";
 import { JOB_TABLE } from "./job.js";
 import {
   CODE_CHANGING_PHASES,
+  REVIEW_ENTRY_PHASES,
   ControlCommandSchema,
   RUN_CONTROL_TABLE,
   RUN_PHASE_TABLE,
@@ -45,15 +46,26 @@ describe("run phase FSM", () => {
     expect(canTransition(RUN_PHASE_TABLE, "BASELINING", "INTERPRETING_MISSION")).toBe(true);
   });
 
-  it("review is reachable only through integration (never straight from comparing)", () => {
-    expect(canTransition(RUN_PHASE_TABLE, "COMPARING", "REVIEWING")).toBe(false);
-    expect(canTransition(RUN_PHASE_TABLE, "INTEGRATING", "REVIEWING")).toBe(true);
+  it("review is entered only from integration, planning or convergence check — never from comparing/gating/executing", () => {
+    const incoming = RUN_PHASE_TABLE.states.filter((s) => canTransition(RUN_PHASE_TABLE, s, "REVIEWING")).sort();
+    expect(incoming).toEqual([...REVIEW_ENTRY_PHASES].sort());
+    expect(incoming).not.toContain("COMPARING");
+    expect(incoming).not.toContain("GATING");
+    expect(incoming).not.toContain("EXECUTING");
   });
 
-  it("simplification must pass through gates again before convergence can be re-checked with new code", () => {
-    expect(canTransition(RUN_PHASE_TABLE, "SIMPLIFYING", "GATING")).toBe(true);
-    expect(canTransition(RUN_PHASE_TABLE, "SIMPLIFYING", "DONE")).toBe(false);
-    expect(canTransition(RUN_PHASE_TABLE, "SIMPLIFYING", "REVIEWING")).toBe(false);
+  it("simplification cannot change code by itself: it only plans tasks or returns with nothing to do", () => {
+    expect(canTransition(RUN_PHASE_TABLE, "SIMPLIFYING", "EXECUTING")).toBe(true);
+    expect(canTransition(RUN_PHASE_TABLE, "SIMPLIFYING", "CONVERGENCE_CHECK")).toBe(true);
+    for (const s of ["GATING", "COMPARING", "INTEGRATING", "REVIEWING", "DONE"] as const) {
+      expect(canTransition(RUN_PHASE_TABLE, "SIMPLIFYING", s)).toBe(false);
+    }
+  });
+
+  it("INTEGRATING is the only code-changing phase and is entered only from COMPARING", () => {
+    expect(CODE_CHANGING_PHASES).toEqual(["INTEGRATING"]);
+    const incoming = RUN_PHASE_TABLE.states.filter((s) => canTransition(RUN_PHASE_TABLE, s, "INTEGRATING"));
+    expect(incoming).toEqual(["COMPARING"]);
   });
 
   it("DONE is reachable only from CONVERGENCE_CHECK", () => {
@@ -63,9 +75,6 @@ describe("run phase FSM", () => {
     }
   });
 
-  it("code-changing phases are exactly integration and simplification", () => {
-    expect([...CODE_CHANGING_PHASES].sort()).toEqual(["INTEGRATING", "SIMPLIFYING"]);
-  });
 });
 
 describe("run control axis", () => {

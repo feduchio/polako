@@ -1,5 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AcceptanceArtifact } from "../domain/acceptance.js";
@@ -110,14 +111,59 @@ describe("Store", () => {
     ]);
     const live = { run: store.repos.runs.get(runId), tasks: store.repos.tasks.listByRun(runId) };
 
-    store.db.prepare("UPDATE tasks SET state = 'CANCELLED' WHERE run_id = ?").run(runId);
+    // corrupt what repositories actually read (json), plus indexed columns, plus delete a row
+    store.db.prepare("UPDATE tasks SET state = 'CANCELLED', json = json_set(json, '$.state', 'CANCELLED') WHERE run_id = ?").run(runId);
     store.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
     expect(store.repos.runs.get(runId)).toBeNull();
+    expect(store.repos.tasks.listByRun(runId)[0]?.state).toBe("CANCELLED");
 
     const replayed = store.events.rebuildProjections(runId);
     expect(replayed).toBe(4);
     expect({ run: store.repos.runs.get(runId), tasks: store.repos.tasks.listByRun(runId) }).toEqual(live);
     expect(live.tasks[0]?.state).toBe("READY");
+  });
+
+  it("rebuild scopes mission-keyed tables from the events, not from the (possibly missing) run row", () => {
+    const runId = id("run");
+    const missionId = id("msn");
+    const r = run(runId, missionId);
+    const interpretation = {
+      id: id("mint"),
+      missionId,
+      version: 1,
+      supersedes: null,
+      basedOn: { profileHash: "c".repeat(64), baselineId: id("base") },
+      goals: ["g"],
+      requirements: [{ ref: "R1", statement: "s", acceptance: ["a"] }],
+      constraints: [],
+      nonGoals: [],
+      definitionOfSuccess: ["d"],
+      ambiguities: [],
+      createdBy: { kind: "supervisor" },
+      createdAt: NOW,
+    };
+    store.events.append([ev(runId, "run.created", { run: r }), ev(runId, "mission.interpreted", { interpretation })]);
+    // stale row that no event produced, and the run projection is gone
+    store.db
+      .prepare("INSERT INTO interpretations (id, mission_id, version, json) VALUES (?, ?, ?, ?)")
+      .run(id("mint"), missionId, 2, JSON.stringify({ ...interpretation, id: id("mint"), version: 2 }));
+    store.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
+
+    store.events.rebuildProjections(runId);
+    const versions = (store.db.prepare("SELECT version FROM interpretations WHERE mission_id = ? ORDER BY version").all(missionId) as { version: number }[]).map(
+      (x) => x.version,
+    );
+    expect(versions).toEqual([1]);
+    expect(store.repos.runs.get(runId)?.id).toBe(runId);
+  });
+
+  it("an event may only project entities of its own run", () => {
+    const a = id("run");
+    const b = id("run");
+    expect(() => store.events.append([ev(a, "run.created", { run: run(b, id("msn")) })])).toThrow(/does not match/);
+    expect(() => store.events.append([ev(a, "task.created", { task: task(b) })])).toThrow(/does not match/);
+    expect(store.repos.runs.get(b)).toBeNull();
+    expect(store.events.list(a)).toEqual([]);
   });
 
   it("mirrors events to runs/<runId>/events.jsonl", () => {
@@ -157,6 +203,33 @@ describe("Store", () => {
     }).toThrow("boom");
     expect(store.repos.runs.get(runId)).toBeNull();
     expect(store.events.list(runId)).toEqual([]);
+    expect(existsSync(join(dir, "runs", runId, "events.jsonl"))).toBe(false);
+  });
+
+  it("the mirror is written only once the outermost transaction commits", () => {
+    const runId = id("run");
+    store.transaction(() => {
+      store.events.append([ev(runId, "run.created", { run: run(runId, id("msn")) })]);
+      expect(existsSync(join(dir, "runs", runId, "events.jsonl"))).toBe(false);
+    });
+    expect(readFileSync(join(dir, "runs", runId, "events.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  it("refuses non-contiguous or too-new schema_version histories", () => {
+    const other = mkdtempSync(join(tmpdir(), "polish-mig-"));
+    try {
+      const raw = new DatabaseSync(join(other, "polish.db"));
+      raw.exec("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); INSERT INTO schema_version VALUES (2, 0);");
+      raw.close();
+      expect(() => openStore({ home: other })).toThrow(/not contiguous/);
+      rmSync(join(other, "polish.db"));
+      const raw2 = new DatabaseSync(join(other, "polish.db"));
+      raw2.exec("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); INSERT INTO schema_version VALUES (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 0), (9, 0);");
+      raw2.close();
+      expect(() => openStore({ home: other })).toThrow(/newer than this build/);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
   });
 
   it("reopening the same home preserves data and applies no duplicate migrations", () => {
@@ -241,11 +314,45 @@ describe("AcceptanceStorage", () => {
     expect(readFileSync(join(checkout, a.relativePath), "utf8")).toBe("expect(1).toBe(1)");
   });
 
-  it("refuses paths that escape the checkout", () => {
-    const a = artifact("../outside.ts", "x");
-    expect(() => {
-      store.acceptance.materialize(checkout, [a]);
-    }).toThrow(/escapes/);
-    expect(() => store.acceptance.verify(checkout, [a])).toThrow(/escapes/);
+  it("refuses paths that escape the checkout lexically", () => {
+    for (const bad of ["../outside.ts", "/etc/passwd", "", "."]) {
+      const a = artifact(bad || "x", "x");
+      const art = { ...a, relativePath: bad };
+      expect(() => {
+        store.acceptance.materialize(checkout, [art]);
+      }).toThrow(/escapes|relative path/);
+      expect(() => store.acceptance.verify(checkout, [art])).toThrow(/escapes|relative path/);
+    }
+  });
+
+  it("refuses paths that escape the checkout through a symlinked directory", () => {
+    const outside = mkdtempSync(join(tmpdir(), "polish-outside-"));
+    try {
+      symlinkSync(outside, join(checkout, "linked"));
+      const a = artifact("linked/victim.txt", "owned");
+      expect(() => {
+        store.acceptance.materialize(checkout, [a]);
+      }).toThrow(/symlink/);
+      expect(existsSync(join(outside, "victim.txt"))).toBe(false);
+      expect(() => store.acceptance.verify(checkout, [a])).toThrow(/symlink/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a directory or symlink at a protected path as not_a_file, and materialize replaces it", () => {
+    const a = artifact("tests/protected.test.ts", "real");
+    mkdirSync(join(checkout, "tests", "protected.test.ts"), { recursive: true });
+    expect(store.acceptance.verify(checkout, [a])).toEqual([{ path: a.relativePath, reason: "not_a_file" }]);
+    store.acceptance.materialize(checkout, [a]);
+    expect(store.acceptance.verify(checkout, [a])).toEqual([]);
+
+    rmSync(join(checkout, a.relativePath));
+    writeFileSync(join(checkout, "decoy.ts"), "real");
+    symlinkSync(join(checkout, "decoy.ts"), join(checkout, a.relativePath));
+    expect(store.acceptance.verify(checkout, [a])).toEqual([{ path: a.relativePath, reason: "not_a_file" }]);
+    store.acceptance.materialize(checkout, [a]);
+    expect(lstatSync(join(checkout, a.relativePath)).isSymbolicLink()).toBe(false);
+    expect(store.acceptance.verify(checkout, [a])).toEqual([]);
   });
 });

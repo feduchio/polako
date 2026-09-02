@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AcceptanceStorage } from "./acceptance.js";
 import { ArtifactStore } from "./artifacts.js";
-import { openDb, transaction, type Db } from "./db.js";
+import { TxManager, openDb, type Db } from "./db.js";
 import { EventLog } from "./eventLog.js";
 import { createRepositories, type Repositories } from "./repositories.js";
 
@@ -33,14 +33,15 @@ export function openStore(options: OpenStoreOptions): Store {
   const runsDir = home !== null ? join(home, "runs") : null;
 
   const db = openDb({ path: home !== null ? join(home, "polish.db") : ":memory:" });
+  const tx = new TxManager(db);
   const artifacts = new ArtifactStore(db, artifactsDir);
   return {
     db,
-    events: new EventLog(db, { runsDir }),
+    events: new EventLog(tx, { runsDir }),
     artifacts,
     acceptance: new AcceptanceStorage(artifacts),
     repos: createRepositories(db),
-    transaction: (fn) => transaction(db, fn),
+    transaction: (fn) => tx.run(fn),
     close: () => {
       db.close();
     },
@@ -49,9 +50,10 @@ export function openStore(options: OpenStoreOptions): Store {
 }
 
 export { ArtifactStore } from "./artifacts.js";
-export { AcceptanceStorage } from "./acceptance.js";
+export { AcceptanceStorage, safeTarget } from "./acceptance.js";
+export type { ProtectedPathProblem } from "./acceptance.js";
 export { EventLog } from "./eventLog.js";
 export { PROJECTION_RULES, PROJECTED_TABLES, upsertEntity, applyProjections } from "./projections.js";
 export type { Repositories } from "./repositories.js";
-export { openDb, migrate, transaction } from "./db.js";
+export { openDb, migrate, transaction, TxManager } from "./db.js";
 export type { Db } from "./db.js";

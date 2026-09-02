@@ -21,41 +21,82 @@ export function openDb(options: OpenDbOptions): Db {
   return db;
 }
 
+/**
+ * Apply pending migrations. The recorded history must be exactly 1..N with no gaps, and N must
+ * not exceed what this build knows about (a newer daemon may have written the file).
+ */
 export function migrate(db: Db): number {
   db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);");
-  const row = db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as { v: number | null } | undefined;
-  let current = row?.v ?? 0;
+  const applied = (db.prepare("SELECT version FROM schema_version ORDER BY version").all() as { version: number }[]).map((r) => r.version);
+  for (let i = 0; i < applied.length; i++) {
+    if (applied[i] !== i + 1) {
+      throw new PolishError("CONFIG_ERROR", `schema_version history is not contiguous: ${applied.join(",")}`);
+    }
+  }
+  if (applied.length > MIGRATIONS.length) {
+    throw new PolishError("CONFIG_ERROR", `database schema version ${applied.length} is newer than this build (${MIGRATIONS.length})`);
+  }
+  let current = applied.length;
   for (const m of MIGRATIONS) {
     if (m.version <= current) continue;
     if (m.version !== current + 1) {
       throw new PolishError("CONFIG_ERROR", `migration gap: have ${current}, next is ${m.version}`);
     }
-    transaction(db, () => {
+    db.exec("BEGIN IMMEDIATE");
+    try {
       db.exec(m.sql);
       db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)").run(m.version, Date.now());
-    });
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
     current = m.version;
   }
   return current;
 }
 
 /**
- * Synchronous transaction helper. node:sqlite is synchronous, which is exactly what we want
- * for "event append + projection update" atomicity. Nested calls join the outer transaction.
+ * Transaction coordinator. node:sqlite is synchronous, which is exactly what we want for
+ * "event append + projection update" atomicity. Nested calls join the outer transaction.
+ * Side effects that must only happen if the outermost transaction commits (JSONL mirror,
+ * notifications) are registered with `onCommit` and dropped on rollback.
  */
-export function transaction<T>(db: Db, fn: () => T): T {
-  if (db.isTransaction) return fn();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (err) {
+export class TxManager {
+  private afterCommit: (() => void)[] = [];
+
+  constructor(readonly db: Db) {}
+
+  run<T>(fn: () => T): T {
+    if (this.db.isTransaction) return fn();
+    this.db.exec("BEGIN IMMEDIATE");
+    let result: T;
     try {
-      db.exec("ROLLBACK");
-    } catch {
-      /* already rolled back */
+      result = fn();
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.afterCommit = [];
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* already rolled back */
+      }
+      throw err;
     }
-    throw err;
+    const hooks = this.afterCommit;
+    this.afterCommit = [];
+    for (const hook of hooks) hook();
+    return result;
   }
+
+  /** Run `fn` after the current outermost transaction commits; immediately if none is open. */
+  onCommit(fn: () => void): void {
+    if (this.db.isTransaction) this.afterCommit.push(fn);
+    else fn();
+  }
+}
+
+/** Convenience for callers holding only a Db (tests, migrations). */
+export function transaction<T>(db: Db, fn: () => T): T {
+  return new TxManager(db).run(fn);
 }

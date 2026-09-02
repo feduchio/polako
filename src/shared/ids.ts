@@ -18,12 +18,18 @@ function encodeRandom(bytes: Uint8Array): string {
   return out;
 }
 
+const MAX_TIME = 32 ** 10 - 1;
+const PREFIX_RE = /^[a-z]+$/;
+
 /**
- * Time-sortable opaque identifier: 10 chars of base32 timestamp + 12 random chars.
- * Sorting ids lexicographically sorts by creation time (ms resolution).
+ * Time-sortable opaque identifier: `<prefix>_` + 10 chars of base32 timestamp + 12 random chars.
+ * Sorting ids lexicographically sorts by creation time (ms resolution). Prefix must be lowercase
+ * letters; timestamps are clamped to the encodable range so the output always matches `IdSchema`.
  */
 export function newId(prefix: string, now: number = Date.now()): string {
-  return `${prefix}_${encodeTime(now)}${encodeRandom(randomBytes(12))}`;
+  if (!PREFIX_RE.test(prefix)) throw new TypeError(`id prefix must match ${PREFIX_RE.source}, got "${prefix}"`);
+  const t = Number.isFinite(now) ? Math.min(MAX_TIME, Math.max(0, Math.floor(now))) : 0;
+  return `${prefix}_${encodeTime(t)}${encodeRandom(randomBytes(12))}`;
 }
 
 export type IdPrefix =

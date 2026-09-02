@@ -67,21 +67,28 @@ export class FakeClock implements Clock {
     });
   }
 
-  /** Advance time by `ms`, firing due sleepers in order. Yields to the microtask queue between firings. */
+  /**
+   * Advance time by `ms`, firing due sleepers in order. Yields to the microtask queue between
+   * firings, and keeps scanning until a flush registers no new due sleeper (re-entrancy).
+   */
   async advance(ms: number): Promise<void> {
     const target = this.current + ms;
-    for (;;) {
+    for (let guard = 0; ; guard++) {
+      if (guard > 100_000) throw new Error("FakeClock.advance: sleepers keep re-registering at the current time");
       const due = this.waiters
         .filter((w) => w.at <= target)
         .sort((a, b) => a.at - b.at || a.seq - b.seq)[0];
-      if (!due) break;
+      if (!due) {
+        this.current = target;
+        await flushMicrotasks();
+        if (!this.waiters.some((w) => w.at <= target)) break;
+        continue;
+      }
       this.current = Math.max(this.current, due.at);
       this.waiters = this.waiters.filter((w) => w !== due);
       due.resolve();
       await flushMicrotasks();
     }
-    this.current = target;
-    await flushMicrotasks();
   }
 
   pendingSleepers(): number {

@@ -1,7 +1,8 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { id } from "../shared/ids.js";
-import { compareToBaseline, hasRegression, type BaselineSnapshot, type CheckResult } from "./checks.js";
+import { compareToBaseline, hasRegression, testKey, type BaselineSnapshot, type CheckResult } from "./checks.js";
+import { IdSchema } from "./common.js";
 import { dominates, emptyFindingCounts, equivalentEvidence, type EvidenceVector } from "./checkpoint.js";
 import { cleanRoundsFor, hasConverged, isNovelRound, type CleanRound } from "./convergence.js";
 import { FactStrictSchema, isGroundTruth, promoteToVerified, type Fact } from "./fact.js";
@@ -120,10 +121,11 @@ describe("task origin invariant", () => {
     expect(TaskStrictSchema.safeParse({ ...req, kind: "investigation" }).success).toBe(false);
   });
 
-  it("a VALID validation without evidence artifacts is invalid", () => {
+  it("a VALID validation without evidence artifacts is invalid and cannot create a task", () => {
     const f = finding();
     expect(FindingValidationStrictSchema.safeParse(validation(f, { evidenceRefs: [] })).success).toBe(false);
     expect(FindingValidationStrictSchema.safeParse(validation(f, { verdict: "REJECTED", evidenceRefs: [] })).success).toBe(true);
+    expect(() => createTaskFromValidFinding(f, validation(f, { evidenceRefs: [] }), draft())).toThrow(/evidence/);
   });
 });
 
@@ -266,8 +268,35 @@ describe("baseline-relative regression", () => {
 
   it("newly failing tests and degraded checks are regressions", () => {
     const delta = compareToBaseline(baseline, [check("test", ["flaky.spec::x", "auth.spec::y"], 100), check("lint", [], 0, "fail")]);
-    expect(delta.newlyFailing).toEqual(["test::auth.spec::y"]);
+    expect(delta.newlyFailing).toEqual([testKey("test", "auth.spec::y")]);
     expect(delta.degradedChecks).toEqual(["lint"]);
+  });
+
+  it("a check that failed on baseline and now errors/times out/is skipped is a degradation", () => {
+    for (const status of ["error", "timeout", "skipped"] as const) {
+      const delta = compareToBaseline(baseline, [{ ...check("test", [], 0, status), summary: null }, check("lint", [], 0)]);
+      expect(delta.degradedChecks).toEqual(["test"]);
+      expect(hasRegression(delta)).toBe(true);
+    }
+    expect(compareToBaseline(baseline, [check("test", [], 100), check("lint", [], 0)]).degradedChecks).toEqual([]);
+  });
+
+  it("test identities do not collide across check/test name boundaries", () => {
+    const b: BaselineSnapshot = { ...baseline, checks: [check("a::b", ["c"], 1)] };
+    const delta = compareToBaseline(b, [check("a::b", [], 1), check("a", ["b::c"], 1)]);
+    expect(delta.newlyFailing).toEqual([testKey("a", "b::c")]);
+    expect(delta.newlyPassing).toEqual([testKey("a::b", "c")]);
+  });
+});
+
+describe("ids", () => {
+  it("always produce IdSchema-valid ids, even for out-of-range timestamps", () => {
+    fc.assert(
+      fc.property(fc.double({ noNaN: false }), (t) => {
+        expect(IdSchema.safeParse(id("run", t)).success).toBe(true);
+      }),
+    );
+    expect(() => id("bad-prefix" as never)).toThrow(/prefix/);
   });
 });
 

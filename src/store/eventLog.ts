@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { EventSchema, type Event, type NewEvent } from "../domain/event.js";
 import { PolishError } from "../shared/errors.js";
-import { transaction, type Db } from "./db.js";
+import type { Db, TxManager } from "./db.js";
 import { PROJECTED_TABLES, applyProjections } from "./projections.js";
 
 export interface EventLogOptions {
@@ -15,18 +15,22 @@ interface EventRow {
 }
 
 export class EventLog {
+  private readonly db: Db;
+
   constructor(
-    private readonly db: Db,
+    private readonly tx: TxManager,
     private readonly options: EventLogOptions,
-  ) {}
+  ) {
+    this.db = tx.db;
+  }
 
   /**
    * Append events and update projections atomically. `seq` is assigned here.
-   * Returns the stored events (with seq).
+   * The JSONL mirror is written only after the outermost transaction commits.
    */
   append(events: readonly NewEvent[]): Event[] {
     if (events.length === 0) return [];
-    return transaction(this.db, () => {
+    return this.tx.run(() => {
       const stored: Event[] = [];
       for (const e of events) {
         const seq = this.nextSeq(e.runId);
@@ -39,7 +43,9 @@ export class EventLog {
         applyProjections(this.db, event);
         stored.push(event);
       }
-      this.mirror(stored);
+      this.tx.onCommit(() => {
+        this.mirror(stored);
+      });
       return stored;
     });
   }
@@ -99,28 +105,33 @@ export class EventLog {
   }
 
   /**
-   * Rebuild all projections for a run from its events. Used by recovery and by tests
-   * asserting replay == live state.
+   * Rebuild all projections for a run from its events. The set of rows to clear is derived
+   * from the events themselves (never from possibly-corrupted projections): run-scoped tables
+   * by `run_id`, mission-scoped tables by the mission ids that appear in the run's events.
    */
   rebuildProjections(runId: string): number {
-    return transaction(this.db, () => {
+    return this.tx.run(() => {
+      const events = this.list(runId);
+      const missionIds = new Set<string>();
+      for (const e of events) {
+        const run = e.payload["run"] as { missionId?: unknown } | undefined;
+        if (typeof run?.missionId === "string") missionIds.add(run.missionId);
+        const mission = e.payload["mission"] as { id?: unknown } | undefined;
+        if (typeof mission?.id === "string") missionIds.add(mission.id);
+        const interp = e.payload["interpretation"] as { missionId?: unknown } | undefined;
+        if (typeof interp?.missionId === "string") missionIds.add(interp.missionId);
+      }
       for (const table of PROJECTED_TABLES) {
-        if (table === "missions" || table === "interpretations") {
-          // keyed by mission, not run: delete via the run's mission id
-          const run = this.db.prepare("SELECT mission_id FROM runs WHERE id = ?").get(runId) as { mission_id: string } | undefined;
-          if (run) {
-            if (table === "missions") this.db.prepare("DELETE FROM missions WHERE id = ?").run(run.mission_id);
-            else this.db.prepare("DELETE FROM interpretations WHERE mission_id = ?").run(run.mission_id);
-          }
-          continue;
-        }
         if (table === "runs") {
           this.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
-          continue;
+        } else if (table === "missions") {
+          for (const m of missionIds) this.db.prepare("DELETE FROM missions WHERE id = ?").run(m);
+        } else if (table === "interpretations") {
+          for (const m of missionIds) this.db.prepare("DELETE FROM interpretations WHERE mission_id = ?").run(m);
+        } else {
+          this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
         }
-        this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
       }
-      const events = this.list(runId);
       for (const e of events) applyProjections(this.db, e);
       return events.length;
     });

@@ -11,6 +11,7 @@ import { JobSchema } from "../domain/job.js";
 import { MissionInterpretationSchema, MissionSchema } from "../domain/mission.js";
 import { RunSchema } from "../domain/run.js";
 import { TaskStrictSchema } from "../domain/task.js";
+import { PolishError } from "../shared/errors.js";
 import type { Db } from "./db.js";
 
 /**
@@ -176,11 +177,37 @@ export function upsertEntity(db: Db, table: ProjectedTable, entity: unknown): vo
   ).run(...values);
 }
 
-/** Apply all projection rules matching the event. Validation errors propagate (and abort the enclosing transaction). */
+/** Tables whose rows are scoped by `run_id` and must therefore match the event envelope. */
+const RUN_SCOPED: ReadonlySet<ProjectedTable> = new Set<ProjectedTable>([
+  "baselines",
+  "tasks",
+  "candidates",
+  "checkpoints",
+  "findings",
+  "finding_validations",
+  "clean_rounds",
+  "facts",
+  "acceptance_artifacts",
+  "jobs",
+]);
+
+/**
+ * Apply all projection rules matching the event. Validation errors propagate (and abort the
+ * enclosing transaction). An entity may only be projected by an event of its own run: a
+ * `runs` snapshot must have `id === event.runId`, run-scoped entities `runId === event.runId`.
+ * Mission-scoped tables (`missions`, `interpretations`) are not run-bound and are not checked.
+ */
 export function applyProjections(db: Db, event: Event): void {
   for (const rule of rulesByType.get(event.type) ?? []) {
     const entity = event.payload[rule.payloadField];
     if (entity === undefined) continue;
+    const record = entity as Record<string, unknown>;
+    if (rule.table === "runs" && record["id"] !== event.runId) {
+      throw new PolishError("INVARIANT_VIOLATION", "run snapshot id does not match event runId", { eventId: event.id, table: rule.table });
+    }
+    if (RUN_SCOPED.has(rule.table) && record["runId"] !== event.runId) {
+      throw new PolishError("INVARIANT_VIOLATION", "entity runId does not match event runId", { eventId: event.id, table: rule.table });
+    }
     upsertEntity(db, rule.table, entity);
   }
 }

@@ -45,15 +45,31 @@ export const RUN_PHASE_TABLE: TransitionTable<RunPhase> = {
     REVIEWING: ["VALIDATING", "FAILED"],
     VALIDATING: ["PLANNING", "CONVERGENCE_CHECK", "NEEDS_HUMAN", "FAILED"],
     CONVERGENCE_CHECK: ["REVIEWING", "SIMPLIFYING", "PLANNING", "DONE", "NEEDS_HUMAN", "FAILED"],
-    SIMPLIFYING: ["GATING", "CONVERGENCE_CHECK", "FAILED"],
+    /**
+     * SIMPLIFYING only *plans* `simplify` tasks. Any code change then goes through the normal
+     * EXECUTING -> GATING -> COMPARING -> INTEGRATING pipeline. If nothing worth simplifying
+     * is found, no task ran and no code changed, so returning to CONVERGENCE_CHECK is sound.
+     */
+    SIMPLIFYING: ["EXECUTING", "CONVERGENCE_CHECK", "NEEDS_HUMAN", "FAILED"],
     DONE: [],
     NEEDS_HUMAN: [],
     FAILED: [],
   },
 };
 
-/** Phases during which code on the run branch may change (a new checkpoint may be produced). */
-export const CODE_CHANGING_PHASES: readonly RunPhase[] = ["INTEGRATING", "SIMPLIFYING"];
+/**
+ * The only phase during which code on the run branch may change (new checkpoint, including
+ * rollback checkpoints, which are performed on the integration lane).
+ */
+export const CODE_CHANGING_PHASES: readonly RunPhase[] = ["INTEGRATING"];
+
+/**
+ * Phases from which REVIEWING may be entered. Never from COMPARING/GATING/EXECUTING: a winning
+ * candidate must be integrated (and pass integration gates) before any reviewer sees it.
+ * PLANNING -> REVIEWING covers missions with no coding requirements ("review and polish");
+ * CONVERGENCE_CHECK -> REVIEWING starts the next clean round on an unchanged checkpoint.
+ */
+export const REVIEW_ENTRY_PHASES: readonly RunPhase[] = ["INTEGRATING", "PLANNING", "CONVERGENCE_CHECK"];
 
 /**
  * Axis 2: user control. Orthogonal to phase — any command is valid from any phase.

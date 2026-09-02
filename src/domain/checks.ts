@@ -55,10 +55,22 @@ export const BaselineSnapshotSchema = z.object({
 });
 export type BaselineSnapshot = z.infer<typeof BaselineSnapshotSchema>;
 
+/** Collision-free identity for a failing test: (check name, test name) as a JSON tuple. */
+export function testKey(checkName: string, testName: string): string {
+  return JSON.stringify([checkName, testName]);
+}
+
 export function baselineFailingTests(baseline: BaselineSnapshot): Set<string> {
   const out = new Set<string>();
-  for (const c of baseline.checks) for (const t of c.summary?.failingTests ?? []) out.add(`${c.name}::${t}`);
+  for (const c of baseline.checks) for (const t of c.summary?.failingTests ?? []) out.add(testKey(c.name, t));
   return out;
+}
+
+/** Higher is healthier. `skipped` sits below `pass`: a check that used to run and now does not is a degradation. */
+const CHECK_RANK: Record<CheckStatus, number> = { pass: 4, fail: 2, skipped: 1, error: 0, timeout: 0 };
+
+export function checkDegraded(before: CheckStatus, after: CheckStatus): boolean {
+  return CHECK_RANK[after] < CHECK_RANK[before];
 }
 
 export interface RegressionDelta {
@@ -78,7 +90,7 @@ export function compareToBaseline(baseline: BaselineSnapshot, candidate: CheckRe
   const degradedChecks: string[] = [];
   const candByName = new Map(candidate.map((c) => [c.name, c] as const));
 
-  for (const c of candidate) for (const t of c.summary?.failingTests ?? []) candFailing.add(`${c.name}::${t}`);
+  for (const c of candidate) for (const t of c.summary?.failingTests ?? []) candFailing.add(testKey(c.name, t));
 
   for (const b of baseline.checks) {
     const c = candByName.get(b.name);
@@ -86,7 +98,7 @@ export function compareToBaseline(baseline: BaselineSnapshot, candidate: CheckRe
       degradedChecks.push(b.name);
       continue;
     }
-    if (b.status === "pass" && c.status !== "pass") degradedChecks.push(b.name);
+    if (checkDegraded(b.status, c.status)) degradedChecks.push(b.name);
   }
 
   const missing: string[] = [];

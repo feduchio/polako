@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { TransitionTable } from "./fsm.js";
 import { GitHashSchema, IdSchema, TimestampSchema } from "./common.js";
-import type { Finding, FindingValidation } from "./finding.js";
+import { FindingValidationStrictSchema, type Finding, type FindingValidation } from "./finding.js";
 import { PolishError } from "../shared/errors.js";
 
 /**
@@ -132,6 +132,13 @@ export function createTaskFromValidFinding(finding: Finding, validation: Finding
       findingId: finding.id,
       validationId: validation.id,
       verdict: validation.verdict,
+    });
+  }
+  const strict = FindingValidationStrictSchema.safeParse(validation);
+  if (!strict.success) {
+    throw new PolishError("INVARIANT_VIOLATION", "VALID validation must carry evidence artifacts", {
+      validationId: validation.id,
+      issues: strict.error.issues.map((i) => i.message),
     });
   }
   return TaskStrictSchema.parse({
