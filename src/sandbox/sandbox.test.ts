@@ -139,7 +139,11 @@ describe("CommandPolicy", () => {
     expect(strict.check(["git", "grep", "-iOtouch /tmp/PWNED", "-e", "one"])).toMatch(/pager|not in allowlist/);
     expect(strict.check(["git", "grep", "-inOtouch /tmp/PWNED", "-e", "one"])).toMatch(/pager|not in allowlist/);
     expect(arbitrary.check(["git", "grep", "-iOtouch /tmp/PWNED", "-e", "one"])).toMatch(/pager/);
+    expect(arbitrary.check(["git", "grep", "-IOsh -c \"echo x\"", "-e", "one"])).toMatch(/pager/);
+    expect(arbitrary.check(["git", "grep", "-WOsh -c \"echo x\"", "-e", "one"])).toMatch(/pager/);
     expect(strict.check(["git", "log", "--oneline"])).toBeNull();
+    expect(strict.check(["git", "diff", "-Oorderfile"])).toMatch(/pager/);
+    expect(strict.check(["git", "log", "--", "-Ofile.txt"])).toBeNull();
     expect(strict.check(["git", "grep", "-e", "bash", "-i"])).toMatch(/not in allowlist/);
     expect(strict.check(["rg", "bash", "-i"])).toBeNull();
     expect(arbitrary.check(["rg", "sh -c"])).toBeNull();

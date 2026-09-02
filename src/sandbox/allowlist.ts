@@ -109,8 +109,9 @@ function isPatternContext(argv: readonly string[], shellIndex: number): boolean 
 function gitExternalCommandDenial(argv: readonly string[]): string | null {
   if (shellBasename(argv[0] ?? "").toLowerCase() !== "git") return null;
   for (const a of argv) {
-    // Short -O alone, fused, spaced, or clustered with other short flags (-iOtouch, -inO…).
-    if (/^-[a-z0-9]*O/.test(a)) return "git pager/external-command options are not allowed";
+    // Short -O alone, fused, spaced, or clustered with other short flags (-iOtouch, -IOsh, -inO…).
+    if (/^-[A-Za-z0-9]*O/.test(a)) return "git pager/external-command options are not allowed";
+    if (a === "--") break;
     if (!a.startsWith("--")) continue;
     const name = a.slice(2).split("=", 1)[0] ?? "";
     if (name.length === 0) continue;
