@@ -181,6 +181,43 @@ describe("ModelBroker", () => {
     const reqText = store.artifacts.getText(events[0]!.artifacts[0]!.sha256);
     expect(JSON.parse(reqText)).toMatchObject({ maxTokens: 123, temperature: 0.25 });
   });
+
+  it("records a model.call when cancelled while waiting for quota or during retry backoff", async () => {
+    const sharedQuota = new QuotaTracker(clock, { concurrency: 1, rpm: null });
+    const quotaBroker = new ModelBroker({
+      store,
+      clock,
+      catalog,
+      quota: sharedQuota,
+      budget,
+      secrets: SecretStore.fromValues({ OPENROUTER_API_KEY: "sk-supersecret-value" }),
+      retry: { maxAttempts: 2, baseDelayMs: 100, maxDelayMs: 1000 },
+      jitter: () => 1,
+    });
+    const releaseSlot = await sharedQuota.acquire("p1");
+    const ac1 = new AbortController();
+    const waiting = quotaBroker.complete({ ...req(runId, "big"), signal: ac1.signal });
+    const waitingSettled = waiting.catch((e: unknown) => e);
+    await clock.advance(10);
+    ac1.abort();
+    await clock.advance(60);
+    await waitingSettled;
+    expect(store.events.list(runId, { types: ["model.call"] })).toHaveLength(1);
+    expect(store.events.list(runId, { types: ["model.call"] })[0]!.payload).toMatchObject({ ok: false });
+    releaseSlot();
+
+    const run2 = id("run");
+    provider.script("mid", [{ kind: "error", error: new ProviderError("p1", "server", "retry me") }]);
+    const ac2 = new AbortController();
+    const backoff = broker.complete({ ...req(run2, "mid"), signal: ac2.signal });
+    const backoffSettled = backoff.catch((e: unknown) => e);
+    await clock.advance(1);
+    ac2.abort();
+    await clock.advance(200);
+    await backoffSettled;
+    expect(store.events.list(run2, { types: ["model.call"] })).toHaveLength(1);
+    expect(store.events.list(run2, { types: ["model.call"] })[0]!.payload).toMatchObject({ ok: false });
+  });
 });
 
 describe("QuotaTracker", () => {

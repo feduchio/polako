@@ -71,18 +71,34 @@ export class ModelBroker {
       throw err instanceof PolishError ? err : new PolishError("CANCELLED", "model call cancelled", { cause: err });
     };
 
+    const noteCancelled = (): void => {
+      const outcome: AttemptOutcome = { ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() };
+      outcomes.push(outcome);
+      catalog.recordCall(request.model, outcome);
+    };
+
+    const isCancel = (err: unknown): boolean =>
+      isAbortError(err) || (err instanceof PolishError && err.code === "CANCELLED");
+
     while (attempt < this.retry.maxAttempts) {
       attempt++;
       if (request.signal?.aborted) {
-        outcomes.push({ ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() });
-        catalog.recordCall(request.model, { ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() });
+        noteCancelled();
         failCancelled(new PolishError("CANCELLED", "model call cancelled"));
       }
-      const release = await quota.acquire(adapter.id, request.signal);
+      let release: () => void;
+      try {
+        release = await quota.acquire(adapter.id, request.signal);
+      } catch (err) {
+        if (isCancel(err)) {
+          noteCancelled();
+          failCancelled(err);
+        }
+        throw err;
+      }
       if (request.signal?.aborted) {
         release();
-        outcomes.push({ ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() });
-        catalog.recordCall(request.model, { ok: false, latencyMs: 0, errorKind: "cancelled", at: clock.now() });
+        noteCancelled();
         failCancelled(new PolishError("CANCELLED", "model call cancelled"));
       }
       const started = clock.now();
@@ -99,15 +115,11 @@ export class ModelBroker {
       } catch (err) {
         release();
         lastError = err;
-        const kind = isAbortError(err)
-          ? "cancelled"
-          : err instanceof ProviderError
-            ? err.kind
-            : "unknown";
+        const kind = isCancel(err) ? "cancelled" : err instanceof ProviderError ? err.kind : "unknown";
         const outcome: AttemptOutcome = { ok: false, latencyMs: clock.now() - started, errorKind: kind, at: clock.now() };
         outcomes.push(outcome);
         catalog.recordCall(request.model, outcome);
-        if (isAbortError(err) || (err instanceof PolishError && err.code === "CANCELLED")) {
+        if (isCancel(err)) {
           this.recordEvent(request, null, attempt, outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
           throw err;
         }
@@ -120,7 +132,15 @@ export class ModelBroker {
           if (err instanceof ProviderError && err.kind === "auth") catalog.setProviderAvailable(adapter.id, false);
           throw err;
         }
-        await clock.sleep(err instanceof ProviderError && err.retryAfterMs !== null ? err.retryAfterMs : this.backoff(attempt), request.signal);
+        try {
+          await clock.sleep(err instanceof ProviderError && err.retryAfterMs !== null ? err.retryAfterMs : this.backoff(attempt), request.signal);
+        } catch (sleepErr) {
+          if (isCancel(sleepErr)) {
+            noteCancelled();
+            failCancelled(sleepErr);
+          }
+          throw sleepErr;
+        }
       }
     }
     throw lastError instanceof Error ? lastError : new PolishError("PROVIDER_ERROR", "model call failed");
