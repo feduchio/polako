@@ -8,7 +8,9 @@ export type PolishErrorCode =
   | "PROVIDER_ERROR"
   | "SANDBOX_ERROR"
   | "CONFIG_ERROR"
-  | "IO_ERROR";
+  | "IO_ERROR"
+  | "INVALID_ARGUMENT"
+  | "BUDGET_EXCEEDED";
 
 export class PolishError extends Error {
   readonly code: PolishErrorCode;

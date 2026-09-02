@@ -47,11 +47,11 @@ module.exports = {
       to: { path: "^src/(engine|scheduler|agents|council|verify|findings|convergence|broker|providers|sandbox|intel|context|protocols|project|store)/" },
     },
     {
-      name: "engine-depends-only-on-foundation",
-      comment: "A5 engine orchestrates domain + store + scheduler only; later blocks widen via new rules",
+      name: "protocols-depends-only-on-foundation",
+      comment: "A9 protocol registry is pure load/compose over markdown; no I/O modules beyond fs via shared",
       severity: "error",
-      from: { path: "^src/engine/" },
-      to: { path: "^src/(?!engine/|domain/|shared/|store/|scheduler/)" },
+      from: { path: "^src/protocols/" },
+      to: { path: "^src/(?!protocols/|domain/|shared/)" },
     },
     {
       name: "engine-is-not-imported-by-lower-layers",

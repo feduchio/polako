@@ -19,6 +19,7 @@
     "check": "pnpm typecheck && pnpm lint && pnpm deps:check && pnpm test"
   },
   "dependencies": {
+    "yaml": "^2.9.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {
