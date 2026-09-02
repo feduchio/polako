@@ -45,43 +45,7 @@ const EXECUTION_MARKERS = new Set([
   "--pre",
   "--pre-glob",
   "--hostname-bin",
-  "-O",
-  "--open-files-in-pager",
-  "--pager",
 ]);
-
-function shellScriptFlagsIn(argv: readonly string[]): boolean {
-  for (let i = 0; i < argv.length; i++) {
-    const token = argv[i];
-    if (token === undefined || !isShellName(token)) continue;
-    if (shellScriptFlagsAfter(argv, i)) return true;
-  }
-  return false;
-}
-
-/** Expand a single argv token into pseudo-argv (handles `--flag=value` and `-O<cmd>`). */
-function pseudoArgvFromToken(token: string): string[] {
-  const out: string[] = [];
-  for (const word of token.split(/\s+/).filter(Boolean)) {
-    const oMatch = /^-O(.+)$/i.exec(word);
-    if (oMatch?.[1]) {
-      out.push(...oMatch[1].split(/\s+/).filter(Boolean));
-      continue;
-    }
-    const eqIdx = word.indexOf("=");
-    if (eqIdx > 0 && word.startsWith("--")) {
-      out.push(...word.slice(eqIdx + 1).split(/\s+/).filter(Boolean));
-      continue;
-    }
-    out.push(word);
-  }
-  return out;
-}
-
-/** Detect shell `-c` hidden inside one argv token (e.g. git pager options). */
-function embeddedShellScript(token: string): boolean {
-  return shellScriptFlagsIn(pseudoArgvFromToken(token));
-}
 
 function shellBasename(token: string): string {
   const slash = token.lastIndexOf("/");
@@ -142,12 +106,24 @@ function isPatternContext(argv: readonly string[], shellIndex: number): boolean 
   return false;
 }
 
+/** Git pager options run their value through a shell; reject any spelling outright. */
+function gitExternalCommandDenial(argv: readonly string[]): string | null {
+  if (shellBasename(argv[0] ?? "").toLowerCase() !== "git") return null;
+  for (const a of argv) {
+    if (a === "-O" || a === "--open-files-in-pager" || a === "--pager") {
+      return "git pager/external-command options are not allowed";
+    }
+    if (a.startsWith("--open-files-in-pager=") || a.startsWith("--pager=")) {
+      return "git pager/external-command options are not allowed";
+    }
+    if (/^-O\S/.test(a)) return "git pager/external-command options are not allowed";
+  }
+  return null;
+}
+
 /** True when argv invokes a shell to run a script string (-c / combined short opts). */
 export function invokesShellScript(argv: readonly string[]): boolean {
   if (argv.length === 0) return false;
-  for (const token of argv) {
-    if (embeddedShellScript(token)) return true;
-  }
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (token === undefined || !isShellName(token)) continue;
@@ -183,6 +159,8 @@ export class CommandPolicy {
   /** Returns null when allowed, otherwise a human-readable denial reason. */
   check(argv: readonly string[]): string | null {
     if (argv.length === 0) return "empty command";
+    const gitDenial = gitExternalCommandDenial(argv);
+    if (gitDenial) return gitDenial;
     if (invokesShellScript(argv)) {
       return "shell -c is not allowed; call the program directly";
     }
