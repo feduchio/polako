@@ -1,11 +1,10 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import type { SandboxConfig } from "../domain/config.js";
 import { PolishError } from "../shared/errors.js";
 import type { CommandPolicy } from "./allowlist.js";
 import { scrubEnv } from "./env.js";
 import { Git, type DiffStat } from "./git.js";
-import { assertGitCommitish, sandboxPath } from "./ids.js";
+import { assertGitCommitish, sandboxCwd, sandboxPath } from "./ids.js";
 import { runProcess, type ProcessResult } from "./process.js";
 
 export interface SandboxHandle {
@@ -95,9 +94,17 @@ export class WorktreeSandbox implements Sandbox {
           const denial = input.policy.check(argv);
           if (denial) return Promise.reject(new PolishError("SANDBOX_ERROR", denial, { argv }));
         }
+        let cwd = path;
+        if (opts.cwd !== undefined) {
+          try {
+            cwd = sandboxCwd(path, opts.cwd);
+          } catch (err) {
+            return Promise.reject(err instanceof Error ? err : new PolishError("SANDBOX_ERROR", String(err)));
+          }
+        }
         return runProcess({
           argv,
-          cwd: opts.cwd ? join(path, opts.cwd) : path,
+          cwd,
           env: {
             ...scrubEnv(
               {},

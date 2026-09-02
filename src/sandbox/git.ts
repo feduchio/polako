@@ -151,15 +151,27 @@ export class Git {
     const dirty = !(await this.isClean());
     if (dirty) await this.run(["stash", "push", "-u", "-m", "polish:pre-cherry-pick"]);
     const r = await this.run(["cherry-pick", "--no-commit", "--allow-empty", commit], { allowFailure: true });
-    if (r.exitCode === 0) {
+    if (r.exitCode !== 0) {
+      const conflicts = (await this.out(["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
+      await this.run(["reset", "-q", "--hard"], { allowFailure: true });
+      await this.run(["clean", "-fd"], { allowFailure: true });
       if (dirty) await this.run(["stash", "pop"], { allowFailure: true });
-      return { ok: true, conflicts: [] };
+      return { ok: false, conflicts };
     }
-    const conflicts = (await this.out(["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
-    await this.run(["reset", "-q", "--hard"], { allowFailure: true });
-    await this.run(["clean", "-fd"], { allowFailure: true });
-    if (dirty) await this.run(["stash", "pop"], { allowFailure: true });
-    return { ok: false, conflicts };
+    if (dirty) {
+      const pop = await this.run(["stash", "pop"], { allowFailure: true });
+      const unmerged = (await this.out(["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
+      if (pop.exitCode !== 0 || unmerged.length > 0) {
+        await this.run(["reset", "-q", "--hard"], { allowFailure: true });
+        await this.run(["clean", "-fd"], { allowFailure: true });
+        const stashList = await this.run(["stash", "list"], { allowFailure: true });
+        if (stashList.stdout.includes("polish:pre-cherry-pick")) {
+          await this.run(["stash", "pop"], { allowFailure: true });
+        }
+        return { ok: false, conflicts: unmerged.length > 0 ? unmerged : ["stash pop conflict"] };
+      }
+    }
+    return { ok: true, conflicts: [] };
   }
 }
 

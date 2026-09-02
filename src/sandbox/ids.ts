@@ -25,3 +25,16 @@ export function assertGitCommitish(commitish: string): void {
     throw new PolishError("SANDBOX_ERROR", `invalid git commitish: ${commitish}`);
   }
 }
+
+/** Resolve a relative cwd under a sandbox worktree; rejects escapes. */
+export function sandboxCwd(worktreePath: string, cwd: string): string {
+  if (cwd.startsWith("/") || cwd.includes("\0")) {
+    throw new PolishError("SANDBOX_ERROR", `invalid cwd: ${cwd}`);
+  }
+  const resolved = resolve(worktreePath, cwd);
+  const prefix = worktreePath.endsWith(sep) ? worktreePath : worktreePath + sep;
+  if (resolved !== worktreePath && !resolved.startsWith(prefix)) {
+    throw new PolishError("SANDBOX_ERROR", `cwd escapes sandbox: ${cwd}`);
+  }
+  return resolved;
+}

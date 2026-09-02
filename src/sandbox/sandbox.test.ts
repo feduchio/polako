@@ -120,8 +120,10 @@ describe("CommandPolicy", () => {
     expect(arbitrary.check(["sh", "-c", "echo hi"])).toMatch(/shell -c/);
     expect(arbitrary.check(["bash", "-lc", "echo hi"])).toMatch(/shell -c/);
     expect(arbitrary.check(["/bin/bash", "-c", "echo hi"])).toMatch(/shell -c/);
+    expect(arbitrary.check(["BASH", "-c", "echo hi"])).toMatch(/shell -c/);
     expect(arbitrary.check(["pnpm", "test", "&&", "git", "push"])).toMatch(/shell operators/);
     expect(arbitrary.check(["rg", "-c", "sh"])).toBeNull();
+    expect(arbitrary.check(["rg", "sh", "-c"])).toBeNull();
     expect(arbitrary.check(["curl", "http://x"])).toBeNull();
   });
 });
@@ -198,6 +200,15 @@ describe("WorktreeSandbox", () => {
     await expect(sandbox.create({ id: "ok", baseCommit: "--detach", policy })).rejects.toThrow(/invalid git commitish/);
   });
 
+  it("rejects cwd values that escape the worktree", async () => {
+    const policy = CommandPolicy.forProject([["node", "-e"]], null);
+    const h = await sandbox.create({ id: "cwd-test", baseCommit: base, policy });
+    await expect(h.run(["node", "-e", "process.exit(0)"], { cwd: "../.." })).rejects.toThrow(/cwd escapes/);
+    const ok = await h.run(["node", "-e", "console.log(process.cwd())"], { cwd: "." });
+    expect(ok.stdout.trim()).toBe(h.path);
+    await h.destroy();
+  });
+
   it("exposes isolates=false and supports bypassPolicy, destroyAll, commitAll null, and fastForward", async () => {
     expect(sandbox.isolates).toBe(false);
     const policy = CommandPolicy.forProject([["node", "-e"]], null);
@@ -244,11 +255,18 @@ describe("WorktreeSandbox", () => {
     expect(conflictWithWork.ok).toBe(false);
     expect(readFileSync(join(b.path, "keep.txt"), "utf8")).toBe("precious\n");
 
+    writeFileSync(join(b.path, "a.txt"), "worker edit\n");
+    const overlap = await b.git.cherryPick(ca);
+    expect(overlap.ok).toBe(false);
+    expect(readFileSync(join(b.path, "a.txt"), "utf8")).toBe("worker edit\n");
+    expect((await b.git.out(["stash", "list"])).includes("polish:pre-cherry-pick")).toBe(false);
+
     const c = await sandbox.create({ id: "c", baseCommit: base, branch: "polish/c", policy });
     writeFileSync(join(c.path, "c.txt"), "c\n");
     await c.commitAll("c");
     const ok = await c.git.cherryPick(ca);
     expect(ok.ok).toBe(true);
+    expect(await c.git.out(["stash", "list"])).toBe("");
     expect(await c.commitAll("integrate a")).not.toBeNull();
     expect((await c.git.diff(base)).includes("from a")).toBe(true);
   });

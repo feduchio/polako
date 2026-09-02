@@ -36,17 +36,29 @@ function shellBasename(token: string): string {
   return slash >= 0 ? token.slice(slash + 1) : token;
 }
 
+function isShellName(token: string): boolean {
+  return SHELL_NAMES.has(shellBasename(token).toLowerCase());
+}
+
+function shellScriptFlagsAfter(argv: readonly string[], shellIndex: number): boolean {
+  for (let j = shellIndex + 1; j < argv.length; j++) {
+    const a = argv[j];
+    if (a === undefined) continue;
+    if (a === "-c" || a === "--command") return true;
+    if (a.startsWith("-") && !a.startsWith("--") && a.slice(1).includes("c")) return true;
+  }
+  return false;
+}
+
 /** True when argv invokes a shell to run a script string (-c / combined short opts). */
 export function invokesShellScript(argv: readonly string[]): boolean {
-  for (let i = 0; i < argv.length; i++) {
+  if (argv.length === 0) return false;
+  const candidates: number[] = [0];
+  if (argv[0]?.toLowerCase() === "env" && argv.length > 1) candidates.push(1);
+  for (const i of candidates) {
     const token = argv[i];
-    if (token === undefined || !SHELL_NAMES.has(shellBasename(token))) continue;
-    for (let j = i + 1; j < argv.length; j++) {
-      const a = argv[j];
-      if (a === undefined) continue;
-      if (a === "-c" || a === "--command") return true;
-      if (a.startsWith("-") && !a.startsWith("--") && a.slice(1).includes("c")) return true;
-    }
+    if (token === undefined || !isShellName(token)) continue;
+    if (shellScriptFlagsAfter(argv, i)) return true;
   }
   return false;
 }
