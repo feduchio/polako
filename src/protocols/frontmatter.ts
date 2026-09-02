@@ -11,6 +11,9 @@ export function parseSkillMarkdown(raw: string): { meta: ProtocolFrontmatter; bo
   }
   const yamlText = match[1];
   const body = match[2].replace(/^\r?\n/, "");
+  if (body.trim().length === 0) {
+    throw new PolishError("INVALID_ARGUMENT", "SKILL.md body must be non-empty");
+  }
   let parsed: unknown;
   try {
     parsed = parseYaml(yamlText);

@@ -99,6 +99,25 @@ x
     expect(() => ProtocolRegistry.load(dir)).toThrow(PolishError);
   });
 
+  it("rejects empty SKILL.md body", () => {
+    dir = mkdtempSync(join(tmpdir(), "polish-proto-"));
+    mkdirSync(join(dir, "empty-body"), { recursive: true });
+    writeFileSync(
+      join(dir, "empty-body", "SKILL.md"),
+      `---
+name: empty-body
+description: has frontmatter only
+applies_to:
+  - worker
+kind: task
+budget_tokens: 10
+resources: []
+---
+`,
+    );
+    expect(() => ProtocolRegistry.load(dir)).toThrow(PolishError);
+  });
+
   it("composes deterministically and hashes stably", () => {
     const registry = ProtocolRegistry.load(defaultProtocolsRoot());
     const a = compose(registry, { task: "bugfix", domains: ["react-native", "typescript"], role: "planner" });
