@@ -14,7 +14,6 @@ export const READONLY_GIT_RULES: readonly CommandRule[] = [
   { prefix: ["git", "log"], description: "git log" },
   { prefix: ["git", "show"], description: "git show" },
   { prefix: ["git", "blame"], description: "git blame" },
-  { prefix: ["git", "grep"], description: "git grep" },
   { prefix: ["git", "ls-files"], description: "git ls-files" },
   { prefix: ["git", "rev-parse"], description: "git rev-parse" },
 ];
@@ -110,8 +109,8 @@ function isPatternContext(argv: readonly string[], shellIndex: number): boolean 
 function gitExternalCommandDenial(argv: readonly string[]): string | null {
   if (shellBasename(argv[0] ?? "").toLowerCase() !== "git") return null;
   for (const a of argv) {
-    // Short -O, including fused values with or without a following space ("-Otouch", "-O touch").
-    if (a.startsWith("-O")) return "git pager/external-command options are not allowed";
+    // Short -O alone, fused, spaced, or clustered with other short flags (-iOtouch, -inO…).
+    if (/^-[a-z0-9]*O/.test(a)) return "git pager/external-command options are not allowed";
     if (!a.startsWith("--")) continue;
     const name = a.slice(2).split("=", 1)[0] ?? "";
     if (name.length === 0) continue;
