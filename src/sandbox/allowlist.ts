@@ -31,8 +31,13 @@ export const SEARCH_RULES: readonly CommandRule[] = [
 
 const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 
-/** Programs whose argv may contain tokens that look like shell names or `-c` flags. */
-const PATTERN_ARG_PROGRAMS = new Set(["rg", "ls", "cat", "wc", "head", "tail", "find", "git"]);
+/** Search/read-only tools whose argv may contain pattern tokens that look like shell names. */
+const SEARCH_TOOLS = new Set(["rg", "ls", "cat", "wc", "head", "tail", "find", "git"]);
+
+const PACKAGE_MANAGERS = new Set(["pnpm", "npm", "yarn", "bun"]);
+
+/** Flags that cause the following token to be executed as a child program. */
+const EXECUTION_MARKERS = new Set(["-exec", "-execdir", "-ok", "-okdir", "--pre", "--pre-glob"]);
 
 function shellBasename(token: string): string {
   const slash = token.lastIndexOf("/");
@@ -41,6 +46,14 @@ function shellBasename(token: string): string {
 
 function isShellName(token: string): boolean {
   return SHELL_NAMES.has(shellBasename(token).toLowerCase());
+}
+
+function isSearchTool(token: string): boolean {
+  return SEARCH_TOOLS.has(shellBasename(token).toLowerCase());
+}
+
+function isEnvWrapper(token: string): boolean {
+  return shellBasename(token).toLowerCase() === "env";
 }
 
 function shellScriptFlagsAfter(argv: readonly string[], shellIndex: number): boolean {
@@ -53,19 +66,49 @@ function shellScriptFlagsAfter(argv: readonly string[], shellIndex: number): boo
   return false;
 }
 
+/** True when a shell token at shellIndex is being executed, not used as a search pattern. */
+function hasExecutionPrefix(argv: readonly string[], shellIndex: number): boolean {
+  for (let j = shellIndex - 1; j >= 0; j--) {
+    const a = argv[j];
+    if (a === undefined) continue;
+    if (EXECUTION_MARKERS.has(a)) return true;
+    if (isEnvWrapper(a)) return true;
+    if (a === "exec" && j >= 1) {
+      const pm = shellBasename(argv[j - 1] ?? "").toLowerCase();
+      if (PACKAGE_MANAGERS.has(pm)) {
+        const invoked = argv[j + 1];
+        if (invoked !== undefined && isShellName(invoked) && shellIndex === j + 1) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** True when a shell-like token is an argument to a search tool, not an invoked program. */
+function isPatternContext(argv: readonly string[], shellIndex: number): boolean {
+  if (shellIndex === 0) return false;
+  if (isSearchTool(argv[0] ?? "")) return true;
+  for (let j = 0; j < argv.length - 1; j++) {
+    if (argv[j] !== "exec") continue;
+    const pm = j >= 1 ? shellBasename(argv[j - 1] ?? "").toLowerCase() : "";
+    if (!PACKAGE_MANAGERS.has(pm)) continue;
+    const invoked = argv[j + 1];
+    if (invoked !== undefined && isSearchTool(invoked) && shellIndex > j + 1) return true;
+  }
+  return false;
+}
+
 /** True when argv invokes a shell to run a script string (-c / combined short opts). */
 export function invokesShellScript(argv: readonly string[]): boolean {
   if (argv.length === 0) return false;
-  const scanAll = !PATTERN_ARG_PROGRAMS.has(argv[0] ?? "");
-  const candidates: number[] = [];
-  if (isShellName(argv[0] ?? "")) candidates.push(0);
-  if (scanAll) {
-    for (let i = 1; i < argv.length; i++) candidates.push(i);
-  }
-  for (const i of candidates) {
+  for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (token === undefined || !isShellName(token)) continue;
-    if (shellScriptFlagsAfter(argv, i)) return true;
+    if (!shellScriptFlagsAfter(argv, i)) continue;
+    if (i === 0) return true;
+    if (hasExecutionPrefix(argv, i)) return true;
+    if (isPatternContext(argv, i)) continue;
+    return true;
   }
   return false;
 }

@@ -40,7 +40,9 @@ export function sandboxCwd(worktreePath: string, cwd: string): string {
     resolvedReal = realpathSync(resolved);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") throw err;
+    if (code !== "ENOENT") {
+      throw new PolishError("SANDBOX_ERROR", `invalid cwd: ${cwd}`);
+    }
     if (resolved !== worktreeReal && !resolved.startsWith(prefix)) {
       throw new PolishError("SANDBOX_ERROR", `cwd escapes sandbox: ${cwd}`);
     }

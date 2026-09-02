@@ -126,9 +126,13 @@ describe("CommandPolicy", () => {
     expect(arbitrary.check(["nice", "bash", "-c", "echo hi"])).toMatch(/shell -c/);
     const strict = CommandPolicy.forProject([["pnpm", "test"]], "pnpm");
     expect(strict.check(["pnpm", "exec", "bash", "-lc", "echo hi"])).toMatch(/shell -c/);
+    expect(strict.check(["find", ".", "-exec", "bash", "-c", "echo pwned", "{}", "+"])).toMatch(/shell -c/);
+    expect(strict.check(["find", ".", "-execdir", "zsh", "-c", "echo pwned", "{}", "+"])).toMatch(/shell -c/);
     expect(arbitrary.check(["pnpm", "test", "&&", "git", "push"])).toMatch(/shell operators/);
     expect(arbitrary.check(["rg", "-c", "sh"])).toBeNull();
     expect(arbitrary.check(["rg", "sh", "-c"])).toBeNull();
+    expect(arbitrary.check(["/usr/bin/rg", "sh", "-c"])).toBeNull();
+    expect(strict.check(["pnpm", "exec", "rg", "sh", "-c"])).toBeNull();
     expect(arbitrary.check(["curl", "http://x"])).toBeNull();
   });
 });
