@@ -224,6 +224,44 @@ describe("RunEngine", () => {
     expect(store.repos.jobs.get(job.id)!.state).toBe("READY");
   });
 
+  it("tick does not let one run's in-flight job starve another active run", async () => {
+    const blocked = engine.createRun({ projectPath: "/tmp/a" });
+    const free = engine.createRun({ projectPath: "/tmp/b" });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    sched.register("hang", async () => {
+      await gate;
+      return {};
+    });
+    let freeDrives = 0;
+    engine.registerPhase("CREATED", (ctx) => {
+      if (ctx.run.id === blocked.id) {
+        if (ctx.store.repos.jobs.listByRun(ctx.run.id).length === 0) {
+          ctx.scheduler.enqueue({ runId: ctx.run.id, type: "hang", lane: "local.shell" });
+        }
+        return { status: "waiting" };
+      }
+      freeDrives += 1;
+      return { status: "complete", nextPhase: "DISCOVERING_PROJECT" };
+    });
+    engine.registerPhase("DISCOVERING_PROJECT", (ctx) => {
+      if (ctx.run.id === free.id) freeDrives += 1;
+      return { status: "waiting" };
+    });
+
+    await engine.tickRun(blocked.id);
+    expect(sched.inFlightCount(blocked.id)).toBe(1);
+    expect(freeDrives).toBe(0);
+
+    const tickPromise = engine.tick();
+    await Promise.race([tickPromise, flushMicrotasks().then(() => flushMicrotasks())]);
+    expect(freeDrives).toBeGreaterThanOrEqual(1);
+    expect(store.repos.runs.get(free.id)!.phase).toBe("DISCOVERING_PROJECT");
+    release();
+    await tickPromise;
+  });
   it("changing checkpoint hash invalidates prior clean rounds for convergence", async () => {
     const run = engine.createRun({ projectPath: "/tmp/p" });
     await advanceTo(run.id, "CONVERGENCE_CHECK");

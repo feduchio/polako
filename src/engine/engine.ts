@@ -113,18 +113,16 @@ export class RunEngine {
 
   /**
    * One orchestration round: acknowledge control for any run still settling pause/stop, then
-   * drive non-terminal phases. Explicit so tests drive it with a FakeClock.
+   * drive non-terminal phases. Active runs are driven concurrently so one run's in-flight
+   * work cannot starve another's tick.
    */
   async tick(): Promise<void> {
-    for (const run of this.store.repos.runs.listAll()) {
-      if (run.control === "PAUSE_REQUESTED" || run.control === "STOP_REQUESTED") {
-        await this.acknowledgeControl(run.id);
-      }
-    }
+    const settling = this.store.repos.runs
+      .listAll()
+      .filter((r) => r.control === "PAUSE_REQUESTED" || r.control === "STOP_REQUESTED");
+    await Promise.all(settling.map((r) => this.acknowledgeControl(r.id)));
     this.scheduler.tick();
-    for (const run of this.store.repos.runs.listActive()) {
-      await this.tickRun(run.id);
-    }
+    await Promise.all(this.store.repos.runs.listActive().map((r) => this.tickRun(r.id)));
   }
 
   /** Drive a single run until its current phase driver waits or the run leaves the active set. */
@@ -133,9 +131,12 @@ export class RunEngine {
     if (!run) throw new PolishError("NOT_FOUND", `run ${runId} not found`);
     if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
 
-    await this.acknowledgeControl(runId);
-    run = this.requireRun(runId);
-    if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
+    // Only await settle for pause/stop — never for RUNNING (would starve sibling runs in tick).
+    if (run.control === "PAUSE_REQUESTED" || run.control === "STOP_REQUESTED") {
+      await this.acknowledgeControl(runId);
+      run = this.requireRun(runId);
+      if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
+    }
     if (run.control !== "RUNNING") return;
     // Terminal phase: no further phase-driver work (control acks already handled above).
     if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
@@ -152,8 +153,9 @@ export class RunEngine {
     });
     this.scheduler.tick();
     if (result.status === "waiting") return;
+    // Defer phase advance until this run's jobs finish — do not block awaiting them here.
+    if (this.scheduler.inFlightCount(runId) > 0) return;
 
-    await this.scheduler.settle(runId);
     run = this.requireRun(runId);
     if (isTerminal(RUN_CONTROL_TABLE, run.control) || run.control !== "RUNNING") return;
     if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
