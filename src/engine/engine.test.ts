@@ -263,7 +263,7 @@ describe("RunEngine", () => {
     await tickPromise;
   });
 
-  it("remembers complete across in-flight jobs and advances after settle without re-driving", async () => {
+  it("applies complete immediately even when the driver left jobs in flight", async () => {
     const run = engine.createRun({ projectPath: "/tmp/p" });
     let release!: () => void;
     const gate = new Promise<void>((r) => {
@@ -276,23 +276,42 @@ describe("RunEngine", () => {
     let driverCalls = 0;
     engine.registerPhase("CREATED", () => {
       driverCalls += 1;
-      if (driverCalls === 1) {
-        sched.enqueue({ runId: run.id, type: "work", lane: "local.shell" });
-        return { status: "complete", nextPhase: "DISCOVERING_PROJECT" };
-      }
-      return { status: "waiting" };
+      sched.enqueue({ runId: run.id, type: "work", lane: "local.shell" });
+      return { status: "complete", nextPhase: "DISCOVERING_PROJECT" };
     });
 
     await engine.tickRun(run.id);
-    expect(store.repos.runs.get(run.id)!.phase).toBe("CREATED");
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
     expect(sched.inFlightCount(run.id)).toBe(1);
     expect(driverCalls).toBe(1);
-
     release();
     await flushMicrotasks();
+  });
+
+  it("crash after complete+in-flight keeps the phase advance from events", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    sched.register("work", async () => {
+      await new Promise<void>(() => {
+        /* abandoned on simulated crash */
+      });
+      return {};
+    });
+    engine.registerPhase("CREATED", () => {
+      sched.enqueue({ runId: run.id, type: "work", lane: "local.shell" });
+      return { status: "complete", nextPhase: "DISCOVERING_PROJECT" };
+    });
     await engine.tickRun(run.id);
     expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
-    expect(driverCalls).toBe(1);
+    expect(store.events.list(run.id, { types: ["run.phase_changed"] }).length).toBeGreaterThan(0);
+
+    // New process: same SQLite projections, no in-memory engine state.
+    const sched2 = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 60_000 });
+    const engine2 = new RunEngine({ store, clock, scheduler: sched2, config: defaultConfig() }, false);
+    engine2.registerPhase("DISCOVERING_PROJECT", () => ({ status: "waiting" }));
+    engine2.recover();
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
+    await engine2.tickRun(run.id);
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
   });
 
   it("draining pause does not prevent sibling active runs from being driven", async () => {

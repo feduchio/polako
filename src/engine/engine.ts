@@ -31,8 +31,6 @@ export class RunEngine {
   private readonly scheduler: Scheduler;
   private readonly config: EngineOptions["config"];
   private readonly drivers = new Map<RunPhase, PhaseDriver>();
-  /** Driver returned complete while jobs were still in flight; applied once drained. */
-  private readonly pendingPhase = new Map<string, RunPhase>();
 
   constructor(options: EngineOptions, installStubs = true) {
     this.store = options.store;
@@ -85,7 +83,6 @@ export class RunEngine {
     this.append(runId, "run.control_changed", { run: updated }, { kind: "user" });
 
     if (command === "kill" && next === "KILLED") {
-      this.pendingPhase.delete(runId);
       this.terminate(updated, { code: "killed_by_user", summary: "run killed by user" }, true);
     }
 
@@ -145,22 +142,10 @@ export class RunEngine {
       await this.acknowledgeControl(runId);
       run = this.requireRun(runId);
       if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
-      if (run.control === "STOP_REQUESTED" || run.control === "STOPPED") {
-        this.pendingPhase.delete(runId);
-      }
     }
     if (run.control !== "RUNNING") return;
     // Terminal phase: no further phase-driver work (control acks already handled above).
     if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
-
-    // Apply a deferred complete once this run's jobs have drained (do not re-invoke the driver).
-    const pending = this.pendingPhase.get(runId);
-    if (pending !== undefined) {
-      if (this.scheduler.inFlightCount(runId) > 0) return;
-      this.pendingPhase.delete(runId);
-      this.applyPhaseAdvance(runId, pending);
-      return;
-    }
 
     const driver = this.drivers.get(run.phase);
     if (!driver) return;
@@ -174,11 +159,7 @@ export class RunEngine {
     });
     this.scheduler.tick();
     if (result.status === "waiting") return;
-
-    if (this.scheduler.inFlightCount(runId) > 0) {
-      this.pendingPhase.set(runId, result.nextPhase);
-      return;
-    }
+    // Persist the advance immediately (event-sourced); leftover jobs may still finish.
     this.applyPhaseAdvance(runId, result.nextPhase);
   }
 
@@ -213,7 +194,6 @@ export class RunEngine {
     if (run.control === "STOP_REQUESTED") {
       const stopped = applyControlCommand(run.control, "stopped");
       if (stopped !== run.control) {
-        this.pendingPhase.delete(runId);
         const updated: Run = { ...run, control: stopped, updatedAt: this.clock.now() };
         this.append(runId, "run.control_changed", { run: updated }, SYSTEM_ACTOR);
         this.terminate(updated, { code: "stopped_by_user", summary: "run stopped by user" }, true);
