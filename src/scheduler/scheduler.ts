@@ -1,8 +1,8 @@
 import type { LaneLimits } from "../domain/config.js";
 import type { NewEvent } from "../domain/event.js";
-import { assertTransition } from "../domain/fsm.js";
+import { assertTransition, isTerminal } from "../domain/fsm.js";
 import { JOB_TABLE, type Job, type JobState, type Lane } from "../domain/job.js";
-import { mayDispatchJobs, mustCancelInFlight, type RunControl } from "../domain/run.js";
+import { mayDispatchJobs, mustCancelInFlight, RUN_PHASE_TABLE, type RunControl } from "../domain/run.js";
 import { SYSTEM_ACTOR } from "../domain/common.js";
 import type { Store } from "../store/index.js";
 import type { Clock } from "../shared/clock.js";
@@ -159,6 +159,8 @@ export class Scheduler {
       }
       const control = this.controlFor(job.runId);
       if (control === null || !mayDispatchJobs(control)) continue; // vanished runs were failed in applyRunControl
+      const run = this.store.repos.runs.get(job.runId);
+      if (run === null || isTerminal(RUN_PHASE_TABLE, run.phase)) continue;
       const used = running.get(job.lane) ?? 0;
       if (used >= this.laneLimit(job.lane)) continue;
       if (!this.handlers.has(job.type)) {

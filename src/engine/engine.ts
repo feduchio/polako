@@ -37,9 +37,11 @@ export class RunEngine {
     this.clock = options.clock;
     this.scheduler = options.scheduler;
     this.config = options.config;
-    if (installStubs) installStubDrivers((phase, driver) => {
-      this.registerPhase(phase, driver);
-    });
+    if (installStubs) {
+      installStubDrivers((phase, driver) => {
+        this.registerPhase(phase, driver);
+      });
+    }
   }
 
   registerPhase(phase: RunPhase, driver: PhaseDriver): void {
@@ -74,14 +76,21 @@ export class RunEngine {
     if (isTerminal(RUN_CONTROL_TABLE, run.control) && command !== "kill") {
       return run;
     }
+    // kill after STOPPED is a no-op (stays STOPPED)
     const next = applyControlCommand(run.control, command);
     if (next === run.control) return run;
     const updated: Run = { ...run, control: next, updatedAt: this.clock.now() };
     this.append(runId, "run.control_changed", { run: updated }, { kind: "user" });
 
     if (command === "kill" && next === "KILLED") {
-      this.terminate(updated, { code: "killed_by_user", summary: "run killed by user" });
+      this.terminate(updated, { code: "killed_by_user", summary: "run killed by user" }, true);
     }
+
+    // Immediate ack when nothing is in flight (including terminal-phase stop/pause).
+    if ((next === "STOP_REQUESTED" || next === "PAUSE_REQUESTED") && this.scheduler.inFlightCount(runId) === 0) {
+      this.acknowledgeControlSync(runId);
+    }
+
     this.scheduler.tick();
     return this.requireRun(runId);
   }
@@ -103,10 +112,15 @@ export class RunEngine {
   }
 
   /**
-   * One orchestration round: for each active run, acknowledge control quiescence, then drive
-   * the current phase. Explicit so tests drive it with a FakeClock.
+   * One orchestration round: acknowledge control for any run still settling pause/stop, then
+   * drive non-terminal phases. Explicit so tests drive it with a FakeClock.
    */
   async tick(): Promise<void> {
+    for (const run of this.store.repos.runs.listAll()) {
+      if (run.control === "PAUSE_REQUESTED" || run.control === "STOP_REQUESTED") {
+        await this.acknowledgeControl(run.id);
+      }
+    }
     this.scheduler.tick();
     for (const run of this.store.repos.runs.listActive()) {
       await this.tickRun(run.id);
@@ -117,12 +131,14 @@ export class RunEngine {
   async tickRun(runId: string): Promise<void> {
     let run = this.store.repos.runs.get(runId);
     if (!run) throw new PolishError("NOT_FOUND", `run ${runId} not found`);
-    if (this.isInactive(run)) return;
+    if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
 
     await this.acknowledgeControl(runId);
     run = this.requireRun(runId);
-    if (this.isInactive(run)) return;
+    if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
     if (run.control !== "RUNNING") return;
+    // Terminal phase: no further phase-driver work (control acks already handled above).
+    if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
 
     const driver = this.drivers.get(run.phase);
     if (!driver) return;
@@ -139,7 +155,8 @@ export class RunEngine {
 
     await this.scheduler.settle(runId);
     run = this.requireRun(runId);
-    if (this.isInactive(run) || run.control !== "RUNNING") return;
+    if (isTerminal(RUN_CONTROL_TABLE, run.control) || run.control !== "RUNNING") return;
+    if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
     const next = transitionPhase(run, result.nextPhase, this.clock.now());
     this.append(runId, "run.phase_changed", { run: next }, SYSTEM_ACTOR);
     if (result.nextPhase === "DONE") {
@@ -149,6 +166,10 @@ export class RunEngine {
 
   private async acknowledgeControl(runId: string): Promise<void> {
     await this.scheduler.settle(runId);
+    this.acknowledgeControlSync(runId);
+  }
+
+  private acknowledgeControlSync(runId: string): void {
     const run = this.requireRun(runId);
     if (this.scheduler.inFlightCount(runId) > 0) return;
 
@@ -165,19 +186,16 @@ export class RunEngine {
       if (stopped !== run.control) {
         const updated: Run = { ...run, control: stopped, updatedAt: this.clock.now() };
         this.append(runId, "run.control_changed", { run: updated }, SYSTEM_ACTOR);
-        this.terminate(updated, { code: "stopped_by_user", summary: "run stopped by user" });
+        this.terminate(updated, { code: "stopped_by_user", summary: "run stopped by user" }, true);
       }
     }
   }
 
-  private terminate(run: Run, reason: TerminalReason): void {
-    if (run.terminalReason !== null) return;
+  /** Append `run.terminated`. `force` overwrites a prior reason (e.g. kill after converged). */
+  private terminate(run: Run, reason: TerminalReason, force = false): void {
+    if (run.terminalReason !== null && !force) return;
     const updated: Run = { ...run, terminalReason: reason, updatedAt: this.clock.now() };
     this.append(run.id, "run.terminated", { run: updated }, SYSTEM_ACTOR);
-  }
-
-  private isInactive(run: Run): boolean {
-    return isTerminal(RUN_PHASE_TABLE, run.phase) || isTerminal(RUN_CONTROL_TABLE, run.control);
   }
 
   private requireRun(runId: string): Run {

@@ -167,6 +167,63 @@ describe("RunEngine", () => {
     expect(store.repos.runs.get(run.id)!.control).toBe("KILLED");
   });
 
+  it("kill after DONE still appends killed_by_user termination", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    await advanceTo(run.id, "CONVERGENCE_CHECK");
+    const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    engine.setCurrentCheckpoint(run.id, hash);
+    recordCleanRounds(run.id, hash, 3);
+    await engine.tickRun(run.id);
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DONE");
+    expect(store.repos.runs.get(run.id)!.terminalReason?.code).toBe("converged");
+
+    engine.control(run.id, "kill");
+    const killed = store.repos.runs.get(run.id)!;
+    expect(killed.control).toBe("KILLED");
+    expect(killed.terminalReason?.code).toBe("killed_by_user");
+    const reasons = store.events
+      .list(run.id, { types: ["run.terminated"] })
+      .map((e) => (e.payload["run"] as { terminalReason: { code: string } }).terminalReason.code);
+    expect(reasons).toContain("killed_by_user");
+  });
+
+  it("stop after DONE settles to STOPPED with stopped_by_user", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    await advanceTo(run.id, "CONVERGENCE_CHECK");
+    const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    engine.setCurrentCheckpoint(run.id, hash);
+    recordCleanRounds(run.id, hash, 3);
+    await engine.tickRun(run.id);
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DONE");
+
+    engine.control(run.id, "stop");
+    const stopped = store.repos.runs.get(run.id)!;
+    expect(stopped.control).toBe("STOPPED");
+    expect(stopped.terminalReason?.code).toBe("stopped_by_user");
+  });
+
+  it("tick does not dispatch READY jobs for terminal-phase runs", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    await advanceTo(run.id, "CONVERGENCE_CHECK");
+    const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    engine.setCurrentCheckpoint(run.id, hash);
+    recordCleanRounds(run.id, hash, 3);
+    await engine.tickRun(run.id);
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DONE");
+    expect(store.repos.runs.get(run.id)!.control).toBe("RUNNING");
+
+    let handled = 0;
+    sched.register("late", async () => {
+      handled += 1;
+      return {};
+    });
+    const job = sched.enqueue({ runId: run.id, type: "late", lane: "local.shell" });
+    expect(job.state).toBe("READY");
+    await engine.tick();
+    expect(handled).toBe(0);
+    expect(store.repos.jobs.get(job.id)!.state).toBe("READY");
+  });
+
   it("changing checkpoint hash invalidates prior clean rounds for convergence", async () => {
     const run = engine.createRun({ projectPath: "/tmp/p" });
     await advanceTo(run.id, "CONVERGENCE_CHECK");
