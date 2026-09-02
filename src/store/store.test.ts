@@ -1,15 +1,16 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, linkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AcceptanceArtifact } from "../domain/acceptance.js";
+import { createMission } from "../domain/mission.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
 import type { Task } from "../domain/task.js";
 import { sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
-import { openStore, type Store } from "./index.js";
+import { openStore, transaction, type Store } from "./index.js";
 
 const NOW = 1_700_000_000_000;
 const HASH = "a".repeat(40);
@@ -123,7 +124,7 @@ describe("Store", () => {
     expect(live.tasks[0]?.state).toBe("READY");
   });
 
-  it("rebuild scopes mission-keyed tables from the events, not from the (possibly missing) run row", () => {
+  it("rebuild restores interpretation rows produced by this run and leaves unrelated interpretation ids alone", () => {
     const runId = id("run");
     const missionId = id("msn");
     const r = run(runId, missionId);
@@ -143,18 +144,19 @@ describe("Store", () => {
       createdAt: NOW,
     };
     store.events.append([ev(runId, "run.created", { run: r }), ev(runId, "mission.interpreted", { interpretation })]);
-    // stale row that no event produced, and the run projection is gone
+    store.db
+      .prepare("UPDATE interpretations SET version = 99, json = json_set(json, '$.version', 99) WHERE id = ?")
+      .run(interpretation.id);
+    const staleId = id("mint");
     store.db
       .prepare("INSERT INTO interpretations (id, mission_id, version, json) VALUES (?, ?, ?, ?)")
-      .run(id("mint"), missionId, 2, JSON.stringify({ ...interpretation, id: id("mint"), version: 2 }));
+      .run(staleId, missionId, 2, JSON.stringify({ ...interpretation, id: staleId, version: 2 }));
     store.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
 
     store.events.rebuildProjections(runId);
-    const versions = (store.db.prepare("SELECT version FROM interpretations WHERE mission_id = ? ORDER BY version").all(missionId) as { version: number }[]).map(
-      (x) => x.version,
-    );
-    expect(versions).toEqual([1]);
     expect(store.repos.runs.get(runId)?.id).toBe(runId);
+    expect(store.db.prepare("SELECT version FROM interpretations WHERE id = ?").get(interpretation.id)).toEqual({ version: 1 });
+    expect(store.db.prepare("SELECT version FROM interpretations WHERE id = ?").get(staleId)).toEqual({ version: 2 });
   });
 
   it("an event may only project entities of its own run", () => {
@@ -240,6 +242,71 @@ describe("Store", () => {
     expect(store.repos.runs.get(runId)).not.toBeNull();
     const versions = store.db.prepare("SELECT COUNT(*) AS c FROM schema_version").get() as { c: number };
     expect(versions.c).toBe(1);
+  });
+
+  it("mirror failures do not fail append; the mirror is rebuildable from the DB", () => {
+    const runId = id("run");
+    mkdirSync(join(dir, "runs"), { recursive: true });
+    chmodSync(join(dir, "runs"), 0o000);
+    expect(() => {
+      store.events.append([ev(runId, "run.created", { run: run(runId, id("msn")) })]);
+    }).not.toThrow();
+    chmodSync(join(dir, "runs"), 0o700);
+    expect(store.events.list(runId)).toHaveLength(1);
+    expect(existsSync(join(dir, "runs", runId, "events.jsonl"))).toBe(false);
+    store.events.rebuildMirror(runId);
+    expect(readFileSync(join(dir, "runs", runId, "events.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  it("exported transaction() shares the store TxManager so rollback drops mirror hooks", () => {
+    const runId = id("run");
+    expect(() => {
+      transaction(store.db, () => {
+        store.events.append([ev(runId, "run.created", { run: run(runId, id("msn")) })]);
+        throw new Error("boom");
+      });
+    }).toThrow("boom");
+    expect(store.events.list(runId)).toEqual([]);
+    store.events.append([ev(runId, "run.created", { run: run(runId, id("msn")) })]);
+    expect(readFileSync(join(dir, "runs", runId, "events.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  it("rebuild ignores incidental mission keys on unknown event types", () => {
+    const runA = id("run");
+    const missionId = id("msn");
+    const mission = createMission({ id: missionId, projectPath: "/p", text: "t", createdAt: NOW });
+    store.events.append([ev(runA, "run.created", { run: run(runA, missionId) }), ev(runA, "mission.recorded", { mission })]);
+    const runB = id("run");
+    store.events.append([ev(runB, "future.event", { mission: { id: missionId } })]);
+    store.events.rebuildProjections(runB);
+    expect(store.db.prepare("SELECT id FROM missions WHERE id = ?").get(missionId)).toBeTruthy();
+  });
+
+  it("rebuilding one run does not delete another run's interpretation for a shared mission", () => {
+    const missionId = id("msn");
+    const interp1 = {
+      id: id("mint"),
+      missionId,
+      version: 1,
+      supersedes: null,
+      basedOn: { profileHash: "c".repeat(64), baselineId: id("base") },
+      goals: ["g"],
+      requirements: [{ ref: "R1", statement: "s", acceptance: ["a"] }],
+      constraints: [],
+      nonGoals: [],
+      definitionOfSuccess: ["d"],
+      ambiguities: [],
+      createdBy: { kind: "supervisor" as const },
+      createdAt: NOW,
+    };
+    const interp2 = { ...interp1, id: id("mint"), version: 2, supersedes: interp1.id };
+    const runA = id("run");
+    const runB = id("run");
+    store.events.append([ev(runA, "run.created", { run: run(runA, missionId) }), ev(runA, "mission.interpreted", { interpretation: interp1 })]);
+    store.events.append([ev(runB, "run.created", { run: run(runB, missionId) }), ev(runB, "mission.interpreted", { interpretation: interp2 })]);
+    store.events.rebuildProjections(runA);
+    const versions = (store.db.prepare("SELECT version FROM interpretations WHERE mission_id = ? ORDER BY version").all(missionId) as { version: number }[]).map((x) => x.version);
+    expect(versions).toEqual([1, 2]);
   });
 });
 
@@ -354,5 +421,20 @@ describe("AcceptanceStorage", () => {
     store.acceptance.materialize(checkout, [a]);
     expect(lstatSync(join(checkout, a.relativePath)).isSymbolicLink()).toBe(false);
     expect(store.acceptance.verify(checkout, [a])).toEqual([]);
+  });
+
+  it("does not overwrite external files through a hard link at a protected path", () => {
+    const outside = mkdtempSync(join(tmpdir(), "polish-outside-hl-"));
+    try {
+      writeFileSync(join(outside, "victim.txt"), "original");
+      linkSync(join(outside, "victim.txt"), join(checkout, "protected.txt"));
+      const a = artifact("protected.txt", "from-cas");
+      store.acceptance.materialize(checkout, [a]);
+      expect(readFileSync(join(outside, "victim.txt"), "utf8")).toBe("original");
+      expect(readFileSync(join(checkout, "protected.txt"), "utf8")).toBe("from-cas");
+      expect(store.acceptance.verify(checkout, [a])).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

@@ -1,9 +1,8 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventSchema, type Event, type NewEvent } from "../domain/event.js";
-import { PolishError } from "../shared/errors.js";
 import type { Db, TxManager } from "./db.js";
-import { PROJECTED_TABLES, applyProjections } from "./projections.js";
+import { PROJECTED_TABLES, PROJECTION_RULES, applyProjections } from "./projections.js";
 
 export interface EventLogOptions {
   /** directory for `runs/<runId>/events.jsonl` mirrors; null disables the mirror (tests) */
@@ -13,6 +12,27 @@ export interface EventLogOptions {
 interface EventRow {
   json: string;
 }
+
+const rulesByType = new Map<string, typeof PROJECTION_RULES[number][]>();
+for (const rule of PROJECTION_RULES) {
+  const list = rulesByType.get(rule.eventType) ?? [];
+  list.push(rule);
+  rulesByType.set(rule.eventType, list);
+}
+
+/** Run-scoped tables cleared wholesale on rebuild; mission tables only by entity id from ruled events. */
+const RUN_SCOPED_TABLES = new Set<typeof PROJECTED_TABLES[number]>([
+  "baselines",
+  "tasks",
+  "candidates",
+  "checkpoints",
+  "findings",
+  "finding_validations",
+  "clean_rounds",
+  "facts",
+  "acceptance_artifacts",
+  "jobs",
+]);
 
 export class EventLog {
   private readonly db: Db;
@@ -26,7 +46,8 @@ export class EventLog {
 
   /**
    * Append events and update projections atomically. `seq` is assigned here.
-   * The JSONL mirror is written only after the outermost transaction commits.
+   * The JSONL mirror is written only after the outermost transaction commits; mirror
+   * failures are non-fatal (recorded in `tx.drainMirrorFailures()`, rebuildable from DB).
    */
   append(events: readonly NewEvent[]): Event[] {
     if (events.length === 0) return [];
@@ -105,36 +126,46 @@ export class EventLog {
   }
 
   /**
-   * Rebuild all projections for a run from its events. The set of rows to clear is derived
-   * from the events themselves (never from possibly-corrupted projections): run-scoped tables
-   * by `run_id`, mission-scoped tables by the mission ids that appear in the run's events.
+   * Rebuild all projections for a run from its events. Run-scoped rows are cleared by `run_id`.
+   * Mission-scoped rows are cleared only for entity ids this run's *ruled* events produced —
+   * never by incidental payload keys on unknown event types, and never all rows for a shared mission.
    */
   rebuildProjections(runId: string): number {
     return this.tx.run(() => {
       const events = this.list(runId);
       const missionIds = new Set<string>();
+      const interpretationIds = new Set<string>();
       for (const e of events) {
-        const run = e.payload["run"] as { missionId?: unknown } | undefined;
-        if (typeof run?.missionId === "string") missionIds.add(run.missionId);
-        const mission = e.payload["mission"] as { id?: unknown } | undefined;
-        if (typeof mission?.id === "string") missionIds.add(mission.id);
-        const interp = e.payload["interpretation"] as { missionId?: unknown } | undefined;
-        if (typeof interp?.missionId === "string") missionIds.add(interp.missionId);
+        for (const rule of rulesByType.get(e.type) ?? []) {
+          const entity = e.payload[rule.payloadField] as Record<string, unknown> | undefined;
+          if (!entity || typeof entity["id"] !== "string") continue;
+          if (rule.table === "missions") missionIds.add(entity["id"]);
+          if (rule.table === "interpretations") interpretationIds.add(entity["id"]);
+        }
       }
       for (const table of PROJECTED_TABLES) {
         if (table === "runs") {
           this.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
         } else if (table === "missions") {
-          for (const m of missionIds) this.db.prepare("DELETE FROM missions WHERE id = ?").run(m);
+          for (const id of missionIds) this.db.prepare("DELETE FROM missions WHERE id = ?").run(id);
         } else if (table === "interpretations") {
-          for (const m of missionIds) this.db.prepare("DELETE FROM interpretations WHERE mission_id = ?").run(m);
-        } else {
+          for (const id of interpretationIds) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(id);
+        } else if (RUN_SCOPED_TABLES.has(table)) {
           this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
         }
       }
       for (const e of events) applyProjections(this.db, e);
       return events.length;
     });
+  }
+
+  /** Rewrite the JSONL mirror for one run from the authoritative event log. */
+  rebuildMirror(runId: string): void {
+    if (this.options.runsDir === null) return;
+    const events = this.list(runId);
+    const dir = join(this.options.runsDir, runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + (events.length > 0 ? "\n" : ""));
   }
 
   private nextSeq(runId: string): number {
@@ -150,12 +181,12 @@ export class EventLog {
       byRun.set(e.runId, list);
     }
     for (const [runId, list] of byRun) {
-      const dir = join(this.options.runsDir, runId);
       try {
+        const dir = join(this.options.runsDir, runId);
         mkdirSync(dir, { recursive: true });
         appendFileSync(join(dir, "events.jsonl"), list.map((e) => JSON.stringify(e)).join("\n") + "\n");
       } catch (err) {
-        throw new PolishError("IO_ERROR", `failed to mirror events for run ${runId}`, { dir }, { cause: err });
+        this.tx.mirrorFailures.push({ runId, error: err, at: Date.now() });
       }
     }
   }

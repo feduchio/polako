@@ -104,7 +104,10 @@ export function compareToBaseline(baseline: BaselineSnapshot, candidate: CheckRe
   const missing: string[] = [];
   for (const b of baseline.checks) {
     const c = candByName.get(b.name);
-    if (b.summary && c?.summary && c.summary.total < b.summary.total) {
+    if (!c) continue;
+    if (b.summary && !c.summary) {
+      missing.push(`${b.name}: test summary omitted (baseline had ${b.summary.total} tests)`);
+    } else if (b.summary && c.summary && c.summary.total < b.summary.total) {
       missing.push(`${b.name}: ${b.summary.total - c.summary.total} fewer tests than baseline`);
     }
   }

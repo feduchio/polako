@@ -9,6 +9,18 @@ export interface OpenDbOptions {
   path: string;
 }
 
+/** One TxManager per Db so hooks registered during `append` survive nested `transaction(db, …)`. */
+const txManagers = new WeakMap<Db, TxManager>();
+
+export function getTxManager(db: Db): TxManager {
+  let tx = txManagers.get(db);
+  if (!tx) {
+    tx = new TxManager(db);
+    txManagers.set(db, tx);
+  }
+  return tx;
+}
+
 export function openDb(options: OpenDbOptions): Db {
   const db = new DatabaseSync(options.path);
   if (options.path !== ":memory:") {
@@ -56,6 +68,12 @@ export function migrate(db: Db): number {
   return current;
 }
 
+export interface MirrorFailure {
+  runId: string;
+  error: unknown;
+  at: number;
+}
+
 /**
  * Transaction coordinator. node:sqlite is synchronous, which is exactly what we want for
  * "event append + projection update" atomicity. Nested calls join the outer transaction.
@@ -64,6 +82,7 @@ export function migrate(db: Db): number {
  */
 export class TxManager {
   private afterCommit: (() => void)[] = [];
+  readonly mirrorFailures: MirrorFailure[] = [];
 
   constructor(readonly db: Db) {}
 
@@ -94,9 +113,16 @@ export class TxManager {
     if (this.db.isTransaction) this.afterCommit.push(fn);
     else fn();
   }
+
+  /** Mirror write failures since the last drain (the DB commit already succeeded). */
+  drainMirrorFailures(): MirrorFailure[] {
+    const out = this.mirrorFailures;
+    this.mirrorFailures.length = 0;
+    return out;
+  }
 }
 
-/** Convenience for callers holding only a Db (tests, migrations). */
+/** Convenience for callers holding only a Db (tests, migrations). Uses the shared TxManager. */
 export function transaction<T>(db: Db, fn: () => T): T {
-  return new TxManager(db).run(fn);
+  return getTxManager(db).run(fn);
 }

@@ -32,6 +32,20 @@ describe("FakeClock", () => {
     expect(clock.pendingSleepers()).toBe(0);
   });
 
+  it("completes a large finite chain of zero-delay re-entrant sleepers", async () => {
+    const clock = new FakeClock(0);
+    let fired = 0;
+    const limit = 100_001;
+    const again = (): void => {
+      fired++;
+      if (fired < limit) void clock.sleep(0).then(again);
+    };
+    void clock.sleep(0).then(again);
+    await clock.advance(0);
+    expect(fired).toBe(limit);
+    expect(clock.pendingSleepers()).toBe(0);
+  });
+
   it("rejects an aborted sleep", async () => {
     const clock = new FakeClock(0);
     const ac = new AbortController();

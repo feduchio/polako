@@ -281,6 +281,12 @@ describe("baseline-relative regression", () => {
     expect(compareToBaseline(baseline, [check("test", [], 100), check("lint", [], 0)]).degradedChecks).toEqual([]);
   });
 
+  it("omitted test summary on a passing check is flagged as possible silencing", () => {
+    const delta = compareToBaseline(baseline, [{ ...check("test", [], 100), summary: null }, check("lint", [], 0)]);
+    expect(delta.missing).toEqual(["test: test summary omitted (baseline had 100 tests)"]);
+    expect(hasRegression(delta)).toBe(true);
+  });
+
   it("test identities do not collide across check/test name boundaries", () => {
     const b: BaselineSnapshot = { ...baseline, checks: [check("a::b", ["c"], 1)] };
     const delta = compareToBaseline(b, [check("a::b", [], 1), check("a", ["b::c"], 1)]);

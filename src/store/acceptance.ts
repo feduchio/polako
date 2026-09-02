@@ -25,26 +25,26 @@ export class AcceptanceStorage {
 
   /**
    * Copy every artifact into `checkoutDir`, replacing whatever the candidate left there.
-   * Symlinks (or directories) at the target path are removed first so we never write
-   * through a link a candidate planted.
+   * Symlinks, directories, and hard links to outside the checkout are removed first so we
+   * never write through a link a candidate planted.
    */
   materialize(checkoutDir: string, artifacts: readonly AcceptanceArtifact[]): void {
+    const rootReal = realpathSync(resolve(checkoutDir));
     for (const a of artifacts) {
       const target = safeTarget(checkoutDir, a.relativePath);
       mkdirSync(dirname(target), { recursive: true });
-      const st = lstatSafe(target);
-      if (st && !st.isFile()) rmSync(target, { recursive: true, force: true });
-      else if (st?.isSymbolicLink()) rmSync(target, { force: true });
+      removePathForMaterialize(rootReal, target);
       writeFileSync(target, this.artifacts.getBytes(a.sha256));
     }
   }
 
   /**
    * Compare protected paths in a checkout to the stored artifacts. Returns the paths that
-   * differ, are missing, or are no longer regular files (directory / symlink swapped in).
-   * Used by gates *before* materializing, to detect candidates that touched what they are judged by.
+   * differ, are missing, or are no longer regular files inside the checkout (directory /
+   * symlink / hard link to an external inode).
    */
   verify(checkoutDir: string, artifacts: readonly AcceptanceArtifact[]): ProtectedPathProblem[] {
+    const rootReal = realpathSync(resolve(checkoutDir));
     const problems: ProtectedPathProblem[] = [];
     for (const a of artifacts) {
       const target = safeTarget(checkoutDir, a.relativePath);
@@ -53,7 +53,7 @@ export class AcceptanceStorage {
         problems.push({ path: a.relativePath, reason: "missing" });
         continue;
       }
-      if (!st.isFile()) {
+      if (!st.isFile() || !fileResolvesInside(rootReal, target)) {
         problems.push({ path: a.relativePath, reason: "not_a_file" });
         continue;
       }
@@ -69,6 +69,26 @@ function lstatSafe(path: string): ReturnType<typeof lstatSync> | null {
   } catch {
     return null;
   }
+}
+
+function fileResolvesInside(rootReal: string, target: string): boolean {
+  try {
+    const fileReal = realpathSync(target);
+    return fileReal === rootReal || fileReal.startsWith(rootReal + sep);
+  } catch {
+    return false;
+  }
+}
+
+/** Remove an existing path so materialize always creates a fresh inode inside the checkout. */
+function removePathForMaterialize(rootReal: string, target: string): void {
+  const st = lstatSafe(target);
+  if (!st) return;
+  if (st.isFile() && fileResolvesInside(rootReal, target)) {
+    rmSync(target, { force: true });
+    return;
+  }
+  rmSync(target, { recursive: true, force: true });
 }
 
 /**

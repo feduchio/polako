@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AcceptanceStorage } from "./acceptance.js";
 import { ArtifactStore } from "./artifacts.js";
-import { TxManager, openDb, type Db } from "./db.js";
+import { getTxManager, openDb, type Db } from "./db.js";
 import { EventLog } from "./eventLog.js";
 import { createRepositories, type Repositories } from "./repositories.js";
 
@@ -33,7 +33,7 @@ export function openStore(options: OpenStoreOptions): Store {
   const runsDir = home !== null ? join(home, "runs") : null;
 
   const db = openDb({ path: home !== null ? join(home, "polish.db") : ":memory:" });
-  const tx = new TxManager(db);
+  const tx = getTxManager(db);
   const artifacts = new ArtifactStore(db, artifactsDir);
   return {
     db,
@@ -55,5 +55,6 @@ export type { ProtectedPathProblem } from "./acceptance.js";
 export { EventLog } from "./eventLog.js";
 export { PROJECTION_RULES, PROJECTED_TABLES, upsertEntity, applyProjections } from "./projections.js";
 export type { Repositories } from "./repositories.js";
-export { openDb, migrate, transaction, TxManager } from "./db.js";
+export { openDb, migrate, transaction, TxManager, getTxManager } from "./db.js";
+export type { MirrorFailure } from "./db.js";
 export type { Db } from "./db.js";

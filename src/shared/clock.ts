@@ -75,7 +75,9 @@ export class FakeClock implements Clock {
   async advance(ms: number): Promise<void> {
     const target = this.current + ms;
     for (let guard = 0; ; guard++) {
-      if (guard > 100_000) throw new Error("FakeClock.advance: sleepers keep re-registering at the current time");
+      if (guard > 100_000 && this.waiters.some((w) => w.at <= target)) {
+        throw new Error("FakeClock.advance: sleepers keep re-registering at the current time");
+      }
       await flushMicrotasks();
       const due = this.waiters
         .filter((w) => w.at <= target)
