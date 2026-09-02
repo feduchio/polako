@@ -68,7 +68,7 @@ describe("FakeClock", () => {
   });
 
   it("rejects an infinite chain of zero-delay re-entrant sleepers", async () => {
-    const clock = new FakeClock(0);
+    const clock = new FakeClock(0, 1000);
     const again = (): void => {
       void clock.sleep(0).then(again);
     };

@@ -359,6 +359,34 @@ describe("Store", () => {
     const versions = (store.db.prepare("SELECT version FROM interpretations WHERE mission_id = ? ORDER BY version").all(missionId) as { version: number }[]).map((x) => x.version);
     expect(versions).toEqual([1, 2]);
   });
+
+  it("rebuild restores shared interpretations produced by another run for the same mission", () => {
+    const missionId = id("msn");
+    const interp2 = {
+      id: id("mint"),
+      missionId,
+      version: 2,
+      supersedes: id("mint"),
+      basedOn: { profileHash: "c".repeat(64), baselineId: id("base") },
+      goals: ["g"],
+      requirements: [{ ref: "R1", statement: "s", acceptance: ["a"] }],
+      constraints: [],
+      nonGoals: [],
+      definitionOfSuccess: ["d"],
+      ambiguities: [],
+      createdBy: { kind: "supervisor" as const },
+      createdAt: NOW,
+    };
+    const runA = id("run");
+    const runB = id("run");
+    store.events.append([ev(runB, "run.created", { run: run(runB, missionId) }), ev(runB, "mission.interpreted", { interpretation: interp2 })]);
+    const runSnapshot = { ...run(runA, missionId), interpretationId: interp2.id, phase: "INTERPRETING_MISSION" as const };
+    store.events.append([ev(runA, "run.created", { run: runSnapshot })]);
+    store.db.prepare("DELETE FROM interpretations WHERE id = ?").run(interp2.id);
+    store.events.rebuildProjections(runA);
+    expect(store.repos.runs.get(runA)?.interpretationId).toBe(interp2.id);
+    expect(store.db.prepare("SELECT version FROM interpretations WHERE id = ?").get(interp2.id)).toEqual({ version: 2 });
+  });
 });
 
 describe("ArtifactStore", () => {

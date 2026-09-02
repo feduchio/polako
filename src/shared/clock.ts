@@ -31,6 +31,9 @@ function abortError(signal: AbortSignal | undefined): Error {
   return err;
 }
 
+/** Maximum zero-delay sleeper firings `advance` will drain before rejecting infinite re-registration. */
+export const FAKE_CLOCK_MAX_REENTRANT_FIRINGS = 10_000_000;
+
 /**
  * Deterministic clock for simulations: time advances only via `advance()`/`tick()`.
  * Sleeps resolve in timestamp order when time passes them.
@@ -40,7 +43,10 @@ export class FakeClock implements Clock {
   private waiters: { at: number; seq: number; resolve: () => void; reject: (e: Error) => void }[] = [];
   private seq = 0;
 
-  constructor(start = 1_700_000_000_000) {
+  constructor(
+    start = 1_700_000_000_000,
+    private readonly maxReentrantFirings = FAKE_CLOCK_MAX_REENTRANT_FIRINGS,
+  ) {
     this.current = start;
   }
 
@@ -75,18 +81,18 @@ export class FakeClock implements Clock {
   async advance(ms: number): Promise<void> {
     const target = this.current + ms;
     const dueAtStart = this.waiters.filter((w) => w.at <= target).length;
-    const maxIterations = 100_000 + 100_000 * Math.max(1, dueAtStart);
+    const maxFirings = this.maxReentrantFirings + this.maxReentrantFirings * Math.max(1, dueAtStart);
+    let firings = 0;
     for (let guard = 0; ; guard++) {
-      // Re-entrant sleep(0) chains register the next waiter during flushMicrotasks after
-      // resolve(), so a pending check here would miss them and never trip on infinite loops.
-      if (guard > maxIterations) {
-        throw new Error("FakeClock.advance: sleepers keep re-registering at the current time");
-      }
       await flushMicrotasks();
       const due = this.waiters
         .filter((w) => w.at <= target)
         .sort((a, b) => a.at - b.at || a.seq - b.seq)[0];
       if (due) {
+        firings++;
+        if (firings > maxFirings) {
+          throw new Error("FakeClock.advance: sleepers keep re-registering at the current time");
+        }
         this.current = Math.max(this.current, due.at);
         this.waiters = this.waiters.filter((w) => w !== due);
         due.resolve();

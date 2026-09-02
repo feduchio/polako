@@ -127,23 +127,13 @@ export class EventLog {
 
   /**
    * Rebuild all projections for a run from its events. Run-scoped rows are cleared by `run_id`.
-   * Mission-scoped rows: delete entity ids this run will re-upsert, then purge any row whose id
-   * appears in no ruled event anywhere (stale manual inserts). Rows backed by other runs' events
-   * are preserved (shared-mission case).
+   * Mission-scoped rows for missions this run touches are cleared and replayed from the entire
+   * event log so shared interpretations produced by other runs are restored.
    */
   rebuildProjections(runId: string): number {
     return this.tx.run(() => {
       const events = this.list(runId);
-      const missionIds = new Set<string>();
-      const interpretationIds = new Set<string>();
-      for (const e of events) {
-        for (const rule of rulesByType.get(e.type) ?? []) {
-          const entity = e.payload[rule.payloadField] as Record<string, unknown> | undefined;
-          if (!entity || typeof entity["id"] !== "string") continue;
-          if (rule.table === "missions") missionIds.add(entity["id"]);
-          if (rule.table === "interpretations") interpretationIds.add(entity["id"]);
-        }
-      }
+      const scopedMissionIds = this.scopedMissionIds(events);
       const globalMissionIds = this.ruledEntityIds("missions");
       const globalInterpretationIds = this.ruledEntityIds("interpretations");
 
@@ -151,18 +141,59 @@ export class EventLog {
         if (table === "runs") {
           this.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
         } else if (table === "missions") {
-          for (const mid of missionIds) this.db.prepare("DELETE FROM missions WHERE id = ?").run(mid);
+          for (const mid of scopedMissionIds) this.db.prepare("DELETE FROM missions WHERE id = ?").run(mid);
           this.deleteOrphanMissionRows(globalMissionIds);
         } else if (table === "interpretations") {
-          for (const iid of interpretationIds) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(iid);
+          for (const mid of scopedMissionIds) {
+            this.db.prepare("DELETE FROM interpretations WHERE mission_id = ?").run(mid);
+          }
           this.deleteOrphanInterpretationRows(globalInterpretationIds);
         } else if (RUN_SCOPED_TABLES.has(table)) {
           this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
         }
       }
       for (const e of events) applyProjections(this.db, e);
+      this.replaySharedMissionProjections(scopedMissionIds);
       return events.length;
     });
+  }
+
+  /** Mission ids this run references via run snapshots, mission events, or interpretation events. */
+  private scopedMissionIds(events: Event[]): Set<string> {
+    const ids = new Set<string>();
+    for (const e of events) {
+      for (const rule of rulesByType.get(e.type) ?? []) {
+        const entity = e.payload[rule.payloadField] as Record<string, unknown> | undefined;
+        if (!entity) continue;
+        if (rule.table === "missions" && typeof entity["id"] === "string") ids.add(entity["id"]);
+        if (rule.table === "interpretations" && typeof entity["missionId"] === "string") ids.add(entity["missionId"]);
+        if (rule.table === "runs" && typeof entity["missionId"] === "string") ids.add(entity["missionId"]);
+      }
+    }
+    return ids;
+  }
+
+  private eventTouchesScopedMissions(e: Event, missionIds: Set<string>): boolean {
+    for (const rule of rulesByType.get(e.type) ?? []) {
+      if (rule.table !== "missions" && rule.table !== "interpretations") continue;
+      const entity = e.payload[rule.payloadField] as Record<string, unknown> | undefined;
+      if (!entity) continue;
+      if (rule.table === "missions" && typeof entity["id"] === "string" && missionIds.has(entity["id"])) return true;
+      if (rule.table === "interpretations" && typeof entity["missionId"] === "string" && missionIds.has(entity["missionId"])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Re-apply mission-scoped projections from every run for missions this rebuild touches. */
+  private replaySharedMissionProjections(missionIds: Set<string>): void {
+    if (missionIds.size === 0) return;
+    const rows = this.db.prepare("SELECT json FROM events ORDER BY ts, run_id, seq").all() as unknown as EventRow[];
+    for (const row of rows) {
+      const e = EventSchema.parse(JSON.parse(row.json));
+      if (this.eventTouchesScopedMissions(e, missionIds)) applyProjections(this.db, e);
+    }
   }
 
   /** Entity ids that appear in at least one ruled event in the entire log. */
