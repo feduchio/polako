@@ -5,6 +5,7 @@ import { PolishError } from "../shared/errors.js";
 import type { CommandPolicy } from "./allowlist.js";
 import { scrubEnv } from "./env.js";
 import { Git, type DiffStat } from "./git.js";
+import { assertGitCommitish, sandboxPath } from "./ids.js";
 import { runProcess, type ProcessResult } from "./process.js";
 
 export interface SandboxHandle {
@@ -64,7 +65,8 @@ export class WorktreeSandbox implements Sandbox {
   }
 
   async create(input: CreateSandboxInput): Promise<SandboxHandle> {
-    const path = join(this.root, input.id);
+    assertGitCommitish(input.baseCommit);
+    const path = sandboxPath(this.root, input.id);
     if (existsSync(path)) throw new PolishError("CONFLICT", `sandbox path already exists: ${path}`);
     if (input.branch) {
       if (await this.repo.branchExists(input.branch)) {
@@ -96,7 +98,14 @@ export class WorktreeSandbox implements Sandbox {
         return runProcess({
           argv,
           cwd: opts.cwd ? join(path, opts.cwd) : path,
-          env: { ...baseEnv, ...(opts.env ?? {}) },
+          env: {
+            ...scrubEnv(
+              {},
+              { allowlist: Object.keys(opts.env ?? {}), denyPatterns: cfg.envDenyPatterns, fixed: {} },
+              opts.env ?? {},
+            ),
+            ...baseEnv,
+          },
           timeoutMs: opts.timeoutMs ?? cfg.commandTimeoutMs,
           maxOutputBytes: cfg.maxOutputBytes,
           ...(opts.signal ? { signal: opts.signal } : {}),

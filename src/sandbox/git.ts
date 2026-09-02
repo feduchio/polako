@@ -117,7 +117,7 @@ export class Git {
     const args = ["worktree", "add", "-q"];
     if (opts.detach) args.push("--detach");
     if (opts.branch) args.push("-b", opts.branch);
-    args.push(path, commitish);
+    args.push("--", path, commitish);
     await this.run(args);
   }
 
@@ -148,11 +148,17 @@ export class Git {
 
   /** Apply the changes of `commit` (relative to its parent) onto the current HEAD in this worktree. */
   async cherryPick(commit: string): Promise<{ ok: boolean; conflicts: string[] }> {
+    const dirty = !(await this.isClean());
+    if (dirty) await this.run(["stash", "push", "-u", "-m", "polish:pre-cherry-pick"]);
     const r = await this.run(["cherry-pick", "--no-commit", "--allow-empty", commit], { allowFailure: true });
-    if (r.exitCode === 0) return { ok: true, conflicts: [] };
+    if (r.exitCode === 0) {
+      if (dirty) await this.run(["stash", "pop"], { allowFailure: true });
+      return { ok: true, conflicts: [] };
+    }
     const conflicts = (await this.out(["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
-    await this.run(["cherry-pick", "--abort"], { allowFailure: true });
     await this.run(["reset", "-q", "--hard"], { allowFailure: true });
+    await this.run(["clean", "-fd"], { allowFailure: true });
+    if (dirty) await this.run(["stash", "pop"], { allowFailure: true });
     return { ok: false, conflicts };
   }
 }

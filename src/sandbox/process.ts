@@ -49,9 +49,10 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     let timedOut = false;
     let aborted = false;
     let settled = false;
+    let exited = false;
 
     const killGroup = (sig: NodeJS.Signals): void => {
-      if (child.pid === undefined) return;
+      if (child.pid === undefined || exited) return;
       try {
         if (process.platform !== "win32") process.kill(-child.pid, sig);
         else child.kill(sig);
@@ -96,6 +97,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
+      exited = true;
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
       resolve({
@@ -113,6 +115,9 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
       });
     });
 
+    child.stdin.on("error", () => {
+      /* EPIPE when the child does not read stdin */
+    });
     if (options.stdin !== undefined) child.stdin.end(options.stdin);
     else child.stdin.end();
   });

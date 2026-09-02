@@ -29,7 +29,27 @@ export const SEARCH_RULES: readonly CommandRule[] = [
   { prefix: ["find"], description: "find" },
 ];
 
-const SHELL_METACHARS = /[;&|<>`$(){}\\]/;
+const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+
+function shellBasename(token: string): string {
+  const slash = token.lastIndexOf("/");
+  return slash >= 0 ? token.slice(slash + 1) : token;
+}
+
+/** True when argv invokes a shell to run a script string (-c / combined short opts). */
+export function invokesShellScript(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    if (token === undefined || !SHELL_NAMES.has(shellBasename(token))) continue;
+    for (let j = i + 1; j < argv.length; j++) {
+      const a = argv[j];
+      if (a === undefined) continue;
+      if (a === "-c" || a === "--command") return true;
+      if (a.startsWith("-") && !a.startsWith("--") && a.slice(1).includes("c")) return true;
+    }
+  }
+  return false;
+}
 
 export class CommandPolicy {
   private readonly rules: CommandRule[];
@@ -54,13 +74,10 @@ export class CommandPolicy {
   /** Returns null when allowed, otherwise a human-readable denial reason. */
   check(argv: readonly string[]): string | null {
     if (argv.length === 0) return "empty command";
-    if (argv.some((a) => a === "sh" || a === "bash" || a === "zsh") && argv.some((a) => a === "-c")) {
+    if (invokesShellScript(argv)) {
       return "shell -c is not allowed; call the program directly";
     }
-    if (argv.some((a) => SHELL_METACHARS.test(a) && !a.startsWith("-"))) {
-      // metachars in bare arguments are fine for e.g. rg patterns, but forbid obvious redirections/chains
-      if (argv.some((a) => /^(\||&&|;|>|>>|<)$/.test(a))) return "shell operators are not allowed";
-    }
+    if (argv.some((a) => /^(\||&&|;|>|>>|<)$/.test(a))) return "shell operators are not allowed";
     if (this.allowArbitrary) return null;
     const matched = this.rules.some((r) => r.prefix.length <= argv.length && r.prefix.every((p, i) => argv[i] === p));
     return matched ? null : `command not in allowlist: ${argv.join(" ")}`;

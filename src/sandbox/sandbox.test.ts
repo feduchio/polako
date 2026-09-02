@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -50,7 +50,8 @@ describe("runProcess", () => {
   });
 
   it("kills the whole process group on timeout", async () => {
-    const marker = join(mkdtempSync(join(tmpdir(), "polish-proc-")), "child.pid");
+    const markerDir = mkdtempSync(join(tmpdir(), "polish-proc-"));
+    const marker = join(markerDir, "child.pid");
     const script = `
       const { spawn } = require('node:child_process');
       const fs = require('node:fs');
@@ -71,6 +72,7 @@ describe("runProcess", () => {
       alive = false;
     }
     expect(alive).toBe(false);
+    rmSync(markerDir, { recursive: true, force: true });
   });
 
   it("aborts via signal", async () => {
@@ -86,6 +88,18 @@ describe("runProcess", () => {
 
   it("rejects on spawn failure", async () => {
     await expect(runProcess({ argv: ["definitely-not-a-binary-xyz"], cwd: tmpdir(), env: {}, timeoutMs: 1000, maxOutputBytes: 10 })).rejects.toThrow(/failed to spawn/);
+  });
+
+  it("does not crash on stdin EPIPE when the child ignores stdin", async () => {
+    const r = await runProcess({
+      argv: ["node", "-e", "process.exit(0)"],
+      cwd: tmpdir(),
+      env: { PATH: process.env["PATH"]! },
+      timeoutMs: 10_000,
+      maxOutputBytes: 4096,
+      stdin: "x".repeat(256 * 1024),
+    });
+    expect(r.exitCode).toBe(0);
   });
 });
 
@@ -104,7 +118,10 @@ describe("CommandPolicy", () => {
   it("never allows shell -c or shell operators, even in arbitrary mode", () => {
     const arbitrary = CommandPolicy.forProject([], "pnpm", true);
     expect(arbitrary.check(["sh", "-c", "echo hi"])).toMatch(/shell -c/);
+    expect(arbitrary.check(["bash", "-lc", "echo hi"])).toMatch(/shell -c/);
+    expect(arbitrary.check(["/bin/bash", "-c", "echo hi"])).toMatch(/shell -c/);
     expect(arbitrary.check(["pnpm", "test", "&&", "git", "push"])).toMatch(/shell operators/);
+    expect(arbitrary.check(["rg", "-c", "sh"])).toBeNull();
     expect(arbitrary.check(["curl", "http://x"])).toBeNull();
   });
 });
@@ -151,20 +168,54 @@ describe("WorktreeSandbox", () => {
   });
 
   it("enforces the command policy and scrubs the environment for commands", async () => {
+    process.env["POLISH_TEST_SECRET_TOKEN"] = "leak";
     const policy = CommandPolicy.forProject([["node", "-e"]], null);
     const h = await sandbox.create({ id: "c2", baseCommit: base, policy });
-    await expect(h.run(["git", "push"])).rejects.toThrow(/not in allowlist/);
-    process.env["POLISH_TEST_SECRET_TOKEN"] = "leak";
     try {
+      await expect(h.run(["git", "push"])).rejects.toThrow(/not in allowlist/);
       const r = await h.run(["node", "-e", "console.log(JSON.stringify(process.env))"]);
       const env = JSON.parse(r.stdout) as Record<string, string>;
       expect(env).not.toHaveProperty("POLISH_TEST_SECRET_TOKEN");
       expect(env["CI"]).toBe("1");
       expect(env["PATH"]).toBeDefined();
+
+      const leaked = await h.run(["node", "-e", "console.log(JSON.stringify(process.env.AWS_SECRET_ACCESS_KEY))"], {
+        env: { AWS_SECRET_ACCESS_KEY: "leaked-via-optsenv", CI: "0" },
+      });
+      expect(leaked.stdout.trim()).toBe("undefined");
+      const ciProbe = await h.run(["node", "-e", "console.log(process.env.CI)"], { env: { CI: "0" } });
+      expect(ciProbe.stdout.trim()).toBe("1");
     } finally {
       delete process.env["POLISH_TEST_SECRET_TOKEN"];
+      await h.destroy();
     }
-    await h.destroy();
+  });
+
+  it("rejects sandbox ids that escape the root", async () => {
+    const policy = CommandPolicy.forProject([], null);
+    await expect(sandbox.create({ id: "../escaped", baseCommit: base, policy })).rejects.toThrow(/invalid sandbox id|escapes root/);
+    await expect(sandbox.create({ id: "--detach", baseCommit: base, policy })).rejects.toThrow(/invalid sandbox id/);
+    await expect(sandbox.create({ id: "ok", baseCommit: "--detach", policy })).rejects.toThrow(/invalid git commitish/);
+  });
+
+  it("exposes isolates=false and supports bypassPolicy, destroyAll, commitAll null, and fastForward", async () => {
+    expect(sandbox.isolates).toBe(false);
+    const policy = CommandPolicy.forProject([["node", "-e"]], null);
+    const a = await sandbox.create({ id: "ff-a", baseCommit: base, branch: "polish/ff-a", policy });
+    const b = await sandbox.create({ id: "ff-b", baseCommit: base, branch: "polish/ff-b", policy });
+    expect(await sandbox.list()).toHaveLength(2);
+    expect(await a.commitAll("noop")).toBeNull();
+    writeFileSync(join(b.path, "b.txt"), "b\n");
+    const tip = (await b.commitAll("add b"))!;
+    expect(await repo.fastForward("polish/ff-a", tip)).toBe(true);
+    expect(await repo.fastForward("polish/ff-a", base)).toBe(false);
+    await expect(a.run(["git", "push"])).rejects.toThrow(/not in allowlist/);
+    const bypassed = await a.run(["node", "-e", "console.log('bypassed')"], { bypassPolicy: true });
+    expect(bypassed.stdout.trim()).toBe("bypassed");
+    await sandbox.destroyAll();
+    expect(await sandbox.list()).toEqual([]);
+    expect(existsSync(a.path)).toBe(false);
+    expect(existsSync(b.path)).toBe(false);
   });
 
   it("refuses duplicate ids and branches", async () => {
@@ -187,6 +238,11 @@ describe("WorktreeSandbox", () => {
     expect(conflict.ok).toBe(false);
     expect(conflict.conflicts).toEqual(["a.txt"]);
     expect(await b.git.isClean()).toBe(true);
+
+    writeFileSync(join(b.path, "keep.txt"), "precious\n");
+    const conflictWithWork = await b.git.cherryPick(ca);
+    expect(conflictWithWork.ok).toBe(false);
+    expect(readFileSync(join(b.path, "keep.txt"), "utf8")).toBe("precious\n");
 
     const c = await sandbox.create({ id: "c", baseCommit: base, branch: "polish/c", policy });
     writeFileSync(join(c.path, "c.txt"), "c\n");
