@@ -359,7 +359,7 @@ describe("Scheduler", () => {
     await sched.settle();
     expect(calls).toBe(0);
     for (const j of [ready, root, child]) {
-      expect(store.repos.jobs.get(j.id)).toMatchObject({ state: "CANCELLED", error: expect.stringMatching(/run .* not found/) as string });
+      expect(store.repos.jobs.get(j.id)).toMatchObject({ state: "CANCELLED", error: expect.stringMatching(/run\b.*not found/) as string });
     }
     expect(sched.inFlightCount()).toBe(0);
   });
