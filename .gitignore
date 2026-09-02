@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.pnpm-store/
+*.log
+.DS_Store
+.env
+*.local
+fixtures/**/node_modules/
+fixtures/**/.codegraph/
