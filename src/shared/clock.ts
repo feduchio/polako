@@ -68,26 +68,29 @@ export class FakeClock implements Clock {
   }
 
   /**
-   * Advance time by `ms`, firing due sleepers in order. Yields to the microtask queue between
-   * firings, and keeps scanning until a flush registers no new due sleeper (re-entrancy).
+   * Advance time by `ms`, firing due sleepers in order. Drains pending continuations *before*
+   * moving time (so a sleep scheduled by code that is already running registers at the
+   * pre-advance time), between firings, and after reaching the target (re-entrancy).
    */
   async advance(ms: number): Promise<void> {
     const target = this.current + ms;
     for (let guard = 0; ; guard++) {
       if (guard > 100_000) throw new Error("FakeClock.advance: sleepers keep re-registering at the current time");
+      await flushMicrotasks();
       const due = this.waiters
         .filter((w) => w.at <= target)
         .sort((a, b) => a.at - b.at || a.seq - b.seq)[0];
-      if (!due) {
-        this.current = target;
-        await flushMicrotasks();
-        if (!this.waiters.some((w) => w.at <= target)) break;
+      if (due) {
+        this.current = Math.max(this.current, due.at);
+        this.waiters = this.waiters.filter((w) => w !== due);
+        due.resolve();
         continue;
       }
-      this.current = Math.max(this.current, due.at);
-      this.waiters = this.waiters.filter((w) => w !== due);
-      due.resolve();
-      await flushMicrotasks();
+      if (this.current !== target) {
+        this.current = target;
+        continue;
+      }
+      break;
     }
   }
 
@@ -96,10 +99,11 @@ export class FakeClock implements Clock {
   }
 }
 
-export async function flushMicrotasks(rounds = 5): Promise<void> {
+/** Drain the microtask queue completely (a macrotask boundary), `rounds` times. */
+export async function flushMicrotasks(rounds = 1): Promise<void> {
   for (let i = 0; i < rounds; i++) {
     await new Promise<void>((resolve) => {
-      queueMicrotask(resolve);
+      setImmediate(resolve);
     });
   }
 }

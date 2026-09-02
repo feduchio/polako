@@ -233,7 +233,7 @@ describe("Scheduler", () => {
     expect(store.repos.jobs.get(j.id)?.attempts).toBe(2);
   });
 
-  it("an expired lease with no in-flight owner is returned to READY on tick, or FAILED when attempts are exhausted", () => {
+  it("an expired lease with no in-flight owner is returned to READY on tick, or FAILED when attempts are exhausted", async () => {
     const run = makeRun(store, clock);
     sched.register("noop", async () => ({}));
     const a = sched.enqueue({ runId: run.id, type: "noop", lane: "local.shell", maxAttempts: 2 });
@@ -252,7 +252,7 @@ describe("Scheduler", () => {
         },
       ]);
     }
-    void clock.advance(500);
+    await clock.advance(500);
     setControl(store, run, "PAUSED"); // prevent re-dispatch in this tick so we can observe the reclaim
     sched.tick();
     expect(store.repos.jobs.get(a.id)?.state).toBe("READY");
