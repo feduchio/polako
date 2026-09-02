@@ -10,7 +10,7 @@ import type { Run } from "../domain/run.js";
 import type { Task } from "../domain/task.js";
 import { sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
-import { openStore, transaction, type Store } from "./index.js";
+import { openStore, transaction, getTxManager, type Store } from "./index.js";
 
 const NOW = 1_700_000_000_000;
 const HASH = "a".repeat(40);
@@ -124,7 +124,7 @@ describe("Store", () => {
     expect(live.tasks[0]?.state).toBe("READY");
   });
 
-  it("rebuild restores interpretation rows produced by this run and leaves unrelated interpretation ids alone", () => {
+  it("rebuild restores interpretation rows produced by this run and purges stale rows with no backing event", () => {
     const runId = id("run");
     const missionId = id("msn");
     const r = run(runId, missionId);
@@ -156,7 +156,7 @@ describe("Store", () => {
     store.events.rebuildProjections(runId);
     expect(store.repos.runs.get(runId)?.id).toBe(runId);
     expect(store.db.prepare("SELECT version FROM interpretations WHERE id = ?").get(interpretation.id)).toEqual({ version: 1 });
-    expect(store.db.prepare("SELECT version FROM interpretations WHERE id = ?").get(staleId)).toEqual({ version: 2 });
+    expect(store.db.prepare("SELECT id FROM interpretations WHERE id = ?").get(staleId)).toBeUndefined();
   });
 
   it("an event may only project entities of its own run", () => {
@@ -256,6 +256,15 @@ describe("Store", () => {
     expect(existsSync(join(dir, "runs", runId, "events.jsonl"))).toBe(false);
     store.events.rebuildMirror(runId);
     expect(readFileSync(join(dir, "runs", runId, "events.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  it("queues mirror failures for drain without failing append", () => {
+    const runId = id("run");
+    mkdirSync(join(dir, "runs"), { recursive: true });
+    chmodSync(join(dir, "runs"), 0o000);
+    store.events.append([ev(runId, "run.created", { run: run(runId, id("msn")) })]);
+    chmodSync(join(dir, "runs"), 0o700);
+    expect(getTxManager(store.db).drainMirrorFailures()).toHaveLength(1);
   });
 
   it("exported transaction() shares the store TxManager so rollback drops mirror hooks", () => {

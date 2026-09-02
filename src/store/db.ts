@@ -116,7 +116,7 @@ export class TxManager {
 
   /** Mirror write failures since the last drain (the DB commit already succeeded). */
   drainMirrorFailures(): MirrorFailure[] {
-    const out = this.mirrorFailures;
+    const out = [...this.mirrorFailures];
     this.mirrorFailures.length = 0;
     return out;
   }

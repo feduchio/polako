@@ -127,29 +127,39 @@ export class EventLog {
 
   /**
    * Rebuild all projections for a run from its events. Run-scoped rows are cleared by `run_id`.
-   * Mission-scoped rows are cleared only for entity ids this run's *ruled* events produced —
-   * never by incidental payload keys on unknown event types, and never all rows for a shared mission.
+   * Mission-scoped rows: delete entity ids this run will re-upsert, then purge same-mission rows
+   * whose ids appear in no event anywhere (stale manual inserts). Rows backed by other runs' events
+   * are preserved (shared-mission case).
    */
   rebuildProjections(runId: string): number {
     return this.tx.run(() => {
       const events = this.list(runId);
       const missionIds = new Set<string>();
       const interpretationIds = new Set<string>();
+      const interpretationMissionIds = new Set<string>();
       for (const e of events) {
         for (const rule of rulesByType.get(e.type) ?? []) {
           const entity = e.payload[rule.payloadField] as Record<string, unknown> | undefined;
           if (!entity || typeof entity["id"] !== "string") continue;
           if (rule.table === "missions") missionIds.add(entity["id"]);
-          if (rule.table === "interpretations") interpretationIds.add(entity["id"]);
+          if (rule.table === "interpretations") {
+            interpretationIds.add(entity["id"]);
+            if (typeof entity["missionId"] === "string") interpretationMissionIds.add(entity["missionId"]);
+          }
         }
       }
+      const globalMissionIds = this.ruledEntityIds("missions");
+      const globalInterpretationIds = this.ruledEntityIds("interpretations");
+
       for (const table of PROJECTED_TABLES) {
         if (table === "runs") {
           this.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
         } else if (table === "missions") {
-          for (const id of missionIds) this.db.prepare("DELETE FROM missions WHERE id = ?").run(id);
+          for (const mid of missionIds) this.db.prepare("DELETE FROM missions WHERE id = ?").run(mid);
+          this.deleteOrphanMissionRows(missionIds, globalMissionIds);
         } else if (table === "interpretations") {
-          for (const id of interpretationIds) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(id);
+          for (const iid of interpretationIds) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(iid);
+          this.deleteOrphanInterpretationRows(interpretationMissionIds, globalInterpretationIds);
         } else if (RUN_SCOPED_TABLES.has(table)) {
           this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
         }
@@ -157,6 +167,36 @@ export class EventLog {
       for (const e of events) applyProjections(this.db, e);
       return events.length;
     });
+  }
+
+  /** Entity ids that appear in at least one ruled event in the entire log. */
+  private ruledEntityIds(table: "missions" | "interpretations"): Set<string> {
+    const ids = new Set<string>();
+    const rows = this.db.prepare("SELECT json FROM events").all() as unknown as EventRow[];
+    for (const row of rows) {
+      const e = EventSchema.parse(JSON.parse(row.json));
+      for (const rule of rulesByType.get(e.type) ?? []) {
+        if (rule.table !== table) continue;
+        const entity = e.payload[rule.payloadField] as Record<string, unknown> | undefined;
+        if (entity && typeof entity["id"] === "string") ids.add(entity["id"]);
+      }
+    }
+    return ids;
+  }
+
+  private deleteOrphanMissionRows(missionIds: Set<string>, globalIds: Set<string>): void {
+    for (const mid of missionIds) {
+      if (!globalIds.has(mid)) this.db.prepare("DELETE FROM missions WHERE id = ?").run(mid);
+    }
+  }
+
+  private deleteOrphanInterpretationRows(missionIds: Set<string>, globalIds: Set<string>): void {
+    for (const mid of missionIds) {
+      const rows = this.db.prepare("SELECT id FROM interpretations WHERE mission_id = ?").all(mid) as { id: string }[];
+      for (const row of rows) {
+        if (!globalIds.has(row.id)) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(row.id);
+      }
+    }
   }
 
   /** Rewrite the JSONL mirror for one run from the authoritative event log. */
