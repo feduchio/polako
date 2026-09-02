@@ -27,6 +27,12 @@ module.exports = {
       to: { path: "^src/(?!store/|domain/|shared/)" },
     },
     {
+      name: "project-depends-only-on-domain-sandbox",
+      severity: "error",
+      from: { path: "^src/project/" },
+      to: { path: "^src/(?!project/|domain/|shared/|sandbox/)" },
+    },
+    {
       name: "providers-behind-broker-interfaces",
       comment: "concrete providers may only see broker interfaces, never engine/agents",
       severity: "error",
