@@ -189,7 +189,8 @@ export class EventLog {
   /** Re-apply mission-scoped projections from every run for missions this rebuild touches. */
   private replaySharedMissionProjections(missionIds: Set<string>): void {
     if (missionIds.size === 0) return;
-    const rows = this.db.prepare("SELECT json FROM events ORDER BY ts, run_id, seq").all() as unknown as EventRow[];
+    // Insertion order (rowid), not event.ts — callers control ts and it need not reflect append order.
+    const rows = this.db.prepare("SELECT json FROM events ORDER BY rowid").all() as unknown as EventRow[];
     for (const row of rows) {
       const e = EventSchema.parse(JSON.parse(row.json));
       if (this.eventTouchesScopedMissions(e, missionIds)) applyProjections(this.db, e);

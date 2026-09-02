@@ -387,6 +387,46 @@ describe("Store", () => {
     expect(store.repos.runs.get(runA)?.interpretationId).toBe(interp2.id);
     expect(store.db.prepare("SELECT version FROM interpretations WHERE id = ?").get(interp2.id)).toEqual({ version: 2 });
   });
+
+  it("shared replay preserves live append order when event timestamps are out of order", () => {
+    const missionId = id("msn");
+    const interpretationId = id("mint");
+    const baseInterp = {
+      id: interpretationId,
+      missionId,
+      version: 1,
+      supersedes: null,
+      basedOn: { profileHash: "c".repeat(64), baselineId: id("base") },
+      goals: ["first"],
+      requirements: [{ ref: "R1", statement: "s", acceptance: ["a"] }],
+      constraints: [],
+      nonGoals: [],
+      definitionOfSuccess: ["d"],
+      ambiguities: [],
+      createdBy: { kind: "supervisor" as const },
+      createdAt: NOW,
+    };
+    const runA = id("run");
+    const runB = id("run");
+    store.events.append([
+      ev(runA, "run.created", { run: run(runA, missionId) }),
+      { ...ev(runA, "mission.interpreted", { interpretation: baseInterp }), ts: NOW + 200 },
+    ]);
+    store.events.append([
+      ev(runB, "run.created", { run: run(runB, missionId) }),
+      {
+        ...ev(runB, "mission.interpreted", { interpretation: { ...baseInterp, version: 2, goals: ["last"], supersedes: interpretationId } }),
+        ts: NOW + 100,
+      },
+    ]);
+    const liveGoal = JSON.parse((store.db.prepare("SELECT json FROM interpretations WHERE id = ?").get(interpretationId) as { json: string }).json) as { goals: string[] };
+    expect(liveGoal.goals).toEqual(["last"]);
+
+    store.db.prepare("DELETE FROM interpretations WHERE id = ?").run(interpretationId);
+    store.events.rebuildProjections(runA);
+    const replayedGoal = JSON.parse((store.db.prepare("SELECT json FROM interpretations WHERE id = ?").get(interpretationId) as { json: string }).json) as { goals: string[] };
+    expect(replayedGoal.goals).toEqual(["last"]);
+  });
 });
 
 describe("ArtifactStore", () => {
