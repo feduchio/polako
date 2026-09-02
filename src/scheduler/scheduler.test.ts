@@ -398,9 +398,10 @@ describe("Scheduler", () => {
       workerId: "w1",
       laneLimits: defaultConfig().lanes,
       leaseMs: 1000,
-      onPersistError: (e) => {
+      onPersistError: async (e) => {
         errors.push(e);
-        throw new Error("reporter failed"); // must not escape
+        await Promise.resolve();
+        throw new Error("async reporter failed"); // a rejection must not escape either
       },
     });
     let release: () => void = () => undefined;

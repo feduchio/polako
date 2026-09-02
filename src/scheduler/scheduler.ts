@@ -41,9 +41,10 @@ export interface SchedulerOptions {
   /**
    * Called when a job's terminal state could not be persisted (store failure). The job stays
    * RUNNING in the store and will be reclaimed when its lease expires. Exceptions thrown by
-   * the callback are swallowed. The failure is always also queued in `drainPersistErrors()`.
+   * the callback (or rejections, if it is async) are swallowed. The failure is always also
+   * queued in `drainPersistErrors()`.
    */
-  onPersistError?: (error: unknown, job: Job) => void;
+  onPersistError?: (error: unknown, job: Job) => void | Promise<void>;
 }
 
 export interface PersistError {
@@ -262,7 +263,9 @@ export class Scheduler {
       // become an unhandled rejection: `settle()` awaits these promises.
       this.persistErrors.push({ job, error: err, at: this.clock.now() });
       try {
-        this.options.onPersistError?.(err, job);
+        // A reporter may be async despite the void signature; swallow rejections too.
+        const maybePromise: unknown = this.options.onPersistError?.(err, job);
+        if (maybePromise instanceof Promise) maybePromise.catch(() => undefined);
       } catch {
         /* reporter failures must not escape */
       }
