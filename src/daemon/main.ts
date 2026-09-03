@@ -2,7 +2,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "../shared/cliEntry.js";
 import { RpcServer } from "./rpc.js";
 import { DaemonService } from "./service.js";
 
@@ -46,7 +46,7 @@ export async function runDaemon(): Promise<void> {
   process.on("SIGTERM", stop);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   runDaemon().catch((error: unknown) => {
     console.error(error);
     process.exitCode = 1;

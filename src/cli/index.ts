@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { pathToFileURL } from "node:url";
 import type { Event } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
 import { projectRunStatus } from "../observe/project.js";
 import { renderActivityFeed, renderRunStatus } from "../observe/render.js";
+import { isMainModule } from "../shared/cliEntry.js";
 import { callDaemon } from "./client.js";
 import { runWatch } from "./watch.js";
 
@@ -204,7 +204,7 @@ Local CLI setup (from the polish repo):
   pnpm cli:link
 `;
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   runCli().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
