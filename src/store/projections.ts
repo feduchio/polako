@@ -284,7 +284,13 @@ export function applyProjections(db: Db, event: Event, events?: { get(id: string
       });
     }
     if (rule.table === "acceptance_corpus_entries") {
-      const runRow = db.prepare("SELECT json FROM runs WHERE id = ?").get(record["sourceRunId"]) as { json: string } | undefined;
+      const sourceRunId = record["sourceRunId"];
+      if (typeof sourceRunId !== "string") {
+        throw new PolishError("INVARIANT_VIOLATION", "corpus sourceRunId must be a string", {
+          eventId: event.id,
+        });
+      }
+      const runRow = db.prepare("SELECT json FROM runs WHERE id = ?").get(sourceRunId) as { json: string } | undefined;
       if (!runRow) {
         throw new PolishError("INVARIANT_VIOLATION", "corpus source run does not exist", {
           eventId: event.id,
