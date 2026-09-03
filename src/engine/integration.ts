@@ -43,6 +43,7 @@ export type IntegrationStatus =
   | "integrated"
   | "conflict"
   | "failed_gates"
+  | "failed_runtime"
   | "stale_head"
   | "error";
 
@@ -66,6 +67,8 @@ export interface IntegrateWinnerInput {
   runHead: RunHead;
   projectEnv?: Record<string, string>;
   signal?: AbortSignal;
+  /** Runs after integration gates pass, still on the temporary workspace, before CAS. */
+  afterGates?: (input: { commitHash: string; workspace: SandboxHandle }) => Promise<boolean>;
 }
 
 /**
@@ -132,6 +135,21 @@ async function integrateWinnerExclusive(input: IntegrateWinnerInput): Promise<In
         advanced: false,
         error: null,
       };
+    }
+
+    if (input.afterGates !== undefined) {
+      const runtimeOk = await input.afterGates({ commitHash: integratedCommit, workspace });
+      if (!runtimeOk) {
+        return {
+          status: "failed_runtime",
+          previousHead,
+          integratedCommit,
+          gateResult,
+          conflicts: [],
+          advanced: false,
+          error: "runtime validation failed on the integration workspace",
+        };
+      }
     }
 
     const advanced = await input.runHead.compareAndSet(previousHead, integratedCommit);

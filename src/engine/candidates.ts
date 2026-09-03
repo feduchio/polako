@@ -47,6 +47,7 @@ export interface CandidateGates {
 }
 
 export type CandidateResultStatus =
+  | "implemented"
   | "passed"
   | "failed_gates"
   | "worker_failed"
@@ -86,6 +87,8 @@ export interface RunCandidatesParallelInput<TTask = Task> {
   branchPrefix?: string;
   projectEnv?: Record<string, string>;
   signal?: AbortSignal;
+  /** When true, stop after commit; gating runs in a later phase. */
+  skipGates?: boolean;
 }
 
 /**
@@ -155,6 +158,21 @@ async function runOneCandidate<TTask>(
     }
 
     diffSummary = await candidate.git.diffStat(input.baseCheckpoint, headCommit);
+    if (input.skipGates === true) {
+      return {
+        id: candidateId,
+        index,
+        branch,
+        baseCheckpoint: input.baseCheckpoint,
+        headCommit,
+        status: "implemented",
+        diffSummary,
+        gateResult: null,
+        evidenceRefs: workerEvidence(workerOutcome),
+        workerOutcome,
+        error: null,
+      };
+    }
     gate = await input.sandbox.create({
       id: `${candidateId}-gate`,
       baseCommit: headCommit,

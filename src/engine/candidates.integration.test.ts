@@ -170,6 +170,26 @@ describe("B2 temporary integration workspace", () => {
     expect(result.advanced).toBe(false);
     expect(await runHead.read()).toBe(fixture.base);
   });
+
+  it("leaves the run head unchanged when after-gate runtime validation fails", async () => {
+    const fixture = await repositoryFixture();
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-runtime", "pass");
+    const runHead = new GitBranchRunHead(fixture.repoDir, "run");
+
+    const result = await integrateWinner({
+      runId: id("run"),
+      winnerCommit: winner,
+      sandbox: fixture.sandbox,
+      policy: fixture.policy,
+      gates: fixture.gates,
+      runHead,
+      afterGates: async () => false,
+    });
+
+    expect(result.status).toBe("failed_runtime");
+    expect(result.advanced).toBe(false);
+    expect(await runHead.read()).toBe(fixture.base);
+  });
 });
 
 async function repositoryFixture(): Promise<{
