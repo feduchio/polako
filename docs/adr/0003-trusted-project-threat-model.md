@@ -1,6 +1,6 @@
 # ADR-0003: Trusted-project threat model for v1
 
-Status: accepted · Date: 2026-09-02
+Status: Accepted · Date: 2026-09-02
 
 ## Context
 

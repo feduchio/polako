@@ -1,6 +1,6 @@
 # ADR-0002: Event-sourced state with SQLite projections
 
-Status: accepted · Date: 2026-09-02
+Status: Accepted · Date: 2026-09-02
 
 ## Context
 

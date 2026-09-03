@@ -1,6 +1,6 @@
 # ADR-0001: Architecture of the polish orchestrator
 
-Status: accepted · Date: 2026-09-02
+Status: Accepted · Date: 2026-09-02
 
 ## Context
 
