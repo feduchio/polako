@@ -11,16 +11,19 @@ import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
+import { CommandPolicy } from "../sandbox/allowlist.js";
 import { probeModelCapabilities } from "../broker/capabilityProbe.js";
 import {
   PRODUCTION_DRIVER_PHASES,
   buildProductionDeps,
+  createWorkerFactory,
   installProductionDrivers,
   promoteEligibleTasksToReady,
 } from "./composition.js";
 import { createTaskFromRequirement } from "../domain/task.js";
 import { id } from "../shared/ids.js";
 import type { PhaseContext } from "../engine/types.js";
+import { AgentRunner } from "../agents/runner.js";
 
 describe("production composition", () => {
   let dir: string;
@@ -87,11 +90,87 @@ describe("production composition", () => {
     });
     const runId = id("run", clock.now());
     const discovery = await deps.catalog.discover({
-      capabilityProbe: (adapter, model) => probeModelCapabilities(adapter, model, { runId }),
+      maxProbesPerProvider: config.discovery.maxProbesPerProvider,
+      pinnedModels: [],
+      capabilityProbe: (adapter, model) =>
+        probeModelCapabilities(adapter, model, { runId, maxTokens: config.discovery.probeMaxTokens, skipHealth: true }),
     });
     expect(discovery.probes).toHaveLength(2);
     expect(deps.catalog.get({ provider: "scripted", model: "worker" })?.info.source).toBe("probe");
     expect(deps.catalog.get({ provider: "scripted", model: "worker" })?.available).toBe(true);
+  });
+
+  it("createWorkerFactory uses agent.maxTurns instead of retry.maxAttempts", async () => {
+    const provider = new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }]);
+    provider.script("worker", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "list", arguments: "{}" }] },
+      { kind: "reply", content: "", toolCalls: [{ id: "t2", name: "list", arguments: "{}" }] },
+    ]);
+    const config = defaultConfig();
+    config.retry.maxAttempts = 99;
+    config.agent.maxTurns = 1;
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+      resolveSandbox: (ctx) => new WorktreeSandbox(ctx.run.projectPath, join(dir, "worktrees", ctx.run.id), config.sandbox),
+    });
+    await deps.catalog.discover();
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-worker-turns-"));
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "demo" }));
+    const git = await Git.init(repoDir);
+    await git.commitAll("init");
+    const head = await git.revParse("HEAD");
+    const runId = id("run", clock.now());
+    const interpretationId = id("interp", clock.now());
+    const ctx = {
+      run: {
+        id: runId,
+        missionId: id("msn", clock.now()),
+        projectPath: repoDir,
+        runBranch: "polish/run",
+        phase: "EXECUTING",
+        control: "RUNNING",
+        currentCheckpointHash: head,
+        baselineId: null,
+        interpretationId,
+        createdAt: clock.now(),
+        updatedAt: clock.now(),
+        terminalReason: null,
+      },
+      store,
+      scheduler: new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock,
+      config,
+    } satisfies PhaseContext;
+    const worker = createWorkerFactory(deps, ctx)(0);
+    expect(worker).toBeInstanceOf(AgentRunner);
+    const task = createTaskFromRequirement(interpretationId, "R1", {
+      id: id("task", clock.now()),
+      runId,
+      title: "noop",
+      description: "WHAT: noop",
+      kind: "bugfix",
+      acceptance: ["noop"],
+      complexity: "trivial",
+      baseCheckpointHash: head,
+      now: clock.now(),
+    });
+    const sandbox = await new WorktreeSandbox(repoDir, join(dir, "worktrees", runId), config.sandbox).create({
+      id: id("cand", clock.now()),
+      baseCommit: head,
+      policy: CommandPolicy.forProject([], null, false, { packageScripts: [], search: true }),
+    });
+    try {
+      const result = await worker.runLoop(task, sandbox);
+      expect(result.turns).toBe(1);
+      expect(config.agent.maxTurns).not.toBe(config.retry.maxAttempts);
+    } finally {
+      await sandbox.destroy();
+      rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 
   it("promotes PENDING tasks with satisfied dependencies to READY", () => {

@@ -47,6 +47,7 @@ export const KNOWN_EVENT_TYPES = [
   "model.observation.recorded",
   "shell.command",
   "supervisor.decision",
+  "council.role_resolved",
   "budget.updated",
   "pathology.detected",
   "report.generated",

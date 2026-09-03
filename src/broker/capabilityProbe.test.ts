@@ -1,14 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { probeModelCapabilities } from "./capabilityProbe.js";
 import { ModelCatalog } from "./catalog.js";
-import { FAKE_CAPABILITIES, ScriptedProvider, reply } from "../providers/scripted.js";
+import { buildDiscoveryShortlist } from "./discoveryShortlist.js";
+import { FAKE_CAPABILITIES, ScriptedProvider, reply, type ScriptedModel } from "../providers/scripted.js";
 import type { ModelInfo, ProviderAdapter } from "./types.js";
+import { ProviderError } from "./types.js";
 import { id } from "../shared/ids.js";
+import { parseModelRefString } from "../daemon/configLoad.js";
 
 const RUN = id("run");
 
-function model(name: string, caps = FAKE_CAPABILITIES.strong): ModelInfo {
-  return { ref: { provider: "p", model: name }, displayName: name, capabilities: caps, source: "provider" };
+function model(name: string, caps: ModelInfo["capabilities"] = FAKE_CAPABILITIES.strong, cost = 1): ModelInfo {
+  return {
+    ref: { provider: "p", model: name },
+    displayName: name,
+    capabilities: { ...caps, inputCostPerM: cost, outputCostPerM: cost },
+    source: "provider",
+  };
+}
+
+function manyModels(count: number): ModelInfo[] {
+  return Array.from({ length: count }, (_, index) =>
+    model(`model-${String(index).padStart(2, "0")}`, FAKE_CAPABILITIES.fast, index + 1),
+  );
 }
 
 describe("probeModelCapabilities", () => {
@@ -22,13 +36,15 @@ describe("probeModelCapabilities", () => {
     expect(result.available).toBe(true);
     expect(result.checks.health.ok).toBe(true);
     expect(result.checks.tools.ok).toBe(true);
+    expect(result.checks.tools.verdict).toBe("supported");
     expect(result.checks.json.ok).toBe(true);
+    expect(result.checks.json.verdict).toBe("supported");
     expect(result.info.source).toBe("probe");
     expect(result.info.capabilities.supportsTools).toBe(true);
     expect(result.info.capabilities.supportsJson).toBe(true);
   });
 
-  it("clears capabilities when probes fail but health succeeds", async () => {
+  it("treats finish=stop prose without tool_calls as inconclusive and preserves declared supportsTools", async () => {
     const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.frontier }]);
     provider.script("m", [
       { kind: "reply", content: "plain text only" },
@@ -37,9 +53,85 @@ describe("probeModelCapabilities", () => {
     const result = await probeModelCapabilities(provider, model("m"), { runId: RUN });
     expect(result.available).toBe(true);
     expect(result.checks.tools.ok).toBe(false);
+    expect(result.checks.tools.verdict).toBe("inconclusive");
+    expect(result.info.capabilities.supportsTools).toBe(true);
     expect(result.checks.json.ok).toBe(false);
-    expect(result.info.capabilities.supportsTools).toBe(false);
+    expect(result.checks.json.verdict).toBe("unsupported");
     expect(result.info.capabilities.supportsJson).toBe(false);
+  });
+
+  it("treats ProviderError timeout on tools probe as inconclusive and preserves declared supportsTools", async () => {
+    const provider = new ScriptedProvider("p", [
+      { name: "m", capabilities: { ...FAKE_CAPABILITIES.strong, supportsTools: true, supportsJson: true } },
+    ]);
+    provider.script("m", [
+      { kind: "error", error: new ProviderError("p", "timeout", "request timed out") },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const result = await probeModelCapabilities(provider, model("m"), { runId: RUN });
+    expect(result.available).toBe(true);
+    expect(result.checks.tools.verdict).toBe("inconclusive");
+    expect(result.info.capabilities.supportsTools).toBe(true);
+    expect(result.checks.json.verdict).toBe("supported");
+  });
+
+  it("treats finish=length as inconclusive and preserves declared supportsTools", async () => {
+    const provider = new ScriptedProvider("p", [
+      { name: "m", capabilities: { ...FAKE_CAPABILITIES.strong, supportsTools: true, supportsJson: true } },
+    ]);
+    provider.script("m", [
+      { kind: "fn", fn: () => reply("truncated", 10, 5, null, undefined, "length") },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const result = await probeModelCapabilities(provider, model("m"), { runId: RUN, maxTokens: 256 });
+    expect(result.available).toBe(true);
+    expect(result.checks.tools.verdict).toBe("inconclusive");
+    expect(result.info.capabilities.supportsTools).toBe(true);
+    expect(result.checks.json.verdict).toBe("supported");
+  });
+
+  it("treats tools finish=error with prose as inconclusive and preserves declared supportsTools", async () => {
+    const provider = new ScriptedProvider("p", [
+      { name: "m", capabilities: { ...FAKE_CAPABILITIES.strong, supportsTools: true, supportsJson: true } },
+    ]);
+    provider.script("m", [
+      { kind: "fn", fn: () => reply("plain text only", 10, 5, null, undefined, "error") },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const result = await probeModelCapabilities(provider, model("m"), { runId: RUN });
+    expect(result.available).toBe(true);
+    expect(result.checks.tools.verdict).toBe("inconclusive");
+    expect(result.info.capabilities.supportsTools).toBe(true);
+    expect(result.checks.json.verdict).toBe("supported");
+  });
+
+  it("treats tools finish=content_filter as inconclusive and preserves declared supportsTools", async () => {
+    const provider = new ScriptedProvider("p", [
+      { name: "m", capabilities: { ...FAKE_CAPABILITIES.strong, supportsTools: true, supportsJson: true } },
+    ]);
+    provider.script("m", [
+      { kind: "fn", fn: () => reply("", 10, 5, null, undefined, "content_filter") },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const result = await probeModelCapabilities(provider, model("m"), { runId: RUN });
+    expect(result.available).toBe(true);
+    expect(result.checks.tools.verdict).toBe("inconclusive");
+    expect(result.info.capabilities.supportsTools).toBe(true);
+    expect(result.checks.json.verdict).toBe("supported");
+  });
+
+  it("treats json finish=error with valid JSON body as supported", async () => {
+    const provider = new ScriptedProvider("p", [
+      { name: "m", capabilities: { ...FAKE_CAPABILITIES.strong, supportsTools: true, supportsJson: true } },
+    ]);
+    provider.script("m", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "fn", fn: () => reply('{"probe":"ok"}', 10, 5, null, undefined, "error") },
+    ]);
+    const result = await probeModelCapabilities(provider, model("m"), { runId: RUN });
+    expect(result.available).toBe(true);
+    expect(result.checks.json.verdict).toBe("supported");
+    expect(result.info.capabilities.supportsJson).toBe(true);
   });
 
   it("disables the model when health fails", async () => {
@@ -55,12 +147,63 @@ describe("probeModelCapabilities", () => {
     const result = await probeModelCapabilities(unhealthy, model("m"), { runId: RUN });
     expect(result.available).toBe(false);
     expect(result.checks.health.ok).toBe(false);
+    expect(result.checks.health.verdict).toBe("unsupported");
     expect(provider.calls).toHaveLength(0);
   });
 });
 
-describe("ModelCatalog discovery with probes", () => {
-  it("disables models on probe failure without crashing provider discovery", async () => {
+describe("bounded catalog discovery", () => {
+  it("probes only the shortlist cap, not every listed model", async () => {
+    const models: ScriptedModel[] = Array.from({ length: 50 }, (_, index) => ({
+      name: `model-${String(index).padStart(2, "0")}`,
+      capabilities: { ...FAKE_CAPABILITIES.fast, inputCostPerM: index, outputCostPerM: index },
+    }));
+    const provider = new ScriptedProvider("p", models);
+    for (const entry of models) {
+      provider.script(entry.name, [
+        { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+        { kind: "reply", content: '{"probe":"ok"}' },
+      ]);
+    }
+    const catalog = new ModelCatalog();
+    catalog.register(provider);
+    const discovery = await catalog.discover({
+      maxProbesPerProvider: 3,
+      pinnedModels: [],
+      capabilityProbe: (adapter, m) => probeModelCapabilities(adapter, m, { runId: RUN, skipHealth: true }),
+    });
+    expect(discovery.discovered).toBe(50);
+    expect(discovery.probes).toHaveLength(3);
+    const probeCalls = provider.calls.filter((call) => call.metadata.purpose.startsWith("capability_probe"));
+    expect(probeCalls).toHaveLength(6);
+    expect(catalog.list()).toHaveLength(50);
+  });
+
+  it("always probes pinned supervisor models in addition to the shortlist cap", async () => {
+    const models: ScriptedModel[] = Array.from({ length: 50 }, (_, index) => ({
+      name: `model-${String(index).padStart(2, "0")}`,
+      capabilities: { ...FAKE_CAPABILITIES.fast, inputCostPerM: index, outputCostPerM: index },
+    }));
+    models.push({ name: "pinned-council", capabilities: { ...FAKE_CAPABILITIES.strong } });
+    const provider = new ScriptedProvider("p", models);
+    for (const entry of models) {
+      provider.script(entry.name, [
+        { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+        { kind: "reply", content: '{"probe":"ok"}' },
+      ]);
+    }
+    const catalog = new ModelCatalog();
+    catalog.register(provider);
+    const discovery = await catalog.discover({
+      maxProbesPerProvider: 3,
+      pinnedModels: [parseModelRefString("p:pinned-council")],
+      capabilityProbe: (adapter, m) => probeModelCapabilities(adapter, m, { runId: RUN, skipHealth: true }),
+    });
+    expect(discovery.probes).toHaveLength(4);
+    expect(discovery.probes.some((probe) => probe.info.ref.model === "pinned-council")).toBe(true);
+  });
+
+  it("records probe errors without disabling models when health succeeded", async () => {
     const provider = new ScriptedProvider("p", [{ name: "good", capabilities: FAKE_CAPABILITIES.strong }, { name: "bad", capabilities: FAKE_CAPABILITIES.strong }]);
     provider.script("good", [
       { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
@@ -69,14 +212,16 @@ describe("ModelCatalog discovery with probes", () => {
     const catalog = new ModelCatalog();
     catalog.register(provider);
     const discovery = await catalog.discover({
+      maxProbesPerProvider: 8,
+      pinnedModels: [],
       capabilityProbe: async (adapter, m) => {
         if (m.ref.model === "bad") throw new Error("probe exploded");
-        return probeModelCapabilities(adapter, m, { runId: RUN });
+        return probeModelCapabilities(adapter, m, { runId: RUN, skipHealth: true });
       },
     });
     expect(discovery.errors["p/bad:probe"]).toMatch(/probe exploded/);
     expect(catalog.get({ provider: "p", model: "good" })?.available).toBe(true);
-    expect(catalog.get({ provider: "p", model: "bad" })?.available).toBe(false);
+    expect(catalog.get({ provider: "p", model: "bad" })?.available).toBe(true);
     expect(catalog.get({ provider: "p", model: "good" })?.info.source).toBe("probe");
   });
 
@@ -99,10 +244,20 @@ describe("ModelCatalog discovery with probes", () => {
     catalog.register(ok);
     catalog.register(broken);
     const discovery = await catalog.discover({
-      capabilityProbe: (adapter, m) => probeModelCapabilities(adapter, m, { runId: RUN }),
+      maxProbesPerProvider: 8,
+      pinnedModels: [],
+      capabilityProbe: (adapter, m) => probeModelCapabilities(adapter, m, { runId: RUN, skipHealth: true }),
     });
     expect(discovery.errors["fail"]).toMatch(/network down/);
     expect(catalog.get({ provider: "ok", model: "m" })?.available).toBe(true);
     expect(catalog.list().some((e) => e.info.ref.provider === "fail")).toBe(false);
+  });
+});
+
+describe("buildDiscoveryShortlist", () => {
+  it("prefers cheaper declared-tool models after pinned refs", () => {
+    const models = manyModels(5);
+    const shortlist = buildDiscoveryShortlist(models, "p", [models[4]!.ref], 2);
+    expect(shortlist.map((entry) => entry.ref.model)).toEqual(["model-04", "model-00", "model-01"]);
   });
 });

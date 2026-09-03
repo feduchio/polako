@@ -1,5 +1,6 @@
 import { modelRefKey, type ModelRef } from "../domain/common.js";
 import type { CapabilityProbeResult } from "./capabilityProbe.js";
+import { buildDiscoveryShortlist } from "./discoveryShortlist.js";
 import type { ModelInfo, ProviderAdapter } from "./types.js";
 
 export interface ModelStats {
@@ -24,6 +25,10 @@ export interface CatalogDiscoveryOptions {
   signal?: AbortSignal;
   /** Optional active verifier; concrete provider probes are injected to keep broker provider-agnostic. */
   capabilityProbe?: (adapter: ProviderAdapter, model: ModelInfo) => Promise<CapabilityProbeResult>;
+  /** When set with capabilityProbe, only shortlist models are probed (B11 bounded discovery). */
+  maxProbesPerProvider?: number;
+  /** Supervisor-pinned models always included in the shortlist before the probe cap. */
+  pinnedModels?: readonly ModelRef[];
 }
 
 export interface CatalogDiscoveryResult {
@@ -65,14 +70,36 @@ export class ModelCatalog {
     let discovered = 0;
     const errors: Record<string, string> = {};
     const probes: CapabilityProbeResult[] = [];
+    const bounded = options.capabilityProbe !== undefined && options.maxProbesPerProvider !== undefined;
+    const pinnedModels = options.pinnedModels ?? [];
+
     for (const [id, adapter] of this.providers) {
       try {
+        const health = await adapter.health(options.signal);
+        if (!health.ok) {
+          const detail = health.detail ?? "health check failed";
+          errors[id] = detail;
+          this.providerAvailable.set(id, false);
+          continue;
+        }
+        this.providerAvailable.set(id, true);
+
         const models = await adapter.listModels(options.signal);
         for (const model of models) {
-          if (options.capabilityProbe === undefined) {
-            this.upsert(model);
-            continue;
-          }
+          this.upsert(model);
+        }
+        discovered += models.length;
+
+        if (options.capabilityProbe === undefined) continue;
+
+        const maxProbes = options.maxProbesPerProvider;
+        const shortlist = bounded && maxProbes !== undefined
+          ? buildDiscoveryShortlist(models, id, pinnedModels, maxProbes)
+          : models;
+        const shortlistKeys = new Set(shortlist.map((model) => modelRefKey(model.ref)));
+
+        for (const model of models) {
+          if (!shortlistKeys.has(modelRefKey(model.ref))) continue;
           try {
             const result = await options.capabilityProbe(adapter, model);
             probes.push(result);
@@ -81,12 +108,9 @@ export class ModelCatalog {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             errors[`${id}/${model.ref.model}:probe`] = message;
-            this.upsert({ ...model, source: "probe" });
-            this.setModelAvailable(model.ref, false);
+            this.upsert(model);
           }
         }
-        discovered += models.length;
-        this.providerAvailable.set(id, true);
       } catch (err) {
         errors[id] = err instanceof Error ? err.message : String(err);
         this.providerAvailable.set(id, false);

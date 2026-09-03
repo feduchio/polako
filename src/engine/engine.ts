@@ -78,7 +78,8 @@ export class RunEngine {
       id: runId,
       missionId,
       projectPath: input.projectPath,
-      runBranch: input.runBranch ?? `polish/${runId}`,
+      // Must not equal `polish/${runId}` — candidate worktrees use `polish/${runId}/candidates/…` branches.
+      runBranch: input.runBranch ?? `polish/${runId}/run`,
       phase: "CREATED",
       control: "RUNNING",
       currentCheckpointHash: null,

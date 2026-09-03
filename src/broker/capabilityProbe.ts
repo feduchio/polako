@@ -1,10 +1,18 @@
 import type { ModelInfo, ProviderAdapter, CompletionRequest } from "./types.js";
 import { ProviderError } from "./types.js";
 
+export type ProbeVerdict = "supported" | "unsupported" | "inconclusive" | "probe_failed";
+
+export interface CapabilityProbeCheck {
+  ok: boolean;
+  verdict: ProbeVerdict;
+  detail?: string;
+}
+
 export interface CapabilityProbeChecks {
-  health: { ok: boolean; detail?: string };
-  tools: { ok: boolean; detail?: string };
-  json: { ok: boolean; detail?: string };
+  health: CapabilityProbeCheck;
+  tools: CapabilityProbeCheck;
+  json: CapabilityProbeCheck;
 }
 
 export interface CapabilityProbeResult {
@@ -19,73 +27,108 @@ const PROBE_TOOL = {
   parameters: { type: "object", properties: {}, additionalProperties: false },
 };
 
+const DEFAULT_PROBE_MAX_TOKENS = 256;
+
 /**
- * Actively verify health/tools/json for one model. Listing metadata is not trusted:
- * failed checks disable the model or clear the corresponding capability flag.
+ * Actively verify health/tools/json for one model. Declared capabilities are preserved when
+ * probes are inconclusive or fail without an explicit denial.
  */
 export async function probeModelCapabilities(
   adapter: ProviderAdapter,
   model: ModelInfo,
-  ctx: { runId: string; signal?: AbortSignal },
+  ctx: { runId: string; signal?: AbortSignal; maxTokens?: number; skipHealth?: boolean },
 ): Promise<CapabilityProbeResult> {
+  const probeMaxTokens = ctx.maxTokens ?? DEFAULT_PROBE_MAX_TOKENS;
   const checks: CapabilityProbeChecks = {
-    health: { ok: false },
-    tools: { ok: false },
-    json: { ok: false },
+    health: { ok: false, verdict: "unsupported" },
+    tools: { ok: false, verdict: "probe_failed" },
+    json: { ok: false, verdict: "probe_failed" },
   };
 
-  const health = await adapter.health(ctx.signal);
-  checks.health = health.ok ? { ok: true, ...(health.detail !== undefined ? { detail: health.detail } : {}) } : { ok: false, ...(health.detail !== undefined ? { detail: health.detail } : {}) };
-  if (!health.ok) {
-    return {
-      info: probedInfo(model, model.capabilities.supportsTools, model.capabilities.supportsJson),
-      available: false,
-      checks,
-    };
+  if (ctx.skipHealth !== true) {
+    const health = await adapter.health(ctx.signal);
+    checks.health = health.ok
+      ? { ok: true, verdict: "supported", ...(health.detail !== undefined ? { detail: health.detail } : {}) }
+      : { ok: false, verdict: "unsupported", ...(health.detail !== undefined ? { detail: health.detail } : {}) };
+    if (!health.ok) {
+      return {
+        info: probedInfo(model, model.capabilities.supportsTools, model.capabilities.supportsJson),
+        available: false,
+        checks,
+      };
+    }
+  } else {
+    checks.health = { ok: true, verdict: "supported" };
   }
 
-  let supportsTools = false;
+  let toolsVerdict: ProbeVerdict;
   try {
     const toolsRequest: CompletionRequest = {
       model: model.ref,
       messages: [{ role: "user", content: "Call probe_ping." }],
       tools: [PROBE_TOOL],
-      maxTokens: 32,
+      maxTokens: probeMaxTokens,
       temperature: 0,
       metadata: { runId: ctx.runId, purpose: "capability_probe_tools", role: "probe" },
     };
     if (ctx.signal !== undefined) toolsRequest.signal = ctx.signal;
     const tools = await adapter.complete(toolsRequest);
-    supportsTools = tools.finishReason === "tool_calls" || (tools.message.toolCalls?.length ?? 0) > 0;
-    checks.tools = supportsTools ? { ok: true } : { ok: false, detail: `finish=${tools.finishReason}` };
+    const hasToolCalls = tools.finishReason === "tool_calls" || (tools.message.toolCalls?.length ?? 0) > 0;
+    toolsVerdict = hasToolCalls ? "supported" : "inconclusive";
+    checks.tools = {
+      ok: toolsVerdict === "supported",
+      verdict: toolsVerdict,
+      ...(toolsVerdict === "supported" ? {} : { detail: `finish=${tools.finishReason}` }),
+    };
   } catch (err) {
-    checks.tools = { ok: false, detail: probeErrorDetail(err) };
+    toolsVerdict = probeErrorVerdict(err);
+    checks.tools = { ok: false, verdict: toolsVerdict, detail: probeErrorDetail(err) };
   }
 
-  let supportsJson = false;
+  let jsonVerdict: ProbeVerdict;
   try {
     const jsonRequest: CompletionRequest = {
       model: model.ref,
       messages: [{ role: "user", content: 'Reply with JSON only: {"probe":"ok"}' }],
       responseFormat: "json",
-      maxTokens: 32,
+      maxTokens: probeMaxTokens,
       temperature: 0,
       metadata: { runId: ctx.runId, purpose: "capability_probe_json", role: "probe" },
     };
     if (ctx.signal !== undefined) jsonRequest.signal = ctx.signal;
     const json = await adapter.complete(jsonRequest);
-    supportsJson = json.finishReason !== "error" && looksLikeJson(json.message.content);
-    checks.json = supportsJson ? { ok: true } : { ok: false, detail: `content=${json.message.content.slice(0, 40)}` };
+    if (looksLikeJson(json.message.content)) {
+      jsonVerdict = "supported";
+    } else if (isInconclusiveJsonResult(json.finishReason, json.message.content)) {
+      jsonVerdict = "inconclusive";
+    } else {
+      jsonVerdict = "unsupported";
+    }
+    checks.json = {
+      ok: jsonVerdict === "supported",
+      verdict: jsonVerdict,
+      ...(jsonVerdict === "supported" ? {} : { detail: `content=${json.message.content.slice(0, 40)}` }),
+    };
   } catch (err) {
-    checks.json = { ok: false, detail: probeErrorDetail(err) };
+    jsonVerdict = probeErrorVerdict(err);
+    checks.json = { ok: false, verdict: jsonVerdict, detail: probeErrorDetail(err) };
   }
 
-  const available = checks.health.ok;
   return {
-    info: probedInfo(model, supportsTools, supportsJson),
-    available,
+    info: probedInfo(
+      model,
+      resolveCapability(model.capabilities.supportsTools, toolsVerdict),
+      resolveCapability(model.capabilities.supportsJson, jsonVerdict),
+    ),
+    available: checks.health.ok,
     checks,
   };
+}
+
+function resolveCapability(declared: boolean, verdict: ProbeVerdict): boolean {
+  if (verdict === "supported") return true;
+  if (verdict === "unsupported") return false;
+  return declared;
 }
 
 function probedInfo(model: ModelInfo, supportsTools: boolean, supportsJson: boolean): ModelInfo {
@@ -94,6 +137,24 @@ function probedInfo(model: ModelInfo, supportsTools: boolean, supportsJson: bool
     source: "probe",
     capabilities: { ...model.capabilities, supportsTools, supportsJson },
   };
+}
+
+function isInconclusiveJsonResult(finishReason: string, content: string): boolean {
+  if (finishReason === "length") return true;
+  if (content.trim().length === 0) return true;
+  if (finishReason === "error") return true;
+  if (finishReason === "content_filter") return true;
+  return false;
+}
+
+function explicitDenial(err: unknown): boolean {
+  return err instanceof ProviderError && err.kind === "bad_request";
+}
+
+function probeErrorVerdict(err: unknown): ProbeVerdict {
+  if (explicitDenial(err)) return "unsupported";
+  if (err instanceof ProviderError && err.kind === "timeout") return "inconclusive";
+  return "probe_failed";
 }
 
 function looksLikeJson(content: string): boolean {

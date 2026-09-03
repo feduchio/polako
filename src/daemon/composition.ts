@@ -52,6 +52,7 @@ import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { MissionAcceptanceService, type Store } from "../store/index.js";
 import type { FacadeRunMetadata } from "./types.js";
+import { parseModelRefString } from "./configLoad.js";
 
 export interface RunBudgetLimits {
   budgetTokens?: number;
@@ -116,7 +117,7 @@ export function parseRuntimeMode(value: string): RuntimeCapabilityMode {
 export function buildProductionDeps(options: BuildProductionDepsOptions): ProductionDeps {
   const secrets = SecretStore.fromFile(join(options.home, "secrets.env"));
   const catalog = new ModelCatalog();
-  const providers = options.providers ?? loadConfiguredProviders(options.config, secrets);
+  const providers = options.providers ?? loadConfiguredProviders(options.config, secrets, options.home);
   for (const provider of providers) catalog.register(provider);
   const broker = new ModelBroker({
     store: options.store,
@@ -319,7 +320,7 @@ function withReadyPromotion(driver: PhaseDriver): PhaseDriver {
 export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps): void {
   engine.registerPhase("CREATED", () => ({ status: "complete", nextPhase: "DISCOVERING_PROJECT" }));
   const profileResolver = (ctx: PhaseContext) => resolveDiscoveredProfile(ctx);
-  const councilRoles = () => resolveCouncilRoles(deps);
+  const councilRoles = (ctx: PhaseContext) => resolveCouncilRoles(deps, ctx);
   const candidateOptions = {
     sandbox: (ctx: PhaseContext) => resolveSandbox(deps, ctx),
     policy: (ctx: PhaseContext) => commandPolicyFor(ctx, resolveDiscoveredProfile(ctx)),
@@ -350,9 +351,17 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
 }
 
 function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
+  const pinnedModels = deps.config.supervisors.map((entry) => parseModelRefString(entry.model));
   return async (ctx) => {
     const discovery = await deps.catalog.discover({
-      capabilityProbe: (adapter, model) => probeModelCapabilities(adapter, model, { runId: ctx.run.id }),
+      maxProbesPerProvider: deps.config.discovery.maxProbesPerProvider,
+      pinnedModels,
+      capabilityProbe: (adapter, model) =>
+        probeModelCapabilities(adapter, model, {
+          runId: ctx.run.id,
+          maxTokens: deps.config.discovery.probeMaxTokens,
+          skipHealth: true,
+        }),
     });
     const probeEvents: NewEvent[] = discovery.probes.map((probe) => ({
       id: id("evt", ctx.clock.now()),
@@ -376,7 +385,7 @@ function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDr
   };
 }
 
-function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
+export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
   const ranked = deps.router.select({ role: "worker", count: deps.config.candidates.normal, requireTools: true });
   return (index: number) => {
     const model = ranked[index % Math.max(ranked.length, 1)]?.entry.info.ref ?? {
@@ -389,28 +398,65 @@ function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
       artifacts: deps.store.artifacts,
       model,
       commandPolicy: commandPolicyFor(ctx, resolveDiscoveredProfile(ctx)),
-      maxTurns: deps.config.retry.maxAttempts,
+      maxTurns: deps.config.agent.maxTurns,
       maxTokens: deps.config.budget.maxTaskTokens ?? 32_000,
       now: () => deps.clock.now(),
     });
   };
 }
 
-function resolveCouncilRoles(deps: ProductionDeps): CouncilRoleConfigs {
+export function resolveCouncilRoles(deps: ProductionDeps, ctx?: PhaseContext): CouncilRoleConfigs {
   const client = brokerCouncilClient(deps.broker);
-  const pick = (role: "supervisor" | "judge") => {
-    const ranked = deps.router.select({ role, count: 1, requireJson: true });
+  const resolveRole = (
+    role: "planner" | "scope_guardian" | "judge",
+    routerRole: "supervisor" | "judge",
+  ): CouncilRoleConfigs["planner"] => {
+    const pinned = deps.config.supervisors.find((entry) => entry.role === role);
+    if (pinned !== undefined) {
+      const model = parseModelRefString(pinned.model);
+      if (ctx !== undefined) recordCouncilRoleProvenance(ctx, role, model, { configSource: "pinned" });
+      return { client, model };
+    }
+    const ranked = deps.router.select({ role: routerRole, count: 1, requireJson: true });
     const entry = ranked[0];
     if (entry === undefined) {
       throw new PolishError("CONFIG_ERROR", `no models available for council role ${role}`);
     }
-    return { client, model: entry.entry.info.ref };
+    const model = entry.entry.info.ref;
+    if (ctx !== undefined) {
+      recordCouncilRoleProvenance(ctx, role, model, { fallbackReason: `router.select:${routerRole}` });
+    }
+    return { client, model };
   };
   return {
-    planner: pick("supervisor"),
-    scope_guardian: pick("supervisor"),
-    judge: pick("judge"),
+    planner: resolveRole("planner", "supervisor"),
+    scope_guardian: resolveRole("scope_guardian", "supervisor"),
+    judge: resolveRole("judge", "judge"),
   };
+}
+
+function recordCouncilRoleProvenance(
+  ctx: PhaseContext,
+  role: "planner" | "scope_guardian" | "judge",
+  model: { provider: string; model: string },
+  source: { configSource: "pinned" } | { fallbackReason: string },
+): void {
+  const event: NewEvent = {
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: "council.role_resolved",
+    payload: {
+      role,
+      provider: model.provider,
+      model: model.model,
+      ...source,
+    },
+    causedBy: [],
+    actor: { kind: "supervisor", role: "council" },
+    artifacts: [],
+  };
+  ctx.store.events.append([event]);
 }
 
 function brokerCouncilClient(broker: ModelBroker): CouncilCompletionClient {
@@ -477,12 +523,18 @@ function resolveSandbox(deps: ProductionDeps, ctx: PhaseContext): Sandbox {
   );
 }
 
-function loadConfiguredProviders(config: PolishConfig, secrets: SecretStore): ProviderAdapter[] {
+export function loadConfiguredProviders(config: PolishConfig, secrets: SecretStore, home: string): ProviderAdapter[] {
   const providers: ProviderAdapter[] = [];
   for (const entry of config.providers) {
-    if (!entry.enabled || entry.apiKeyEnv === undefined || !secrets.has(entry.apiKeyEnv)) continue;
+    if (!entry.enabled) continue;
+    if (entry.kind === "scripted" || entry.kind === "record-replay") {
+      const adapter = createProviderFromConfig(entry, "", { home });
+      if (adapter !== null) providers.push(adapter);
+      continue;
+    }
+    if (entry.apiKeyEnv === undefined || !secrets.has(entry.apiKeyEnv)) continue;
     const apiKey = secrets.get(entry.apiKeyEnv);
-    const adapter = createProviderFromConfig(entry, apiKey);
+    const adapter = createProviderFromConfig(entry, apiKey, { home });
     if (adapter !== null) providers.push(adapter);
   }
   return providers;

@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { defaultConfig, type PolishConfig } from "../domain/config.js";
+import { type PolishConfig } from "../domain/config.js";
 import { createMission } from "../domain/mission.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
@@ -19,6 +19,7 @@ import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { applyRunBranch } from "./apply.js";
+import { loadPolishConfig } from "./configLoad.js";
 import {
   buildProductionDeps,
   installProductionDrivers,
@@ -64,7 +65,7 @@ export class DaemonService implements RpcHandler {
     this.clock = options.clock ?? systemClock;
     mkdirSync(this.home, { recursive: true });
     this.store = openStore({ home: this.home });
-    this.config = defaultConfig();
+    this.config = loadPolishConfig(this.home);
     if (options.requiredCleanRounds !== undefined) {
       this.config.convergence.requiredCleanRounds = options.requiredCleanRounds;
     }
@@ -96,6 +97,16 @@ export class DaemonService implements RpcHandler {
       void this.tick();
     }, this.tickMs);
     this.timer.unref();
+  }
+
+  /** Loaded polish.toml (or defaults when the file is absent). */
+  getConfig(): PolishConfig {
+    return this.config;
+  }
+
+  /** Production broker/catalog wiring for diagnostics and daemon-level tests. */
+  productionComposition(): ProductionDeps {
+    return this.productionDeps;
   }
 
   async close(): Promise<void> {

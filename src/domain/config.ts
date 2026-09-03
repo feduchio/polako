@@ -79,6 +79,20 @@ export const BudgetSchema = z.object({
   maxRunWallClockMinutes: z.number().int().min(1).nullable().default(null),
 });
 
+export const DiscoveryConfigSchema = z.object({
+  /** max non-pinned models to actively probe per provider during discovery */
+  maxProbesPerProvider: z.number().int().min(1).default(8),
+  /** generation budget for each capability probe call */
+  probeMaxTokens: z.number().int().min(32).default(256),
+});
+export type DiscoveryConfig = z.infer<typeof DiscoveryConfigSchema>;
+
+export const AgentConfigSchema = z.object({
+  /** max tool-loop turns per worker invocation (not task retry attempts) */
+  maxTurns: z.number().int().min(1).default(32),
+});
+export type AgentConfig = z.infer<typeof AgentConfigSchema>;
+
 export const RuntimeValidationConfigSchema = z.object({
   mode: z.enum(["auto", "required", "off"]).default("auto"),
   level: z.enum(["smoke", "affected", "full"]).default("smoke"),
@@ -113,12 +127,17 @@ export const ProviderConfigSchema = z.object({
   apiKeyEnv: z.string().optional(),
   baseUrl: z.url().optional(),
   concurrency: z.number().int().min(1).optional(),
+  /** Scripted provider model names (relative to polish home for record-replay cassettes) */
+  models: z.array(z.string().min(1)).optional(),
+  cassette: z.string().optional(),
 });
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 
 export const PolishConfigSchema = z.object({
   home: z.string().default("~/.polish"),
   lanes: LaneLimitsSchema.prefault({}),
+  agent: AgentConfigSchema.prefault({}),
+  discovery: DiscoveryConfigSchema.prefault({}),
   retry: RetryPolicySchema.prefault({}),
   candidates: CandidateStrategySchema.prefault({}),
   review: ReviewStrategySchema.prefault({}),

@@ -80,11 +80,14 @@ export function reply(
   outputTokens = 5,
   costUsd: number | null = null,
   toolCalls?: { id: string; name: string; arguments: string }[],
+  finishReason?: CompletionResponse["finishReason"],
 ): CompletionResponse {
+  const resolvedFinish =
+    finishReason ?? (toolCalls ? "tool_calls" : "stop");
   return {
     message: toolCalls ? { role: "assistant", content, toolCalls } : { role: "assistant", content },
     usage: { inputTokens, outputTokens, costUsd },
-    finishReason: toolCalls ? "tool_calls" : "stop",
+    finishReason: resolvedFinish,
     latencyMs: 1,
   };
 }

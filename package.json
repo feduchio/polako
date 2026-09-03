@@ -23,6 +23,7 @@
     "check": "pnpm typecheck && pnpm lint && pnpm deps:check && pnpm test"
   },
   "dependencies": {
+    "smol-toml": "^1.8.0",
     "yaml": "^2.9.0",
     "zod": "^4.5.4"
   },
