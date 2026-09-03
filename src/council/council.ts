@@ -12,8 +12,9 @@ import {
 import { createTaskFromRequirement, type Task, type TaskKind } from "../domain/task.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { profileCacheKey } from "../project/discovery.js";
-import { PolishError } from "../shared/errors.js";
+import { PolishError, errorToString, isProvidersUnavailable } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
+import { isOperationalFailure } from "./operational.js";
 import { aggregateCouncilDecision } from "./judge.js";
 import { Judge, Planner, ScopeGuardian } from "./roles.js";
 import type {
@@ -76,16 +77,23 @@ export class SupervisorCouncil {
     this.baseline = baseline;
     const mission = normalizeMission(missionRaw, discovery.projectPath, this.now());
     const context = { mission, discovery, baseline };
-    const calls = await Promise.all([
-      this.planner.analyze({ runId: baseline.runId, purpose: "council_intake_planner", payload: context }),
-      this.scopeGuardian.analyze({ runId: baseline.runId, purpose: "council_intake_scope", payload: context }),
-      this.judge.analyze({ runId: baseline.runId, purpose: "council_intake_judge", payload: context }),
-    ]);
-    const opinions = calls.map((call) => call.opinion);
+    const labeled = [
+      { role: "planner" as const, promise: this.planner.analyze({ runId: baseline.runId, purpose: "council_intake_planner", payload: context }) },
+      { role: "scope_guardian" as const, promise: this.scopeGuardian.analyze({ runId: baseline.runId, purpose: "council_intake_scope", payload: context }) },
+      { role: "judge" as const, promise: this.judge.analyze({ runId: baseline.runId, purpose: "council_intake_judge", payload: context }) },
+    ];
+    const calls = await settleCouncilRoles(labeled);
+    const plannerCall = calls[0];
+    const scopeCall = calls[1];
+    const judgeCall = calls[2];
+    if (plannerCall === undefined || scopeCall === undefined || judgeCall === undefined) {
+      throw new PolishError("INVARIANT_VIOLATION", "council intake lost a sibling role result");
+    }
+    const opinions = [plannerCall.opinion, scopeCall.opinion, judgeCall.opinion];
     let interpretation: MissionInterpretation;
     try {
       interpretation = buildInterpretation(
-        calls[0].proposal,
+        plannerCall.proposal,
         mission,
         discovery,
         baseline,
@@ -140,14 +148,21 @@ export class SupervisorCouncil {
       throw new PolishError("CONFIG_ERROR", "decompose requires prior intake or explicit runId and baseCheckpointHash");
     }
     const context = { interpretation };
-    const calls = await Promise.all([
-      this.planner.analyze({ runId, purpose: "council_decompose_planner", payload: context }),
-      this.scopeGuardian.analyze({ runId, purpose: "council_decompose_scope", payload: context }),
-      this.judge.analyze({ runId, purpose: "council_decompose_judge", payload: context }),
-    ]);
-    const opinions = calls.map((call) => call.opinion);
+    const labeled = [
+      { role: "planner" as const, promise: this.planner.analyze({ runId, purpose: "council_decompose_planner", payload: context }) },
+      { role: "scope_guardian" as const, promise: this.scopeGuardian.analyze({ runId, purpose: "council_decompose_scope", payload: context }) },
+      { role: "judge" as const, promise: this.judge.analyze({ runId, purpose: "council_decompose_judge", payload: context }) },
+    ];
+    const calls = await settleCouncilRoles(labeled);
+    const plannerCall = calls[0];
+    const scopeCall = calls[1];
+    const judgeCall = calls[2];
+    if (plannerCall === undefined || scopeCall === undefined || judgeCall === undefined) {
+      throw new PolishError("INVARIANT_VIOLATION", "council decompose lost a sibling role result");
+    }
+    const opinions = [plannerCall.opinion, scopeCall.opinion, judgeCall.opinion];
     const aggregate = aggregateCouncilDecision(opinions);
-    const causedBy = calls.flatMap((call) => (call.modelEventId === undefined ? [] : [call.modelEventId]));
+    const causedBy = [plannerCall, scopeCall, judgeCall].flatMap((call) => (call.modelEventId === undefined ? [] : [call.modelEventId]));
     if (aggregate === "NEEDS_HUMAN") {
       const decision = this.recordDecision(runId, "decompose", "NEEDS_HUMAN", opinions, causedBy, {
         interpretationId: interpretation.id,
@@ -156,8 +171,8 @@ export class SupervisorCouncil {
       return { tasks: [], roots: [], droppedRequirementRefs: [], decision };
     }
 
-    const allDrafts = taskProposals(calls[0].proposal, interpretation);
-    const { kept, dropped } = applyScopeFilter(allDrafts, calls[1].proposal, calls[2].proposal);
+    const allDrafts = taskProposals(plannerCall.proposal, interpretation);
+    const { kept, dropped } = applyScopeFilter(allDrafts, scopeCall.proposal, judgeCall.proposal);
     const drafts = kept;
     if (drafts.length === 0) {
       const decision = this.recordDecision(runId, "decompose", "NEEDS_HUMAN", opinions, causedBy, {
@@ -375,6 +390,44 @@ function stringArray(value: unknown): string[] {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+function settleCouncilRoles<T>(labeled: readonly { role: "planner" | "scope_guardian" | "judge"; promise: Promise<T> }[]): Promise<T[]> {
+  return Promise.allSettled(labeled.map((item) => item.promise)).then((settled) => {
+    const outcomes: { role: "planner" | "scope_guardian" | "judge"; status: "fulfilled" | "rejected"; error?: string }[] = [];
+    const rejected: { role: "planner" | "scope_guardian" | "judge"; reason: unknown }[] = [];
+    const values: T[] = [];
+    for (let index = 0; index < settled.length; index++) {
+      const result = settled[index];
+      const item = labeled[index];
+      if (result === undefined || item === undefined) continue;
+      if (result.status === "rejected") {
+        outcomes.push({ role: item.role, status: "rejected", error: errorToString(result.reason) });
+        rejected.push({ role: item.role, reason: result.reason });
+      } else {
+        outcomes.push({ role: item.role, status: "fulfilled" });
+        values.push(result.value);
+      }
+    }
+    if (rejected.length === 0) return values;
+    const operational = rejected.filter((item) => isOperationalFailure(item.reason) || isProvidersUnavailable(item.reason));
+    const first = operational[0];
+    if (first !== undefined) {
+      const details =
+        first.reason instanceof PolishError
+          ? { ...first.reason.details, siblingOutcomes: outcomes }
+          : { siblingOutcomes: outcomes };
+      throw new PolishError(
+        "PROVIDERS_UNAVAILABLE",
+        `council role(s) unavailable: ${operational.map((item) => item.role).join(", ")}`,
+        details,
+        first.reason instanceof Error ? { cause: first.reason } : undefined,
+      );
+    }
+    const fallback = rejected[0];
+    if (fallback === undefined) return values;
+    throw fallback.reason;
+  });
 }
 
 function firstConcern(opinions: RoleOpinion[]): string | undefined {

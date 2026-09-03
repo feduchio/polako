@@ -20,7 +20,9 @@
     "deps:check": "depcruise src --config .dependency-cruiser.cjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "pnpm typecheck && pnpm lint && pnpm deps:check && pnpm test"
+    "check": "pnpm typecheck && pnpm lint && pnpm deps:check && pnpm test",
+    "cli:link": "node scripts/cli-link.mjs",
+    "cli:unlink": "node scripts/cli-unlink.mjs"
   },
   "dependencies": {
     "smol-toml": "^1.8.0",

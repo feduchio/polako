@@ -12,6 +12,8 @@ Use as Mission Acceptance Corpus / explicit contracts for the self-host mission.
 
 ## Remaining composition defects (self-host dogfood)
 
+Full Phase-B self-host closure is **DEFERRED_BY_USER** until operator observability/resilience is mature enough for multi-hour unattended work. These items remain OPEN. They are not optional and are not fixed.
+
 3. Multi-task DONE: `assertCodeChangeMissionMayComplete` does not require every required task terminal; after first integration FSM goes to REVIEWING.
 4. Planning re-entry duplicates original tasks (`createPlanningDriver` always full decompose).
 5. Review/evidence use `projectPath` (user checkout), not isolated checkout of `checkpointHash`.

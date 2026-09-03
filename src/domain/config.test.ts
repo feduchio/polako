@@ -13,6 +13,27 @@ describe("PolishConfig", () => {
     expect(cfg.routing.costEligibility).toBe("free_only");
     expect(cfg.routing.maxInputCostPerM).toBe(0);
     expect(cfg.routing.maxOutputCostPerM).toBe(0);
+    expect(cfg.council.maxAttemptsPerModel).toBe(2);
+  });
+
+  it("accepts an ordered supervisor fallback chain", () => {
+    const cfg = PolishConfigSchema.parse({
+      supervisors: [
+        {
+          role: "judge",
+          models: ["openrouter:z-ai/glm-5.2:free", "gemini:gemini-3.8-flash"],
+        },
+      ],
+    });
+    expect(cfg.supervisors[0]?.model).toBe("openrouter:z-ai/glm-5.2:free");
+    expect(cfg.supervisors[0]?.models).toEqual([
+      "openrouter:z-ai/glm-5.2:free",
+      "gemini:gemini-3.8-flash",
+    ]);
+  });
+
+  it("rejects a supervisor pin with neither model nor models", () => {
+    expect(() => PolishConfigSchema.parse({ supervisors: [{ role: "judge" }] })).toThrow();
   });
 
   it("rejects an integration lane wider than 1", () => {

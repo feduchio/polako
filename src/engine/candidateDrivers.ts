@@ -115,6 +115,20 @@ export function createExecutingDriver(options: CandidateDriverOptions): PhaseDri
       policy,
       skipGates: true,
       gates,
+      onWorkerStart: ({ candidateId, index }) => {
+        ctx.store.events.append([
+          {
+            id: id("evt", ctx.clock.now()),
+            runId: ctx.run.id,
+            ts: ctx.clock.now(),
+            type: "worker.started",
+            payload: { candidateId, index, taskId: running.id, model: { provider: "worker", model: `candidate-${index}` } },
+            causedBy: [],
+            actor: { kind: "worker", model: { provider: "worker", model: `candidate-${index}` } },
+            artifacts: [],
+          },
+        ]);
+      },
       ...(corpus === undefined ? {} : { corpus }),
     });
 
@@ -642,6 +656,20 @@ async function resolveGates(ctx: PhaseContext, options: CandidateDriverOptions, 
     },
     verifyAcceptance: (checkoutDir, artifacts) => ctx.store.acceptance.verify(checkoutDir, artifacts),
     persistOutput: createCheckOutputPersister(ctx.store.artifacts),
+    onCheckStart: (info) => {
+      ctx.store.events.append([
+        {
+          id: id("evt", ctx.clock.now()),
+          runId: ctx.run.id,
+          ts: ctx.clock.now(),
+          type: "shell.command_started",
+          payload: { check: info.name, command: info.command, taskId: task.id },
+          causedBy: [],
+          actor: SYSTEM_ACTOR,
+          artifacts: [],
+        },
+      ]);
+    },
     protectedChangeWaivers: ctx.store.repos.protectedChangeWaivers.listByRun(ctx.run.id),
     protectedChangeScope: {
       runId: ctx.run.id,

@@ -15,6 +15,8 @@ export interface CouncilCompletionClient {
 export interface CouncilRoleConfig {
   client: CouncilCompletionClient;
   model: ModelRef;
+  /** Preference chain; defaults to `[model]` when omitted. */
+  models?: readonly ModelRef[];
 }
 
 export type CouncilRoleConfigs = Record<CouncilRole, CouncilRoleConfig>;

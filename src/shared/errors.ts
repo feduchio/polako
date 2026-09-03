@@ -10,7 +10,8 @@ export type PolishErrorCode =
   | "CONFIG_ERROR"
   | "IO_ERROR"
   | "INVALID_ARGUMENT"
-  | "BUDGET_EXCEEDED";
+  | "BUDGET_EXCEEDED"
+  | "PROVIDERS_UNAVAILABLE";
 
 export class PolishError extends Error {
   readonly code: PolishErrorCode;
@@ -35,4 +36,8 @@ export function isAbortError(err: unknown): boolean {
 export function errorToString(err: unknown): string {
   if (err instanceof Error) return `${err.name}: ${err.message}`;
   return String(err);
+}
+
+export function isProvidersUnavailable(err: unknown): boolean {
+  return err instanceof PolishError && err.code === "PROVIDERS_UNAVAILABLE";
 }

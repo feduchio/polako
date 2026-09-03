@@ -2,7 +2,10 @@
 import { pathToFileURL } from "node:url";
 import type { Event } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
+import { projectRunStatus } from "../observe/project.js";
+import { renderActivityFeed, renderRunStatus } from "../observe/render.js";
 import { callDaemon } from "./client.js";
+import { runWatch } from "./watch.js";
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   const [command, ...args] = argv;
@@ -29,13 +32,16 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       return;
     }
     case "status":
-      print(await callDaemon("status", optionalRunId(args)));
+      await statusCommand(args);
+      return;
+    case "watch":
+      await watchCommand(args);
       return;
     case "log":
       await logCommand(args);
       return;
     case "diff":
-      process.stdout.write(`${await callDaemon<string>("diff", runId(args))}\n`);
+      process.stdout.write(`${await callDaemon<string>("diff", runId(withoutBooleanFlags(args)))}\n`);
       return;
     case "pause":
     case "resume":
@@ -74,16 +80,61 @@ async function projectCommand(args: string[]): Promise<void> {
   }));
 }
 
+async function statusCommand(args: string[]): Promise<void> {
+  const json = args.includes("--json");
+  const id = args.find((arg) => !arg.startsWith("-"));
+  const result = await callDaemon<Run | Run[]>("status", id === undefined ? {} : { runId: id });
+  if (Array.isArray(result)) {
+    if (json) {
+      print(result);
+      return;
+    }
+    if (result.length === 0) {
+      process.stdout.write("No runs.\n");
+      return;
+    }
+    for (const run of result) {
+      process.stdout.write(`${run.id}  ${run.phase} / ${run.control}  ${run.projectPath}\n`);
+    }
+    return;
+  }
+  const events = await callDaemon<Event[]>("log", { runId: result.id, afterSeq: -1 });
+  const view = projectRunStatus(result, events, Date.now());
+  if (json) {
+    print(view);
+    return;
+  }
+  process.stdout.write(renderRunStatus(view));
+}
+
+async function watchCommand(args: string[]): Promise<void> {
+  const json = args.includes("--json");
+  const verbose = args.includes("--verbose");
+  const noColor = args.includes("--no-color") || process.env["NO_COLOR"] !== undefined;
+  const id = required(args.find((arg) => !arg.startsWith("-")), "run id");
+  await runWatch({
+    runId: id,
+    json,
+    verbose,
+    color: !noColor && process.stdout.isTTY,
+    isTTY: process.stdout.isTTY && !json,
+  });
+}
+
 async function logCommand(args: string[]): Promise<void> {
   const follow = args.includes("--follow") || args.includes("-f");
+  const json = args.includes("--json");
   const id = required(args.find((arg) => !arg.startsWith("-")), "run id");
   let afterSeq = -1;
   for (;;) {
     const events = await callDaemon<Event[]>("log", { runId: id, afterSeq });
-    for (const event of events) {
-      process.stdout.write(`${JSON.stringify(event)}\n`);
-      afterSeq = Math.max(afterSeq, event.seq);
+    if (json) {
+      for (const event of events) process.stdout.write(`${JSON.stringify(event)}\n`);
+    } else {
+      const body = renderActivityFeed(events);
+      if (body.length > 0) process.stdout.write(`${body}\n`);
     }
+    for (const event of events) afterSeq = Math.max(afterSeq, event.seq);
     if (!follow) return;
     const run = await callDaemon<Run>("status", { runId: id });
     if (isSettled(run)) return;
@@ -96,12 +147,8 @@ function isSettled(run: Run): boolean {
     run.control === "STOPPED" || run.control === "KILLED";
 }
 
-function optionalRunId(args: string[]): Record<string, unknown> {
-  return args[0] === undefined ? {} : { runId: args[0] };
-}
-
 function runId(args: string[]): { runId: string } {
-  return { runId: required(args[0], "run id") };
+  return { runId: required(args.find((arg) => !arg.startsWith("-")), "run id") };
 }
 
 function required(value: string | undefined, label: string): string {
@@ -134,6 +181,10 @@ function withoutFlags(args: string[], valueFlags: string[]): string[] {
   return values;
 }
 
+function withoutBooleanFlags(args: string[]): string[] {
+  return args.filter((arg) => !arg.startsWith("-"));
+}
+
 function print(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -141,12 +192,16 @@ function print(value: unknown): void {
 const usage = `Usage:
   polish project add [path] [--name name]
   polish run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n]
-  polish status [run-id]
-  polish log <run-id> [--follow]
+  polish status [run-id] [--json]
+  polish watch <run-id> [--verbose] [--json] [--no-color]
+  polish log <run-id> [--follow] [--json]
   polish diff <run-id>
   polish pause|resume|stop|kill <run-id>
   polish answer <run-id> <answer>
   polish apply <run-id>
+
+Local CLI setup (from the polish repo):
+  pnpm cli:link
 `;
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

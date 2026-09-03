@@ -126,11 +126,50 @@ export const SandboxConfigSchema = z.object({
 
 export type SandboxConfig = z.infer<typeof SandboxConfigSchema>;
 
-export const SupervisorRoleConfigSchema = z.object({
-  role: z.enum(["planner", "scope_guardian", "adversarial_auditor", "judge"]),
-  /** provider/model reference as configured by the user, e.g. "gemini:gemini-3.8-flash" */
-  model: z.string().min(1),
+/**
+ * Ordered preference chain for one Supervisor Council role.
+ * `model` remains valid for a single pin; `models` is the explicit fallback list.
+ * First entry is user preference, not a hard requirement that the endpoint succeed.
+ */
+export const SupervisorRoleConfigSchema = z
+  .object({
+    role: z.enum(["planner", "scope_guardian", "adversarial_auditor", "judge"]),
+    /** provider/model reference as configured by the user, e.g. "gemini:gemini-3.8-flash" */
+    model: z.string().min(1).optional(),
+    /** Ordered preference/fallback chain. Overrides `model` when non-empty. */
+    models: z.array(z.string().min(1)).optional(),
+  })
+  .superRefine((entry, ctx) => {
+    if (supervisorModelChain(entry).length === 0) {
+      ctx.addIssue({ code: "custom", message: "supervisor role requires model or models" });
+    }
+  })
+  .transform((entry) => {
+    const models = supervisorModelChain(entry);
+    return { role: entry.role, model: models[0] ?? "", models };
+  });
+export type SupervisorRoleConfig = z.infer<typeof SupervisorRoleConfigSchema>;
+
+/** Preferred-then-fallback model refs for a supervisor pin. */
+export function supervisorModelChain(entry: {
+  model?: string | undefined;
+  models?: readonly string[] | undefined;
+}): string[] {
+  if (entry.models !== undefined && entry.models.length > 0) return [...entry.models];
+  if (entry.model !== undefined && entry.model.length > 0) return [entry.model];
+  return [];
+}
+
+/**
+ * Bounded transient retry for a single council model before the next authorised fallback.
+ * Keep this short so a shared free endpoint is not hammered for minutes.
+ */
+export const CouncilRetryConfigSchema = z.object({
+  maxAttemptsPerModel: z.number().int().min(1).default(2),
+  baseBackoffMs: z.number().int().min(0).default(1_500),
+  maxBackoffMs: z.number().int().min(0).default(8_000),
 });
+export type CouncilRetryConfig = z.infer<typeof CouncilRetryConfigSchema>;
 
 export const ProviderConfigSchema = z.object({
   id: z.string().min(1),
@@ -161,6 +200,7 @@ export const PolishConfigSchema = z.object({
   budget: BudgetSchema.prefault({}),
   sandbox: SandboxConfigSchema.prefault({}),
   runtimeValidation: RuntimeValidationConfigSchema.prefault({}),
+  council: CouncilRetryConfigSchema.prefault({}),
   supervisors: z.array(SupervisorRoleConfigSchema).default([]),
   providers: z.array(ProviderConfigSchema).default([]),
 });

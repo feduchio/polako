@@ -40,6 +40,8 @@ export interface CheckRunOptions {
   only?: readonly string[];
   /** Dependency-injected CAS boundary; project intentionally does not import store. */
   persistOutput?: CheckOutputPersister;
+  /** Fired immediately before a check command starts so operators can see in-flight work. */
+  onCheckStart?: (info: { name: string; command: readonly string[] }) => void;
 }
 
 export interface ForensicCheckOutput {
@@ -92,6 +94,7 @@ export async function runChecks(opts: CheckRunOptions | BaselineCheckRunOptions)
 
 async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise<CheckResult> {
   const started = Date.now();
+  opts.onCheckStart?.({ name: def.name, command: def.command });
   try {
     const runOpts: { timeoutMs?: number; signal?: AbortSignal; cwd?: string } = {};
     if (def.timeoutMs !== undefined) runOpts.timeoutMs = def.timeoutMs;
@@ -638,6 +641,7 @@ export async function runIndependentGates(input: {
   baseline: BaselineSnapshot;
   signal?: AbortSignal;
   persistOutput?: CheckOutputPersister;
+  onCheckStart?: (info: { name: string; command: readonly string[] }) => void;
   protectedChangeWaivers?: readonly ProtectedChangeWaiver[];
   protectedChangeScope?: Omit<ProtectedChangeScope, "relativePath">;
   /** Store-backed authority check; schema-valid waiver objects alone are never trusted. */
@@ -727,6 +731,7 @@ export async function runIndependentGates(input: {
   };
   if (input.signal !== undefined) checkOpts.signal = input.signal;
   if (input.persistOutput !== undefined) checkOpts.persistOutput = input.persistOutput;
+  if (input.onCheckStart !== undefined) checkOpts.onCheckStart = input.onCheckStart;
   const evaluation = await runChecks(checkOpts);
   const checks = evaluation.checks;
   const waivedSilencingPaths = new Set(

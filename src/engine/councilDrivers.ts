@@ -2,6 +2,7 @@ import { SYSTEM_ACTOR } from "../domain/common.js";
 import type { ModelInfo } from "../broker/types.js";
 import type { NewEvent } from "../domain/event.js";
 import type { ProjectProfile } from "../project/profile.js";
+import { PolishError, isProvidersUnavailable } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { SupervisorCouncil, type CouncilEventSink, type CouncilRoleConfigs } from "../council/index.js";
 import { emitNeedsHumanReport } from "../report/emit.js";
@@ -80,7 +81,13 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
     if (baseline === undefined) return { status: "waiting" };
     const profile = await (options.resolveProfile ?? defaultProfile)(ctx);
     const council = createCouncil(ctx, options);
-    const result = await council.intake(mission, profile, baseline);
+    let result: IntakeResult;
+    try {
+      result = await council.intake(mission, profile, baseline);
+    } catch (error) {
+      recordCouncilUnavailable(ctx, error);
+      throw error;
+    }
 
     if (result.interpretation !== null) {
       const causedBy = result.decision.events.map((event) => event.id);
@@ -115,7 +122,13 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
     if (interpretation === null) return { status: "waiting" };
 
     const council = createCouncil(ctx, options);
-    const dag = await council.decompose(interpretation);
+    let dag: TaskDag;
+    try {
+      dag = await council.decompose(interpretation);
+    } catch (error) {
+      recordCouncilUnavailable(ctx, error);
+      throw error;
+    }
     if (dag.decision.decision === "NEEDS_HUMAN") {
       emitNeedsHumanReport(ctx, terminalReasonFromDecompose(dag), dag.decision.events.map((event) => event.id));
       return { status: "complete", nextPhase: "NEEDS_HUMAN" };
@@ -137,6 +150,30 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
     if (codingTasks.length > 0) return { status: "complete", nextPhase: "EXECUTING" };
     return { status: "complete", nextPhase: "REVIEWING" };
   };
+}
+
+function recordCouncilUnavailable(ctx: PhaseContext, error: unknown): void {
+  if (!isProvidersUnavailable(error)) return;
+  const details = error instanceof PolishError ? error.details : {};
+  const event: NewEvent = {
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: "council.unavailable",
+    payload: {
+      message: error instanceof Error ? error.message : String(error),
+      role: details["role"] ?? null,
+      attempted: details["attempted"] ?? [],
+      models: details["models"] ?? [],
+      siblingOutcomes: details["siblingOutcomes"] ?? [],
+      automaticRetryScheduled: false,
+      manualResumePossible: true,
+    },
+    causedBy: [],
+    actor: { kind: "supervisor", role: "council" },
+    artifacts: [],
+  };
+  ctx.store.events.append([event]);
 }
 
 function terminalReasonFromIntake(result: Extract<IntakeResult, { status: "NEEDS_HUMAN" }>): TerminalReason {

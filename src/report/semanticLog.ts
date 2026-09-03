@@ -126,7 +126,13 @@ function summarizeEvent(event: Event): string {
     case "supervisor.decision": return `Council decided ${text(event.payload["decision"], "outcome")}: ${text(event.payload["rationale"], "rationale recorded")}`;
     case "report.generated": return `Report generated${subject}`;
     case "model.call": return `Model call ${event.payload["ok"] === false ? "failed" : "completed"}: ${text(event.payload["purpose"], "unspecified purpose")}`;
+    case "model.call_started": return `Model call started: ${text(event.payload["purpose"], "unspecified purpose")}`;
+    case "model.retry_scheduled": return `Model retry scheduled: ${text(event.payload["errorKind"], "transient failure")}`;
+    case "model.fallback_selected": return `Model fallback selected`;
+    case "council.unavailable": return `Council unavailable: ${text(event.payload["role"], "role")}`;
     case "shell.command": return `Command completed: ${text(event.payload["command"], "shell command")}`;
+    case "shell.command_started": return `Command started: ${text(event.payload["command"], "shell command")}`;
+    case "worker.started": return `Worker started`;
     default: return `${event.type.replaceAll(".", " ")}${subject}`;
   }
 }

@@ -41,6 +41,7 @@ export interface CandidateGates {
     corpus?: MissionAcceptanceCorpus,
   ) => void;
   persistOutput?: CheckOutputPersister;
+  onCheckStart?: (info: { name: string; command: readonly string[] }) => void;
   protectedChangeWaivers?: readonly ProtectedChangeWaiver[];
   protectedChangeScope?: Omit<ProtectedChangeScope, "relativePath">;
   validateProtectedChangeWaiver?: (waiver: ProtectedChangeWaiver) => boolean;
@@ -89,6 +90,7 @@ export interface RunCandidatesParallelInput<TTask = Task> {
   signal?: AbortSignal;
   /** When true, stop after commit; gating runs in a later phase. */
   skipGates?: boolean;
+  onWorkerStart?: (info: { candidateId: string; index: number }) => void;
 }
 
 /**
@@ -131,6 +133,7 @@ async function runOneCandidate<TTask>(
     if (worker === undefined) {
       throw new RangeError("either workerFactory or worker must be provided");
     }
+    input.onWorkerStart?.({ candidateId, index });
     workerOutcome = await worker.run(input.task, candidate);
     if (workerOutcome.status !== "completed") {
       return result({
@@ -240,6 +243,7 @@ export async function runGates(input: {
     ...(input.corpus === undefined ? {} : { acceptanceCorpus: input.corpus }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
     ...(input.gates.persistOutput === undefined ? {} : { persistOutput: input.gates.persistOutput }),
+    ...(input.gates.onCheckStart === undefined ? {} : { onCheckStart: input.gates.onCheckStart }),
     ...(input.gates.protectedChangeWaivers === undefined
       ? {}
       : { protectedChangeWaivers: input.gates.protectedChangeWaivers }),

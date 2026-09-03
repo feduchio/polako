@@ -68,6 +68,22 @@ mode = "off"
     expect(config.supervisors[0]?.model).toBe("scripted:planner");
   });
 
+  it("parses a supervisor fallback chain from models", () => {
+    const home = mkdtempSync(join(tmpdir(), "polish-config-chain-"));
+    dirs.push(home);
+    writeFileSync(
+      join(home, "polish.toml"),
+      `
+[[supervisors]]
+role = "judge"
+models = ["openrouter:glm", "gemini:flash", "openrouter:minimax"]
+`,
+    );
+    const config = loadPolishConfig(home);
+    expect(config.supervisors[0]?.model).toBe("openrouter:glm");
+    expect(config.supervisors[0]?.models).toEqual(["openrouter:glm", "gemini:flash", "openrouter:minimax"]);
+  });
+
   it("parses routing cost eligibility from polish.toml", () => {
     const home = mkdtempSync(join(tmpdir(), "polish-config-routing-"));
     dirs.push(home);
@@ -224,6 +240,7 @@ model = "scripted:judge"
     expect(roles.planner.model).toEqual({ provider: "scripted", model: "planner" });
     expect(roles.scope_guardian.model).toEqual({ provider: "scripted", model: "scope" });
     expect(roles.judge.model).toEqual({ provider: "scripted", model: "judge" });
+    expect(roles.judge.models).toEqual([{ provider: "scripted", model: "judge" }]);
 
     const provenance = store.events.list(runId, { types: ["council.role_resolved"] });
     expect(provenance).toHaveLength(3);

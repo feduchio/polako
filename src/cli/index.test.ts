@@ -8,6 +8,7 @@ describe("CLI parsing", () => {
     const output = write.mock.calls.map((call) => String(call[0])).join("");
     expect(output).toContain("polish project add");
     expect(output).toContain("polish apply");
+    expect(output).toContain("polish watch");
     write.mockRestore();
   });
 

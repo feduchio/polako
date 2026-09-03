@@ -74,6 +74,10 @@ describe("ModelBroker", () => {
     }
     expect(catalog.get({ provider: "p1", model: "big" })?.stats.calls).toBe(1);
     expect(budget.snapshot(runId)).toMatchObject({ runUsd: 0.01, runTokens: 150 });
+    expect(store.events.list(runId, { types: ["model.call_started"] })).toHaveLength(1);
+    expect(store.events.list(runId, { types: ["model.call"] })[0]?.payload["callId"]).toBe(
+      store.events.list(runId, { types: ["model.call_started"] })[0]?.payload["callId"],
+    );
   });
 
   it("retries retryable errors with backoff, cools down on rate limits, and gives up after maxAttempts", async () => {
@@ -106,6 +110,7 @@ describe("ModelBroker", () => {
     expect(err).toBeInstanceOf(ProviderError);
     const events = store.events.list(runId, { types: ["model.call"] });
     expect(events.at(-1)!.payload).toMatchObject({ ok: false, attempts: 3 });
+    expect(store.events.list(runId, { types: ["model.retry_scheduled"] }).length).toBeGreaterThanOrEqual(2);
   });
 
   it("does not retry non-retryable errors and marks the provider unavailable on auth failure", async () => {

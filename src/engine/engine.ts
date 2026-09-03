@@ -173,13 +173,22 @@ export class RunEngine {
     const driver = this.drivers.get(run.phase);
     if (!driver) return;
 
-    const result = await driver({
-      run,
-      store: this.store,
-      scheduler: this.scheduler,
-      clock: this.clock,
-      config: this.config,
-    });
+    let result;
+    try {
+      result = await driver({
+        run,
+        store: this.store,
+        scheduler: this.scheduler,
+        clock: this.clock,
+        config: this.config,
+      });
+    } catch (err) {
+      if (err instanceof PolishError && err.code === "PROVIDERS_UNAVAILABLE") {
+        this.control(runId, "pause");
+        return;
+      }
+      throw err;
+    }
     this.scheduler.tick();
     if (result.status === "waiting") return;
     // Persist the advance immediately (event-sourced); leftover jobs may still finish.

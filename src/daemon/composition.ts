@@ -9,9 +9,11 @@ import { DEFAULT_ROUTER_POLICY, ModelRouter } from "../broker/router.js";
 import { BudgetTracker, QuotaTracker } from "../broker/quota.js";
 import { SecretStore } from "../broker/secrets.js";
 import type { ProviderAdapter } from "../broker/types.js";
-import type { CouncilCompletionClient, CouncilRoleConfigs } from "../council/types.js";
+import { createResilientCouncilClient } from "../council/fallback.js";
+import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } from "../council/types.js";
 import type { RuntimeEvidence } from "../domain/acceptance.js";
 import type { PolishConfig } from "../domain/config.js";
+import { supervisorModelChain } from "../domain/config.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
 import { SYSTEM_ACTOR } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
@@ -253,6 +255,9 @@ export function createBaseliningDriver(deps: ProductionDeps): PhaseDriver {
         sandbox,
         profile,
         persistOutput: createCheckOutputPersister(ctx.store.artifacts),
+        onCheckStart: (info) => {
+          recordCheckStart(ctx, info);
+        },
       });
       const baseline = buildBaselineSnapshot({
         runId: ctx.run.id,
@@ -356,7 +361,9 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
 }
 
 function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
-  const pinnedModels = deps.config.supervisors.map((entry) => parseModelRefString(entry.model));
+  const pinnedModels = deps.config.supervisors.flatMap((entry) =>
+    supervisorModelChain(entry).map((value) => parseModelRefString(value)),
+  );
   return async (ctx) => {
     const discovery = await deps.catalog.discover({
       maxProbesPerProvider: deps.config.discovery.maxProbesPerProvider,
@@ -432,27 +439,43 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
 }
 
 export function resolveCouncilRoles(deps: ProductionDeps, ctx?: PhaseContext): CouncilRoleConfigs {
-  const client = brokerCouncilClient(deps.broker);
+  const sink: CouncilEventSink = {
+    append: (events) => deps.store.events.append([...events]),
+  };
   const resolveRole = (
     role: "planner" | "scope_guardian" | "judge",
     routerRole: "supervisor" | "judge",
   ): CouncilRoleConfigs["planner"] => {
     const pinned = deps.config.supervisors.find((entry) => entry.role === role);
-    if (pinned !== undefined) {
-      const model = parseModelRefString(pinned.model);
-      if (ctx !== undefined) recordCouncilRoleProvenance(ctx, role, model, { configSource: "pinned" });
-      return { client, model };
+    const models =
+      pinned !== undefined
+        ? supervisorModelChain(pinned).map((value) => parseModelRefString(value))
+        : undefined;
+    let model;
+    let source: { configSource: "pinned" } | { fallbackReason: string };
+    if (models?.[0] !== undefined) {
+      model = models[0];
+      source = { configSource: "pinned" };
+    } else {
+      const ranked = deps.router.select({ role: routerRole, count: 1, requireJson: true });
+      const entry = ranked[0];
+      if (entry === undefined) {
+        throw new PolishError("CONFIG_ERROR", `no models available for council role ${role}`);
+      }
+      model = entry.entry.info.ref;
+      source = { fallbackReason: `router.select:${routerRole}` };
     }
-    const ranked = deps.router.select({ role: routerRole, count: 1, requireJson: true });
-    const entry = ranked[0];
-    if (entry === undefined) {
-      throw new PolishError("CONFIG_ERROR", `no models available for council role ${role}`);
-    }
-    const model = entry.entry.info.ref;
-    if (ctx !== undefined) {
-      recordCouncilRoleProvenance(ctx, role, model, { fallbackReason: `router.select:${routerRole}` });
-    }
-    return { client, model };
+    const chain = models ?? [model];
+    if (ctx !== undefined) recordCouncilRoleProvenance(ctx, role, chain, source);
+    const client = createResilientCouncilClient({
+      inner: brokerCouncilClient(deps.broker),
+      models: chain,
+      role,
+      clock: deps.clock,
+      retry: deps.config.council,
+      eventSink: sink,
+    });
+    return { client, model, models: chain };
   };
   return {
     planner: resolveRole("planner", "supervisor"),
@@ -464,9 +487,11 @@ export function resolveCouncilRoles(deps: ProductionDeps, ctx?: PhaseContext): C
 function recordCouncilRoleProvenance(
   ctx: PhaseContext,
   role: "planner" | "scope_guardian" | "judge",
-  model: { provider: string; model: string },
+  models: readonly { provider: string; model: string }[],
   source: { configSource: "pinned" } | { fallbackReason: string },
 ): void {
+  const preferred = models[0];
+  if (preferred === undefined) return;
   const event: NewEvent = {
     id: id("evt", ctx.clock.now()),
     runId: ctx.run.id,
@@ -474,8 +499,9 @@ function recordCouncilRoleProvenance(
     type: "council.role_resolved",
     payload: {
       role,
-      provider: model.provider,
-      model: model.model,
+      provider: preferred.provider,
+      model: preferred.model,
+      models: models.map((item) => `${item.provider}:${item.model}`),
       ...source,
     },
     causedBy: [],
@@ -539,6 +565,21 @@ function patchRun(ctx: PhaseContext, patch: Partial<typeof ctx.run>): void {
     artifacts: [],
   };
   ctx.store.events.append([event]);
+}
+
+function recordCheckStart(ctx: PhaseContext, info: { name: string; command: readonly string[] }): void {
+  ctx.store.events.append([
+    {
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "shell.command_started",
+      payload: { check: info.name, command: info.command },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [],
+    },
+  ]);
 }
 
 function resolveSandbox(deps: ProductionDeps, ctx: PhaseContext): Sandbox {

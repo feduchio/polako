@@ -42,6 +42,28 @@ pnpm check        # typecheck + lint + module boundaries + tests
 pnpm test:watch
 ```
 
+### Local CLI (`polish` / `polishd` on PATH)
+
+From this repository, one command installs the binaries into pnpm's global bin directory:
+
+```bash
+cd ~/polish
+pnpm cli:link
+```
+
+Then from **any** directory:
+
+```bash
+polish --help
+polish status <runId>
+polish watch <runId>
+polish log <runId>
+polish pause <runId>
+polish resume <runId>
+```
+
+If `polish` is still not found, the script prints the `pnpm bin -g` directory to add to `PATH`. Do not add a machine-specific alias as the install mechanism. `pnpm cli:unlink` removes the global link.
+
 Module boundaries are enforced by `.dependency-cruiser.cjs`. Every block of the system is
 built under `docs/BVP.md` (independent verifier agents, bounded fix rounds).
 

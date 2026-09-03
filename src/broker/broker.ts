@@ -35,6 +35,7 @@ export interface ModelCallRecord {
   eventId: string;
   response: CompletionResponse;
   attempts: number;
+  callId: string;
 }
 
 interface AttemptOutcome {
@@ -66,70 +67,82 @@ export class ModelBroker {
     if (!adapter) throw new PolishError("CONFIG_ERROR", `unknown provider ${request.model.provider}`);
     budget.assertWithin(request.metadata.runId, request.metadata.taskId);
 
+    const retry = request.metadata.retryPolicy ?? this.retry;
+    const callId = request.metadata.callId ?? id("call", clock.now());
+    const tagged: CompletionRequest = {
+      ...request,
+      metadata: { ...request.metadata, callId, retryPolicy: retry },
+    };
+
     let attempt = 0;
     let lastError: unknown;
     const outcomes: AttemptOutcome[] = [];
 
+    this.recordStarted(tagged, callId);
+
     const failCancelled = (err: unknown): never => {
       // attempts = real provider invocations only (outcomes), not cancelled waits
-      this.recordEvent(request, null, Math.max(outcomes.length, 1), outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
+      this.recordEvent(tagged, null, Math.max(outcomes.length, 1), outcomes, errorToString(err), budget.snapshot(tagged.metadata.runId).runUsd, callId);
       throw err instanceof PolishError ? err : new PolishError("CANCELLED", "model call cancelled", { cause: err });
     };
 
     const isCancel = (err: unknown): boolean =>
       isAbortError(err) || (err instanceof PolishError && err.code === "CANCELLED");
 
-    while (attempt < this.retry.maxAttempts) {
+    while (attempt < retry.maxAttempts) {
       attempt++;
-      if (request.signal?.aborted) {
+      if (tagged.signal?.aborted) {
         failCancelled(new PolishError("CANCELLED", "model call cancelled"));
       }
       let release: () => void;
       try {
-        release = await quota.acquire(adapter.id, request.signal);
+        release = await quota.acquire(adapter.id, tagged.signal);
       } catch (err) {
         if (isCancel(err)) failCancelled(err);
         throw err;
       }
-      if (request.signal?.aborted) {
+      if (tagged.signal?.aborted) {
         release();
         failCancelled(new PolishError("CANCELLED", "model call cancelled"));
       }
       const started = clock.now();
       try {
-        const response = await adapter.complete(request);
+        const response = await adapter.complete(tagged);
         release();
         const latency = Math.max(0, clock.now() - started) || response.latencyMs;
         const outcome: AttemptOutcome = { ok: true, latencyMs: latency, at: clock.now() };
         outcomes.push(outcome);
-        catalog.recordCall(request.model, outcome);
-        this.observations.recordCall(request.model, outcome, request.metadata.runId);
-        const snapshot = budget.record(request.metadata.runId, response.usage, request.metadata.taskId);
-        const eventId = this.recordEvent(request, response, attempt, outcomes, null, snapshot.runUsd);
-        return { eventId, response, attempts: attempt };
+        catalog.recordCall(tagged.model, outcome);
+        this.observations.recordCall(tagged.model, outcome, tagged.metadata.runId);
+        const snapshot = budget.record(tagged.metadata.runId, response.usage, tagged.metadata.taskId);
+        const eventId = this.recordEvent(tagged, response, attempt, outcomes, null, snapshot.runUsd, callId);
+        return { eventId, response, attempts: attempt, callId };
       } catch (err) {
         release();
         lastError = err;
         const kind = isCancel(err) ? "cancelled" : err instanceof ProviderError ? err.kind : "unknown";
         const outcome: AttemptOutcome = { ok: false, latencyMs: clock.now() - started, errorKind: kind, at: clock.now() };
         outcomes.push(outcome);
-        catalog.recordCall(request.model, outcome);
-        this.observations.recordCall(request.model, outcome, request.metadata.runId);
+        catalog.recordCall(tagged.model, outcome);
+        this.observations.recordCall(tagged.model, outcome, tagged.metadata.runId);
         if (isCancel(err)) {
-          this.recordEvent(request, null, attempt, outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
+          this.recordEvent(tagged, null, attempt, outcomes, errorToString(err), budget.snapshot(tagged.metadata.runId).runUsd, callId);
           throw err;
         }
         if (err instanceof ProviderError && err.kind === "rate_limit") {
-          quota.coolDown(adapter.id, err.retryAfterMs ?? this.backoff(attempt));
+          quota.coolDown(adapter.id, err.retryAfterMs ?? this.backoff(attempt, retry));
         }
         const retryable = err instanceof ProviderError ? err.retryable : false;
-        if (!retryable || attempt >= this.retry.maxAttempts) {
-          this.recordEvent(request, null, attempt, outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
+        if (!retryable || attempt >= retry.maxAttempts) {
+          this.recordEvent(tagged, null, attempt, outcomes, errorToString(err), budget.snapshot(tagged.metadata.runId).runUsd, callId);
           if (err instanceof ProviderError && err.kind === "auth") catalog.setProviderAvailable(adapter.id, false);
           throw err;
         }
+        const delayMs =
+          err instanceof ProviderError && err.retryAfterMs !== null ? err.retryAfterMs : this.backoff(attempt, retry);
+        this.recordRetryScheduled(tagged, callId, attempt, retry.maxAttempts, delayMs, kind);
         try {
-          await clock.sleep(err instanceof ProviderError && err.retryAfterMs !== null ? err.retryAfterMs : this.backoff(attempt), request.signal);
+          await clock.sleep(delayMs, tagged.signal);
         } catch (sleepErr) {
           // Cancel during backoff: keep the failed attempt outcome only; do not invent another call.
           if (isCancel(sleepErr)) failCancelled(sleepErr);
@@ -140,9 +153,62 @@ export class ModelBroker {
     throw lastError instanceof Error ? lastError : new PolishError("PROVIDER_ERROR", "model call failed");
   }
 
-  private backoff(attempt: number): number {
-    const exp = Math.min(this.retry.maxDelayMs, this.retry.baseDelayMs * 2 ** (attempt - 1));
+  private backoff(attempt: number, retry: RetryPolicy = this.retry): number {
+    const exp = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 1));
     return Math.round(exp * (0.5 + this.jitter() * 0.5));
+  }
+
+  private recordStarted(request: CompletionRequest, callId: string): void {
+    const { store, clock } = this.deps;
+    const event: NewEvent = {
+      id: id("evt", clock.now()),
+      runId: request.metadata.runId,
+      ts: clock.now(),
+      type: "model.call_started",
+      payload: {
+        callId,
+        model: request.model,
+        role: request.metadata.role,
+        purpose: request.metadata.purpose,
+        taskId: request.metadata.taskId ?? null,
+      },
+      causedBy: request.metadata.causedBy ?? [],
+      actor: { kind: roleToActorKind(request.metadata.role), role: request.metadata.role, model: request.model },
+      artifacts: [],
+    };
+    store.events.append([event]);
+  }
+
+  private recordRetryScheduled(
+    request: CompletionRequest,
+    callId: string,
+    attempt: number,
+    maxAttempts: number,
+    delayMs: number,
+    errorKind: string,
+  ): void {
+    const { store, clock } = this.deps;
+    const event: NewEvent = {
+      id: id("evt", clock.now()),
+      runId: request.metadata.runId,
+      ts: clock.now(),
+      type: "model.retry_scheduled",
+      payload: {
+        callId,
+        model: request.model,
+        role: request.metadata.role,
+        purpose: request.metadata.purpose,
+        attempt,
+        maxAttempts,
+        delayMs,
+        errorKind,
+        retryAt: clock.now() + delayMs,
+      },
+      causedBy: request.metadata.causedBy ?? [],
+      actor: { kind: roleToActorKind(request.metadata.role), role: request.metadata.role, model: request.model },
+      artifacts: [],
+    };
+    store.events.append([event]);
   }
 
   private recordEvent(
@@ -152,6 +218,7 @@ export class ModelBroker {
     attemptOutcomes: readonly AttemptOutcome[],
     error: string | null,
     runUsdSoFar: number,
+    callId: string,
   ): string {
     const { store, secrets, clock } = this.deps;
     const reqArtifact = store.artifacts.put(
@@ -180,6 +247,7 @@ export class ModelBroker {
       ts: clock.now(),
       type: "model.call",
       payload: {
+        callId,
         model: request.model,
         role: request.metadata.role,
         purpose: request.metadata.purpose,
@@ -232,6 +300,8 @@ export class ModelBroker {
 function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "verifier" | "evidence_agent" | "scout" | "system" {
   switch (role) {
     case "supervisor":
+    case "planner":
+    case "scope_guardian":
     case "judge":
       return "supervisor";
     case "worker":

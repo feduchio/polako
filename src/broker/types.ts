@@ -62,6 +62,10 @@ export interface CompletionRequest {
     taskId?: string;
     /** event ids that caused this call (why-chain) */
     causedBy?: string[];
+    /** Correlate start/retry/completion events for one logical call. */
+    callId?: string;
+    /** Override constructor retry policy for this request (council uses a tighter bound). */
+    retryPolicy?: { maxAttempts: number; baseDelayMs: number; maxDelayMs: number };
   };
 }
 

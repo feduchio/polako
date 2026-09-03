@@ -27,7 +27,7 @@ export class CouncilRoleAgent {
       metadata: {
         runId: context.runId,
         purpose: context.purpose,
-        role: this.role === "scope_guardian" ? "supervisor" : this.role,
+        role: this.role,
         ...(context.causedBy === undefined ? {} : { causedBy: context.causedBy }),
       },
     };
