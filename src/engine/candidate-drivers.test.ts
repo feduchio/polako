@@ -17,11 +17,10 @@ import { Scheduler } from "../scheduler/index.js";
 import { stubDriverFor } from "./stubs.js";
 import { RunEngine } from "./engine.js";
 import {
+  createComparingDriver,
   createExecutingDriver,
   createGatingDriver,
   createIntegratingDriver,
-  pickFirstPassedCandidate,
-  seedWinnerForTests,
   type CandidateDriverOptions,
 } from "./candidateDrivers.js";
 import { ScriptedCandidateWorker, type CandidateGates } from "./candidates.js";
@@ -53,7 +52,7 @@ describe("B2 production candidate drivers", () => {
     }
     engine.registerPhase("EXECUTING", createExecutingDriver(driverOptions));
     engine.registerPhase("GATING", createGatingDriver(driverOptions));
-    engine.registerPhase("COMPARING", comparingTestDriver());
+    engine.registerPhase("COMPARING", createComparingDriver());
     engine.registerPhase("INTEGRATING", createIntegratingDriver(driverOptions));
   });
 
@@ -86,6 +85,7 @@ describe("B2 production candidate drivers", () => {
     expect(store.events.list(runId, { types: ["candidate.gated"] })).toHaveLength(2);
     expect(candidates.find((candidate) => candidate.state === "PASSED_GATES")?.gateReport?.passed).toBe(true);
     expect(candidates.find((candidate) => candidate.state === "FAILED_GATES")?.gateReport?.passed).toBe(false);
+    expect(candidates.every((candidate) => (candidate.gateReport?.diffStat.files ?? 0) > 0)).toBe(true);
   });
 
   it("INTEGRATING advances the run head only when integration gates pass", async () => {
@@ -214,17 +214,6 @@ describe("B2 production candidate drivers", () => {
     expect(finished?.payload["status"]).toBe("failed_runtime");
   });
 });
-
-function comparingTestDriver() {
-  return (ctx: Parameters<typeof seedWinnerForTests>[0]) => {
-    const task = ctx.store.repos.tasks.listByRun(ctx.run.id).find((item) => item.state === "GATED");
-    if (task === undefined) return { status: "waiting" as const };
-    const winner = pickFirstPassedCandidate(ctx, task.id);
-    if (winner === null) return { status: "waiting" as const };
-    seedWinnerForTests(ctx, task.id, winner.id);
-    return { status: "complete" as const, nextPhase: "INTEGRATING" as const };
-  };
-}
 
 function buildDriverOptions(
   fixture: Awaited<ReturnType<typeof repositoryFixture>>,

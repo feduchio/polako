@@ -26,11 +26,13 @@ export {
   type CouncilDriverOptions,
 } from "./councilDrivers.js";
 export {
+  createComparingDriver,
   createExecutingDriver,
   createGatingDriver,
   createIntegratingDriver,
   pickFirstPassedCandidate,
   seedWinnerForTests,
   type CandidateDriverOptions,
+  type ComparingDriverOptions,
 } from "./candidateDrivers.js";
 export type { EngineOptions, PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";

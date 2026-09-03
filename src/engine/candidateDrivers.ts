@@ -4,11 +4,19 @@ import { runtimeAllowsDone } from "../domain/acceptance.js";
 import type { GateReport, Candidate, CandidateState } from "../domain/candidate.js";
 import type { GateFailureReason } from "../domain/candidate.js";
 import { emptyFindingCounts, type Checkpoint, type EvidenceVector } from "../domain/checkpoint.js";
-import { SYSTEM_ACTOR } from "../domain/common.js";
+import { SYSTEM_ACTOR, type ArtifactRef } from "../domain/common.js";
 import type { PolishConfig } from "../domain/config.js";
 import type { NewEvent } from "../domain/event.js";
+import type { BaselineSnapshot } from "../domain/checks.js";
+import { compareToBaseline } from "../domain/checks.js";
 import type { GateResult } from "../project/checkRunner.js";
 import { createCheckOutputPersister } from "../project/checkRunner.js";
+import { PairwiseJudge } from "../verify/pairwise.js";
+import {
+  selectTournamentWinner,
+  type TournamentSourceCandidate,
+} from "../verify/tournament.js";
+import type { VerifierStrategy } from "../verify/strategy.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { discoverRuntimeValidator } from "../runtime/discovery.js";
 import { bindNodeScenario, rerunRuntimeScenarios, templatesFromCorpus } from "../runtime/corpus.js";
@@ -36,7 +44,11 @@ export interface CandidateDriverOptions {
   resolveRunHead?: (ctx: PhaseContext) => RunHead | Promise<RunHead>;
   runtimeValidators?: readonly RuntimeValidator[] | ((ctx: PhaseContext) => readonly RuntimeValidator[]);
   resolveCorpus?: (ctx: PhaseContext) => MissionAcceptanceCorpus | undefined | Promise<MissionAcceptanceCorpus | undefined>;
+  /** Injectable pairwise judge for COMPARING; defaults to TS backend from config. */
+  resolveVerifierStrategy?: (ctx: PhaseContext, task: Task) => VerifierStrategy | Promise<VerifierStrategy>;
 }
+
+export type ComparingDriverOptions = Pick<CandidateDriverOptions, "resolveVerifierStrategy">;
 
 /** Test helper: mark the first passed candidate as the integration winner. Not a production tournament. */
 export function pickFirstPassedCandidate(ctx: PhaseContext, taskId: string): Candidate | null {
@@ -162,6 +174,91 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
   };
 }
 
+/** Production COMPARING driver: deterministic metrics first, then pairwise judge for survivors. */
+export function createComparingDriver(options: ComparingDriverOptions = {}): PhaseDriver {
+  return async (ctx) => {
+    const task = comparingTask(ctx);
+    if (task === null) return { status: "waiting" };
+    if (task.selectedCandidateId !== null) return { status: "waiting" };
+
+    const eligible = passedCandidates(ctx, task.id);
+    const baseline = ctx.store.repos.baselines.listByRun(ctx.run.id)[0];
+    if (baseline === undefined) throw new Error("baseline missing for candidate comparison");
+
+    const sources = eligible.map((candidate) => toTournamentSource(candidate, baseline));
+    const strategy = await resolveVerifierStrategy(ctx, task, options);
+    const selection = await selectTournamentWinner({
+      candidates: sources,
+      baseline,
+      strategy,
+      context: { runId: ctx.run.id, task: task.description, acceptance: task.acceptance },
+      pivotFrom: ctx.config.verifier.pivotTournamentFrom,
+    });
+
+    const rationaleRef = ctx.store.artifacts.put(
+      JSON.stringify({
+        taskId: task.id,
+        method: selection.method,
+        frontier: selection.frontier,
+        winnerId: selection.winnerId,
+        ranking: selection.ranking.map((entry) => ({
+          candidateId: entry.candidate.id,
+          rank: entry.rank,
+          points: entry.points,
+          metrics: entry.metrics,
+        })),
+        evidence: selection.evidence.map((match) => ({
+          a: match.a,
+          b: match.b,
+          winner: match.verdict.winner,
+          rationale: match.verdict.rationale,
+          scores: match.verdict.scores,
+        })),
+      }, null, 2),
+      "comparison_rationale",
+      `task-${task.id}`,
+      ctx.clock.now(),
+    );
+
+    const comparedEventId = appendComparedEvent(ctx, {
+      taskId: task.id,
+      winner: selection.winnerId,
+      method: selection.method,
+      eligible: eligible.map((candidate) => candidate.id),
+      frontier: selection.frontier,
+      metrics: Object.fromEntries(selection.ranking.map((entry) => [entry.candidate.id, entry.metrics])),
+      evidence: selection.evidence.map((match) => ({
+        a: match.a,
+        b: match.b,
+        winner: match.verdict.winner,
+        rationale: match.verdict.rationale,
+      })),
+      rationaleRef,
+    });
+
+    if (selection.winnerId === null) {
+      return handleNoComparisonWinner(ctx, task, comparedEventId);
+    }
+
+    const now = ctx.clock.now();
+    const updated = eligible.map((candidate) => ({
+      ...candidate,
+      state: candidate.id === selection.winnerId ? "WINNER" as const : "LOSER" as const,
+      updatedAt: now,
+    }));
+    appendCandidateEvents(ctx, updated, "candidate.state_changed");
+
+    const selected: Task = {
+      ...task,
+      state: "SELECTED",
+      selectedCandidateId: selection.winnerId,
+      updatedAt: now,
+    };
+    appendTaskEvent(ctx, selected, [comparedEventId]);
+    return { status: "complete", nextPhase: "INTEGRATING" };
+  };
+}
+
 /** Production INTEGRATING driver: serial temporary workspace, gates, checkpoint CAS. */
 export function createIntegratingDriver(options: CandidateDriverOptions): PhaseDriver {
   return async (ctx) => {
@@ -247,6 +344,10 @@ function gatedTask(ctx: PhaseContext): Task | null {
   return ctx.store.repos.tasks.listByRun(ctx.run.id).find((task) => task.state === "GATED") ?? null;
 }
 
+function comparingTask(ctx: PhaseContext): Task | null {
+  return ctx.store.repos.tasks.listByRun(ctx.run.id).find((task) => task.state === "GATED") ?? null;
+}
+
 function integrationTask(ctx: PhaseContext): Task | null {
   return ctx.store.repos.tasks
     .listByRun(ctx.run.id)
@@ -278,10 +379,51 @@ function handleZeroSurvivors(ctx: PhaseContext, task: Task): { status: "complete
   return { status: "complete", nextPhase: retry ? "PLANNING" : "FAILED" };
 }
 
+function handleNoComparisonWinner(
+  ctx: PhaseContext,
+  task: Task,
+  _comparedEventId: string,
+): { status: "complete"; nextPhase: "PLANNING" | "NEEDS_HUMAN" | "FAILED" } {
+  const retry = task.attempts < ctx.config.retry.maxAttempts;
+  const nextState: Task["state"] = retry ? "READY" : "BLOCKED";
+  appendTaskEvent(ctx, { ...task, state: nextState, updatedAt: ctx.clock.now() });
+  if (retry) return { status: "complete", nextPhase: "PLANNING" };
+  return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+}
+
+function toTournamentSource(candidate: Candidate, baseline: BaselineSnapshot): TournamentSourceCandidate {
+  const gateReport = candidate.gateReport;
+  const checks = gateReport?.checks ?? [];
+  return {
+    id: candidate.id,
+    status: candidate.state === "PASSED_GATES" ? "passed" : "failed_gates",
+    diffSummary: gateReport?.diffStat ?? { files: 0, insertions: 0, deletions: 0 },
+    gateResult: gateReport === null ? null : {
+      checks,
+      regression: compareToBaseline(baseline, checks),
+      passed: gateReport.passed,
+    },
+  };
+}
+
+async function resolveVerifierStrategy(
+  ctx: PhaseContext,
+  task: Task,
+  options: ComparingDriverOptions,
+): Promise<VerifierStrategy> {
+  if (options.resolveVerifierStrategy !== undefined) return options.resolveVerifierStrategy(ctx, task);
+  return new PairwiseJudge();
+}
+
 function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult, index: number): Candidate {
   const now = ctx.clock.now();
   const state = resultStatusToCandidateState(result);
-  const gateReport = result.status === "no_changes" ? noChangesGateReport(result, now) : null;
+  const gateReport =
+    result.status === "no_changes"
+      ? noChangesGateReport(result, now)
+      : result.status === "implemented"
+        ? implementedDiffReport(result, now)
+        : null;
   return {
     id: result.id,
     runId: ctx.run.id,
@@ -292,7 +434,7 @@ function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult, ind
     branch: result.branch,
     worktreePath: null,
     headCommit: result.headCommit,
-    state: gateReport === null ? state : "FAILED_GATES",
+    state: result.status === "no_changes" ? "FAILED_GATES" : state,
     gateReport,
     transcriptRef: result.workerOutcome?.transcriptRef ?? null,
     diffRef: null,
@@ -321,7 +463,12 @@ function resultStatusToCandidateState(result: CandidateResult): CandidateState {
 }
 
 function applyGateResult(ctx: PhaseContext, candidate: Candidate, headCommit: string, gateResult: GateResult): Candidate {
-  const gateReport = toGateReport(headCommit, gateResult, ctx.clock.now());
+  const gateReport = toGateReport(
+    headCommit,
+    gateResult,
+    ctx.clock.now(),
+    candidate.gateReport?.diffStat ?? { files: 0, insertions: 0, deletions: 0 },
+  );
   return {
     ...candidate,
     state: gateResult.passed ? "PASSED_GATES" : "FAILED_GATES",
@@ -330,7 +477,12 @@ function applyGateResult(ctx: PhaseContext, candidate: Candidate, headCommit: st
   };
 }
 
-function toGateReport(commitHash: string, gate: GateResult, createdAt: number): GateReport {
+function toGateReport(
+  commitHash: string,
+  gate: GateResult,
+  createdAt: number,
+  diffStat: GateReport["diffStat"],
+): GateReport {
   const failures: { reason: GateFailureReason; detail: string }[] = [];
   if (gate.candidateProtectedPathProblems.length > 0) {
     for (const problem of gate.candidateProtectedPathProblems) {
@@ -364,7 +516,19 @@ function toGateReport(commitHash: string, gate: GateResult, createdAt: number): 
     injectedAcceptance: [],
     failures,
     passed: gate.passed,
-    diffStat: { files: 0, insertions: 0, deletions: 0 },
+    diffStat,
+    createdAt,
+  };
+}
+
+function implementedDiffReport(result: CandidateResult, createdAt: number): GateReport {
+  return {
+    gatedCommit: result.headCommit ?? result.baseCheckpoint,
+    checks: [],
+    injectedAcceptance: [],
+    failures: [],
+    passed: false,
+    diffStat: result.diffSummary,
     createdAt,
   };
 }
@@ -523,17 +687,32 @@ function appendCandidateEvents(ctx: PhaseContext, candidates: Candidate[], type:
   if (events.length > 0) ctx.store.events.append(events);
 }
 
-function appendTaskEvent(ctx: PhaseContext, task: Task): void {
+function appendTaskEvent(ctx: PhaseContext, task: Task, causedBy: string[] = []): void {
   ctx.store.events.append([{
     id: id("evt", ctx.clock.now()),
     runId: ctx.run.id,
     ts: ctx.clock.now(),
     type: "task.state_changed",
     payload: { task },
-    causedBy: [],
+    causedBy,
     actor: SYSTEM_ACTOR,
     artifacts: [],
   }]);
+}
+
+function appendComparedEvent(ctx: PhaseContext, payload: Record<string, unknown>): string {
+  const eventId = id("evt", ctx.clock.now());
+  ctx.store.events.append([{
+    id: eventId,
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: "candidate.compared",
+    payload,
+    causedBy: [],
+    actor: SYSTEM_ACTOR,
+    artifacts: payload["rationaleRef"] === undefined ? [] : [payload["rationaleRef"] as ArtifactRef],
+  }]);
+  return eventId;
 }
 
 function patchTask(ctx: PhaseContext, task: Task): Task {
