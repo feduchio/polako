@@ -82,6 +82,13 @@ module.exports = {
       to: { path: "^src/(?!agents/|domain/|shared/|sandbox/|intel/|broker/|providers/|store/|context/)" },
     },
     {
+      name: "council-depends-only-on-allowed",
+      comment: "B7 SupervisorCouncil may use domain/shared/store/context/broker/providers/project (no engine)",
+      severity: "error",
+      from: { path: "^src/council/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/(?!council/|domain/|shared/|store/|context/|broker/|providers/|project/)" },
+    },
+    {
       name: "engine-is-not-imported-by-lower-layers",
       severity: "error",
       from: { path: "^src/(?!engine/|daemon/)" },

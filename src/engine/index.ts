@@ -19,4 +19,10 @@ export {
   type IntegrationStatus,
   type RunHead,
 } from "./integration.js";
+export {
+  createDiscoveringModelsDriver,
+  createInterpretingMissionDriver,
+  createPlanningDriver,
+  type CouncilDriverOptions,
+} from "./councilDrivers.js";
 export type { EngineOptions, PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
