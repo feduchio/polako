@@ -4,6 +4,10 @@ import type { NewEvent } from "../domain/event.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { id } from "../shared/ids.js";
 import { SupervisorCouncil, type CouncilEventSink, type CouncilRoleConfigs } from "../council/index.js";
+import { emitNeedsHumanReport } from "../report/emit.js";
+import type { TerminalReason } from "../domain/run.js";
+import type { TaskDag } from "../council/types.js";
+import type { IntakeResult } from "../council/types.js";
 import type { PhaseContext, PhaseDriver } from "./types.js";
 
 export interface CouncilDriverOptions {
@@ -94,7 +98,10 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
       appendRunSnapshot(ctx, { interpretationId: result.interpretation.id });
     }
 
-    if (result.status === "NEEDS_HUMAN") return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+    if (result.status === "NEEDS_HUMAN") {
+      emitNeedsHumanReport(ctx, terminalReasonFromIntake(result), result.decision.events.map((event) => event.id));
+      return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+    }
     return { status: "complete", nextPhase: "DISCOVERING_MODELS" };
   };
 }
@@ -110,6 +117,7 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
     const council = createCouncil(ctx, options);
     const dag = await council.decompose(interpretation);
     if (dag.decision.decision === "NEEDS_HUMAN") {
+      emitNeedsHumanReport(ctx, terminalReasonFromDecompose(dag), dag.decision.events.map((event) => event.id));
       return { status: "complete", nextPhase: "NEEDS_HUMAN" };
     }
     const causedBy = dag.decision.events.map((event) => event.id);
@@ -128,6 +136,25 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
     const codingTasks = dag.tasks.filter((task) => task.touchesProductCode && task.kind !== "investigation");
     if (codingTasks.length > 0) return { status: "complete", nextPhase: "EXECUTING" };
     return { status: "complete", nextPhase: "REVIEWING" };
+  };
+}
+
+function terminalReasonFromIntake(result: Extract<IntakeResult, { status: "NEEDS_HUMAN" }>): TerminalReason {
+  return {
+    code: "ambiguous_intent",
+    summary: result.decision.rationale,
+    question: result.question,
+    options: result.options,
+  };
+}
+
+function terminalReasonFromDecompose(dag: TaskDag): TerminalReason {
+  const concern = dag.decision.opinions.find((opinion) => opinion.concerns.length > 0)?.concerns[0];
+  return {
+    code: "product_decision_required",
+    summary: dag.decision.rationale,
+    question: concern ?? "The council could not produce an executable plan. How should we proceed?",
+    options: ["Restate requirements with explicit acceptance", "Narrow the mission scope", "Stop the run"],
   };
 }
 

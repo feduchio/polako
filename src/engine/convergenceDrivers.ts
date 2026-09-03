@@ -9,6 +9,8 @@ import {
 } from "../convergence/index.js";
 import type { RunHead } from "./integration.js";
 import { GitBranchRunHead, runOnIntegrationLane } from "./integration.js";
+import { emitFinalReport, emitNeedsHumanReport } from "../report/emit.js";
+import type { TerminalReason } from "../domain/run.js";
 import type { PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
 import { id } from "../shared/ids.js";
 
@@ -30,6 +32,9 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
     const evidence = gatherCompletionEvidence(ctx);
     const antiFake = assertCodeChangeMissionMayComplete(evidence);
     if (!antiFake.ok) {
+      if (antiFake.terminal === "NEEDS_HUMAN") {
+        emitNeedsHumanReport(ctx, humanTerminalReason(antiFake.reason));
+      }
       return { status: "complete", nextPhase: antiFake.terminal };
     }
 
@@ -63,8 +68,10 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
 
     switch (decision.action) {
       case "DONE":
+        emitFinalReport(ctx);
         return { status: "complete", nextPhase: "DONE" };
       case "NEEDS_HUMAN":
+        emitNeedsHumanReport(ctx, humanTerminalReason(decision.reason));
         return { status: "complete", nextPhase: "NEEDS_HUMAN" };
       case "SIMPLIFY": {
         const rollbackTo = decision.rollbackTo;
@@ -80,6 +87,12 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
             }),
           );
           if (!result.advanced) {
+            emitNeedsHumanReport(ctx, {
+              code: "internal_error",
+              summary: "dominance rollback could not be applied on the run branch",
+              question: "Rollback failed because the run branch head changed. How should the run proceed?",
+              options: ["Retry simplification", "Stop the run"],
+            });
             return { status: "complete", nextPhase: "NEEDS_HUMAN" };
           }
           ctx.store.events.append(result.events);
@@ -118,6 +131,15 @@ function runtimeEvidenceAllowsDone(ctx: PhaseContext, checkpointHash: string): b
   }
   if (current.some((evidence) => evidence.status === "failed")) return false;
   return current.length === 0 || current.some((evidence) => runtimeAllowsDone(mode, evidence, checkpointHash));
+}
+
+function humanTerminalReason(summary: string): TerminalReason {
+  return {
+    code: "pathology_detected",
+    summary,
+    question: summary,
+    options: ["Continue review", "Stop the run"],
+  };
 }
 
 function syntheticCheckpoint(ctx: PhaseContext, hash: string): Checkpoint {

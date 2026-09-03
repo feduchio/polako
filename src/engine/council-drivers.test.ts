@@ -97,6 +97,9 @@ describe("council phase drivers", () => {
     const run = store.repos.runs.get(runId)!;
     expect(run.phase).toBe("NEEDS_HUMAN");
     expect(store.repos.tasks.listByRun(runId)).toHaveLength(0);
+    const reports = store.events.list(runId, { types: ["report.generated"] });
+    expect(reports).toHaveLength(1);
+    expect(store.artifacts.getText(reports[0]!.artifacts[0]!.sha256)).toContain("Which API should remain compatible?");
   });
 
   it("PLANNING routes to NEEDS_HUMAN when the council drops every coding task", async () => {
@@ -111,6 +114,9 @@ describe("council phase drivers", () => {
     const run = store.repos.runs.get(runId)!;
     expect(run.phase).toBe("NEEDS_HUMAN");
     expect(store.repos.tasks.listByRun(runId)).toHaveLength(0);
+    const reports = store.events.list(runId, { types: ["report.generated"] });
+    expect(reports.length).toBeGreaterThanOrEqual(1);
+    expect(store.artifacts.getText(reports.at(-1)!.artifacts[0]!.sha256)).toContain("ACTION REQUIRED:");
   });
 });
 

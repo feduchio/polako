@@ -33,6 +33,7 @@ import {
   type CandidateResult,
 } from "./candidates.js";
 import { GitBranchRunHead, integrateWinner, type RunHead } from "./integration.js";
+import { emitNeedsHumanReport } from "../report/emit.js";
 import type { PhaseContext, PhaseDriver } from "./types.js";
 
 export interface CandidateDriverOptions {
@@ -382,12 +383,22 @@ function handleZeroSurvivors(ctx: PhaseContext, task: Task): { status: "complete
 function handleNoComparisonWinner(
   ctx: PhaseContext,
   task: Task,
-  _comparedEventId: string,
+  comparedEventId: string,
 ): { status: "complete"; nextPhase: "PLANNING" | "NEEDS_HUMAN" | "FAILED" } {
   const retry = task.attempts < ctx.config.retry.maxAttempts;
   const nextState: Task["state"] = retry ? "READY" : "BLOCKED";
   appendTaskEvent(ctx, { ...task, state: nextState, updatedAt: ctx.clock.now() });
   if (retry) return { status: "complete", nextPhase: "PLANNING" };
+  emitNeedsHumanReport(
+    ctx,
+    {
+      code: "repeated_failure",
+      summary: `comparison produced no winner for task ${task.id} after ${task.attempts} attempts`,
+      question: "Tournament comparison produced no winner. How should the run proceed?",
+      options: ["Retry planning", "Stop the run"],
+    },
+    [comparedEventId],
+  );
   return { status: "complete", nextPhase: "NEEDS_HUMAN" };
 }
 

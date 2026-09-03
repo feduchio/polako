@@ -70,6 +70,11 @@ describe("B6 production CONVERGENCE_CHECK driver", () => {
     });
     await engine.tickRun(runId);
     expect(store.repos.runs.get(runId)?.phase).toBe("DONE");
+    const reports = store.events.list(runId, { types: ["report.generated"] });
+    expect(reports).toHaveLength(1);
+    const body = store.artifacts.getText(reports[0]!.artifacts[0]!.sha256);
+    expect(body).toMatch(/^DONE:/);
+    expect(body).toContain(fixture.integrated);
   });
 
   it("does not count clean rounds from a previous checkpoint", async () => {
@@ -120,6 +125,9 @@ describe("B6 production CONVERGENCE_CHECK driver", () => {
     expect(store.repos.runs.get(runId)?.phase).toBe("NEEDS_HUMAN");
     expect(store.repos.runs.get(runId)?.currentCheckpointHash).toBe(dominatedHash);
     expect(store.repos.checkpoints.listByRun(runId).some((checkpoint) => checkpoint.source === "rollback")).toBe(false);
+    const reports = store.events.list(runId, { types: ["report.generated"] });
+    expect(reports).toHaveLength(1);
+    expect(store.artifacts.getText(reports[0]!.artifacts[0]!.sha256)).toContain("Rollback failed");
   });
 
   it("blocks DONE when runtime=required and final evidence is missing", async () => {
