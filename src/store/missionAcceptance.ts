@@ -26,7 +26,7 @@ export class MissionAcceptanceService {
 
   record(input: Omit<CorpusEntry, "id" | "createdAt"> & { id?: string }): CorpusEntry {
     const sourceRun = this.store.repos.runs.get(input.sourceRunId);
-    if (sourceRun === null || sourceRun.missionId !== input.missionId) {
+    if (sourceRun?.missionId !== input.missionId) {
       throw new PolishError(
         "INVARIANT_VIOLATION",
         "corpus source run must belong to the entry mission",

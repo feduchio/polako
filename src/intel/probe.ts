@@ -234,7 +234,7 @@ async function discoverContract(
     for (const key of spec.required) {
       if (!discoveredOptions[key]) missing.push(`${spec.logical}:${key}`);
     }
-    chosen[spec.logical] = { command: alias ?? spec.aliases[0]!, options: chosenOptions };
+    chosen[spec.logical] = { command: alias ?? spec.aliases[0] ?? spec.logical, options: chosenOptions };
   }
 
   let fixtureQuery: "not-run" | "passed" | "failed";
