@@ -58,6 +58,14 @@ export function emitReport(ctx: ReportContext, input: EmitReportInput): Artifact
       kind: input.kind,
       checkpointHash: ctx.run.currentCheckpointHash,
       reportRef: ref.sha256,
+      ...(input.kind === "needs_human" && input.terminalReason !== undefined
+        ? {
+            question: input.terminalReason.question ?? input.terminalReason.summary,
+            options: input.terminalReason.options ?? [],
+            summary: input.terminalReason.summary,
+            code: input.terminalReason.code,
+          }
+        : {}),
     },
     causedBy: input.causedBy ?? [],
     actor: SYSTEM_ACTOR,

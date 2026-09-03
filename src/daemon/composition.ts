@@ -10,6 +10,7 @@ import { BudgetTracker, QuotaTracker } from "../broker/quota.js";
 import { SecretStore } from "../broker/secrets.js";
 import type { ProviderAdapter } from "../broker/types.js";
 import { createResilientCouncilClient } from "../council/fallback.js";
+import { createStructuredCouncilClient } from "../council/structuredOutput.js";
 import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } from "../council/types.js";
 import type { RuntimeEvidence } from "../domain/acceptance.js";
 import type { PolishConfig } from "../domain/config.js";
@@ -467,8 +468,22 @@ export function resolveCouncilRoles(deps: ProductionDeps, ctx?: PhaseContext): C
     }
     const chain = models ?? [model];
     if (ctx !== undefined) recordCouncilRoleProvenance(ctx, role, chain, source);
+    const broker = brokerCouncilClient(deps.broker);
+    const inner =
+      role === "planner"
+        ? createStructuredCouncilClient({
+            inner: broker,
+            role: "planner",
+            clock: deps.clock,
+            eventSink: sink,
+            resolveResponseArtifact: (eventId) => {
+              const event = deps.store.events.get(eventId);
+              return event?.artifacts.find((artifact) => artifact.kind === "model_response") ?? null;
+            },
+          })
+        : broker;
     const client = createResilientCouncilClient({
-      inner: brokerCouncilClient(deps.broker),
+      inner,
       models: chain,
       role,
       clock: deps.clock,

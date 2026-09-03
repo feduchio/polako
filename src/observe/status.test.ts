@@ -60,6 +60,66 @@ describe("RunObserver projection", () => {
     expect(view.warning).toMatch(/no active operation/i);
   });
 
+  it("D: genuine NEEDS_HUMAN status shows the human question", () => {
+    const run = baseRun({
+      phase: "NEEDS_HUMAN",
+      terminalReason: {
+        code: "ambiguous_intent",
+        summary: "Compatibility is unclear.",
+        question: "Which API should remain compatible?",
+        options: ["Public API", "Internal API"],
+      },
+    });
+    const events = [
+      evt(0, "supervisor.decision", { decision: "NEEDS_HUMAN", reason: "blocking ambiguity" }, NOW),
+      evt(1, "report.generated", { kind: "needs_human", question: "Which API should remain compatible?", options: ["Public API", "Internal API"] }, NOW + 1),
+      evt(2, "run.phase_changed", { to: "NEEDS_HUMAN", run: { phase: "NEEDS_HUMAN", terminalReason: run.terminalReason } }, NOW + 2),
+    ];
+    const view = projectRunStatus(run, events, NOW + 3);
+    expect(view.humanRequest?.question).toBe("Which API should remain compatible?");
+    const rendered = renderRunStatus(view);
+    expect(rendered).toContain("Which API should remain compatible?");
+    expect(rendered).toContain("HUMAN");
+    expect(projectActivity(events).map((line) => line.text).join("\n")).toContain("Needs human · Which API should remain compatible?");
+  });
+
+  it("historical schema-invalid NEEDS_HUMAN is shown as output contract, not a human question", () => {
+    const run = baseRun({ phase: "NEEDS_HUMAN" });
+    const events = [
+      evt(0, "supervisor.decision", {
+        decision: "NEEDS_HUMAN",
+        reason: "planner interpretation requirements failed schema validation",
+        rationale: "planner: bounded | scope: unambiguous | judge: verifiable",
+      }, NOW),
+      evt(1, "report.generated", {
+        kind: "needs_human",
+        question: "The planner did not produce a valid requirement set. How should the mission be interpreted?",
+        options: ["Restate the mission with explicit acceptance criteria"],
+      }, NOW + 1),
+      evt(2, "run.phase_changed", { to: "NEEDS_HUMAN", run: { phase: "NEEDS_HUMAN" } }, NOW + 2),
+    ];
+    const view = projectRunStatus(run, events, NOW + 3);
+    expect(view.waiting?.kind).toBe("output_contract");
+    expect(view.humanRequest).toBeNull();
+    const rendered = renderRunStatus(view);
+    expect(rendered).toContain("output contract");
+    expect(rendered).toContain("not a human question");
+    expect(rendered).not.toContain("How should the mission be interpreted?");
+  });
+
+  it("human log summarizes planner output-invalid and repair", () => {
+    const events = [
+      evt(0, "model.output_invalid", { role: "planner", summary: "$.requirements[0] expected object" }, NOW),
+      evt(1, "model.output_repair_attempted", { role: "planner", attempt: 1, maxAttempts: 1 }, NOW + 1),
+      evt(2, "model.fallback_selected", { role: "planner", to: { provider: "openrouter", model: "minimax-m3" } }, NOW + 2),
+    ];
+    const text = projectActivity(events).map((line) => line.text).join("\n");
+    expect(text).toContain("! planner output invalid · $.requirements[0] expected object");
+    expect(text).toContain("↻ repair 1/1");
+    expect(text).toContain("⇢ fallback");
+    expect(text).toMatch(/Minimax M3|MiniMax M3/i);
+  });
+
   it("watch fixture renders semantic transitions in order", () => {
     const events = [
       evt(0, "project.discovered", { profile: { packageManager: "pnpm", framework: "vitest" } }, NOW),

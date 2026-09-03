@@ -1,0 +1,45 @@
+{
+  "source": {
+    "runId": "run_01m1mnxga8r84x5xerpdvp",
+    "callId": "call_01m1mnxq9g16t4rt13t31e",
+    "model": { "provider": "gemini", "model": "gemini-3.8-flash" },
+    "purpose": "council_intake_planner",
+    "responseArtifactSha256": "54743a7640c1c455df2b4063516e1ef7576f940b34927f13be3e3cc9cc5e87b8"
+  },
+  "decision": "approve",
+  "rationale": "The mission is well-defined and bounded: fix a retry bug in RetryFetcher where retrying transient failures incorrectly triggers duplicate in-flight detection. Baseline test failures confirm an existing issue that needs resolution without altering the public API or adding dependencies.",
+  "concerns": [
+    "Ensure in-flight request tracking is cleared or properly recognized across retry attempts so legitimate concurrent calls still detect duplicates if intended by design."
+  ],
+  "proposal": {
+    "goals": [
+      "Fix retry handling in RetryFetcher so transient failures retry without tripping duplicate in-flight detection.",
+      "Preserve maxRetries semantics and existing public API.",
+      "Ensure all tests pass cleanly without introducing external dependencies."
+    ],
+    "requirements": [
+      "Do not add new dependencies to package.json.",
+      "Do not change public API signatures or contract.",
+      "Retries must succeed on transient failure recovery without duplicate in-flight errors."
+    ],
+    "acceptanceCriteria": [
+      "npm run test passes with exit code 0.",
+      "Duplicate in-flight detection works for actual concurrent requests while allowing sequential retry attempts for the same operation.",
+      "No unrelated files or configurations are modified."
+    ],
+    "plan": [
+      {
+        "step": 1,
+        "description": "Inspect test suite output and RetryFetcher implementation to locate duplicate in-flight detection and retry logic."
+      },
+      {
+        "step": 2,
+        "description": "Fix in-flight tracking state transition during retry execution."
+      },
+      {
+        "step": 3,
+        "description": "Run npm run test to verify fix and ensure no regressions."
+      }
+    ]
+  }
+}

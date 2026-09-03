@@ -31,6 +31,7 @@ export function renderRunStatus(view: RunStatusView): string {
     "",
     "WAITING",
     renderWaiting(view),
+    ...renderHuman(view),
     "",
     "VERIFICATION",
     `Gates     ${view.verification.gatesRunning ?? view.verification.latestGate ?? DASH}`,
@@ -108,6 +109,23 @@ function renderWaiting(view: RunStatusView): string {
   parts.push(view.waiting.automaticRetryScheduled ? "auto-retry scheduled" : "no auto-retry");
   if (view.waiting.manualResumePossible) parts.push("manual resume possible");
   return parts.join(" · ");
+}
+
+function renderHuman(view: RunStatusView): string[] {
+  if (view.phase === "NEEDS_HUMAN" && view.waiting?.kind === "output_contract") {
+    return ["", "HUMAN", "not a human question · planner output failed the schema contract"];
+  }
+  if (view.humanRequest === null) {
+    if (view.phase === "NEEDS_HUMAN") {
+      return ["", "HUMAN", "decision required (see report)"];
+    }
+    return [];
+  }
+  const lines = ["", "HUMAN", view.humanRequest.question];
+  view.humanRequest.options.forEach((option, index) => {
+    lines.push(`${index + 1}. ${option}`);
+  });
+  return lines;
 }
 
 function padRole(role: string): string {

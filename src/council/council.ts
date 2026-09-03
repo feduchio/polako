@@ -12,10 +12,11 @@ import {
 import { createTaskFromRequirement, type Task, type TaskKind } from "../domain/task.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { profileCacheKey } from "../project/discovery.js";
-import { PolishError, errorToString, isProvidersUnavailable } from "../shared/errors.js";
+import { PolishError, errorToString, isOutputContractFailure, isProvidersUnavailable } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { isOperationalFailure } from "./operational.js";
 import { aggregateCouncilDecision } from "./judge.js";
+import { outputContractError } from "./interpretationSchema.js";
 import { Judge, Planner, ScopeGuardian } from "./roles.js";
 import type {
   CouncilDecision,
@@ -101,21 +102,11 @@ export class SupervisorCouncil {
         this.now(),
       );
     } catch (error) {
-      const decision = this.recordDecision(
-        baseline.runId,
-        "intake",
-        "NEEDS_HUMAN",
-        opinions,
-        calls.flatMap((call) => (call.modelEventId === undefined ? [] : [call.modelEventId])),
-        { reason: error instanceof Error ? error.message : String(error) },
+      if (isOutputContractFailure(error)) throw error;
+      throw outputContractError(
+        error instanceof Error ? error.message : "planner interpretation failed schema validation",
+        { causeMessage: error instanceof Error ? error.message : String(error) },
       );
-      return {
-        status: "NEEDS_HUMAN",
-        interpretation: null,
-        decision,
-        question: "The planner did not produce a valid requirement set. How should the mission be interpreted?",
-        options: ["Restate the mission with explicit acceptance criteria", "Narrow the mission to a single bugfix"],
-      };
     }
     const aggregate = aggregateCouncilDecision(opinions, { blockingAmbiguity: hasBlockingAmbiguity(interpretation) });
     const decision = this.recordDecision(
@@ -265,13 +256,15 @@ function buildInterpretation(
   const proposal = extractProposal(raw, "interpretation") as InterpretationProposal;
   const requirements = parseRequirements(proposal.requirements);
   if (requirements === null) {
-    throw new PolishError("INVARIANT_VIOLATION", "planner produced no valid requirements");
+    throw outputContractError("planner produced no valid requirements", {
+      issues: [{ path: "$.requirements", message: "expected a non-empty array of requirement objects" }],
+    });
   }
   const firstRequirement = requirements[0];
   if (firstRequirement === undefined) {
-    throw new PolishError("INVARIANT_VIOLATION", "planner produced no valid requirements");
+    throw outputContractError("planner produced no valid requirements");
   }
-  return MissionInterpretationSchema.parse({
+  const parsed = MissionInterpretationSchema.safeParse({
     id: id("mint", now),
     missionId: mission.id,
     version: 1,
@@ -286,16 +279,28 @@ function buildInterpretation(
     createdBy: { kind: "supervisor", role: "planner", model },
     createdAt: now,
   });
+  if (!parsed.success) {
+    throw outputContractError("planner interpretation failed schema validation", {
+      issues: parsed.error.issues.map((issue) => ({
+        path: `$${issue.path.map((part) => (typeof part === "number" ? `[${part}]` : `.${String(part)}`)).join("")}`,
+        message: issue.message,
+      })),
+    });
+  }
+  return parsed.data;
 }
 
 function parseRequirements(raw: unknown): Requirement[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const requirements: Requirement[] = [];
-  for (const item of raw) {
-    const parsed = RequirementSchema.safeParse(item);
+  for (let index = 0; index < raw.length; index++) {
+    const parsed = RequirementSchema.safeParse(raw[index]);
     if (!parsed.success) {
-      throw new PolishError("INVARIANT_VIOLATION", "planner interpretation requirements failed schema validation", {
-        issues: parsed.error.issues.map((issue) => issue.message),
+      throw outputContractError("planner interpretation requirements failed schema validation", {
+        issues: parsed.error.issues.map((issue) => ({
+          path: `$.requirements[${index}]${issue.path.length > 0 ? `.${issue.path.join(".")}` : ""}`,
+          message: issue.message,
+        })),
       });
     }
     requirements.push(parsed.data);

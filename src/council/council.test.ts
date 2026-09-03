@@ -84,9 +84,7 @@ describe("SupervisorCouncil", () => {
   it("does not invent a requirement when the planner returns none", async () => {
     const provider = scriptedCouncil(false, { emptyRequirements: true });
     const council = new SupervisorCouncil({ roles: councilRoles(provider), now: () => 10 });
-    const result = await council.intake(BUGFIX_MISSION, PROFILE, BASELINE);
-    expect(result.status).toBe("NEEDS_HUMAN");
-    expect(result.interpretation).toBeNull();
+    await expect(council.intake(BUGFIX_MISSION, PROFILE, BASELINE)).rejects.toMatchObject({ code: "OUTPUT_CONTRACT" });
   });
 
   it("returns NEEDS_HUMAN when every coding task is dropped", async () => {

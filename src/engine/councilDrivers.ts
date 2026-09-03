@@ -2,7 +2,7 @@ import { SYSTEM_ACTOR } from "../domain/common.js";
 import type { ModelInfo } from "../broker/types.js";
 import type { NewEvent } from "../domain/event.js";
 import type { ProjectProfile } from "../project/profile.js";
-import { PolishError, isProvidersUnavailable } from "../shared/errors.js";
+import { PolishError, isResumableCouncilFailure } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { SupervisorCouncil, type CouncilEventSink, type CouncilRoleConfigs } from "../council/index.js";
 import { emitNeedsHumanReport } from "../report/emit.js";
@@ -106,7 +106,12 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
     }
 
     if (result.status === "NEEDS_HUMAN") {
-      emitNeedsHumanReport(ctx, terminalReasonFromIntake(result), result.decision.events.map((event) => event.id));
+      const reason = terminalReasonFromIntake(result);
+      emitNeedsHumanReport(ctx, reason, result.decision.events.map((event) => event.id));
+      appendRunSnapshot(ctx, {
+        interpretationId: result.interpretation?.id ?? ctx.run.interpretationId,
+        terminalReason: reason,
+      });
       return { status: "complete", nextPhase: "NEEDS_HUMAN" };
     }
     return { status: "complete", nextPhase: "DISCOVERING_MODELS" };
@@ -130,7 +135,9 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
       throw error;
     }
     if (dag.decision.decision === "NEEDS_HUMAN") {
-      emitNeedsHumanReport(ctx, terminalReasonFromDecompose(dag), dag.decision.events.map((event) => event.id));
+      const reason = terminalReasonFromDecompose(dag);
+      emitNeedsHumanReport(ctx, reason, dag.decision.events.map((event) => event.id));
+      appendRunSnapshot(ctx, { terminalReason: reason });
       return { status: "complete", nextPhase: "NEEDS_HUMAN" };
     }
     const causedBy = dag.decision.events.map((event) => event.id);
@@ -153,8 +160,9 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
 }
 
 function recordCouncilUnavailable(ctx: PhaseContext, error: unknown): void {
-  if (!isProvidersUnavailable(error)) return;
+  if (!isResumableCouncilFailure(error)) return;
   const details = error instanceof PolishError ? error.details : {};
+  const outputContract = error instanceof PolishError && error.code === "OUTPUT_CONTRACT";
   const event: NewEvent = {
     id: id("evt", ctx.clock.now()),
     runId: ctx.run.id,
@@ -162,9 +170,11 @@ function recordCouncilUnavailable(ctx: PhaseContext, error: unknown): void {
     type: "council.unavailable",
     payload: {
       message: error instanceof Error ? error.message : String(error),
-      role: details["role"] ?? null,
+      role: details["role"] ?? "planner",
+      kind: outputContract ? "output_contract" : "providers_unavailable",
       attempted: details["attempted"] ?? [],
       models: details["models"] ?? [],
+      issues: details["issues"] ?? [],
       siblingOutcomes: details["siblingOutcomes"] ?? [],
       automaticRetryScheduled: false,
       manualResumePossible: true,

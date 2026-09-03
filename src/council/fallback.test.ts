@@ -3,7 +3,7 @@ import { ProviderError } from "../broker/types.js";
 import type { CompletionRequest, CompletionResponse } from "../broker/types.js";
 import { SupervisorCouncil } from "./council.js";
 import { createResilientCouncilClient } from "./fallback.js";
-import { isOperationalFailure } from "./operational.js";
+import { isOperationalFailure, isCouncilFallbackWorthy } from "./operational.js";
 import type { CouncilCompletionClient, CouncilEventSink } from "./types.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { createMission } from "../domain/mission.js";
@@ -142,6 +142,11 @@ describe("council operational fallback", () => {
     });
     await expect(council.intake(MISSION, PROFILE, BASELINE)).rejects.toBeInstanceOf(PolishError);
     expect(seen.sort()).toEqual(["judge", "planner", "scope"]);
+  });
+
+  it("treats output-contract failure as fallback-worthy, not semantic", () => {
+    expect(isCouncilFallbackWorthy(new PolishError("OUTPUT_CONTRACT", "schema"))).toBe(true);
+    expect(isOperationalFailure(new PolishError("OUTPUT_CONTRACT", "schema"))).toBe(false);
   });
 
   it("treats bad_request as semantic, not fallback-worthy", () => {

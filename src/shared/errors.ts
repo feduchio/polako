@@ -11,7 +11,8 @@ export type PolishErrorCode =
   | "IO_ERROR"
   | "INVALID_ARGUMENT"
   | "BUDGET_EXCEEDED"
-  | "PROVIDERS_UNAVAILABLE";
+  | "PROVIDERS_UNAVAILABLE"
+  | "OUTPUT_CONTRACT";
 
 export class PolishError extends Error {
   readonly code: PolishErrorCode;
@@ -40,4 +41,13 @@ export function errorToString(err: unknown): string {
 
 export function isProvidersUnavailable(err: unknown): boolean {
   return err instanceof PolishError && err.code === "PROVIDERS_UNAVAILABLE";
+}
+
+export function isOutputContractFailure(err: unknown): boolean {
+  return err instanceof PolishError && err.code === "OUTPUT_CONTRACT";
+}
+
+/** Exhausted council availability or planner output-contract failure: pause, do not ask a human. */
+export function isResumableCouncilFailure(err: unknown): boolean {
+  return isProvidersUnavailable(err) || isOutputContractFailure(err);
 }

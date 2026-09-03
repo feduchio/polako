@@ -1,5 +1,5 @@
 import { ProviderError } from "../broker/types.js";
-import { PolishError } from "../shared/errors.js";
+import { isOutputContractFailure, PolishError } from "../shared/errors.js";
 
 /**
  * Infrastructure failures that may use an authorised fallback model.
@@ -14,6 +14,11 @@ export function isOperationalFailure(err: unknown): boolean {
   }
   if (err instanceof Error && err.name === "AbortError") return false;
   return false;
+}
+
+/** Schema/JSON contract failures may use the authorised model chain; they are not semantic answers. */
+export function isCouncilFallbackWorthy(err: unknown): boolean {
+  return isOperationalFailure(err) || isOutputContractFailure(err);
 }
 
 export function operationalKind(err: unknown): string {

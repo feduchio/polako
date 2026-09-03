@@ -68,7 +68,7 @@ export class Judge extends CouncilRoleAgent {
 function systemPrompt(role: CouncilRole): string {
   const focus =
     role === "planner"
-      ? "Extract concrete goals, requirements, acceptance criteria, and a minimal dependency plan."
+      ? 'Extract concrete goals and requirements. proposal.requirements must be a non-empty array of objects {"ref":"R1","statement":"...","acceptance":["observable criterion"]}; never a string array, never acceptanceCriteria.'
       : role === "scope_guardian"
         ? "Protect explicit constraints and non-goals; identify ambiguity that blocks safe execution; during decomposition return dropRefs for out-of-scope requirements."
         : "Independently adjudicate whether the proposal is complete, testable, and safe to execute; during decomposition you may restore dropped refs via restoreRefs.";

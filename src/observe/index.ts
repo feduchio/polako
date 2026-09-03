@@ -4,6 +4,7 @@ export type {
   ActiveOperation,
   ActivityLine,
   CouncilRoleStatus,
+  HumanRequest,
   RunStatusView,
   TaskCounts,
   WaitingState,

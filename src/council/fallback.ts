@@ -6,7 +6,7 @@ import type { CouncilRetryConfig } from "../domain/config.js";
 import type { Clock } from "../shared/clock.js";
 import { PolishError, errorToString } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
-import { isOperationalFailure, operationalKind } from "./operational.js";
+import { isCouncilFallbackWorthy, operationalKind } from "./operational.js";
 import type { CouncilCompletionClient, CouncilEventSink, CouncilRole } from "./types.js";
 
 export interface AttemptedCouncilModel {
@@ -65,13 +65,16 @@ export function createResilientCouncilClient(options: ResilientCouncilClientOpti
         } catch (err) {
           lastError = err;
           attempted.push({ model, kind: operationalKind(err), error: errorToString(err) });
-          if (!isOperationalFailure(err)) throw err;
+          if (!isCouncilFallbackWorthy(err)) throw err;
         }
       }
+      const outputContract = attempted.length > 0 && attempted.every((item) => item.kind === "output_contract");
       throw new PolishError(
-        "PROVIDERS_UNAVAILABLE",
-        `council role ${options.role} has no available models`,
-        { role: options.role, attempted, models: models.map(modelRefKey) },
+        outputContract ? "OUTPUT_CONTRACT" : "PROVIDERS_UNAVAILABLE",
+        outputContract
+          ? `council role ${options.role} failed the output contract on every authorised model`
+          : `council role ${options.role} has no available models`,
+        { role: options.role, attempted, models: models.map(modelRefKey), kind: outputContract ? "output_contract" : "providers_unavailable" },
         lastError instanceof Error ? { cause: lastError } : undefined,
       );
     },

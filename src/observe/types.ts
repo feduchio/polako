@@ -22,7 +22,7 @@ export interface ActiveOperation {
 }
 
 export interface WaitingState {
-  kind: "retry" | "unavailable";
+  kind: "retry" | "unavailable" | "output_contract";
   summary: string;
   attempt: number | null;
   maxAttempts: number | null;
@@ -31,6 +31,12 @@ export interface WaitingState {
   fallbackTo: string | null;
   automaticRetryScheduled: boolean;
   manualResumePossible: boolean;
+}
+
+export interface HumanRequest {
+  question: string;
+  options: string[];
+  summary: string;
 }
 
 export interface TaskCounts {
@@ -57,6 +63,7 @@ export interface RunStatusView {
   council: CouncilRoleStatus[];
   active: ActiveOperation | null;
   waiting: WaitingState | null;
+  humanRequest: HumanRequest | null;
   verification: {
     gatesRunning: string | null;
     latestGate: string | null;

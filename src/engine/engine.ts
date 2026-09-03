@@ -183,7 +183,7 @@ export class RunEngine {
         config: this.config,
       });
     } catch (err) {
-      if (err instanceof PolishError && err.code === "PROVIDERS_UNAVAILABLE") {
+      if (err instanceof PolishError && (err.code === "PROVIDERS_UNAVAILABLE" || err.code === "OUTPUT_CONTRACT")) {
         this.control(runId, "pause");
         return;
       }

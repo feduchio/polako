@@ -7,6 +7,7 @@ import type {
   ActiveOperation,
   ActivityLine,
   CouncilRoleStatus,
+  HumanRequest,
   RunStatusView,
   TaskCounts,
   WaitingState,
@@ -23,13 +24,16 @@ export function projectRunStatus(run: Run, events: readonly Event[], now: number
     : null;
   const council = COUNCIL_ROLES.map((role) => projectCouncilRole(role, ordered, now));
   const waiting = projectWaiting(run, ordered, now);
+  const humanRequest = projectHumanRequest(run, ordered);
   const active = projectActive(ordered, now);
   const stallKind = projectStall(run, active, waiting, lastActivity?.ageMs ?? null);
   const warning =
     stallKind === "stale"
       ? "run reports RUNNING but no active operation is known"
       : stallKind === "unavailable"
-        ? "provider unavailable; resume when the endpoint recovers"
+        ? waiting?.kind === "output_contract"
+          ? "planner output contract failed; not a human question"
+          : "provider unavailable; resume when the endpoint recovers"
         : null;
 
   return {
@@ -49,6 +53,7 @@ export function projectRunStatus(run: Run, events: readonly Event[], now: number
     council,
     active,
     waiting,
+    humanRequest,
     verification: {
       gatesRunning: active?.kind === "shell" ? active.label : null,
       latestGate: latestGateSummary(ordered),
@@ -87,9 +92,9 @@ function projectStall(
     return "terminal";
   }
   if (run.control === "PAUSED" || run.control === "PAUSE_REQUESTED") {
-    return waiting?.kind === "unavailable" ? "unavailable" : "paused";
+    return waiting?.kind === "unavailable" || waiting?.kind === "output_contract" ? "unavailable" : "paused";
   }
-  if (waiting?.kind === "unavailable") return "unavailable";
+  if (waiting?.kind === "unavailable" || waiting?.kind === "output_contract") return "unavailable";
   if (waiting?.kind === "retry") return "retry";
   if (active !== null) return "running";
   if (run.control === "RUNNING" && (lastAgeMs === null || lastAgeMs >= STALE_MS)) return "stale";
@@ -97,13 +102,30 @@ function projectStall(
 }
 
 function projectWaiting(run: Run, events: readonly Event[], now: number): WaitingState | null {
+  const historical = latestHistoricalSchemaNeedsHuman(events);
+  if (historical !== undefined && run.phase === "NEEDS_HUMAN") {
+    return {
+      kind: "output_contract",
+      summary: "planner output contract failed",
+      attempt: null,
+      maxAttempts: null,
+      backoffMs: null,
+      retryAt: null,
+      fallbackTo: null,
+      automaticRetryScheduled: false,
+      manualResumePossible: true,
+    };
+  }
   const unavailable = [...events].reverse().find((event) => event.type === "council.unavailable");
   if (unavailable !== undefined && (run.control === "PAUSED" || run.control === "PAUSE_REQUESTED" || run.control === "RUNNING")) {
     const attempted = Array.isArray(unavailable.payload["attempted"]) ? unavailable.payload["attempted"] : [];
     const role = text(unavailable.payload["role"]) ?? "council";
+    const outputContract = unavailable.payload["kind"] === "output_contract";
     return {
-      kind: "unavailable",
-      summary: `${role} unavailable${attempted.length > 0 ? ` · ${attempted.length} model(s)` : ""}`,
+      kind: outputContract ? "output_contract" : "unavailable",
+      summary: outputContract
+        ? `${role} output contract failed`
+        : `${role} unavailable${attempted.length > 0 ? ` · ${attempted.length} model(s)` : ""}`,
       attempt: null,
       maxAttempts: null,
       backoffMs: null,
@@ -133,6 +155,41 @@ function projectWaiting(run: Run, events: readonly Event[], now: number): Waitin
     };
   }
   return null;
+}
+
+function projectHumanRequest(run: Run, events: readonly Event[]): HumanRequest | null {
+  if (run.phase !== "NEEDS_HUMAN") return null;
+  if (latestHistoricalSchemaNeedsHuman(events) !== undefined) return null;
+  const reason = run.terminalReason;
+  if (reason?.question !== undefined && reason.question.length > 0 && !isSchemaContractReason(reason.question) && !isSchemaContractReason(reason.summary)) {
+    return { question: reason.question, options: reason.options ?? [], summary: reason.summary };
+  }
+  const report = [...events].reverse().find((event) => event.type === "report.generated" && event.payload["kind"] === "needs_human");
+  const question = text(report?.payload["question"]);
+  if (question !== null && !isSchemaContractReason(question)) {
+    const options = Array.isArray(report?.payload["options"])
+      ? report.payload["options"].filter((item): item is string => typeof item === "string" && item.length > 0)
+      : [];
+    return { question, options, summary: text(report?.payload["summary"]) ?? question };
+  }
+  const decision = [...events].reverse().find((event) => event.type === "supervisor.decision" && event.payload["decision"] === "NEEDS_HUMAN");
+  const decisionReason = text(decision?.payload["reason"]);
+  if (decisionReason !== null && !isSchemaContractReason(decisionReason)) {
+    return { question: decisionReason, options: [], summary: decisionReason };
+  }
+  return null;
+}
+
+function latestHistoricalSchemaNeedsHuman(events: readonly Event[]): Event | undefined {
+  return [...events].reverse().find((event) => {
+    if (event.type !== "supervisor.decision") return false;
+    if (event.payload["decision"] !== "NEEDS_HUMAN") return false;
+    return isSchemaContractReason(text(event.payload["reason"]) ?? "") || isSchemaContractReason(text(event.payload["rationale"]) ?? "");
+  });
+}
+
+function isSchemaContractReason(value: string): boolean {
+  return /schema validation|output contract|valid requirement set/i.test(value);
 }
 
 function projectActive(events: readonly Event[], now: number): ActiveOperation | null {
@@ -428,6 +485,15 @@ export function summarize(event: Event): string {
       const nested = asRecord(event.payload["run"]);
       const phase = text(event.payload["to"]) ?? text(nested?.["phase"]);
       if (phase === "INTERPRETING_MISSION") return "Interpreting mission";
+      if (phase === "NEEDS_HUMAN") {
+        const reason = asRecord(nested?.["terminalReason"]);
+        const question = text(reason?.["question"]);
+        if (question !== null && !isSchemaContractReason(question)) return `Needs human · ${question}`;
+        if (isSchemaContractReason(text(reason?.["summary"]) ?? "") || isSchemaContractReason(question ?? "")) {
+          return "Planner output contract failed";
+        }
+        return "Phase NEEDS_HUMAN";
+      }
       return phase !== null ? `Phase ${phase}` : "Phase changed";
     }
     case "model.call_started":
@@ -445,8 +511,17 @@ export function summarize(event: Event): string {
     }
     case "model.fallback_selected":
       return `⇢ fallback · ${displayModel(event.payload["to"])}`;
+    case "model.output_invalid":
+      return `! ${text(event.payload["role"]) ?? "planner"} output invalid · ${text(event.payload["summary"]) ?? "schema"}`;
+    case "model.output_repair_attempted": {
+      const attempt = number(event.payload["attempt"]) ?? 1;
+      const max = number(event.payload["maxAttempts"]) ?? attempt;
+      return `↻ repair ${attempt}/${max}`;
+    }
     case "council.unavailable":
-      return `! ${text(event.payload["role"]) ?? "council"} unavailable`;
+      return event.payload["kind"] === "output_contract"
+        ? `! ${text(event.payload["role"]) ?? "planner"} output contract failed`
+        : `! ${text(event.payload["role"]) ?? "council"} unavailable`;
     case "council.role_resolved":
       return `${text(event.payload["role"]) ?? "role"} resolved · ${text(event.payload["model"]) ?? displayModel(event.payload)}`;
     case "shell.command_started": {
@@ -484,12 +559,23 @@ export function summarize(event: Event): string {
       return "✓ Clean round";
     case "mission.interpreted":
       return "Mission interpreted";
+    case "report.generated": {
+      if (event.payload["kind"] === "needs_human") {
+        const question = text(event.payload["question"]);
+        if (question !== null && !isSchemaContractReason(question)) return `Needs human · ${question}`;
+      }
+      return "";
+    }
     case "run.control_changed": {
       const nested = asRecord(event.payload["run"]);
       return `Control ${text(nested?.["control"]) ?? "changed"}`;
     }
-    case "supervisor.decision":
-      return `Council ${text(event.payload["decision"]) ?? "decided"}`;
+    case "supervisor.decision": {
+      const decision = text(event.payload["decision"]) ?? "decided";
+      const reason = text(event.payload["reason"]);
+      if (reason !== null && isSchemaContractReason(reason)) return `Council ${decision} · output contract failed`;
+      return `Council ${decision}`;
+    }
     default:
       return "";
   }
