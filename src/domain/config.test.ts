@@ -8,10 +8,16 @@ describe("PolishConfig", () => {
     expect(cfg.convergence.requiredCleanRounds).toBe(3);
     expect(cfg.sandbox.backend).toBe("worktree");
     expect(cfg.sandbox.allowArbitraryCommands).toBe(false);
+    expect(cfg.runtimeValidation.mode).toBe("auto");
+    expect(cfg.lanes["local.runtime"]).toBe(1);
   });
 
   it("rejects an integration lane wider than 1", () => {
     expect(() => PolishConfigSchema.parse({ lanes: { integration: 2 } })).toThrow();
+  });
+
+  it("rejects a local.runtime lane wider than 1", () => {
+    expect(() => PolishConfigSchema.parse({ lanes: { "local.runtime": 2 } })).toThrow();
   });
 
   it("keeps provider keys out of config (only env var names)", () => {

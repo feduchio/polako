@@ -58,14 +58,44 @@ export class MissionAcceptanceService {
     return entry;
   }
 
+  recordRuntimeScenario(input: {
+    missionId: string;
+    sourceRunId: string;
+    requirementRef: string;
+    scenarioId: string;
+    summary: string;
+    metadata?: Record<string, unknown>;
+    evidenceRefs?: string[];
+    artifactHashes?: string[];
+  }): CorpusEntry {
+    return this.record({
+      missionId: input.missionId,
+      sourceRunId: input.sourceRunId,
+      requirementRef: input.requirementRef,
+      kind: "runtime_scenario",
+      summary: input.summary,
+      evidenceRefs: input.evidenceRefs ?? [],
+      artifactHashes: input.artifactHashes ?? [],
+      metadata: { scenarioId: input.scenarioId, ...(input.metadata ?? {}) },
+    });
+  }
+
   recordRuntimeEvidence(input: {
     missionId: string;
     requirementRef: string;
     evidence: RuntimeEvidence;
     evidenceRefs?: string[];
     summary?: string;
+    /** When set, evidence for any other checkpoint is rejected rather than recorded. */
+    expectedCheckpointHash?: string;
   }): CorpusEntry {
     const evidence = RuntimeEvidenceSchema.parse(input.evidence);
+    if (input.expectedCheckpointHash !== undefined && evidence.checkpointHash !== input.expectedCheckpointHash) {
+      throw new PolishError("INVARIANT_VIOLATION", "runtime evidence checkpoint does not match the expected checkpoint", {
+        expectedCheckpointHash: input.expectedCheckpointHash,
+        evidenceCheckpointHash: evidence.checkpointHash,
+      });
+    }
     return this.record({
       missionId: input.missionId,
       sourceRunId: evidence.runId,
@@ -78,6 +108,7 @@ export class MissionAcceptanceService {
         scenarioId: evidence.scenarioId,
         validator: evidence.validator,
         status: evidence.status,
+        checkpointHash: evidence.checkpointHash,
       },
       runtimeEvidence: evidence,
     });

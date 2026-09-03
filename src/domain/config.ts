@@ -12,6 +12,8 @@ export const LaneLimitsSchema = z.object({
   "local.build": z.number().int().min(1).default(1),
   /** serial integration queue — must stay 1; exposed for tests only */
   integration: z.literal(1).default(1),
+  /** runtime scenario executions — serial so fixture processes cannot overlap */
+  "local.runtime": z.literal(1).default(1),
   supervisor: z.number().int().min(1).default(2),
   verifier: z.number().int().min(1).default(2),
   /** default per-provider LLM concurrency when the provider does not advertise limits */
@@ -77,6 +79,12 @@ export const BudgetSchema = z.object({
   maxRunWallClockMinutes: z.number().int().min(1).nullable().default(null),
 });
 
+export const RuntimeValidationConfigSchema = z.object({
+  mode: z.enum(["auto", "required", "off"]).default("auto"),
+  level: z.enum(["smoke", "affected", "full"]).default("smoke"),
+});
+export type RuntimeValidationConfig = z.infer<typeof RuntimeValidationConfigSchema>;
+
 export const SandboxConfigSchema = z.object({
   backend: z.enum(["worktree", "sandbox-exec", "container"]).default("worktree"),
   commandTimeoutMs: z.number().int().min(1000).default(15 * 60_000),
@@ -118,6 +126,7 @@ export const PolishConfigSchema = z.object({
   contextBudget: ContextBudgetSchema.prefault({}),
   budget: BudgetSchema.prefault({}),
   sandbox: SandboxConfigSchema.prefault({}),
+  runtimeValidation: RuntimeValidationConfigSchema.prefault({}),
   supervisors: z.array(SupervisorRoleConfigSchema).default([]),
   providers: z.array(ProviderConfigSchema).default([]),
 });

@@ -68,6 +68,13 @@ module.exports = {
       to: { path: "^src/(?!context/|domain/|shared/|store/|protocols/|project/|intel/)" },
     },
     {
+      name: "runtime-depends-only-on-foundation",
+      comment: "B12 runtime validators may use domain/shared/sandbox process runner only",
+      severity: "error",
+      from: { path: "^src/runtime/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/(?!runtime/|domain/|shared/|sandbox/)" },
+    },
+    {
       name: "engine-is-not-imported-by-lower-layers",
       severity: "error",
       from: { path: "^src/(?!engine/|daemon/)" },

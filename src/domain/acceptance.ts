@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { posix } from "node:path";
-import { IdSchema, Sha256Schema, TimestampSchema } from "./common.js";
+import { GitHashSchema, IdSchema, Sha256Schema, TimestampSchema } from "./common.js";
 
 /**
  * Artifacts a candidate is judged by. Stored outside any worktree
@@ -34,6 +34,17 @@ export const CorpusEntryKindSchema = z.enum([
 ]);
 export type CorpusEntryKind = z.infer<typeof CorpusEntryKindSchema>;
 
+export const RuntimeCapabilityClassSchema = z.enum([
+  "AVAILABLE_SAFE",
+  "AVAILABLE_UNSAFE",
+  "UNAVAILABLE",
+  "NOT_APPLICABLE",
+]);
+export type RuntimeCapabilityClass = z.infer<typeof RuntimeCapabilityClassSchema>;
+
+export const RuntimeValidationModeSchema = z.enum(["auto", "required", "off"]);
+export type RuntimeValidationMode = z.infer<typeof RuntimeValidationModeSchema>;
+
 export const RuntimeEvidenceSchema = z.object({
   id: IdSchema,
   runId: IdSchema,
@@ -43,6 +54,8 @@ export const RuntimeEvidenceSchema = z.object({
   status: z.enum(["passed", "failed", "unavailable", "skipped"]),
   summary: z.string().min(1),
   observations: z.record(z.string(), z.unknown()),
+  /** Commit the scenario actually executed against. Stale evidence cannot satisfy DONE. */
+  checkpointHash: GitHashSchema,
   /** Runtime validation is read-only unless the caller explicitly opts into a broader policy. */
   sideEffects: z.object({
     policy: z.enum(["safe", "explicit"]),
@@ -53,6 +66,52 @@ export const RuntimeEvidenceSchema = z.object({
   finishedAt: TimestampSchema,
 });
 export type RuntimeEvidence = z.infer<typeof RuntimeEvidenceSchema>;
+
+/** True when evidence belongs to a different checkpoint than the one under consideration. */
+export function isStaleRuntimeEvidence(evidence: RuntimeEvidence, checkpointHash: string): boolean {
+  return evidence.checkpointHash !== checkpointHash;
+}
+
+/**
+ * Whether DONE is allowed given runtime mode and evidence for the *final* checkpoint.
+ * Evidence whose checkpointHash differs from `finalCheckpointHash` is stale and never
+ * satisfies DONE (including auto skip/unavailable records from an earlier checkpoint).
+ * `null` means "no runtime attempt at this checkpoint" and is allowed only in `auto`/`off`.
+ */
+export function runtimeAllowsDone(
+  mode: RuntimeValidationMode,
+  evidence: RuntimeEvidence | null,
+  finalCheckpointHash: string,
+): boolean {
+  if (mode === "off") return true;
+  if (evidence !== null && evidence.checkpointHash !== finalCheckpointHash) return false;
+  if (mode === "auto") {
+    if (evidence === null) return true;
+    if (evidence.status === "skipped" || evidence.status === "unavailable") return true;
+    return evidence.status === "passed";
+  }
+  return evidence !== null && evidence.status === "passed";
+}
+
+/**
+ * Corpus-level DONE gate. Stale evidence (wrong checkpoint) always blocks when present.
+ * `requiredScenarioIds` must each have `passed` evidence at `finalCheckpointHash` when
+ * mode is `required`. In `auto`, a failed current-checkpoint run blocks; missing runs do not.
+ */
+export function runtimeCorpusAllowsDone(
+  mode: RuntimeValidationMode,
+  evidences: readonly RuntimeEvidence[],
+  finalCheckpointHash: string,
+  requiredScenarioIds: readonly string[] = [],
+): boolean {
+  if (mode === "off") return true;
+  if (evidences.some((e) => e.checkpointHash !== finalCheckpointHash)) return false;
+  const current = evidences.filter((e) => e.checkpointHash === finalCheckpointHash);
+  if (mode === "auto") {
+    return !current.some((e) => e.status === "failed");
+  }
+  return requiredScenarioIds.every((id) => current.some((e) => e.scenarioId === id && e.status === "passed"));
+}
 
 export const CorpusEntrySchema = z.object({
   id: IdSchema,

@@ -52,7 +52,8 @@ export type IdPrefix =
   | "base"
   | "cr"
   | "call"
-  | "mobs";
+  | "mobs"
+  | "rte";
 
 export function id(prefix: IdPrefix, now?: number): string {
   return newId(prefix, now);

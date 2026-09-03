@@ -22,7 +22,7 @@ export const JOB_TABLE: TransitionTable<JobState> = {
 };
 
 /** Lane names: `llm.<providerId>` plus the fixed local lanes. */
-export const LaneSchema = z.string().regex(/^(llm\.[a-z0-9_-]+|local\.shell|local\.test|local\.build|integration|supervisor|verifier)$/);
+export const LaneSchema = z.string().regex(/^(llm\.[a-z0-9_-]+|local\.shell|local\.test|local\.build|local\.runtime|integration|supervisor|verifier)$/);
 export type Lane = z.infer<typeof LaneSchema>;
 
 export const INTEGRATION_LANE: Lane = "integration";
