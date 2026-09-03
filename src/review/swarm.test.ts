@@ -33,11 +33,12 @@ describe("review swarm", () => {
       checkpoint: CHECKPOINT,
     };
 
+    const reviewer = { provider, model: { provider: "reviews", model: "reviewer" } };
     const findings = await runReviewSwarm({
       checkpoint: CHECKPOINT,
       axes: ["correctness", "regression", "adversarial"],
       artifact,
-      providers: [provider],
+      providers: [reviewer],
       repositoryRoot: root,
     });
 
@@ -65,11 +66,12 @@ describe("review swarm", () => {
       diff: "",
       checkpoint: CHECKPOINT,
     };
+    const reviewer = { provider, model: { provider: "reviews", model: "reviewer" } };
     await expect(runReviewSwarm({
       checkpoint: CHECKPOINT,
       axes: ["correctness", "regression"],
       artifact,
-      providers: [provider],
+      providers: [reviewer],
     })).rejects.toThrow("at least three");
   });
 
@@ -87,11 +89,12 @@ describe("review swarm", () => {
       checkpoint: CHECKPOINT,
     };
 
+    const reviewer = { provider, model: { provider: "reviews", model: "reviewer" } };
     await runReviewSwarm({
       checkpoint: CHECKPOINT,
       axes: ["correctness", "regression", "adversarial"],
       artifact,
-      providers: [provider],
+      providers: [reviewer],
     });
 
     const userBodies = provider.calls.map((call) => call.messages[1]?.content ?? "");

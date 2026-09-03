@@ -236,8 +236,8 @@ async function buildTestEngine(
   // "sup" = supervisor/judge model (strong, JSON mode → selected for all council roles).
   // Setting supportsJson=false on wkr ensures the router always picks "sup" for requireJson roles.
   const provider = new ScriptedProvider("scripted", [
-    { name: "wkr", capabilities: { ...FAKE_CAPABILITIES.frontier, supportsJson: false } },
-    { name: "sup", capabilities: FAKE_CAPABILITIES.strong },
+    { name: "wkr", capabilities: { ...FAKE_CAPABILITIES.frontier, supportsJson: false, inputCostPerM: 0, outputCostPerM: 0 } },
+    { name: "sup", capabilities: { ...FAKE_CAPABILITIES.strong, inputCostPerM: 0, outputCostPerM: 0 } },
   ], {
     fallback: {
       kind: "fn",
@@ -358,8 +358,8 @@ describe("B10 positive path – production E2E", () => {
       },
     ]);
 
-    // Review (1 reviewer, clean round – no findings).
-    provider.script("wkr", [
+    // Review (1 reviewer via Router requireJson → "sup", clean round – no findings).
+    provider.script("sup", [
       { kind: "reply", content: JSON.stringify({ findings: [] }) },
     ]);
 

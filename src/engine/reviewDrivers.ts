@@ -17,10 +17,9 @@ import {
   reviewAxesForRound,
   type ReviewExecution,
 } from "../domain/review.js";
-import type { ProviderAdapter } from "../broker/types.js";
-import { ScriptedProvider } from "../providers/scripted.js";
+import { PolishError } from "../shared/errors.js";
 import { buildCheckpointReviewArtifact } from "../review/artifact.js";
-import { runAxisReview } from "../review/swarm.js";
+import { runAxisReview, type ReviewProvider } from "../review/swarm.js";
 import { id } from "../shared/ids.js";
 import {
   latestCompletedReviewRound,
@@ -30,7 +29,7 @@ import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import type { PhaseContext, PhaseDriver } from "./types.js";
 
 export interface ReviewDriverOptions {
-  resolveProviders?: (ctx: PhaseContext) => ProviderAdapter[] | Promise<ProviderAdapter[]>;
+  resolveReviewers?: (ctx: PhaseContext) => ReviewProvider[] | Promise<ReviewProvider[]>;
   resolveAxes?: (ctx: PhaseContext) => ReviewAxis[] | Promise<ReviewAxis[]>;
 }
 
@@ -59,7 +58,10 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
       (execution) => execution.checkpointHash === hash && execution.roundIndex === roundIndex,
     );
     const axes = await resolveAxes(ctx, options);
-    const providers = await resolveProviders(ctx, options);
+    const reviewers = await resolveReviewers(ctx, options);
+    if (reviewers.length === 0) {
+      throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
+    }
     const baseline = ctx.store.repos.baselines.listByRun(ctx.run.id)[0];
     const parent = checkpoint.parentId === null ? null : ctx.store.repos.checkpoints.get(checkpoint.parentId);
     const artifact = await buildCheckpointReviewArtifact({
@@ -73,15 +75,17 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
     }
 
     for (const axis of missingAxes(axes, roundExecutions, required)) {
-      const provider = providers[axes.indexOf(axis) % providers.length] ?? providers[0];
-      if (provider === undefined) return { status: "waiting" };
-      const started = await startExecution(ctx, hash, roundIndex, axis, provider);
+      const reviewer = reviewers[axes.indexOf(axis) % reviewers.length];
+      if (reviewer === undefined) {
+        throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
+      }
+      const started = startExecution(ctx, hash, roundIndex, axis, reviewer);
       try {
         const result = await runAxisReview({
           checkpoint,
           axis,
           artifact,
-          provider,
+          provider: reviewer,
           repositoryRoot: ctx.run.projectPath,
           now: ctx.clock.now(),
         });
@@ -205,9 +209,9 @@ async function resolveAxes(ctx: PhaseContext, options: ReviewDriverOptions): Pro
   return reviewAxesForRound(ctx.config.review.reviewersPerRound);
 }
 
-async function resolveProviders(ctx: PhaseContext, options: ReviewDriverOptions): Promise<ProviderAdapter[]> {
-  if (options.resolveProviders) return options.resolveProviders(ctx);
-  return [new ScriptedProvider("review-default", [])];
+async function resolveReviewers(ctx: PhaseContext, options: ReviewDriverOptions): Promise<ReviewProvider[]> {
+  if (options.resolveReviewers) return options.resolveReviewers(ctx);
+  throw new PolishError("CONFIG_ERROR", "production REVIEWING requires explicit ReviewProvider selection");
 }
 
 function hasPendingFindingWork(ctx: PhaseContext, checkpointHash: string): boolean {
@@ -306,22 +310,21 @@ class DeferredCorpusAppender implements CorpusAppender {
   }
 }
 
-async function startExecution(
+function startExecution(
   ctx: PhaseContext,
   checkpointHash: string,
   roundIndex: number,
   axis: ReviewAxis,
-  provider: ProviderAdapter,
-): Promise<ReviewExecution> {
+  reviewer: ReviewProvider,
+): ReviewExecution {
   const now = ctx.clock.now();
-  const model = (await provider.listModels())[0]?.ref ?? { provider: provider.id, model: "default" };
   const execution: ReviewExecution = {
     id: id("rvex", now),
     runId: ctx.run.id,
     checkpointHash,
     roundIndex,
     axis,
-    requestedModel: model,
+    requestedModel: reviewer.model,
     completed: false,
     findings: [],
     startedAt: now,

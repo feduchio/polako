@@ -1,4 +1,9 @@
 import { modelRefKey, type ModelRef } from "../domain/common.js";
+import {
+  UNRESTRICTED_COST_ELIGIBILITY,
+  isCostEligible,
+  type CostEligibilityPolicy,
+} from "./costEligibility.js";
 import type { ModelInfo } from "./types.js";
 
 function estimatedCostPerM(cap: ModelInfo["capabilities"]): number {
@@ -7,13 +12,15 @@ function estimatedCostPerM(cap: ModelInfo["capabilities"]): number {
 
 /**
  * Build the bounded probe shortlist for one provider: pinned supervisor models first
- * (never dropped), then cheapest declared-tool models up to maxProbesPerProvider.
+ * (never dropped, even if paid), then cheapest declared-tool models that pass cost
+ * eligibility, up to maxProbesPerProvider. Cataloging of paid models happens elsewhere.
  */
 export function buildDiscoveryShortlist(
   models: readonly ModelInfo[],
   providerId: string,
   pinnedRefs: readonly ModelRef[],
   maxProbesPerProvider: number,
+  costEligibility: CostEligibilityPolicy = UNRESTRICTED_COST_ELIGIBILITY,
 ): ModelInfo[] {
   const byKey = new Map(models.map((model) => [modelRefKey(model.ref), model]));
   const pinned: ModelInfo[] = [];
@@ -29,6 +36,7 @@ export function buildDiscoveryShortlist(
   const ranked = models
     .filter((model) => !pinnedKeys.has(modelRefKey(model.ref)))
     .filter((model) => model.capabilities.supportsTools)
+    .filter((model) => isCostEligible(model.capabilities, costEligibility))
     .sort((left, right) => {
       const costDelta = estimatedCostPerM(left.capabilities) - estimatedCostPerM(right.capabilities);
       if (costDelta !== 0) return costDelta;

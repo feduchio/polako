@@ -1,6 +1,14 @@
 export { probeModelCapabilities } from "./capabilityProbe.js";
 export type { CapabilityProbeCheck, CapabilityProbeChecks, CapabilityProbeResult, ProbeVerdict } from "./capabilityProbe.js";
 export { buildDiscoveryShortlist } from "./discoveryShortlist.js";
+export {
+  costEligibilityFromConfig,
+  FREE_ONLY_COST_ELIGIBILITY,
+  isCostEligible,
+  isExplicitlyFree,
+  UNRESTRICTED_COST_ELIGIBILITY,
+} from "./costEligibility.js";
+export type { CostEligibilityMode, CostEligibilityPolicy, RoutingCostConfig } from "./costEligibility.js";
 export * from "./types.js";
 export { ModelCatalog } from "./catalog.js";
 export type { CatalogDiscoveryOptions, CatalogEntry, ModelStats } from "./catalog.js";

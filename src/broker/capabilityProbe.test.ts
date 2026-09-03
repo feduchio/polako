@@ -260,4 +260,23 @@ describe("buildDiscoveryShortlist", () => {
     const shortlist = buildDiscoveryShortlist(models, "p", [models[4]!.ref], 2);
     expect(shortlist.map((entry) => entry.ref.model)).toEqual(["model-04", "model-00", "model-01"]);
   });
+
+  it("under free_only excludes paid and unknown prices except pinned supervisors", () => {
+    const models = [
+      ...manyModels(3),
+      model("free-zero", FAKE_CAPABILITIES.fast, 0),
+      {
+        ref: { provider: "p", model: "unknown-price" },
+        displayName: "unknown-price",
+        capabilities: { ...FAKE_CAPABILITIES.fast, inputCostPerM: null, outputCostPerM: null },
+        source: "provider" as const,
+      },
+    ];
+    const shortlist = buildDiscoveryShortlist(models, "p", [models[2]!.ref], 8, {
+      mode: "free_only",
+      maxInputCostPerM: 0,
+      maxOutputCostPerM: 0,
+    });
+    expect(shortlist.map((entry) => entry.ref.model)).toEqual(["model-02", "free-zero"]);
+  });
 });

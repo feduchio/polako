@@ -11,7 +11,7 @@ export const ModelCapabilitiesSchema = z.object({
   maxOutputTokens: z.number().int().positive().nullable(),
   supportsTools: z.boolean(),
   supportsJson: z.boolean(),
-  /** USD per 1M tokens; null when unknown/free */
+  /** USD per 1M tokens; null when unknown. Unknown is not treated as free. */
   inputCostPerM: z.number().nonnegative().nullable(),
   outputCostPerM: z.number().nonnegative().nullable(),
   tier: ModelTierSchema,

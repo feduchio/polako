@@ -4,7 +4,8 @@ import { AgentRunner } from "../agents/runner.js";
 import { ModelBroker } from "../broker/broker.js";
 import { probeModelCapabilities } from "../broker/capabilityProbe.js";
 import { ModelCatalog } from "../broker/catalog.js";
-import { ModelRouter } from "../broker/router.js";
+import { costEligibilityFromConfig } from "../broker/costEligibility.js";
+import { DEFAULT_ROUTER_POLICY, ModelRouter } from "../broker/router.js";
 import { BudgetTracker, QuotaTracker } from "../broker/quota.js";
 import { SecretStore } from "../broker/secrets.js";
 import type { ProviderAdapter } from "../broker/types.js";
@@ -31,6 +32,7 @@ import {
 } from "../engine/index.js";
 import type { PhaseContext, PhaseDriver } from "../engine/types.js";
 import { createProviderFromConfig } from "../providers/factory.js";
+import type { ReviewProvider } from "../review/swarm.js";
 import {
   buildBaselineSnapshot,
   createCheckOutputPersister,
@@ -139,7 +141,10 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     home: options.home,
     catalog,
     broker,
-    router: new ModelRouter(catalog),
+    router: new ModelRouter(catalog, {
+      ...DEFAULT_ROUTER_POLICY,
+      costEligibility: costEligibilityFromConfig(options.config.routing),
+    }),
     providers,
     resolveSandbox: sandbox,
   };
@@ -344,7 +349,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
   engine.registerPhase("GATING", createGatingDriver(candidateOptions));
   engine.registerPhase("COMPARING", createComparingDriver());
   engine.registerPhase("INTEGRATING", createIntegratingDriver(candidateOptions));
-  engine.registerPhase("REVIEWING", createReviewingDriver({ resolveProviders: () => deps.providers }));
+  engine.registerPhase("REVIEWING", createReviewingDriver({ resolveReviewers: () => selectReviewProviders(deps) }));
   engine.registerPhase("VALIDATING", withReadyPromotion(createValidatingDriver()));
   engine.registerPhase("SIMPLIFYING", createSimplifyingDriver());
   engine.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver());
@@ -356,6 +361,7 @@ function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDr
     const discovery = await deps.catalog.discover({
       maxProbesPerProvider: deps.config.discovery.maxProbesPerProvider,
       pinnedModels,
+      costEligibility: costEligibilityFromConfig(deps.config.routing),
       capabilityProbe: (adapter, model) =>
         probeModelCapabilities(adapter, model, {
           runId: ctx.run.id,
@@ -383,6 +389,26 @@ function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDr
     const models = deps.catalog.list().map((entry) => entry.info);
     return createDiscoveringModelsDriver(models)(ctx);
   };
+}
+
+/** Router-selected reviewers with exact ModelRef; never listModels()[0]. */
+export function selectReviewProviders(deps: ProductionDeps): ReviewProvider[] {
+  const ranked = deps.router.select({
+    role: "reviewer",
+    count: deps.config.review.reviewersPerRound,
+    requireJson: true,
+  });
+  if (ranked.length === 0) {
+    throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
+  }
+  return ranked.map((row) => {
+    const ref = row.entry.info.ref;
+    const adapter = deps.catalog.provider(ref.provider) ?? deps.providers.find((provider) => provider.id === ref.provider);
+    if (adapter === undefined) {
+      throw new PolishError("CONFIG_ERROR", `no provider adapter for review model ${ref.provider}:${ref.model}`);
+    }
+    return { provider: adapter, model: ref };
+  });
 }
 
 export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {

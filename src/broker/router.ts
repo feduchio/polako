@@ -1,5 +1,10 @@
 import { modelRefKey, type ModelRef } from "../domain/common.js";
 import type { CatalogEntry, ModelCatalog } from "./catalog.js";
+import {
+  UNRESTRICTED_COST_ELIGIBILITY,
+  isCostEligible,
+  type CostEligibilityPolicy,
+} from "./costEligibility.js";
 import { TIER_RANK, type ModelTier } from "./types.js";
 
 export type ModelRole = "worker" | "reviewer" | "verifier" | "judge" | "supervisor" | "scout" | "evidence";
@@ -30,6 +35,13 @@ export interface RouterPolicy {
   failurePenalty: number;
   /** bonus for a family not in `avoidFamilies` / not already chosen */
   diversityBonus: number;
+  /**
+   * Cost gate for every dynamic router role. User-pinned council models are
+   * authorized outside the router (explicit config refs), not by role name.
+   * Default unrestricted so ranking unit tests stay cost-agnostic; production
+   * composition applies config (free_only by default).
+   */
+  costEligibility: CostEligibilityPolicy;
 }
 
 export const DEFAULT_ROUTER_POLICY: RouterPolicy = {
@@ -38,6 +50,7 @@ export const DEFAULT_ROUTER_POLICY: RouterPolicy = {
   costWeight: 0.05,
   failurePenalty: 0.5,
   diversityBonus: 0.08,
+  costEligibility: UNRESTRICTED_COST_ELIGIBILITY,
 };
 
 export interface Ranked {
@@ -67,6 +80,7 @@ export class ModelRouter {
       if (req.requireTools && !c.supportsTools) return false;
       if (req.requireJson && !c.supportsJson) return false;
       if (req.minContextWindow !== undefined && c.contextWindow < req.minContextWindow) return false;
+      if (!isCostEligible(c, this.policy.costEligibility)) return false;
       return true;
     });
 

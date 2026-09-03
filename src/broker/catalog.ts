@@ -1,5 +1,6 @@
 import { modelRefKey, type ModelRef } from "../domain/common.js";
 import type { CapabilityProbeResult } from "./capabilityProbe.js";
+import type { CostEligibilityPolicy } from "./costEligibility.js";
 import { buildDiscoveryShortlist } from "./discoveryShortlist.js";
 import type { ModelInfo, ProviderAdapter } from "./types.js";
 
@@ -29,6 +30,8 @@ export interface CatalogDiscoveryOptions {
   maxProbesPerProvider?: number;
   /** Supervisor-pinned models always included in the shortlist before the probe cap. */
   pinnedModels?: readonly ModelRef[];
+  /** Restricts which non-pinned models are probed; listed models are still cataloged. */
+  costEligibility?: CostEligibilityPolicy;
 }
 
 export interface CatalogDiscoveryResult {
@@ -94,7 +97,7 @@ export class ModelCatalog {
 
         const maxProbes = options.maxProbesPerProvider;
         const shortlist = bounded && maxProbes !== undefined
-          ? buildDiscoveryShortlist(models, id, pinnedModels, maxProbes)
+          ? buildDiscoveryShortlist(models, id, pinnedModels, maxProbes, options.costEligibility)
           : models;
         const shortlistKeys = new Set(shortlist.map((model) => modelRefKey(model.ref)));
 

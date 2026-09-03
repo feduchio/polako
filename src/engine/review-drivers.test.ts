@@ -41,7 +41,9 @@ describe("B4 production REVIEWING driver", () => {
     for (const phase of ["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "PLANNING", "EXECUTING", "GATING", "COMPARING", "INTEGRATING", "VALIDATING", "CONVERGENCE_CHECK"] as const) {
       engine.registerPhase(phase, stubDriverFor(phase));
     }
-    engine.registerPhase("REVIEWING", createReviewingDriver({ resolveProviders: () => [provider] }));
+    engine.registerPhase("REVIEWING", createReviewingDriver({
+      resolveReviewers: () => [{ provider, model: { provider: "reviews", model: "reviewer" } }],
+    }));
   });
 
   afterEach(() => {

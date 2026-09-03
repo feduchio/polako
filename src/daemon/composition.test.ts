@@ -101,7 +101,9 @@ describe("production composition", () => {
   });
 
   it("createWorkerFactory uses agent.maxTurns instead of retry.maxAttempts", async () => {
-    const provider = new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }]);
+    const provider = new ScriptedProvider("scripted", [
+      { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 } },
+    ]);
     provider.script("worker", [
       { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "list", arguments: "{}" }] },
       { kind: "reply", content: "", toolCalls: [{ id: "t2", name: "list", arguments: "{}" }] },

@@ -39,7 +39,7 @@ export function createProviderFromConfig(
     case "scripted": {
       const models = (entry.models ?? ["default"]).map((name) => ({
         name,
-        capabilities: FAKE_CAPABILITIES.strong,
+        capabilities: { ...FAKE_CAPABILITIES.strong, inputCostPerM: 0, outputCostPerM: 0 },
       }));
       return new ScriptedProvider(entry.id, models, { concurrency: entry.concurrency ?? null });
     }

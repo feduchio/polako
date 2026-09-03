@@ -6,8 +6,9 @@ Use as Mission Acceptance Corpus / explicit contracts for the self-host mission.
 
 ## Launch blockers (must not skip)
 
-1. **User-pinned Supervisor Council** — production INTERPRETING_MISSION uses `config.supervisors`. Empty pin + empty catalog throws. Host `~/.polish/polish.toml` currently has providers only. Human must pin planner / scope_guardian / judge before a live run.
+1. **User-pinned Supervisor Council** — ACCEPTED with host pins in `~/.polish/polish.toml`.
 2. **Bounded discovery + probe INCONCLUSIVE + agent.maxTurns** — ACCEPTED, `docs/ledger/B-bootstrap-discovery.md`.
+2b. **Cost eligibility + production reviewer routing** — ACCEPTED, `docs/ledger/B-bootstrap-cost-eligibility.md`. Finding 10 (`listModels()[0]`) lifted here.
 
 ## Remaining composition defects (self-host dogfood)
 
@@ -18,7 +19,7 @@ Use as Mission Acceptance Corpus / explicit contracts for the self-host mission.
 7. `createRun` mutates shared `config.runtimeValidation.mode` (concurrent-run leak).
 8. `--budget-tokens` / `--budget-usd` stored in facade metadata; `applyRunBudgetOverrides` unused; Option A hard caps required (not C2).
 9. Candidate provenance is `worker/candidate-N`.
-10. Reviewer selection is `provider.listModels()[0]`, not Broker/Router.
+10. ~~Reviewer selection is `provider.listModels()[0]`~~ — lifted to bootstrap cost eligibility (Router + explicit `ReviewProvider`).
 11. Production tournament `new PairwiseJudge()` with no provider → heuristic-only on a non-dominated frontier.
 12. Crash recovery restores scheduler jobs only (not run settings, catalog rediscover, per-run budget, runtime mode).
 13. B10 NEEDS_HUMAN / STOP-RESUME / crash through DaemonService/RPC coding composition (engine/RPC round-trips exist; daemon coding E2E is DONE-only).

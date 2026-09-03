@@ -93,6 +93,19 @@ export const AgentConfigSchema = z.object({
 });
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 
+/**
+ * Dynamic worker/reviewer/verifier routing cost gate (Phase B, not C2/C8).
+ * Default free_only: both advertised input and output prices must be explicitly 0.
+ * Unknown/null pricing is not free. Pinned supervisors bypass this via explicit model refs.
+ */
+export const RoutingConfigSchema = z.object({
+  costEligibility: z.enum(["free_only", "ceiling", "unrestricted"]).default("free_only"),
+  /** Used when costEligibility = "ceiling". 0/0 is equivalent to free_only. */
+  maxInputCostPerM: z.number().nonnegative().default(0),
+  maxOutputCostPerM: z.number().nonnegative().default(0),
+});
+export type RoutingConfig = z.infer<typeof RoutingConfigSchema>;
+
 export const RuntimeValidationConfigSchema = z.object({
   mode: z.enum(["auto", "required", "off"]).default("auto"),
   level: z.enum(["smoke", "affected", "full"]).default("smoke"),
@@ -138,6 +151,7 @@ export const PolishConfigSchema = z.object({
   lanes: LaneLimitsSchema.prefault({}),
   agent: AgentConfigSchema.prefault({}),
   discovery: DiscoveryConfigSchema.prefault({}),
+  routing: RoutingConfigSchema.prefault({}),
   retry: RetryPolicySchema.prefault({}),
   candidates: CandidateStrategySchema.prefault({}),
   review: ReviewStrategySchema.prefault({}),

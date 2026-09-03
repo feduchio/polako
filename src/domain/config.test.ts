@@ -10,6 +10,9 @@ describe("PolishConfig", () => {
     expect(cfg.sandbox.allowArbitraryCommands).toBe(false);
     expect(cfg.runtimeValidation.mode).toBe("auto");
     expect(cfg.lanes["local.runtime"]).toBe(1);
+    expect(cfg.routing.costEligibility).toBe("free_only");
+    expect(cfg.routing.maxInputCostPerM).toBe(0);
+    expect(cfg.routing.maxOutputCostPerM).toBe(0);
   });
 
   it("rejects an integration lane wider than 1", () => {
