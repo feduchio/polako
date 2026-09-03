@@ -1,7 +1,15 @@
 import { SYSTEM_ACTOR } from "../domain/common.js";
+import type { CorpusEntry } from "../domain/acceptance.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Finding } from "../domain/finding.js";
 import type { ReviewAxis } from "../domain/finding.js";
+import {
+  FindingValidator,
+  ProjectFindingEvidenceWorker,
+  type CorpusAppender,
+  type FindingEvidenceWorker,
+  type FindingValidationResult,
+} from "../findings/index.js";
 import {
   assertExecutionCheckpoint,
   currentReviewRoundIndex,
@@ -14,11 +22,16 @@ import { ScriptedProvider } from "../providers/scripted.js";
 import { buildCheckpointReviewArtifact } from "../review/artifact.js";
 import { runAxisReview } from "../review/swarm.js";
 import { id } from "../shared/ids.js";
+import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import type { PhaseContext, PhaseDriver } from "./types.js";
 
 export interface ReviewDriverOptions {
   resolveProviders?: (ctx: PhaseContext) => ProviderAdapter[] | Promise<ProviderAdapter[]>;
   resolveAxes?: (ctx: PhaseContext) => ReviewAxis[] | Promise<ReviewAxis[]>;
+}
+
+export interface ValidatingDriverOptions {
+  resolveWorker?: (ctx: PhaseContext) => FindingEvidenceWorker | Promise<FindingEvidenceWorker>;
 }
 
 /** Production REVIEWING driver: fresh independent reviewers on the integrated checkpoint artifact. */
@@ -86,6 +99,57 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
   };
 }
 
+/** Production VALIDATING driver: triage, reproduce, persist validation evidence, spawn tasks. */
+export function createValidatingDriver(options: ValidatingDriverOptions = {}): PhaseDriver {
+  return async (ctx) => {
+    const hash = ctx.run.currentCheckpointHash;
+    if (hash === null) return { status: "waiting" };
+
+    const allFindings = ctx.store.repos.findings.listByRun(ctx.run.id);
+    const raw = allFindings
+      .filter((finding) => finding.status === "RAW" && finding.checkpointHash === hash)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    if (raw.length === 0) {
+      if (hasPendingFindingWork(ctx, hash)) return { status: "complete", nextPhase: "PLANNING" };
+      return { status: "complete", nextPhase: "CONVERGENCE_CHECK" };
+    }
+
+    const worker = await resolveEvidenceWorker(ctx, options);
+    const deferredCorpus = new DeferredCorpusAppender(ctx.clock.now());
+    const validator = new FindingValidator({
+      clock: ctx.clock,
+      worker,
+      corpus: deferredCorpus,
+      maxInvestigationRounds: ctx.config.convergence.maxInvestigationRoundsPerFinding,
+    });
+    const requirementRef = resolveRequirementRef(ctx);
+    let known = [...allFindings];
+
+    for (const finding of raw) {
+      const result = await validator.validate({
+        finding,
+        existingFindings: known.filter((item) => item.id !== finding.id),
+        missionId: ctx.run.missionId,
+        requirementRef,
+      });
+      known = known.map((item) => (item.id === finding.id ? result.finding : item));
+      const causedBy = findRaisedEventId(ctx, finding.id);
+      const validationEventId = persistValidationResult(ctx, finding, result, causedBy === null ? [] : [causedBy]);
+      if (deferredCorpus.pending !== null && validationEventId !== null) {
+        const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
+        corpus.record({
+          ...deferredCorpus.pending,
+          evidenceRefs: [validationEventId, ...deferredCorpus.pending.evidenceRefs],
+        });
+        deferredCorpus.pending = null;
+      }
+    }
+
+    if (hasPendingFindingWork(ctx, hash)) return { status: "complete", nextPhase: "PLANNING" };
+    return { status: "complete", nextPhase: "CONVERGENCE_CHECK" };
+  };
+}
+
 function missingAxes(
   axes: readonly ReviewAxis[],
   executions: readonly ReviewExecution[],
@@ -110,6 +174,102 @@ async function resolveAxes(ctx: PhaseContext, options: ReviewDriverOptions): Pro
 async function resolveProviders(ctx: PhaseContext, options: ReviewDriverOptions): Promise<ProviderAdapter[]> {
   if (options.resolveProviders) return options.resolveProviders(ctx);
   return [new ScriptedProvider("review-default", [])];
+}
+
+function hasPendingFindingWork(ctx: PhaseContext, checkpointHash: string): boolean {
+  return ctx.store.repos.tasks.listByRun(ctx.run.id).some(
+    (task) =>
+      task.state === "PENDING" &&
+      task.baseCheckpointHash === checkpointHash &&
+      (task.kind === "investigation" || task.origin.kind === "valid_finding"),
+  );
+}
+
+async function resolveEvidenceWorker(ctx: PhaseContext, options: ValidatingDriverOptions): Promise<FindingEvidenceWorker> {
+  if (options.resolveWorker) return options.resolveWorker(ctx);
+  return new ProjectFindingEvidenceWorker({
+    projectPath: ctx.run.projectPath,
+    persistOutput: (output, kind, label) => ctx.store.artifacts.put(output, kind, label),
+    now: () => ctx.clock.now(),
+  });
+}
+
+function resolveRequirementRef(ctx: PhaseContext): string {
+  const interpretationId = ctx.run.interpretationId;
+  if (interpretationId !== null) {
+    const interpretation = ctx.store.repos.interpretations.get(interpretationId);
+    const first = interpretation?.requirements[0];
+    if (first !== undefined) return first.ref;
+  }
+  return "R1";
+}
+
+function findRaisedEventId(ctx: PhaseContext, findingId: string): string | null {
+  for (const event of ctx.store.events.list(ctx.run.id, { types: ["finding.raised"] })) {
+    const finding = (event.payload as { finding?: Finding }).finding;
+    if (finding?.id === findingId) return event.id;
+  }
+  return null;
+}
+
+function persistValidationResult(
+  ctx: PhaseContext,
+  before: Finding,
+  result: FindingValidationResult,
+  causedBy: string[],
+): string | null {
+  const events: NewEvent[] = [];
+  if (result.finding.status !== before.status || result.finding.fingerprint !== before.fingerprint) {
+    events.push({
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "finding.status_changed",
+      payload: { finding: result.finding, from: before.status, to: result.finding.status },
+      causedBy,
+      actor: { kind: "evidence_agent" },
+      artifacts: [],
+    });
+  }
+  let validationEventId: string | null = null;
+  if (result.validation !== null) {
+    validationEventId = id("evt", ctx.clock.now() + 1);
+    events.push({
+      id: validationEventId,
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "finding.validated",
+      payload: { validation: result.validation, finding: result.finding },
+      causedBy,
+      actor: { kind: "evidence_agent" },
+      artifacts: result.validation.evidenceRefs,
+    });
+  }
+  if (result.task !== null) {
+    events.push({
+      id: id("evt", ctx.clock.now() + 2),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "task.created",
+      payload: { task: result.task },
+      causedBy: validationEventId === null ? causedBy : [validationEventId],
+      actor: { kind: "evidence_agent" },
+      artifacts: [],
+    });
+  }
+  if (events.length > 0) ctx.store.events.append(events);
+  return validationEventId;
+}
+
+class DeferredCorpusAppender implements CorpusAppender {
+  pending: (Omit<CorpusEntry, "id" | "createdAt"> & { id?: string }) | null = null;
+
+  constructor(private readonly now: number) {}
+
+  record(entry: Omit<CorpusEntry, "id" | "createdAt"> & { id?: string }): CorpusEntry {
+    this.pending = entry;
+    return { ...entry, id: entry.id ?? id("corp", this.now), createdAt: this.now };
+  }
 }
 
 async function startExecution(

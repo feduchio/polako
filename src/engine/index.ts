@@ -37,6 +37,8 @@ export {
 } from "./candidateDrivers.js";
 export {
   createReviewingDriver,
+  createValidatingDriver,
   type ReviewDriverOptions,
+  type ValidatingDriverOptions,
 } from "./reviewDrivers.js";
 export type { EngineOptions, PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
