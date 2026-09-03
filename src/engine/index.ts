@@ -35,4 +35,8 @@ export {
   type CandidateDriverOptions,
   type ComparingDriverOptions,
 } from "./candidateDrivers.js";
+export {
+  createReviewingDriver,
+  type ReviewDriverOptions,
+} from "./reviewDrivers.js";
 export type { EngineOptions, PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";

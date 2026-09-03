@@ -199,4 +199,19 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX model_observations_model ON model_observations (model_key, observed_at, id);
     `,
   },
+  {
+    version: 3,
+    sql: `
+      CREATE TABLE review_executions (
+        id              TEXT PRIMARY KEY,
+        run_id          TEXT NOT NULL,
+        checkpoint_hash TEXT NOT NULL,
+        round_index     INTEGER NOT NULL,
+        axis            TEXT NOT NULL,
+        completed       INTEGER NOT NULL,
+        json            TEXT NOT NULL
+      );
+      CREATE INDEX review_executions_run ON review_executions (run_id, checkpoint_hash, round_index);
+    `,
+  },
 ];

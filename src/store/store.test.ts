@@ -296,7 +296,7 @@ describe("Store", () => {
     store = openStore({ home: dir });
     expect(store.repos.runs.get(runId)).not.toBeNull();
     const versions = store.db.prepare("SELECT COUNT(*) AS c FROM schema_version").get() as { c: number };
-    expect(versions.c).toBe(2);
+    expect(versions.c).toBe(3);
   });
 
   it("mirror failures do not fail append; the mirror is rebuildable from the DB", () => {

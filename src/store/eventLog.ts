@@ -29,6 +29,7 @@ const RUN_SCOPED_TABLES = new Set<typeof PROJECTED_TABLES[number]>([
   "findings",
   "finding_validations",
   "clean_rounds",
+  "review_executions",
   "facts",
   "acceptance_artifacts",
   "protected_change_waivers",

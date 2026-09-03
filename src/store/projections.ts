@@ -7,6 +7,7 @@ import { CleanRoundSchema } from "../domain/convergence.js";
 import type { Event } from "../domain/event.js";
 import { FactStrictSchema, assertVerifiedFactEvidence } from "../domain/fact.js";
 import { FindingSchema, FindingValidationStrictSchema } from "../domain/finding.js";
+import { ReviewExecutionSchema } from "../domain/review.js";
 import { JobSchema } from "../domain/job.js";
 import { MissionInterpretationSchema, MissionSchema } from "../domain/mission.js";
 import { ProtectedChangeWaiverSchema } from "../domain/protectedChangeWaiver.js";
@@ -38,6 +39,7 @@ export type ProjectedTable =
   | "findings"
   | "finding_validations"
   | "clean_rounds"
+  | "review_executions"
   | "facts"
   | "acceptance_artifacts"
   | "acceptance_corpus_entries"
@@ -119,6 +121,16 @@ const TABLE_SPECS: Record<ProjectedTable, TableSpec> = {
   clean_rounds: {
     schema: CleanRoundSchema,
     columns: (e) => ({ run_id: str(e["runId"]), checkpoint_hash: str(e["checkpointHash"]), round_index: num(e["roundIndex"]) }),
+  },
+  review_executions: {
+    schema: ReviewExecutionSchema,
+    columns: (e) => ({
+      run_id: str(e["runId"]),
+      checkpoint_hash: str(e["checkpointHash"]),
+      round_index: num(e["roundIndex"]),
+      axis: str(e["axis"]),
+      completed: num(e["completed"] ? 1 : 0),
+    }),
   },
   facts: {
     schema: FactStrictSchema,
@@ -209,6 +221,8 @@ export const PROJECTION_RULES: readonly ProjectionRule[] = [
   { eventType: "finding.validated", payloadField: "validation", table: "finding_validations" },
   { eventType: "finding.validated", payloadField: "finding", table: "findings" },
   { eventType: "clean_round.recorded", payloadField: "cleanRound", table: "clean_rounds" },
+  { eventType: "review.started", payloadField: "execution", table: "review_executions" },
+  { eventType: "review.finished", payloadField: "execution", table: "review_executions" },
   { eventType: "fact.recorded", payloadField: "fact", table: "facts" },
   { eventType: "fact.promoted", payloadField: "fact", table: "facts" },
   { eventType: "fact.superseded", payloadField: "fact", table: "facts" },
@@ -254,6 +268,7 @@ const RUN_SCOPED: ReadonlySet<ProjectedTable> = new Set<ProjectedTable>([
   "findings",
   "finding_validations",
   "clean_rounds",
+  "review_executions",
   "facts",
   "acceptance_artifacts",
   "protected_change_waivers",

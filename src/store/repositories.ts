@@ -15,6 +15,7 @@ import { FindingSchema, FindingValidationSchema, type Finding, type FindingValid
 import { JobSchema, type Job } from "../domain/job.js";
 import { MissionInterpretationSchema, MissionSchema, type Mission, type MissionInterpretation } from "../domain/mission.js";
 import { ProtectedChangeWaiverSchema, type ProtectedChangeWaiver } from "../domain/protectedChangeWaiver.js";
+import { ReviewExecutionSchema, type ReviewExecution } from "../domain/review.js";
 import { RunSchema, type Run } from "../domain/run.js";
 import { TaskSchema, type Task } from "../domain/task.js";
 import type { Db } from "./db.js";
@@ -108,6 +109,16 @@ class CleanRoundRepo extends ByRunRepo<CleanRound> {
   }
 }
 
+class ReviewExecutionRepo extends ByRunRepo<ReviewExecution> {
+  forCheckpoint(runId: string, checkpointHash: string): ReviewExecution[] {
+    return this.query("run_id = ? AND checkpoint_hash = ?", [runId, checkpointHash], "round_index ASC, rowid ASC");
+  }
+
+  forRound(runId: string, checkpointHash: string, roundIndex: number): ReviewExecution[] {
+    return this.query("run_id = ? AND checkpoint_hash = ? AND round_index = ?", [runId, checkpointHash, roundIndex], "rowid ASC");
+  }
+}
+
 class FactRepo extends ByRunRepo<Fact> {
   listCurrent(runId: string): Fact[] {
     return this.query("run_id = ? AND superseded_by IS NULL", [runId]);
@@ -168,6 +179,7 @@ export interface Repositories {
   findings: FindingRepo;
   validations: ValidationRepo;
   cleanRounds: CleanRoundRepo;
+  reviewExecutions: ReviewExecutionRepo;
   facts: FactRepo;
   acceptance: AcceptanceRepo;
   acceptanceCorpus: AcceptanceCorpusRepo;
@@ -187,6 +199,7 @@ export function createRepositories(db: Db): Repositories {
     findings: new FindingRepo(db, "findings", FindingSchema),
     validations: new ValidationRepo(db, "finding_validations", FindingValidationSchema),
     cleanRounds: new CleanRoundRepo(db, "clean_rounds", CleanRoundSchema),
+    reviewExecutions: new ReviewExecutionRepo(db, "review_executions", ReviewExecutionSchema),
     facts: new FactRepo(db, "facts", FactSchema),
     acceptance: new AcceptanceRepo(db, "acceptance_artifacts", AcceptanceArtifactSchema),
     acceptanceCorpus: new AcceptanceCorpusRepo(db, "acceptance_corpus_entries", CorpusEntrySchema),

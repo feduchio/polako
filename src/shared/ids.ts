@@ -51,6 +51,7 @@ export type IdPrefix =
   | "waiv"
   | "base"
   | "cr"
+  | "rvex"
   | "call"
   | "mobs"
   | "rte";
