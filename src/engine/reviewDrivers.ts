@@ -22,6 +22,10 @@ import { ScriptedProvider } from "../providers/scripted.js";
 import { buildCheckpointReviewArtifact } from "../review/artifact.js";
 import { runAxisReview } from "../review/swarm.js";
 import { id } from "../shared/ids.js";
+import {
+  latestCompletedReviewRound,
+  recordCleanRoundEvent,
+} from "../convergence/record.js";
 import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import type { PhaseContext, PhaseDriver } from "./types.js";
 
@@ -111,6 +115,7 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
       .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
     if (raw.length === 0) {
       if (hasPendingFindingWork(ctx, hash)) return { status: "complete", nextPhase: "PLANNING" };
+      recordCleanRoundIfEligible(ctx, hash);
       return { status: "complete", nextPhase: "CONVERGENCE_CHECK" };
     }
 
@@ -146,8 +151,37 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
     }
 
     if (hasPendingFindingWork(ctx, hash)) return { status: "complete", nextPhase: "PLANNING" };
+    recordCleanRoundIfEligible(ctx, hash);
     return { status: "complete", nextPhase: "CONVERGENCE_CHECK" };
   };
+}
+
+function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): void {
+  const required = ctx.config.review.reviewersPerRound;
+  const reviewExecutions = ctx.store.repos.reviewExecutions.listByRun(ctx.run.id);
+  const latest = latestCompletedReviewRound(reviewExecutions, checkpointHash, required);
+  if (latest === null) return;
+
+  const completedReviewRounds = new Set(
+    reviewExecutions
+      .filter((execution) => execution.checkpointHash === checkpointHash)
+      .map((execution) => execution.roundIndex),
+  ).size;
+  const existingForCheckpoint = ctx.store.repos.cleanRounds.forCheckpoint(ctx.run.id, checkpointHash).length;
+  if (existingForCheckpoint >= completedReviewRounds) return;
+
+  const findings = ctx.store.repos.findings.listByRun(ctx.run.id);
+  const event = recordCleanRoundEvent({
+    runId: ctx.run.id,
+    checkpointHash,
+    requiredReviewers: required,
+    reviewExecutions,
+    findings,
+    existingCleanRounds: ctx.store.repos.cleanRounds.listByRun(ctx.run.id),
+    reviewRoundIndex: latest,
+    now: ctx.clock.now(),
+  });
+  ctx.store.events.append([event]);
 }
 
 function missingAxes(

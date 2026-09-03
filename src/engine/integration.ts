@@ -76,7 +76,7 @@ export interface IntegrateWinnerInput {
  * user's checkout. The durable head is advanced only after all integration gates pass.
  */
 export function integrateWinner(input: IntegrateWinnerInput): Promise<IntegrationResult> {
-  return integrationLane.run(() => integrateWinnerExclusive(input));
+  return runOnIntegrationLane(() => integrateWinnerExclusive(input));
 }
 
 class SerialLane {
@@ -90,6 +90,11 @@ class SerialLane {
 }
 
 const integrationLane = new SerialLane();
+
+/** Serializes run-head mutation (integration and rollback) onto the in-process integration lane. */
+export function runOnIntegrationLane<T>(operation: () => Promise<T>): Promise<T> {
+  return integrationLane.run(operation);
+}
 
 async function integrateWinnerExclusive(input: IntegrateWinnerInput): Promise<IntegrationResult> {
   const previousHead = await input.runHead.read();

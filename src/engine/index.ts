@@ -14,6 +14,7 @@ export {
 export {
   GitBranchRunHead,
   integrateWinner,
+  runOnIntegrationLane,
   type IntegrateWinnerInput,
   type IntegrationResult,
   type IntegrationStatus,
@@ -41,4 +42,10 @@ export {
   type ReviewDriverOptions,
   type ValidatingDriverOptions,
 } from "./reviewDrivers.js";
+export {
+  createConvergenceDriver,
+  gatherCompletionEvidence,
+  assertRunMayComplete,
+  type ConvergenceDriverOptions,
+} from "./convergenceDrivers.js";
 export type { EngineOptions, PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
