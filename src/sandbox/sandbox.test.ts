@@ -106,13 +106,59 @@ describe("runProcess", () => {
 describe("CommandPolicy", () => {
   const policy = CommandPolicy.forProject([["pnpm", "test"], ["pnpm", "typecheck"]], "pnpm");
 
-  it("allows project checks, read-only git and search; denies the rest", () => {
-    expect(policy.check(["pnpm", "test", "--", "src/x.test.ts"])).toBeNull();
+  it("allows project checks and read-only git; denies raw search and the rest", () => {
+    expect(policy.check(["pnpm", "test"])).toBeNull();
+    expect(policy.check(["pnpm", "test", "--", "src/x.test.ts"])).toMatch(/not in allowlist/);
     expect(policy.check(["git", "diff", "HEAD~1"])).toBeNull();
-    expect(policy.check(["rg", "foo|bar", "src"])).toBeNull();
-    expect(policy.check(["git", "push", "origin", "main"])).toMatch(/not in allowlist/);
+    expect(policy.check(["rg", "foo|bar", "src"])).toMatch(/not in allowlist/);
+    expect(policy.check(["cat", "package.json"])).toMatch(/not in allowlist/);
+    expect(policy.check(["head", "-n", "1", "package.json"])).toMatch(/not in allowlist/);
+    expect(policy.check(["ls", "src"])).toMatch(/not in allowlist/);
+    expect(policy.check(["rg", "--pre", "sh -c id", "needle"])).toMatch(/option not allowed/);
+    expect(policy.check(["find", ".", "-type", "f"])).toMatch(/not in allowlist/);
+    expect(policy.check(["pnpm", "run", "arbitrary"])).toMatch(/not in allowlist/);
+    expect(policy.check(["pnpm", "exec", "node", "-e", "process.exit()"])).toMatch(/not in allowlist/);
+    expect(policy.check(["git", "push", "origin", "main"])).toMatch(/not.*allowlist|not read-only/);
     expect(policy.check(["rm", "-rf", "/"])).toMatch(/not in allowlist/);
     expect(policy.check(["curl", "http://x"])).toMatch(/not in allowlist/);
+    expect(policy.check(["git", "show", "/etc/passwd"])).toMatch(/outside the worktree/);
+  });
+
+  it("grants search/read only when explicitly requested and confines operands", () => {
+    const withSearch = CommandPolicy.forProject([["pnpm", "test"]], "pnpm", false, { search: true });
+    expect(withSearch.check(["rg", "foo|bar", "src"])).toBeNull();
+    expect(withSearch.check(["cat", "src/a.ts"])).toBeNull();
+    expect(withSearch.check(["rg", "--pre", "sh -c id", "needle"])).toMatch(/option not allowed/);
+    expect(withSearch.check(["cat", "/etc/passwd"])).toMatch(/outside the worktree/);
+    expect(withSearch.check(["rg", "foo", "../secret"])).toMatch(/outside the worktree/);
+    expect(withSearch.check(["head", "-n", "2", "~/secrets"])).toMatch(/outside the worktree/);
+  });
+
+  it("allows only named package scripts and explicit task grants", () => {
+    const scoped = CommandPolicy.forProject([], "pnpm", false, {
+      packageScripts: ["test"],
+      taskGrants: [{ prefix: ["node", "tools/audit.mjs"], description: "task audit" }],
+    });
+    expect(scoped.check(["pnpm", "run", "test"])).toBeNull();
+    expect(scoped.check(["pnpm", "run", "test", "--", "src/x.test.ts"])).toMatch(/not in allowlist/);
+    expect(scoped.check(["pnpm", "run", "test", "--config", "evil.config.ts"])).toMatch(/not in allowlist/);
+    expect(scoped.check(["pnpm", "run", "evil"])).toMatch(/not in allowlist/);
+    expect(scoped.check(["pnpm", "exec", "vitest"])).toMatch(/not in allowlist/);
+    expect(scoped.check(["node", "tools/audit.mjs", "--json"])).toBeNull();
+    expect(scoped.check(["node", "tools/other.mjs"])).toMatch(/not in allowlist/);
+    const trailing = CommandPolicy.forProject([], "pnpm", false, {
+      packageScripts: ["test"],
+      packageScriptsAllowTrailingArgs: ["test"],
+    });
+    expect(trailing.check(["pnpm", "run", "test", "--", "src/x.test.ts"])).toBeNull();
+    expect(trailing.check(["pnpm", "run", "test", "--config", "x.ts"])).toBeNull();
+  });
+
+  it("rejects empty command and task-grant prefixes", () => {
+    expect(() => new CommandPolicy([{ prefix: [], description: "vacuous" }])).toThrow(/non-empty/);
+    expect(() => CommandPolicy.forProject([], null, false, {
+      taskGrants: [{ prefix: [], description: "vacuous task grant" }],
+    })).toThrow(/non-empty/);
   });
 
   it("never allows shell -c or shell operators, even in arbitrary mode", () => {
@@ -144,14 +190,14 @@ describe("CommandPolicy", () => {
     expect(strict.check(["git", "log", "--oneline"])).toBeNull();
     expect(strict.check(["git", "diff", "-Oorderfile"])).toMatch(/pager/);
     expect(strict.check(["git", "log", "--", "-Ofile.txt"])).toBeNull();
-    expect(strict.check(["git", "grep", "-e", "bash", "-i"])).toMatch(/not in allowlist/);
-    expect(strict.check(["rg", "bash", "-i"])).toBeNull();
+    expect(strict.check(["git", "grep", "-e", "bash", "-i"])).toMatch(/not.*allowlist|not read-only/);
+    expect(strict.check(["rg", "bash", "-i"])).toMatch(/not in allowlist/);
     expect(arbitrary.check(["rg", "sh -c"])).toBeNull();
     expect(arbitrary.check(["pnpm", "test", "&&", "git", "push"])).toMatch(/shell operators/);
     expect(arbitrary.check(["rg", "-c", "sh"])).toBeNull();
     expect(arbitrary.check(["rg", "sh", "-c"])).toBeNull();
     expect(arbitrary.check(["/usr/bin/rg", "sh", "-c"])).toBeNull();
-    expect(strict.check(["pnpm", "exec", "rg", "sh", "-c"])).toBeNull();
+    expect(strict.check(["pnpm", "exec", "rg", "sh", "-c"])).toMatch(/not in allowlist/);
     expect(arbitrary.check(["curl", "http://x"])).toBeNull();
   });
 });
@@ -182,6 +228,7 @@ describe("WorktreeSandbox", () => {
     expect(existsSync(join(h.path, "a.txt"))).toBe(true);
     writeFileSync(join(h.path, "b.txt"), "two\n");
     expect(await h.changedFiles()).toEqual(["b.txt"]);
+    expect(await h.changedFiles(base)).toEqual(["b.txt"]);
     const commit = await h.commitAll("add b");
     expect(commit).toMatch(/^[0-9a-f]{40}$/);
     expect(await h.headCommit()).toBe(commit);
@@ -197,23 +244,40 @@ describe("WorktreeSandbox", () => {
     expect(await repo.branchExists("polish/cand1")).toBe(true);
   });
 
+  it("includes untracked files in changedFiles(base)", async () => {
+    const policy = CommandPolicy.forProject([], null);
+    const h = await sandbox.create({ id: "untracked", baseCommit: base, policy });
+    writeFileSync(join(h.path, "planted-protected.test.ts"), "untracked plant\n");
+    expect(await h.changedFiles(base)).toEqual(["planted-protected.test.ts"]);
+    expect(await h.git.diffAgainst(base)).toContain("+++ b/planted-protected.test.ts");
+    expect(await h.git.diffAgainst(base)).toContain("+untracked plant");
+    await h.destroy();
+  });
+
   it("enforces the command policy and scrubs the environment for commands", async () => {
     process.env["POLISH_TEST_SECRET_TOKEN"] = "leak";
-    const policy = CommandPolicy.forProject([["node", "-e"]], null);
+    const dumpEnv = "console.log(JSON.stringify(process.env))";
+    const dumpAws = "console.log(JSON.stringify(process.env.AWS_SECRET_ACCESS_KEY))";
+    const dumpCi = "console.log(process.env.CI)";
+    const policy = CommandPolicy.forProject([
+      ["node", "-e", dumpEnv],
+      ["node", "-e", dumpAws],
+      ["node", "-e", dumpCi],
+    ], null);
     const h = await sandbox.create({ id: "c2", baseCommit: base, policy });
     try {
-      await expect(h.run(["git", "push"])).rejects.toThrow(/not in allowlist/);
-      const r = await h.run(["node", "-e", "console.log(JSON.stringify(process.env))"]);
+      await expect(h.run(["git", "push"])).rejects.toThrow(/not read-only allowlisted/);
+      const r = await h.run(["node", "-e", dumpEnv]);
       const env = JSON.parse(r.stdout) as Record<string, string>;
       expect(env).not.toHaveProperty("POLISH_TEST_SECRET_TOKEN");
       expect(env["CI"]).toBe("1");
       expect(env["PATH"]).toBeDefined();
 
-      const leaked = await h.run(["node", "-e", "console.log(JSON.stringify(process.env.AWS_SECRET_ACCESS_KEY))"], {
+      const leaked = await h.run(["node", "-e", dumpAws], {
         env: { AWS_SECRET_ACCESS_KEY: "leaked-via-optsenv", CI: "0" },
       });
       expect(leaked.stdout.trim()).toBe("undefined");
-      const ciProbe = await h.run(["node", "-e", "console.log(process.env.CI)"], { env: { CI: "0" } });
+      const ciProbe = await h.run(["node", "-e", dumpCi], { env: { CI: "0" } });
       expect(ciProbe.stdout.trim()).toBe("1");
     } finally {
       delete process.env["POLISH_TEST_SECRET_TOKEN"];
@@ -229,7 +293,10 @@ describe("WorktreeSandbox", () => {
   });
 
   it("rejects cwd values that escape the worktree", async () => {
-    const policy = CommandPolicy.forProject([["node", "-e"]], null);
+    const policy = CommandPolicy.forProject([
+      ["node", "-e", "process.exit(0)"],
+      ["node", "-e", "console.log(process.cwd())"],
+    ], null);
     const h = await sandbox.create({ id: "cwd-test", baseCommit: base, policy });
     await expect(h.run(["node", "-e", "process.exit(0)"], { cwd: "../.." })).rejects.toThrow(/cwd escapes/);
     const ok = await h.run(["node", "-e", "console.log(process.cwd())"], { cwd: "." });
@@ -238,7 +305,7 @@ describe("WorktreeSandbox", () => {
   });
 
   it("rejects symlink cwd that escapes the worktree", async () => {
-    const policy = CommandPolicy.forProject([["node", "-e"]], null);
+    const policy = CommandPolicy.forProject([["node", "-e", "process.exit(0)"]], null);
     const victim = await sandbox.create({ id: "victim", baseCommit: base, policy });
     const attacker = await sandbox.create({ id: "attacker", baseCommit: base, policy });
     symlinkSync(victim.path, join(attacker.path, "peer"));
@@ -258,7 +325,7 @@ describe("WorktreeSandbox", () => {
     const tip = (await b.commitAll("add b"))!;
     expect(await repo.fastForward("polish/ff-a", tip)).toBe(true);
     expect(await repo.fastForward("polish/ff-a", base)).toBe(false);
-    await expect(a.run(["git", "push"])).rejects.toThrow(/not in allowlist/);
+    await expect(a.run(["git", "push"])).rejects.toThrow(/not read-only allowlisted/);
     const bypassed = await a.run(["node", "-e", "console.log('bypassed')"], { bypassPolicy: true });
     expect(bypassed.stdout.trim()).toBe("bypassed");
     await sandbox.destroyAll();

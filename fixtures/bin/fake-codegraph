@@ -10,8 +10,27 @@ function out(v) {
   process.stdout.write(JSON.stringify(v) + "\n");
 }
 
+const help = {
+  init: "Usage: codegraph init [--json]",
+  search: "Usage: codegraph search <query> [--json] [--limit <n>]",
+  symbol: "Usage: codegraph symbol <name> [--json]",
+  callers: "Usage: codegraph callers <name> [--json]",
+  callees: "Usage: codegraph callees <name> [--json]",
+  impact: "Usage: codegraph impact [--json] [--depth <n>] [--symbol <name>] [--file <path>]",
+  "affected-tests": "Usage: codegraph affected-tests [--json] [--file <path>]",
+  refresh: "Usage: codegraph refresh [--json] [--file <path>]",
+};
+
 if (cmd === "--version" || cmd === "version") {
   process.stdout.write("fake-codegraph 1.1.6\n");
+  process.exit(0);
+}
+if (cmd === "--help") {
+  process.stdout.write(`Commands:\n${Object.keys(help).join("\n")}\n`);
+  process.exit(0);
+}
+if (rest.includes("--help") && Object.hasOwn(help, cmd)) {
+  process.stdout.write(help[cmd] + "\n");
   process.exit(0);
 }
 if (cmd === "probe") {
@@ -25,6 +44,10 @@ if (cmd === "init") {
   process.exit(0);
 }
 if (cmd === "search") {
+  if (rest[0] === "POLISH_CODEGRAPH_CONTRACT_MARKER_7f31") {
+    out([{ path: "src/polish-contract-probe.ts", line: 1, text: rest[0] }]);
+    process.exit(0);
+  }
   out([{ path: "src/math.ts", line: 1, text: "export function add" }]);
   process.exit(0);
 }

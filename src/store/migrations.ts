@@ -159,4 +159,44 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX jobs_run_state ON jobs (run_id, state);
     `,
   },
+  {
+    version: 2,
+    sql: `
+      ALTER TABLE events ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1;
+      UPDATE events SET schema_version = 1 WHERE schema_version IS NULL;
+
+      CREATE TABLE acceptance_corpus_entries (
+        id            TEXT PRIMARY KEY,
+        mission_id    TEXT NOT NULL,
+        source_run_id TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        created_at    INTEGER NOT NULL,
+        json          TEXT NOT NULL
+      );
+      CREATE INDEX acceptance_corpus_mission ON acceptance_corpus_entries (mission_id, created_at, id);
+
+      CREATE TABLE protected_change_waivers (
+        id                   TEXT PRIMARY KEY,
+        run_id               TEXT NOT NULL,
+        mission_id           TEXT NOT NULL,
+        task_id              TEXT NOT NULL,
+        requirement_id       TEXT NOT NULL,
+        path_scope           TEXT NOT NULL,
+        finding_kind         TEXT NOT NULL,
+        base_checkpoint_hash TEXT NOT NULL,
+        json                 TEXT NOT NULL
+      );
+      CREATE INDEX protected_waiver_scope
+        ON protected_change_waivers (run_id, mission_id, task_id, requirement_id, finding_kind);
+
+      CREATE TABLE model_observations (
+        id         TEXT PRIMARY KEY,
+        model_key  TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        json       TEXT NOT NULL
+      );
+      CREATE INDEX model_observations_model ON model_observations (model_key, observed_at, id);
+    `,
+  },
 ];

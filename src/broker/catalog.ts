@@ -19,6 +19,12 @@ export interface CatalogEntry {
   available: boolean;
 }
 
+export interface CatalogDiscoveryOptions {
+  signal?: AbortSignal;
+  /** Optional active verifier; concrete provider probes are injected to keep broker provider-agnostic. */
+  capabilityProbe?: (adapter: ProviderAdapter, model: ModelInfo) => Promise<ModelInfo>;
+}
+
 const EMA = 0.2;
 
 /**
@@ -44,12 +50,27 @@ export class ModelCatalog {
   }
 
   async refresh(signal?: AbortSignal): Promise<{ discovered: number; errors: Record<string, string> }> {
+    return this.discover(signal === undefined ? {} : { signal });
+  }
+
+  async discover(options: CatalogDiscoveryOptions = {}): Promise<{ discovered: number; errors: Record<string, string> }> {
     let discovered = 0;
     const errors: Record<string, string> = {};
     for (const [id, adapter] of this.providers) {
       try {
-        const models = await adapter.listModels(signal);
-        for (const m of models) this.upsert(m);
+        const models = await adapter.listModels(options.signal);
+        for (const model of models) {
+          if (options.capabilityProbe === undefined) {
+            this.upsert(model);
+            continue;
+          }
+          try {
+            this.upsert(await options.capabilityProbe(adapter, model));
+          } catch (error) {
+            errors[`${id}/${model.ref.model}:probe`] = error instanceof Error ? error.message : String(error);
+            this.upsert(model);
+          }
+        }
         discovered += models.length;
         this.providerAvailable.set(id, true);
       } catch (err) {
@@ -99,10 +120,22 @@ export class ModelCatalog {
   }
 
   /** Zero observed call stats (used by ModelBroker.restore before replaying events). */
-  resetCallStats(): void {
+  resetCallStats(resetQuality = false): void {
     for (const e of this.entries.values()) {
-      e.stats = { calls: 0, failures: 0, latencyMs: 0, quality: e.stats.quality, lastErrorKind: null, lastUsedAt: null };
+      e.stats = {
+        calls: 0,
+        failures: 0,
+        latencyMs: 0,
+        quality: resetQuality ? null : e.stats.quality,
+        lastErrorKind: null,
+        lastUsedAt: null,
+      };
     }
+  }
+
+  resetQuality(ref: ModelRef): void {
+    const entry = this.entries.get(modelRefKey(ref));
+    if (entry) entry.stats.quality = null;
   }
 
   /** Feed back an outcome quality signal in 0..1 (e.g. candidate passed gates = 1, failed = 0). */

@@ -3,7 +3,7 @@ export type { EnvPolicy } from "./env.js";
 export { runProcess } from "./process.js";
 export type { ProcessResult, RunProcessOptions } from "./process.js";
 export { CommandPolicy, READONLY_GIT_RULES, SEARCH_RULES } from "./allowlist.js";
-export type { CommandRule } from "./allowlist.js";
+export type { CommandRule, ProjectCommandCapabilities } from "./allowlist.js";
 export { Git } from "./git.js";
 export type { DiffStat } from "./git.js";
 export { WorktreeSandbox } from "./worktree.js";

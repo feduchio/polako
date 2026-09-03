@@ -31,6 +31,7 @@ const RUN_SCOPED_TABLES = new Set<typeof PROJECTED_TABLES[number]>([
   "clean_rounds",
   "facts",
   "acceptance_artifacts",
+  "protected_change_waivers",
   "jobs",
 ]);
 
@@ -57,11 +58,13 @@ export class EventLog {
         const seq = this.nextSeq(e.runId);
         const event = EventSchema.parse({ ...e, seq });
         this.db
-          .prepare("INSERT INTO events (id, run_id, seq, ts, type, actor_kind, json) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .run(event.id, event.runId, event.seq, event.ts, event.type, event.actor.kind, JSON.stringify(event));
+          .prepare(
+            "INSERT INTO events (id, run_id, seq, ts, type, actor_kind, schema_version, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(event.id, event.runId, event.seq, event.ts, event.type, event.actor.kind, event.schemaVersion, JSON.stringify(event));
         const insertCause = this.db.prepare("INSERT OR IGNORE INTO event_causes (event_id, cause_id) VALUES (?, ?)");
         for (const c of event.causedBy) insertCause.run(event.id, c);
-        applyProjections(this.db, event);
+        applyProjections(this.db, event, this);
         stored.push(event);
       }
       this.tx.onCommit(() => {
@@ -148,11 +151,15 @@ export class EventLog {
             this.db.prepare("DELETE FROM interpretations WHERE mission_id = ?").run(mid);
           }
           this.deleteOrphanInterpretationRows(globalInterpretationIds);
+        } else if (table === "acceptance_corpus_entries") {
+          for (const mid of scopedMissionIds) {
+            this.db.prepare("DELETE FROM acceptance_corpus_entries WHERE mission_id = ?").run(mid);
+          }
         } else if (RUN_SCOPED_TABLES.has(table)) {
           this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
         }
       }
-      for (const e of events) applyProjections(this.db, e);
+      for (const e of events) applyProjections(this.db, e, this);
       this.replaySharedMissionProjections(scopedMissionIds);
       return events.length;
     });
@@ -167,6 +174,7 @@ export class EventLog {
         if (!entity) continue;
         if (rule.table === "missions" && typeof entity["id"] === "string") ids.add(entity["id"]);
         if (rule.table === "interpretations" && typeof entity["missionId"] === "string") ids.add(entity["missionId"]);
+        if (rule.table === "acceptance_corpus_entries" && typeof entity["missionId"] === "string") ids.add(entity["missionId"]);
         if (rule.table === "runs" && typeof entity["missionId"] === "string") ids.add(entity["missionId"]);
       }
     }
@@ -175,11 +183,14 @@ export class EventLog {
 
   private eventTouchesScopedMissions(e: Event, missionIds: Set<string>): boolean {
     for (const rule of rulesByType.get(e.type) ?? []) {
-      if (rule.table !== "missions" && rule.table !== "interpretations") continue;
+      if (rule.table !== "missions" && rule.table !== "interpretations" && rule.table !== "acceptance_corpus_entries") continue;
       const entity = e.payload[rule.payloadField] as Record<string, unknown> | undefined;
       if (!entity) continue;
       if (rule.table === "missions" && typeof entity["id"] === "string" && missionIds.has(entity["id"])) return true;
       if (rule.table === "interpretations" && typeof entity["missionId"] === "string" && missionIds.has(entity["missionId"])) {
+        return true;
+      }
+      if (rule.table === "acceptance_corpus_entries" && typeof entity["missionId"] === "string" && missionIds.has(entity["missionId"])) {
         return true;
       }
     }
@@ -193,7 +204,7 @@ export class EventLog {
     const rows = this.db.prepare("SELECT json FROM events ORDER BY rowid").all() as unknown as EventRow[];
     for (const row of rows) {
       const e = EventSchema.parse(JSON.parse(row.json));
-      if (this.eventTouchesScopedMissions(e, missionIds)) applyProjections(this.db, e);
+      if (this.eventTouchesScopedMissions(e, missionIds)) applyProjections(this.db, e, this);
     }
   }
 
@@ -224,6 +235,24 @@ export class EventLog {
     for (const row of rows) {
       if (!globalIds.has(row.id)) this.db.prepare("DELETE FROM interpretations WHERE id = ?").run(row.id);
     }
+  }
+
+  /**
+   * Rebuild global model observations from every `model.observation.recorded` event.
+   * Run-scoped rebuilds intentionally leave this table untouched.
+   */
+  rebuildModelObservations(): number {
+    return this.tx.run(() => {
+      this.db.prepare("DELETE FROM model_observations").run();
+      const rows = this.db
+        .prepare("SELECT json FROM events WHERE type = ? ORDER BY rowid")
+        .all("model.observation.recorded") as unknown as EventRow[];
+      for (const row of rows) {
+        const e = EventSchema.parse(JSON.parse(row.json));
+        applyProjections(this.db, e, this);
+      }
+      return rows.length;
+    });
   }
 
   /** Rewrite the JSONL mirror for one run from the authoritative event log. */

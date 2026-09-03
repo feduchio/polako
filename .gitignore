@@ -8,3 +8,6 @@ coverage/
 *.local
 fixtures/**/node_modules/
 fixtures/**/.codegraph/
+.polish/
+*.pid
+*.sock

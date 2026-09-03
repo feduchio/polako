@@ -180,7 +180,7 @@ export class Scheduler {
     if (JOB_TABLE.terminal.includes(job.state)) return;
     const flying = this.inFlight.get(jobId);
     if (flying) {
-      this.markCancelRequested(job);
+      this.requestCancel(job);
       flying.controller.abort(new PolishError("CANCELLED", reason));
       return;
     }
@@ -311,15 +311,24 @@ export class Scheduler {
   private applyRunControl(): void {
     for (const flying of [...this.inFlight.values()]) {
       const control = this.controlFor(flying.job.runId);
+      const run = this.store.repos.runs.get(flying.job.runId);
+      const terminalPhase = run !== null && isTerminal(RUN_PHASE_TABLE, run.phase);
       if (flying.controller.signal.aborted) continue;
-      if (control === null || mustCancelInFlight(control)) {
-        this.markCancelRequested(flying.job);
-        flying.controller.abort(new PolishError("CANCELLED", control === null ? "run not found" : "run stopped"));
+      if (control === null || terminalPhase || mustCancelInFlight(control)) {
+        this.requestCancel(flying.job);
+        flying.controller.abort(new PolishError(
+          "CANCELLED",
+          control === null ? "run not found" : terminalPhase ? "run phase is terminal" : "run stopped",
+        ));
       }
     }
     for (const job of this.store.repos.jobs.listByState(["PENDING", "READY"])) {
       const control = this.controlFor(job.runId);
+      const run = this.store.repos.runs.get(job.runId);
       if (control === null) this.setState(job, "CANCELLED", { error: `run ${job.runId} not found` });
+      else if (run !== null && isTerminal(RUN_PHASE_TABLE, run.phase)) {
+        this.setState(job, "CANCELLED", { error: "run phase is terminal" });
+      }
       else if (mustCancelInFlight(control)) this.setState(job, "CANCELLED", { error: "run stopped" });
     }
   }
@@ -354,10 +363,24 @@ export class Scheduler {
       .run(now + this.options.leaseMs, now + this.options.leaseMs, jobId);
   }
 
-  private markCancelRequested(job: Job): void {
-    this.store.db
-      .prepare("UPDATE jobs SET json = json_set(json, '$.cancelRequested', json('true')) WHERE id = ?")
-      .run(job.id);
+  private requestCancel(job: Job): Job {
+    if (job.cancelRequested) return job;
+    const next: Job = { ...job, cancelRequested: true, updatedAt: this.clock.now() };
+    this.store.events.append([this.cancelEvent(next)]);
+    return next;
+  }
+
+  private cancelEvent(job: Job): NewEvent {
+    return {
+      id: id("evt", this.clock.now()),
+      runId: job.runId,
+      ts: this.clock.now(),
+      type: "job.cancel_requested",
+      payload: { job },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [],
+    };
   }
 
   private setState(job: Job, to: JobState, patch: Partial<Job>): Job {
@@ -367,7 +390,7 @@ export class Scheduler {
     return next;
   }
 
-  private event(job: Job, type: "job.created" | "job.state_changed", causedBy: string[]): NewEvent {
+  private event(job: Job, type: "job.created" | "job.state_changed" | "job.cancel_requested", causedBy: string[]): NewEvent {
     return {
       id: id("evt", this.clock.now()),
       runId: job.runId,

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { PolishError } from "../shared/errors.js";
 import { runProcess, type ProcessResult } from "./process.js";
 
@@ -73,10 +75,24 @@ export class Git {
   }
 
   async changedFiles(base?: string): Promise<string[]> {
-    const args = base ? ["diff", "--name-only", base] : ["status", "--porcelain", "--untracked-files=all"];
-    const text = await this.out(args);
-    if (!text) return [];
-    return base ? text.split("\n") : text.split("\n").map((l) => l.slice(3).trim());
+    if (!base) {
+      const text = await this.out(["status", "--porcelain", "--untracked-files=all"]);
+      if (!text) return [];
+      return text.split("\n").map((l) => l.slice(3).trim()).filter(Boolean);
+    }
+    const [diff, untracked] = await Promise.all([
+      this.out(["diff", "--name-only", base]),
+      this.out(["ls-files", "--others", "--exclude-standard"]),
+    ]);
+    const seen = new Set<string>();
+    const files: string[] = [];
+    for (const line of [...diff.split("\n"), ...untracked.split("\n")]) {
+      const path = line.trim();
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      files.push(path);
+    }
+    return files;
   }
 
   async diffStat(base: string, head = "HEAD"): Promise<DiffStat> {
@@ -89,6 +105,40 @@ export class Git {
 
   diff(base: string, head = "HEAD"): Promise<string> {
     return this.out(["diff", "--no-color", `${base}..${head}`]);
+  }
+
+  /**
+   * Working-tree diff vs `base`, including untracked files as added-file hunks.
+   * Unlike `diff(base, head)` this is not limited to the committed range.
+   */
+  async diffAgainst(base: string): Promise<string> {
+    const tracked = await this.out(["diff", "--no-color", base]);
+    const untracked = (await this.out(["ls-files", "--others", "--exclude-standard"]))
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (untracked.length === 0) return tracked;
+    const parts: string[] = tracked === "" ? [] : [tracked];
+    for (const rel of untracked) {
+      if (!rel || isAbsolute(rel) || rel.includes("\0") || rel.split(/[\\/]/).includes("..")) continue;
+      const target = resolve(this.cwd, rel);
+      const fromRoot = relative(this.cwd, target);
+      if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) continue;
+      let content: string;
+      try {
+        content = readFileSync(target, "utf8");
+      } catch {
+        continue;
+      }
+      parts.push(
+        `diff --git a/${rel} b/${rel}`,
+        "new file mode 100644",
+        "--- /dev/null",
+        `+++ b/${rel}`,
+        ...content.split("\n").map((line) => `+${line}`),
+      );
+    }
+    return parts.join("\n");
   }
 
   /** Stage everything and commit; returns the new commit or null when nothing changed. */

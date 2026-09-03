@@ -215,7 +215,20 @@ describe("Store", () => {
     store.events.append([ev(runId, "run.created", { run: run(runId, id("msn")) })]);
     const lines = readFileSync(join(dir, "runs", runId, "events.jsonl"), "utf8").trim().split("\n");
     expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0]!)).toMatchObject({ type: "run.created", seq: 0 });
+    expect(JSON.parse(lines[0]!)).toMatchObject({ schemaVersion: 1, type: "run.created", seq: 0 });
+  });
+
+  it("defaults legacy event JSON to schema version 1 and canonicalizes rebuilt mirrors", () => {
+    const runId = id("run");
+    const [event] = store.events.append([ev(runId, "run.created", { run: run(runId, id("msn")) })]);
+    store.db.prepare("UPDATE events SET json = json_remove(json, '$.schemaVersion') WHERE id = ?").run(event!.id);
+
+    expect(store.events.get(event!.id)?.schemaVersion).toBe(1);
+    store.events.rebuildMirror(runId);
+    const mirrored = JSON.parse(
+      readFileSync(join(dir, "runs", runId, "events.jsonl"), "utf8").trim(),
+    ) as Record<string, unknown>;
+    expect(mirrored["schemaVersion"]).toBe(1);
   });
 
   it("causal chain walks causedBy links backwards and effects forwards", () => {
@@ -283,7 +296,7 @@ describe("Store", () => {
     store = openStore({ home: dir });
     expect(store.repos.runs.get(runId)).not.toBeNull();
     const versions = store.db.prepare("SELECT COUNT(*) AS c FROM schema_version").get() as { c: number };
-    expect(versions.c).toBe(1);
+    expect(versions.c).toBe(2);
   });
 
   it("mirror failures do not fail append; the mirror is rebuildable from the DB", () => {

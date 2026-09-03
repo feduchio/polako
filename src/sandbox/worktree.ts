@@ -17,7 +17,7 @@ export interface SandboxHandle {
   run(argv: readonly string[], opts?: { timeoutMs?: number; signal?: AbortSignal; env?: Record<string, string>; bypassPolicy?: boolean; cwd?: string }): Promise<ProcessResult>;
   headCommit(): Promise<string>;
   commitAll(message: string): Promise<string | null>;
-  changedFiles(): Promise<string[]>;
+  changedFiles(base?: string): Promise<string[]>;
   diffStat(): Promise<DiffStat>;
   diff(): Promise<string>;
   destroy(): Promise<void>;
@@ -120,7 +120,7 @@ export class WorktreeSandbox implements Sandbox {
       },
       headCommit: () => git.revParse(),
       commitAll: (message) => git.commitAll(message),
-      changedFiles: () => git.changedFiles(),
+      changedFiles: (base) => git.changedFiles(base),
       diffStat: () => git.diffStat(input.baseCommit),
       diff: () => git.diff(input.baseCommit),
       destroy: async () => {

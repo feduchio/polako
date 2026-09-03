@@ -36,6 +36,7 @@ export type IdPrefix =
   | "run"
   | "msn"
   | "mint"
+  | "interp"
   | "task"
   | "cand"
   | "cp"
@@ -46,9 +47,12 @@ export type IdPrefix =
   | "evt"
   | "art"
   | "acc"
+  | "corp"
+  | "waiv"
   | "base"
   | "cr"
-  | "call";
+  | "call"
+  | "mobs";
 
 export function id(prefix: IdPrefix, now?: number): string {
   return newId(prefix, now);

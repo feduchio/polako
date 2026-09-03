@@ -22,7 +22,7 @@ function parseVitest(text: string): TestSummary | null {
     const failed = passedFirst[2] ? Number(passedFirst[2]) : 0;
     const skipped = passedFirst[3] ? Number(passedFirst[3]) : 0;
     const total = passedFirst[4] ? Number(passedFirst[4]) : passed + failed + skipped;
-    const failingTests = [...text.matchAll(/FAIL\s+.*?(\S+\.test\.\w+)/g)].map((m) => m[1] ?? "unknown");
+    const failingTests = parseVitestFailingTests(text);
     return { total, passed, failed, skipped, failingTests };
   }
   const failedFirst = /Tests\s+(\d+)\s+failed(?:\s*\|\s*(\d+)\s+passed)?(?:\s*\|\s*(\d+)\s+skipped)?(?:\s*\((\d+)\))?/i.exec(text);
@@ -31,10 +31,27 @@ function parseVitest(text: string): TestSummary | null {
     const passed = failedFirst[2] ? Number(failedFirst[2]) : 0;
     const skipped = failedFirst[3] ? Number(failedFirst[3]) : 0;
     const total = failedFirst[4] ? Number(failedFirst[4]) : passed + failed + skipped;
-    const failingTests = [...text.matchAll(/FAIL\s+.*?(\S+\.test\.\w+)/g)].map((m) => m[1] ?? "unknown");
+    const failingTests = parseVitestFailingTests(text);
     return { total, passed, failed, skipped, failingTests };
   }
   return null;
+}
+
+function parseVitestFailingTests(text: string): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string): void => {
+    if (name === "" || seen.has(name)) return;
+    seen.add(name);
+    names.push(name);
+  };
+  for (const match of text.matchAll(/(?:FAIL|×)\s+(\S+\.(?:test|spec)\.\w+)(?:\s+>\s+([^\n]+))?/g)) {
+    const file = match[1] ?? "unknown";
+    add(file);
+    const rest = match[2]?.trim().replace(/\s+\d+ms$/i, "");
+    if (rest) add(`${file} > ${rest}`);
+  }
+  return names;
 }
 
 function parseJest(text: string): TestSummary | null {

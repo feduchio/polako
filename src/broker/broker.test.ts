@@ -130,10 +130,13 @@ describe("ModelBroker", () => {
   it("restores budget and stats from events", async () => {
     provider.script("big", [{ kind: "reply", content: "x", usage: { inputTokens: 300, outputTokens: 100, costUsd: 0.2 } }]);
     await broker.complete({ ...req(runId, "big"), metadata: { runId, purpose: "t", role: "worker", taskId: "task_x" } });
+    catalog.recordQuality({ provider: "p1", model: "big" }, 0.8);
+    const historicalQuality = catalog.get({ provider: "p1", model: "big" })!.stats.quality;
     const fresh = new BudgetTracker({ maxRunUsd: null, maxRunTokens: null, maxTaskTokens: null });
     const fresh2 = new ModelBroker({ store, clock, catalog, quota: new QuotaTracker(clock, { concurrency: 1, rpm: null }), budget: fresh, secrets: SecretStore.fromValues({}) });
     fresh2.restore(runId);
     expect(fresh.snapshot(runId)).toEqual({ runUsd: 0.2, runTokens: 400, perTask: { task_x: 400 } });
+    expect(catalog.get({ provider: "p1", model: "big" })!.stats.quality).toBe(historicalQuality);
   });
 
   it("persists attempt outcomes so restore rebuilds retry stats", async () => {

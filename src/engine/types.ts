@@ -1,5 +1,6 @@
 import type { PolishConfig } from "../domain/config.js";
 import type { Run, RunPhase } from "../domain/run.js";
+import type { RepositoryStartPolicy } from "../project/index.js";
 import type { Scheduler } from "../scheduler/index.js";
 import type { Clock } from "../shared/clock.js";
 import type { Store } from "../store/index.js";
@@ -24,4 +25,6 @@ export interface EngineOptions {
   clock: Clock;
   scheduler: Scheduler;
   config: PolishConfig;
+  /** Defaults to the Phase A clean-tree assertion; injectable for non-filesystem tests. */
+  assertProjectClean?: (projectPath: string, policy?: RepositoryStartPolicy) => void;
 }

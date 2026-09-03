@@ -12,6 +12,11 @@ const MANIFEST_FILES = [
   "bun.lockb",
   "vitest.config.ts",
   "vitest.config.mjs",
+  "vite.config.ts",
+  "vite.config.mts",
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.cjs",
   "jest.config.js",
   "jest.config.ts",
   "tsconfig.json",
@@ -20,6 +25,29 @@ const MANIFEST_FILES = [
   ".eslintrc.cjs",
 ];
 
+/** Hash check-defining manifests and the package.json scripts block from a checkout. */
+export function inspectManifestHashes(projectPath: string): {
+  manifestHashes: Record<string, string>;
+  scriptsHash: string;
+} {
+  const manifestHashes: Record<string, string> = {};
+  for (const rel of MANIFEST_FILES) {
+    const p = join(projectPath, rel);
+    if (existsSync(p)) manifestHashes[rel] = sha256File(p);
+  }
+  let scriptsHash = "";
+  const pkgPath = join(projectPath, "package.json");
+  if (existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, string> };
+      scriptsHash = hashJson(pkg.scripts ?? {});
+    } catch {
+      scriptsHash = "";
+    }
+  }
+  return { manifestHashes, scriptsHash };
+}
+
 /** Read manifests from disk and build a deterministic project profile. */
 export function discoverProject(projectPath: string, alias: string | null = null): ProjectProfile {
   const pkgPath = join(projectPath, "package.json");
@@ -27,11 +55,7 @@ export function discoverProject(projectPath: string, alias: string | null = null
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, string> };
   const scripts = pkg.scripts ?? {};
   const pm = detectPackageManager(projectPath);
-  const manifestHashes: Record<string, string> = {};
-  for (const rel of MANIFEST_FILES) {
-    const p = join(projectPath, rel);
-    if (existsSync(p)) manifestHashes[rel] = sha256File(p);
-  }
+  const { manifestHashes, scriptsHash } = inspectManifestHashes(projectPath);
   const framework = detectFramework(projectPath, scripts);
   const profile = ProjectProfileSchema.parse({
     projectPath,
@@ -40,7 +64,7 @@ export function discoverProject(projectPath: string, alias: string | null = null
     framework,
     checks: defaultCheckCommands(pm, scripts),
     manifestHashes,
-    scriptsHash: hashJson(scripts),
+    scriptsHash,
     discoveredAt: Date.now(),
   });
   return profile;

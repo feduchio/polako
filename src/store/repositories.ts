@@ -1,5 +1,11 @@
 import type { z } from "zod";
-import { AcceptanceArtifactSchema, type AcceptanceArtifact } from "../domain/acceptance.js";
+import {
+  AcceptanceArtifactSchema,
+  CorpusEntrySchema,
+  type AcceptanceArtifact,
+  type CorpusEntry,
+  type MissionAcceptanceCorpus,
+} from "../domain/acceptance.js";
 import { CandidateSchema, type Candidate } from "../domain/candidate.js";
 import { BaselineSnapshotSchema, type BaselineSnapshot } from "../domain/checks.js";
 import { CheckpointSchema, type Checkpoint } from "../domain/checkpoint.js";
@@ -8,6 +14,7 @@ import { FactSchema, type Fact } from "../domain/fact.js";
 import { FindingSchema, FindingValidationSchema, type Finding, type FindingValidation } from "../domain/finding.js";
 import { JobSchema, type Job } from "../domain/job.js";
 import { MissionInterpretationSchema, MissionSchema, type Mission, type MissionInterpretation } from "../domain/mission.js";
+import { ProtectedChangeWaiverSchema, type ProtectedChangeWaiver } from "../domain/protectedChangeWaiver.js";
 import { RunSchema, type Run } from "../domain/run.js";
 import { TaskSchema, type Task } from "../domain/task.js";
 import type { Db } from "./db.js";
@@ -115,6 +122,21 @@ class AcceptanceRepo extends ByRunRepo<AcceptanceArtifact> {
   }
 }
 
+class AcceptanceCorpusRepo extends ReadRepo<CorpusEntry> {
+  forMission(missionId: string): MissionAcceptanceCorpus {
+    return {
+      missionId,
+      entries: this.query("mission_id = ?", [missionId], "created_at ASC, id ASC"),
+    };
+  }
+}
+
+class ProtectedChangeWaiverRepo extends ByRunRepo<ProtectedChangeWaiver> {
+  forTask(runId: string, taskId: string): ProtectedChangeWaiver[] {
+    return this.query("run_id = ? AND task_id = ?", [runId, taskId]);
+  }
+}
+
 class JobRepo extends ByRunRepo<Job> {
   listByState(states: readonly Job["state"][], runId?: string): Job[] {
     if (states.length === 0) return [];
@@ -148,6 +170,8 @@ export interface Repositories {
   cleanRounds: CleanRoundRepo;
   facts: FactRepo;
   acceptance: AcceptanceRepo;
+  acceptanceCorpus: AcceptanceCorpusRepo;
+  protectedChangeWaivers: ProtectedChangeWaiverRepo;
   jobs: JobRepo;
 }
 
@@ -165,6 +189,8 @@ export function createRepositories(db: Db): Repositories {
     cleanRounds: new CleanRoundRepo(db, "clean_rounds", CleanRoundSchema),
     facts: new FactRepo(db, "facts", FactSchema),
     acceptance: new AcceptanceRepo(db, "acceptance_artifacts", AcceptanceArtifactSchema),
+    acceptanceCorpus: new AcceptanceCorpusRepo(db, "acceptance_corpus_entries", CorpusEntrySchema),
+    protectedChangeWaivers: new ProtectedChangeWaiverRepo(db, "protected_change_waivers", ProtectedChangeWaiverSchema),
     jobs: new JobRepo(db, "jobs", JobSchema),
   };
 }

@@ -12,6 +12,8 @@ import {
 } from "../domain/run.js";
 import { isTerminal } from "../domain/fsm.js";
 import type { Scheduler } from "../scheduler/index.js";
+import { assertRepositoryClean } from "../project/index.js";
+import type { RepositoryStartPolicy } from "../project/index.js";
 import type { Clock } from "../shared/clock.js";
 import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
@@ -20,6 +22,12 @@ import { installStubDrivers } from "./stubs.js";
 import type { EngineOptions, PhaseDriver } from "./types.js";
 
 export type { EngineOptions, PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
+
+export interface CreateRunInput extends RepositoryStartPolicy {
+  projectPath: string;
+  missionId?: string;
+  runBranch?: string;
+}
 
 /**
  * Orchestrates run phase progression and the user control plane over the scheduler.
@@ -30,6 +38,7 @@ export class RunEngine {
   private readonly clock: Clock;
   private readonly scheduler: Scheduler;
   private readonly config: EngineOptions["config"];
+  private readonly assertProjectClean: (projectPath: string, policy?: RepositoryStartPolicy) => void;
   private readonly drivers = new Map<RunPhase, PhaseDriver>();
 
   constructor(options: EngineOptions, installStubs = true) {
@@ -37,6 +46,7 @@ export class RunEngine {
     this.clock = options.clock;
     this.scheduler = options.scheduler;
     this.config = options.config;
+    this.assertProjectClean = options.assertProjectClean ?? assertRepositoryClean;
     if (installStubs) {
       installStubDrivers((phase, driver) => {
         this.registerPhase(phase, driver);
@@ -48,7 +58,14 @@ export class RunEngine {
     this.drivers.set(phase, driver);
   }
 
-  createRun(input: { projectPath: string; missionId?: string; runBranch?: string }): Run {
+  createRun(input: CreateRunInput): Run {
+    if (input.includeDirty === true || input.syntheticSnapshotRef !== undefined) {
+      throw new PolishError(
+        "CONFIG_ERROR",
+        "includeDirty and synthetic snapshots are unsupported in Phase A; a clean tree is required",
+      );
+    }
+    this.assertProjectClean(input.projectPath);
     const now = this.clock.now();
     const runId = id("run", now);
     const missionId = input.missionId ?? id("msn", now);
@@ -204,6 +221,9 @@ export class RunEngine {
   /** Append `run.terminated`. `force` overwrites a prior reason (e.g. kill after converged). */
   private terminate(run: Run, reason: TerminalReason, force = false): void {
     if (run.terminalReason !== null && !force) return;
+    // A terminal run must not leave persistent READY/PENDING jobs that can never dispatch,
+    // or RUNNING work that outlives its owning run.
+    this.scheduler.cancelRun(run.id, `run terminated: ${reason.code}`);
     const updated: Run = { ...run, terminalReason: reason, updatedAt: this.clock.now() };
     this.append(run.id, "run.terminated", { run: updated }, SYSTEM_ACTOR);
   }

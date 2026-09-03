@@ -1,7 +1,15 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { id } from "../shared/ids.js";
-import { compareToBaseline, hasRegression, testKey, type BaselineSnapshot, type CheckResult } from "./checks.js";
+import {
+  compareToBaseline,
+  computeFailureFingerprint,
+  hasRegression,
+  stripDiagnosticLocations,
+  testKey,
+  type BaselineSnapshot,
+  type CheckResult,
+} from "./checks.js";
 import { IdSchema } from "./common.js";
 import { dominates, emptyFindingCounts, equivalentEvidence, type EvidenceVector } from "./checkpoint.js";
 import { cleanRoundsFor, hasConverged, isNovelRound, type CleanRound } from "./convergence.js";
@@ -235,15 +243,28 @@ describe("clean rounds belong to a checkpoint hash", () => {
 });
 
 describe("baseline-relative regression", () => {
-  const check = (name: string, failing: string[], total: number, status: CheckResult["status"] = failing.length ? "fail" : "pass"): CheckResult => ({
-    name,
-    kind: "test",
-    status,
-    exitCode: status === "pass" ? 0 : 1,
-    durationMs: 1,
-    summary: { total, passed: total - failing.length, failed: failing.length, skipped: 0, failingTests: failing },
-    outputRef: null,
-  });
+  const check = (name: string, failing: string[], total: number, status: CheckResult["status"] = failing.length ? "fail" : "pass"): CheckResult => {
+    const summary = { total, passed: total - failing.length, failed: failing.length, skipped: 0, failingTests: failing };
+    const result: CheckResult = {
+      name,
+      kind: "test",
+      status,
+      exitCode: status === "pass" ? 0 : 1,
+      durationMs: 1,
+      summary,
+      outputRef: null,
+    };
+    if (status !== "pass") {
+      result.failureFingerprint = computeFailureFingerprint({
+        kind: "test",
+        status,
+        exitCode: result.exitCode,
+        summary,
+        diagnostics: failing.map((t) => `FAIL ${t}`),
+      });
+    }
+    return result;
+  };
   const baseline: BaselineSnapshot = {
     id: id("base"),
     runId: id("run"),
@@ -292,6 +313,87 @@ describe("baseline-relative regression", () => {
     const delta = compareToBaseline(b, [check("a::b", [], 1), check("a", ["b::c"], 1)]);
     expect(delta.newlyFailing).toEqual([testKey("a", "b::c")]);
     expect(delta.newlyPassing).toEqual([testKey("a::b", "c")]);
+  });
+
+  it("kind-aware fingerprints ignore typecheck line shifts and padded passing tests", () => {
+    const typecheckFp = (line: number, extra: string[] = []) => computeFailureFingerprint({
+      kind: "typecheck",
+      status: "fail",
+      exitCode: 2,
+      summary: null,
+      diagnostics: [`src/app.ts(${line},1): error TS2322: Type 'string' is not assignable to type 'number'.`, ...extra],
+    });
+    expect(typecheckFp(10)).toBe(typecheckFp(44));
+    expect(stripDiagnosticLocations("src/app.ts(10,1): error TS2322")).toBe("src/app.ts(<loc>): error TS2322");
+    expect(stripDiagnosticLocations("  12:7  error  'unused' is assigned a value but never used")).toBe(
+      "  <loc>  error  'unused' is assigned a value but never used",
+    );
+    expect(stripDiagnosticLocations("src/app.ts:12:7: error")).toBe("src/app.ts:<loc>: error");
+    expect(typecheckFp(10)).not.toBe(typecheckFp(10, ["src/app.ts(12,1): error TS2339: Property 'x' does not exist."]));
+
+    const failing = ["src/legacy.test.ts"];
+    const testFp = (total: number) => computeFailureFingerprint({
+      kind: "test",
+      status: "fail",
+      exitCode: 1,
+      summary: { total, passed: total - 1, failed: 1, skipped: 0, failingTests: failing },
+      diagnostics: [`FAIL ${failing[0]}`, `Tests  ${total - 1} passed | 1 failed (${total})`],
+    });
+    expect(testFp(2)).toBe(testFp(8));
+    const filesLineFp = (files: number) => computeFailureFingerprint({
+      kind: "test",
+      status: "fail",
+      exitCode: 1,
+      summary: { total: 21, passed: 20, failed: 1, skipped: 0, failingTests: failing },
+      diagnostics: [`FAIL ${failing[0]}`, ` Test Files 1 failed | ${files} passed (${files + 1})`],
+    });
+    expect(filesLineFp(20)).toBe(filesLineFp(21));
+
+    const baseType: CheckResult = {
+      name: "typecheck",
+      kind: "typecheck",
+      status: "fail",
+      exitCode: 2,
+      durationMs: 1,
+      summary: null,
+      outputRef: null,
+      failureFingerprint: typecheckFp(10),
+    };
+    const shifted: CheckResult = { ...baseType, failureFingerprint: typecheckFp(44) };
+    const typeBase: BaselineSnapshot = { ...baseline, checks: [baseType] };
+    expect(compareToBaseline(typeBase, [shifted]).diagnosticChanges).toEqual([]);
+
+    const newDiag: CheckResult = { ...baseType, failureFingerprint: typecheckFp(10, ["src/new.ts(1,1): error TS2304: Cannot find name 'x'."]) };
+    expect(compareToBaseline(typeBase, [newDiag]).diagnosticChanges).toEqual(["typecheck"]);
+
+    const baseTest = check("test", failing, 2);
+    const padded = check("test", failing, 8);
+    expect(compareToBaseline({ ...baseline, checks: [baseTest] }, [padded]).diagnosticChanges).toEqual([]);
+  });
+
+  it("legacy FAIL→FAIL without a fingerprint fails closed and requires recapture", () => {
+    const legacy: CheckResult = {
+      name: "test",
+      kind: "test",
+      status: "fail",
+      exitCode: 1,
+      durationMs: 1,
+      summary: { total: 1, passed: 0, failed: 1, skipped: 0, failingTests: ["src/legacy.test.ts"] },
+      outputRef: null,
+    };
+    const recaptured: CheckResult = {
+      ...legacy,
+      failureFingerprint: computeFailureFingerprint({
+        kind: "test",
+        status: "fail",
+        exitCode: 1,
+        summary: legacy.summary,
+        diagnostics: ["FAIL src/legacy.test.ts"],
+      }),
+    };
+    const delta = compareToBaseline({ ...baseline, checks: [legacy] }, [recaptured]);
+    expect(delta.diagnosticChanges).toEqual(["test"]);
+    expect(hasRegression(delta)).toBe(true);
   });
 });
 

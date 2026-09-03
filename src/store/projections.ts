@@ -1,16 +1,18 @@
-import type { z } from "zod";
-import { AcceptanceArtifactSchema } from "../domain/acceptance.js";
+import { z, type ZodType } from "zod";
+import { AcceptanceArtifactSchema, CorpusEntrySchema } from "../domain/acceptance.js";
 import { CandidateSchema } from "../domain/candidate.js";
 import { BaselineSnapshotSchema } from "../domain/checks.js";
 import { CheckpointSchema } from "../domain/checkpoint.js";
 import { CleanRoundSchema } from "../domain/convergence.js";
 import type { Event } from "../domain/event.js";
-import { FactStrictSchema } from "../domain/fact.js";
+import { FactStrictSchema, assertVerifiedFactEvidence } from "../domain/fact.js";
 import { FindingSchema, FindingValidationStrictSchema } from "../domain/finding.js";
 import { JobSchema } from "../domain/job.js";
 import { MissionInterpretationSchema, MissionSchema } from "../domain/mission.js";
+import { ProtectedChangeWaiverSchema } from "../domain/protectedChangeWaiver.js";
 import { RunSchema } from "../domain/run.js";
 import { TaskStrictSchema } from "../domain/task.js";
+import { modelRefKey, ModelRefSchema } from "../domain/common.js";
 import { PolishError } from "../shared/errors.js";
 import type { Db } from "./db.js";
 
@@ -38,10 +40,43 @@ export type ProjectedTable =
   | "clean_rounds"
   | "facts"
   | "acceptance_artifacts"
-  | "jobs";
+  | "acceptance_corpus_entries"
+  | "protected_change_waivers"
+  | "jobs"
+  | "model_observations";
+
+const ModelObservationSchema = z.union([
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal("call"),
+    model: ModelRefSchema,
+    observedAt: z.number().int().nonnegative(),
+    outcome: z.object({
+      ok: z.boolean(),
+      latencyMs: z.number(),
+      errorKind: z.string().optional(),
+    }),
+  }),
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal("quality"),
+    model: ModelRefSchema,
+    observedAt: z.number().int().nonnegative(),
+    quality: z.number().min(0).max(1),
+  }),
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal("audition"),
+    model: ModelRefSchema,
+    observedAt: z.number().int().nonnegative(),
+    taskId: z.string().min(1),
+    score: z.number().min(0).max(1),
+    detail: z.string().optional(),
+  }),
+]);
 
 interface TableSpec {
-  schema: z.ZodType;
+  schema: ZodType;
   columns: (entity: Record<string, unknown>) => Record<string, string | number | null>;
 }
 
@@ -98,6 +133,27 @@ const TABLE_SPECS: Record<ProjectedTable, TableSpec> = {
     schema: AcceptanceArtifactSchema,
     columns: (e) => ({ run_id: str(e["runId"]), task_id: optStr(e["taskId"]), relative_path: str(e["relativePath"]), sha256: str(e["sha256"]) }),
   },
+  acceptance_corpus_entries: {
+    schema: CorpusEntrySchema,
+    columns: (e) => ({
+      mission_id: str(e["missionId"]),
+      source_run_id: str(e["sourceRunId"]),
+      kind: str(e["kind"]),
+      created_at: num(e["createdAt"]),
+    }),
+  },
+  protected_change_waivers: {
+    schema: ProtectedChangeWaiverSchema,
+    columns: (e) => ({
+      run_id: str(e["runId"]),
+      mission_id: str(e["missionId"]),
+      task_id: str(e["taskId"]),
+      requirement_id: str(e["requirementId"]),
+      path_scope: JSON.stringify(e["pathScope"]),
+      finding_kind: str(e["findingKind"]),
+      base_checkpoint_hash: str(e["baseCheckpointHash"]),
+    }),
+  },
   jobs: {
     schema: JobSchema,
     columns: (e) => ({
@@ -107,6 +163,14 @@ const TABLE_SPECS: Record<ProjectedTable, TableSpec> = {
       priority: num(e["priority"]),
       lease_until: optNum(e["leaseUntil"]),
       created_at: num(e["createdAt"]),
+    }),
+  },
+  model_observations: {
+    schema: ModelObservationSchema,
+    columns: (e) => ({
+      model_key: modelRefKey(e["model"] as { provider: string; model: string }),
+      kind: str(e["kind"]),
+      observed_at: num(e["observedAt"]),
     }),
   },
 };
@@ -149,8 +213,12 @@ export const PROJECTION_RULES: readonly ProjectionRule[] = [
   { eventType: "fact.promoted", payloadField: "fact", table: "facts" },
   { eventType: "fact.superseded", payloadField: "fact", table: "facts" },
   { eventType: "acceptance.recorded", payloadField: "artifact", table: "acceptance_artifacts" },
+  { eventType: "corpus.entry_added", payloadField: "entry", table: "acceptance_corpus_entries" },
+  { eventType: "protected_change.waiver_recorded", payloadField: "waiver", table: "protected_change_waivers" },
   { eventType: "job.created", payloadField: "job", table: "jobs" },
   { eventType: "job.state_changed", payloadField: "job", table: "jobs" },
+  { eventType: "job.cancel_requested", payloadField: "job", table: "jobs" },
+  { eventType: "model.observation.recorded", payloadField: "observation", table: "model_observations" },
 ];
 
 const rulesByType = new Map<string, ProjectionRule[]>();
@@ -188,6 +256,7 @@ const RUN_SCOPED: ReadonlySet<ProjectedTable> = new Set<ProjectedTable>([
   "clean_rounds",
   "facts",
   "acceptance_artifacts",
+  "protected_change_waivers",
   "jobs",
 ]);
 
@@ -197,7 +266,7 @@ const RUN_SCOPED: ReadonlySet<ProjectedTable> = new Set<ProjectedTable>([
  * `runs` snapshot must have `id === event.runId`, run-scoped entities `runId === event.runId`.
  * Mission-scoped tables (`missions`, `interpretations`) are not run-bound and are not checked.
  */
-export function applyProjections(db: Db, event: Event): void {
+export function applyProjections(db: Db, event: Event, events?: { get(id: string): Event | null }): void {
   for (const rule of rulesByType.get(event.type) ?? []) {
     const entity = event.payload[rule.payloadField];
     if (entity === undefined) continue;
@@ -207,6 +276,33 @@ export function applyProjections(db: Db, event: Event): void {
     }
     if (RUN_SCOPED.has(rule.table) && record["runId"] !== event.runId) {
       throw new PolishError("INVARIANT_VIOLATION", "entity runId does not match event runId", { eventId: event.id, table: rule.table });
+    }
+    if (rule.table === "acceptance_corpus_entries" && record["sourceRunId"] !== event.runId) {
+      throw new PolishError("INVARIANT_VIOLATION", "corpus entry sourceRunId does not match event runId", {
+        eventId: event.id,
+        table: rule.table,
+      });
+    }
+    if (rule.table === "acceptance_corpus_entries") {
+      const runRow = db.prepare("SELECT json FROM runs WHERE id = ?").get(record["sourceRunId"]) as { json: string } | undefined;
+      if (!runRow) {
+        throw new PolishError("INVARIANT_VIOLATION", "corpus source run does not exist", {
+          eventId: event.id,
+          sourceRunId: record["sourceRunId"],
+        });
+      }
+      const runJson = JSON.parse(runRow.json) as { missionId?: unknown };
+      if (runJson.missionId !== record["missionId"]) {
+        throw new PolishError("INVARIANT_VIOLATION", "corpus source run does not belong to the entry mission", {
+          eventId: event.id,
+          sourceRunId: record["sourceRunId"],
+          missionId: record["missionId"],
+        });
+      }
+    }
+    if ((rule.table === "facts") && events) {
+      const fact = FactStrictSchema.parse(entity);
+      assertVerifiedFactEvidence(fact, events);
     }
     upsertEntity(db, rule.table, entity);
   }

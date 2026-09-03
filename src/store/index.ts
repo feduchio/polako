@@ -53,6 +53,8 @@ export { ArtifactStore } from "./artifacts.js";
 export { AcceptanceStorage, safeTarget } from "./acceptance.js";
 export type { ProtectedPathProblem } from "./acceptance.js";
 export { EventLog } from "./eventLog.js";
+export { MissionAcceptanceService } from "./missionAcceptance.js";
+export { ProtectedChangeWaiverService } from "./protectedChangeWaivers.js";
 export { PROJECTION_RULES, PROJECTED_TABLES, upsertEntity, applyProjections } from "./projections.js";
 export type { Repositories } from "./repositories.js";
 export { openDb, migrate, transaction, TxManager, getTxManager } from "./db.js";

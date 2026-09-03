@@ -53,22 +53,17 @@ export class BasicIntel implements RepositoryIntelligence {
   async explore(query: string, limit = 50): Promise<IntelHit[]> {
     await this.ensurePrepared();
     if (!query.trim()) return [];
-    if (this.searchBackend === "rg") {
-      const hits = await this.rgSearch(query, limit);
-      if (hits !== null) return hits;
-      this.searchBackend = "node";
-    }
-    return this.nodeSearch(query, limit);
+    return this.searchUntrustedLiteral(query, limit);
   }
 
   async symbol(name: string): Promise<SymbolRef[]> {
     const pattern = `(?:function|class|const|let|var|type|interface|enum)\\s+${escapeRegExp(name)}\\b`;
-    const hits = await this.explore(pattern, 40);
+    const hits = await this.searchTrustedPattern(pattern, 40);
     return hits.map((h) => ({ name, path: h.path, line: h.line, kind: "symbol" }));
   }
 
   async callers(name: string): Promise<SymbolRef[]> {
-    const hits = await this.explore(`\\b${escapeRegExp(name)}\\s*\\(`, 80);
+    const hits = await this.searchTrustedPattern(`\\b${escapeRegExp(name)}\\s*\\(`, 80);
     return hits
       .filter((h) => !new RegExp(`(?:function|const|let|var)\\s+${escapeRegExp(name)}\\b`).test(h.text))
       .map((h) => ({ name, path: h.path, line: h.line, kind: "caller" }));
@@ -172,11 +167,47 @@ export class BasicIntel implements RepositoryIntelligence {
     }
   }
 
-  private async rgSearch(query: string, limit: number): Promise<IntelHit[] | null> {
+  /** Public/untrusted explore: literal match only. Never compiles the query as a regex. */
+  private async searchUntrustedLiteral(query: string, limit: number): Promise<IntelHit[]> {
+    if (this.searchBackend === "rg") {
+      const hits = await this.rgSearch(query, limit, "literal");
+      if (hits !== null) return hits;
+      this.searchBackend = "node";
+    }
+    return this.nodeLiteralSearch(query, limit);
+  }
+
+  /** Internal symbol/callers search: only trusted, name-escaped patterns constructed here. */
+  private async searchTrustedPattern(pattern: string, limit: number): Promise<IntelHit[]> {
+    if (this.searchBackend === "rg") {
+      const hits = await this.rgSearch(pattern, limit, "trusted");
+      if (hits !== null) return hits;
+      this.searchBackend = "node";
+    }
+    return this.nodeTrustedSearch(pattern, limit);
+  }
+
+  private async rgSearch(
+    query: string,
+    limit: number,
+    mode: "literal" | "trusted",
+  ): Promise<IntelHit[] | null> {
     const bin = this.options.rgBinary ?? "rg";
     try {
       const r = await runProcess({
-        argv: [bin, "--json", "-n", "--glob", "!node_modules/**", "--glob", "!.git/**", query, "."],
+        argv: [
+          bin,
+          "--json",
+          "-n",
+          ...(mode === "literal" ? ["-F"] : []),
+          "--glob",
+          "!node_modules/**",
+          "--glob",
+          "!.git/**",
+          "--",
+          query,
+          ".",
+        ],
         cwd: this.workspacePath,
         env: DEFAULT_ENV,
         timeoutMs: 30_000,
@@ -209,13 +240,21 @@ export class BasicIntel implements RepositoryIntelligence {
     }
   }
 
-  private nodeSearch(query: string, limit: number): IntelHit[] {
+  private nodeLiteralSearch(query: string, limit: number): IntelHit[] {
+    return this.scanLines((line) => line.includes(query), limit);
+  }
+
+  private nodeTrustedSearch(pattern: string, limit: number): IntelHit[] {
     let re: RegExp;
     try {
-      re = new RegExp(query);
+      re = new RegExp(pattern);
     } catch {
-      re = new RegExp(escapeRegExp(query));
+      return [];
     }
+    return this.scanLines((line) => re.test(line), limit);
+  }
+
+  private scanLines(match: (line: string) => boolean, limit: number): IntelHit[] {
     const hits: IntelHit[] = [];
     for (const rel of listCodeFiles(this.workspacePath)) {
       const abs = resolve(this.workspacePath, rel);
@@ -229,7 +268,7 @@ export class BasicIntel implements RepositoryIntelligence {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (line === undefined) continue;
-        if (re.test(line)) {
+        if (match(line)) {
           hits.push({ path: rel, line: i + 1, text: line });
           if (hits.length >= limit) return hits;
         }

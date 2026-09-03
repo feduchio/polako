@@ -1,5 +1,14 @@
 import { SYSTEM_ACTOR } from "../domain/common.js";
-import { FactStrictSchema, promoteToVerified, type Fact } from "../domain/fact.js";
+import {
+  FactStrictSchema,
+  assertVerifiedFactEvidence,
+  filterResolvableProvenanceRefs,
+  filterVerifiedEvidenceRefs,
+  isFactPromotionEvidenceType,
+  promoteToVerified,
+  provenanceStrength,
+  type Fact,
+} from "../domain/fact.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Clock } from "../shared/clock.js";
 import { PolishError } from "../shared/errors.js";
@@ -10,9 +19,15 @@ function normalizeStatement(s: string): string {
   return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function sameIdList(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((id, index) => id === right[index]);
+}
+
 /**
  * Event-sourced facts API. Promotion `llm_inferred → verified` requires a deterministic
- * evidence event id; confidence never promotes.
+ * evidence event id; confidence never promotes. Direct `verified` records are rejected unless
+ * every evidence ref is valid same-run allowlisted evidence.
  */
 export class FactsService {
   constructor(
@@ -29,14 +44,23 @@ export class FactsService {
       createdAt: now,
       updatedAt: now,
     });
+    assertVerifiedFactEvidence(fact, this.store.events);
     this.append(fact.runId, "fact.recorded", { fact });
     return fact;
   }
 
   promote(factId: string, evidenceEventId: string): Fact {
     const current = this.requireFact(factId);
+    const evidence = this.store.events.get(evidenceEventId);
+    if (evidence?.runId !== current.runId || !isFactPromotionEvidenceType(evidence.type)) {
+      throw new PolishError("INVARIANT_VIOLATION", "fact promotion requires allowlisted same-run evidence", {
+        factId,
+        evidenceEventId,
+        evidenceType: evidence?.type ?? null,
+      });
+    }
     const promoted = promoteToVerified(current, evidenceEventId, this.clock.now());
-    this.append(promoted.runId, "fact.promoted", { fact: promoted });
+    this.append(promoted.runId, "fact.promoted", { fact: promoted }, [evidenceEventId]);
     return this.requireFact(factId);
   }
 
@@ -57,32 +81,72 @@ export class FactsService {
       createdAt: now,
       updatedAt: now,
     });
+    assertVerifiedFactEvidence(neu, this.store.events);
     const outdated: Fact = { ...old, supersededBy: neu.id, updatedAt: now };
-    this.append(old.runId, "fact.recorded", { fact: neu });
-    this.append(old.runId, "fact.superseded", { fact: outdated });
+    this.appendBatch(old.runId, [
+      this.newEvent(old.runId, "fact.recorded", { fact: neu }),
+      this.newEvent(old.runId, "fact.superseded", { fact: outdated }),
+    ]);
     return neu;
   }
 
   /**
-   * Among current facts, keep the earliest of each normalized statement and supersede duplicates.
+   * Keep the strongest normalized semantic duplicate, then the newest/id-stable winner.
+   * Evidence and provenance references are unioned onto that winner after validation.
    */
   consolidate(runId: string): { kept: number; superseded: number } {
     const current = this.store.repos.facts.listCurrent(runId);
-    const byKey = new Map<string, Fact>();
-    let superseded = 0;
-    for (const f of [...current].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))) {
-      const key = normalizeStatement(f.statement);
-      const winner = byKey.get(key);
-      if (winner === undefined) {
-        byKey.set(key, f);
-        continue;
-      }
-      const now = this.clock.now();
-      const outdated: Fact = { ...f, supersededBy: winner.id, updatedAt: now };
-      this.append(runId, "fact.superseded", { fact: outdated });
-      superseded += 1;
+    const groups = new Map<string, Fact[]>();
+    for (const fact of current) {
+      const key = normalizeStatement(fact.statement);
+      groups.set(key, [...(groups.get(key) ?? []), fact]);
     }
-    return { kept: byKey.size, superseded };
+    let superseded = 0;
+    for (const duplicates of groups.values()) {
+      duplicates.sort(
+        (a, b) =>
+          provenanceStrength(b.provenanceKind) - provenanceStrength(a.provenanceKind)
+          || b.updatedAt - a.updatedAt
+          || a.id.localeCompare(b.id),
+      );
+      const [winner, ...losers] = duplicates;
+      if (winner === undefined) continue;
+      if (losers.length === 0) continue;
+      const now = this.clock.now();
+      const mergedEvidence = filterVerifiedEvidenceRefs(
+        runId,
+        duplicates.flatMap((f) => f.evidenceRefs),
+        this.store.events,
+      );
+      const mergedProvenance = filterResolvableProvenanceRefs(
+        runId,
+        duplicates.flatMap((f) => f.provenanceRefs),
+        this.store.events,
+      );
+      const batch: NewEvent[] = [];
+      if (mergedProvenance.length > 0) {
+        const merged: Fact = FactStrictSchema.parse({
+          ...winner,
+          provenanceRefs: mergedProvenance,
+          evidenceRefs: mergedEvidence,
+          updatedAt: now,
+        });
+        assertVerifiedFactEvidence(merged, this.store.events);
+        if (
+          !sameIdList(merged.provenanceRefs, winner.provenanceRefs)
+          || !sameIdList(merged.evidenceRefs, winner.evidenceRefs)
+        ) {
+          batch.push(this.newEvent(runId, "fact.recorded", { fact: merged }));
+        }
+      }
+      for (const loser of losers) {
+        const outdated: Fact = { ...loser, supersededBy: winner.id, updatedAt: now };
+        batch.push(this.newEvent(runId, "fact.superseded", { fact: outdated }));
+        superseded += 1;
+      }
+      if (batch.length > 0) this.appendBatch(runId, batch);
+    }
+    return { kept: groups.size, superseded };
   }
 
   listCurrent(runId: string): Fact[] {
@@ -95,17 +159,29 @@ export class FactsService {
     return found;
   }
 
-  private append(runId: string, type: string, payload: Record<string, unknown>): void {
-    const evt: NewEvent = {
+  private append(runId: string, type: string, payload: Record<string, unknown>, causedBy: string[] = []): void {
+    this.appendBatch(runId, [this.newEvent(runId, type, payload, causedBy)]);
+  }
+
+  private appendBatch(_runId: string, events: NewEvent[]): void {
+    this.store.events.append(events);
+  }
+
+  private newEvent(
+    runId: string,
+    type: string,
+    payload: Record<string, unknown>,
+    causedBy: string[] = [],
+  ): NewEvent {
+    return {
       id: id("evt", this.clock.now()),
       runId,
       ts: this.clock.now(),
       type,
       payload,
-      causedBy: [],
+      causedBy,
       actor: SYSTEM_ACTOR,
       artifacts: [],
     };
-    this.store.events.append([evt]);
   }
 }

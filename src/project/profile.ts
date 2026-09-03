@@ -8,6 +8,18 @@ export type PackageManager = z.infer<typeof PackageManagerSchema>;
 export const FrameworkHintSchema = z.enum(["vitest", "jest", "node-test", "unknown"]);
 export type FrameworkHint = z.infer<typeof FrameworkHintSchema>;
 
+export const ProfileScoutFindingSchema = z.object({
+  kind: z.enum(["architecture", "vocabulary", "entrypoint"]),
+  statement: z.string().min(1),
+  provenanceKind: z.enum(["llm_inferred", "verified"]),
+  provenanceRefs: z.array(z.string()).min(1),
+  evidenceRefs: z.array(z.string()),
+  confidence: z.number().min(0).max(1),
+  tags: z.array(z.string()),
+  files: z.array(z.string()),
+});
+export type ProfileScoutFinding = z.infer<typeof ProfileScoutFindingSchema>;
+
 /** Deterministic view of a project discovered from manifests on disk. */
 export const ProjectProfileSchema = z.object({
   projectPath: z.string().min(1),
@@ -20,6 +32,8 @@ export const ProjectProfileSchema = z.object({
   /** sha256 of the scripts block used for checks */
   scriptsHash: Sha256Schema,
   discoveredAt: z.number().int().nonnegative(),
+  /** Scout hypotheses. They remain llm_inferred until independently verified. */
+  scoutFindings: z.array(ProfileScoutFindingSchema).optional(),
 });
 export type ProjectProfile = z.infer<typeof ProjectProfileSchema>;
 

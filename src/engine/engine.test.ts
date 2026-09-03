@@ -26,7 +26,7 @@ describe("RunEngine", () => {
     store = openStore({ artifactsDir: join(dir, "artifacts") });
     clock = new FakeClock(NOW);
     sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 60_000 });
-    engine = new RunEngine({ store, clock, scheduler: sched, config: defaultConfig() });
+    engine = new RunEngine({ store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined });
   });
   afterEach(() => {
     store.close();
@@ -88,6 +88,47 @@ describe("RunEngine", () => {
     expect(done.phase).toBe("DONE");
     expect(done.terminalReason?.code).toBe("converged");
     expect(store.events.list(run.id, { types: ["run.phase_changed"] }).length).toBeGreaterThan(10);
+  });
+
+  it("checks repository cleanliness before persisting a run", () => {
+    let checked = "";
+    const guarded = new RunEngine({
+      store,
+      clock,
+      scheduler: sched,
+      config: defaultConfig(),
+      assertProjectClean: (projectPath) => {
+        checked = projectPath;
+        throw new Error("dirty target");
+      },
+    });
+    expect(() => guarded.createRun({ projectPath: "/tmp/dirty" })).toThrow(/dirty target/);
+    expect(checked).toBe("/tmp/dirty");
+    expect(store.repos.runs.listAll()).toEqual([]);
+  });
+
+  it("rejects includeDirty and synthetic refs throughout Phase A", () => {
+    let cleanlinessChecks = 0;
+    const guarded = new RunEngine({
+      store,
+      clock,
+      scheduler: sched,
+      config: defaultConfig(),
+      assertProjectClean: () => {
+        cleanlinessChecks += 1;
+      },
+    });
+    expect(() =>
+      guarded.createRun({ projectPath: "/tmp/dirty", includeDirty: true }),
+    ).toThrow(/unsupported in Phase A/);
+    expect(() =>
+      guarded.createRun({
+        projectPath: "/tmp/dirty",
+        includeDirty: true,
+        syntheticSnapshotRef: "refs/polish/snapshots/run_1",
+      }),
+    ).toThrow(/unsupported in Phase A/);
+    expect(cleanlinessChecks).toBe(0);
   });
 
   it("pause drains in-flight work then quiesces to PAUSED; resume dispatches again", async () => {
@@ -202,7 +243,7 @@ describe("RunEngine", () => {
     expect(stopped.terminalReason?.code).toBe("stopped_by_user");
   });
 
-  it("tick does not dispatch READY jobs for terminal-phase runs", async () => {
+  it("terminal runs cancel READY jobs that can no longer dispatch", async () => {
     const run = engine.createRun({ projectPath: "/tmp/p" });
     await advanceTo(run.id, "CONVERGENCE_CHECK");
     const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -221,7 +262,7 @@ describe("RunEngine", () => {
     expect(job.state).toBe("READY");
     await engine.tick();
     expect(handled).toBe(0);
-    expect(store.repos.jobs.get(job.id)!.state).toBe("READY");
+    expect(store.repos.jobs.get(job.id)!.state).toBe("CANCELLED");
   });
 
   it("tick does not let one run's in-flight job starve another active run", async () => {
@@ -306,7 +347,7 @@ describe("RunEngine", () => {
 
     // New process: same SQLite projections, no in-memory engine state.
     const sched2 = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 60_000 });
-    const engine2 = new RunEngine({ store, clock, scheduler: sched2, config: defaultConfig() }, false);
+    const engine2 = new RunEngine({ store, clock, scheduler: sched2, config: defaultConfig(), assertProjectClean: () => undefined }, false);
     engine2.registerPhase("DISCOVERING_PROJECT", () => ({ status: "waiting" }));
     engine2.recover();
     expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
@@ -406,7 +447,7 @@ describe("RunEngine", () => {
       attempts += 1;
       return { attempts };
     });
-    const engine2 = new RunEngine({ store, clock, scheduler: sched2, config: defaultConfig() }, false);
+    const engine2 = new RunEngine({ store, clock, scheduler: sched2, config: defaultConfig(), assertProjectClean: () => undefined }, false);
     engine2.registerPhase("CREATED", (ctx) => {
       const job = ctx.store.repos.jobs.listByRun(ctx.run.id)[0]!;
       if (job.state === "SUCCEEDED") return { status: "complete", nextPhase: "DISCOVERING_PROJECT" };

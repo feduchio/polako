@@ -10,6 +10,7 @@ export * from "./task.js";
 export * from "./candidate.js";
 export * from "./convergence.js";
 export * from "./acceptance.js";
+export * from "./protectedChangeWaiver.js";
 export * from "./fact.js";
 export * from "./job.js";
 export * from "./event.js";

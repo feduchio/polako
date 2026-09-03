@@ -8,6 +8,7 @@ import type { ModelCatalog } from "./catalog.js";
 import type { BudgetTracker, QuotaTracker } from "./quota.js";
 import type { SecretStore } from "./secrets.js";
 import { ProviderError, type CompletionRequest, type CompletionResponse } from "./types.js";
+import { ModelObservationRepository } from "./observations.js";
 
 export interface RetryPolicy {
   maxAttempts: number;
@@ -27,6 +28,7 @@ export interface BrokerDeps {
   retry?: RetryPolicy;
   /** deterministic jitter for tests */
   jitter?: () => number;
+  observations?: ModelObservationRepository;
 }
 
 export interface ModelCallRecord {
@@ -50,10 +52,12 @@ interface AttemptOutcome {
 export class ModelBroker {
   private readonly retry: RetryPolicy;
   private readonly jitter: () => number;
+  private readonly observations: ModelObservationRepository;
 
   constructor(private readonly deps: BrokerDeps) {
     this.retry = deps.retry ?? DEFAULT_RETRY_POLICY;
     this.jitter = deps.jitter ?? Math.random;
+    this.observations = deps.observations ?? new ModelObservationRepository(deps.store);
   }
 
   async complete(request: CompletionRequest): Promise<ModelCallRecord> {
@@ -99,6 +103,7 @@ export class ModelBroker {
         const outcome: AttemptOutcome = { ok: true, latencyMs: latency, at: clock.now() };
         outcomes.push(outcome);
         catalog.recordCall(request.model, outcome);
+        this.observations.recordCall(request.model, outcome, request.metadata.runId);
         const snapshot = budget.record(request.metadata.runId, response.usage, request.metadata.taskId);
         const eventId = this.recordEvent(request, response, attempt, outcomes, null, snapshot.runUsd);
         return { eventId, response, attempts: attempt };
@@ -109,6 +114,7 @@ export class ModelBroker {
         const outcome: AttemptOutcome = { ok: false, latencyMs: clock.now() - started, errorKind: kind, at: clock.now() };
         outcomes.push(outcome);
         catalog.recordCall(request.model, outcome);
+        this.observations.recordCall(request.model, outcome, request.metadata.runId);
         if (isCancel(err)) {
           this.recordEvent(request, null, attempt, outcomes, errorToString(err), budget.snapshot(request.metadata.runId).runUsd);
           throw err;
@@ -198,7 +204,8 @@ export class ModelBroker {
   /** Rebuild budget usage and catalog stats for a run from its `model.call` events. */
   restore(runId: string): void {
     const { store, budget, catalog } = this.deps;
-    catalog.resetCallStats();
+    // Global observations must be replayed before catalog registration/refresh can safely consume them.
+    this.observations.restoreCatalog(catalog);
     const snapshot = { runUsd: 0, runTokens: 0, perTask: {} as Record<string, number> };
     for (const e of store.events.list(runId, { types: ["model.call"] })) {
       const p = e.payload as {
@@ -211,19 +218,6 @@ export class ModelBroker {
         attemptOutcomes?: AttemptOutcome[];
         attempts?: number;
       };
-      if (p.model) {
-        if (p.attemptOutcomes && p.attemptOutcomes.length > 0) {
-          for (const o of p.attemptOutcomes) {
-            const outcome: Parameters<ModelCatalog["recordCall"]>[1] = { ok: o.ok, latencyMs: o.latencyMs, at: o.at };
-            if (o.errorKind !== undefined) outcome.errorKind = o.errorKind;
-            catalog.recordCall(p.model, outcome);
-          }
-        } else {
-          const outcome: Parameters<ModelCatalog["recordCall"]>[1] = { ok: p.ok === true, latencyMs: p.latencyMs ?? 0, at: e.ts };
-          if (p.error) outcome.errorKind = p.error;
-          catalog.recordCall(p.model, outcome);
-        }
-      }
       if (p.usage) {
         const tokens = p.usage.inputTokens + p.usage.outputTokens;
         snapshot.runTokens += tokens;

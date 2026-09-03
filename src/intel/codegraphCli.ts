@@ -2,8 +2,9 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PolishError } from "../shared/errors.js";
 import { runProcess } from "../sandbox/process.js";
-import { probeCodeGraph } from "./probe.js";
+import { probeCodeGraph, dialectFromProbe, FALLBACK_CODEGRAPH_DIALECT } from "./probe.js";
 import type {
+  CodeGraphDialect,
   ImpactQuery,
   ImpactResult,
   IntelHealth,
@@ -32,6 +33,8 @@ export class CodeGraphCli implements RepositoryIntelligence {
   private stale = false;
   private lastError: string | null = null;
   private readonly binary: string;
+  private dialect: CodeGraphDialect = FALLBACK_CODEGRAPH_DIALECT;
+  private dialectResolved = false;
 
   constructor(
     readonly workspacePath: string,
@@ -41,8 +44,8 @@ export class CodeGraphCli implements RepositoryIntelligence {
   }
 
   async prepare(): Promise<void> {
-    // Never copy .codegraph from elsewhere — init in this workspace only.
-    const result = await this.exec(["init", "--json"]);
+    await this.resolveDialect();
+    const result = await this.exec([...this.dialect.init]);
     if (result.exitCode !== 0) {
       this.lastError = result.stderr || result.stdout || "init failed";
       throw new PolishError("IO_ERROR", `codegraph init failed: ${this.lastError}`);
@@ -52,30 +55,59 @@ export class CodeGraphCli implements RepositoryIntelligence {
   }
 
   async explore(query: string, limit = 50): Promise<IntelHit[]> {
-    const raw = await this.execJson(["search", query, "--json", "--limit", String(limit)]);
+    await this.resolveDialect();
+    const argv = [this.dialect.searchCommand, query];
+    const searchJson = this.dialect.jsonFlags.search ?? this.dialect.jsonFlag;
+    if (searchJson) argv.push(searchJson);
+    if (this.dialect.limitFlag) argv.push(this.dialect.limitFlag, String(limit));
+    const raw = await this.execJson(argv);
     return normalizeHits(raw);
   }
 
   async symbol(name: string): Promise<SymbolRef[]> {
-    const raw = await this.execJson(["symbol", name, "--json"]);
+    await this.resolveDialect();
+    if (!this.dialect.jsonFlags.symbol) return [];
+    const argv = [this.dialect.symbolCommand, name];
+    argv.push(this.dialect.jsonFlags.symbol);
+    const raw = await this.execJson(argv);
     return normalizeSymbols(raw, name);
   }
 
   async callers(name: string): Promise<SymbolRef[]> {
-    const raw = await this.execJson(["callers", name, "--json"]);
+    await this.resolveDialect();
+    if (!this.dialect.jsonFlags.callers) return [];
+    const argv = [this.dialect.callersCommand, name];
+    argv.push(this.dialect.jsonFlags.callers);
+    const raw = await this.execJson(argv);
     return normalizeSymbols(raw, name, "caller");
   }
 
   async callees(name: string): Promise<SymbolRef[]> {
-    const raw = await this.execJson(["callees", name, "--json"]);
+    await this.resolveDialect();
+    if (!this.dialect.jsonFlags.callees) return [];
+    const argv = [this.dialect.calleesCommand, name];
+    argv.push(this.dialect.jsonFlags.callees);
+    const raw = await this.execJson(argv);
     return normalizeSymbols(raw, name, "callee");
   }
 
   async impact(query: ImpactQuery, depth = 2): Promise<ImpactResult> {
-    const args = ["impact", "--json", "--depth", String(depth)];
-    if (query.symbol) args.push("--symbol", query.symbol);
-    for (const f of query.files ?? []) args.push("--file", f);
-    const raw = await this.execJson(args);
+    await this.resolveDialect();
+    if (!this.dialect.jsonFlags.impact) {
+      return { files: [], symbols: query.symbol ? [query.symbol] : [], depth, ...(this.stale ? { stale: true } : {}) };
+    }
+    const argv = [this.dialect.impactCommand];
+    argv.push(this.dialect.jsonFlags.impact);
+    if (this.dialect.impactDepthFlag) argv.push(this.dialect.impactDepthFlag, String(depth));
+    if (query.symbol) {
+      if (this.dialect.impactSymbolFlag) argv.push(this.dialect.impactSymbolFlag, query.symbol);
+      else argv.push(query.symbol);
+    }
+    for (const f of query.files ?? []) {
+      if (this.dialect.impactFileFlag) argv.push(this.dialect.impactFileFlag, f);
+      else argv.push(f);
+    }
+    const raw = await this.execJson(argv);
     const files = Array.isArray((raw as { files?: unknown }).files)
       ? ((raw as { files: string[] }).files)
       : [];
@@ -88,8 +120,15 @@ export class CodeGraphCli implements RepositoryIntelligence {
   }
 
   async affectedTests(files: readonly string[]): Promise<string[]> {
-    const args = ["affected-tests", "--json", ...files.flatMap((f) => ["--file", f])];
-    const raw = await this.execJson(args);
+    await this.resolveDialect();
+    if (!this.dialect.jsonFlags.affected) return [];
+    const argv = [this.dialect.affectedCommand];
+    argv.push(this.dialect.jsonFlags.affected);
+    for (const f of files) {
+      if (this.dialect.affectedFileFlag) argv.push(this.dialect.affectedFileFlag, f);
+      else argv.push(f);
+    }
+    const raw = await this.execJson(argv);
     if (Array.isArray(raw)) return raw.map(String).sort();
     if (Array.isArray((raw as { tests?: unknown }).tests)) {
       return ((raw as { tests: string[] }).tests).map(String).sort();
@@ -99,10 +138,11 @@ export class CodeGraphCli implements RepositoryIntelligence {
 
   async refresh(changedFiles: readonly string[]): Promise<void> {
     if (changedFiles.length === 0) return;
-    // Mark stale; callers may re-prepare. We do not copy indexes from another worktree.
+    await this.resolveDialect();
     this.stale = true;
-    const args = ["refresh", "--json", ...changedFiles.flatMap((f) => ["--file", f])];
-    const result = await this.exec(args);
+    const argv = [this.dialect.refreshCommand];
+    if (this.dialect.jsonFlags.refresh) argv.push(this.dialect.jsonFlags.refresh);
+    const result = await this.exec(argv);
     if (result.exitCode === 0) {
       this.stale = false;
       this.lastError = null;
@@ -118,13 +158,15 @@ export class CodeGraphCli implements RepositoryIntelligence {
     }
     const indexPath = join(this.workspacePath, ".codegraph");
     const hasIndex = existsSync(indexPath);
-    const ok = hasIndex && this.lastError === null && !this.stale;
+    const compatible = probe.compatible === true;
+    const ok = compatible && hasIndex && this.lastError === null && !this.stale;
     return {
       ok,
       backend: "codegraph-cli",
       detail: [
         `version=${probe.version ?? "?"}`,
         `fts5=${probe.fts5}`,
+        `compatible=${String(compatible)}`,
         hasIndex ? "indexed" : "no-index",
         this.stale ? "stale" : "fresh",
         this.lastError ? `err=${this.lastError}` : null,
@@ -138,6 +180,13 @@ export class CodeGraphCli implements RepositoryIntelligence {
   /** Test/helper: path where this backend keeps its index (never copied across trees). */
   indexDir(): string {
     return resolve(this.workspacePath, ".codegraph");
+  }
+
+  private async resolveDialect(): Promise<void> {
+    if (this.dialectResolved) return;
+    const probe = await (this.options.probe?.() ?? probeCodeGraph(this.binary, this.workspacePath));
+    this.dialect = dialectFromProbe(probe);
+    this.dialectResolved = true;
   }
 
   private async exec(argv: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {

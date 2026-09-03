@@ -72,6 +72,8 @@ export interface BuildWorkerInput {
   task: Task;
   interpretation?: MissionInterpretation | null;
   protocol?: ProtocolBundle | null;
+  /** Critical non-droppable engineering policy; empty/whitespace falls back to the built-in safe policy. */
+  baseEngineeringPolicy?: string;
   profile?: ProjectProfile | null;
   facts: readonly Fact[];
   findings: readonly Finding[];
