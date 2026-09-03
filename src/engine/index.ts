@@ -1,5 +1,5 @@
 export { RunEngine } from "./engine.js";
-export { installStubDrivers, stubDriverFor, STUB_NEXT } from "./stubs.js";
+export { installStubDrivers, isStubDriver, stubDriverFor, STUB_NEXT } from "./stubs.js";
 export {
   runCandidatesParallel,
   ScriptedCandidateWorker,

@@ -9,6 +9,10 @@
     "node": ">=24.0.0"
   },
   "packageManager": "pnpm@11.25.0",
+  "bin": {
+    "polish": "dist/cli/index.js",
+    "polishd": "dist/daemon/main.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",

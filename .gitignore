@@ -11,3 +11,7 @@ fixtures/**/.codegraph/
 .polish/
 *.pid
 *.sock
+.cursor/**
+!.cursor/skills/
+!.cursor/skills/polish/
+!.cursor/skills/polish/SKILL.md

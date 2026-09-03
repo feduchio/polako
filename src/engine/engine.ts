@@ -58,6 +58,11 @@ export class RunEngine {
     this.drivers.set(phase, driver);
   }
 
+  /** Exposes a registered driver for composition tests (B9). */
+  getRegisteredDriver(phase: RunPhase): PhaseDriver | undefined {
+    return this.drivers.get(phase);
+  }
+
   createRun(input: CreateRunInput): Run {
     if (input.includeDirty === true || input.syntheticSnapshotRef !== undefined) {
       throw new PolishError(

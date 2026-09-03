@@ -22,8 +22,14 @@ export const STUB_NEXT: Partial<Record<RunPhase, RunPhase>> = {
   SIMPLIFYING: "CONVERGENCE_CHECK",
 };
 
+const STUB_DRIVER_MARKER = Symbol("polish.stubDriver");
+
+export function isStubDriver(driver: PhaseDriver): boolean {
+  return (driver as { [STUB_DRIVER_MARKER]?: boolean })[STUB_DRIVER_MARKER] === true;
+}
+
 export function stubDriverFor(phase: RunPhase): PhaseDriver {
-  return (ctx): PhaseDriverResult => {
+  const driver: PhaseDriver = (ctx): PhaseDriverResult => {
     if (phase === "CONVERGENCE_CHECK") {
       const hash = ctx.run.currentCheckpointHash;
       if (hash === null) return { status: "waiting" };
@@ -37,6 +43,8 @@ export function stubDriverFor(phase: RunPhase): PhaseDriver {
     if (next === undefined) return { status: "waiting" };
     return { status: "complete", nextPhase: next };
   };
+  (driver as { [STUB_DRIVER_MARKER]?: boolean })[STUB_DRIVER_MARKER] = true;
+  return driver;
 }
 
 export function installStubDrivers(register: (phase: RunPhase, driver: PhaseDriver) => void): void {
