@@ -1,4 +1,5 @@
 import { modelRefKey, type ModelRef } from "../domain/common.js";
+import type { CapabilityProbeResult } from "./capabilityProbe.js";
 import type { ModelInfo, ProviderAdapter } from "./types.js";
 
 export interface ModelStats {
@@ -22,7 +23,13 @@ export interface CatalogEntry {
 export interface CatalogDiscoveryOptions {
   signal?: AbortSignal;
   /** Optional active verifier; concrete provider probes are injected to keep broker provider-agnostic. */
-  capabilityProbe?: (adapter: ProviderAdapter, model: ModelInfo) => Promise<ModelInfo>;
+  capabilityProbe?: (adapter: ProviderAdapter, model: ModelInfo) => Promise<CapabilityProbeResult>;
+}
+
+export interface CatalogDiscoveryResult {
+  discovered: number;
+  errors: Record<string, string>;
+  probes: CapabilityProbeResult[];
 }
 
 const EMA = 0.2;
@@ -35,6 +42,7 @@ export class ModelCatalog {
   private readonly entries = new Map<string, CatalogEntry>();
   private readonly providers = new Map<string, ProviderAdapter>();
   private readonly providerAvailable = new Map<string, boolean>();
+  private readonly modelAvailable = new Map<string, boolean>();
 
   register(adapter: ProviderAdapter): void {
     this.providers.set(adapter.id, adapter);
@@ -49,13 +57,14 @@ export class ModelCatalog {
     return [...this.providers.keys()];
   }
 
-  async refresh(signal?: AbortSignal): Promise<{ discovered: number; errors: Record<string, string> }> {
+  async refresh(signal?: AbortSignal): Promise<CatalogDiscoveryResult> {
     return this.discover(signal === undefined ? {} : { signal });
   }
 
-  async discover(options: CatalogDiscoveryOptions = {}): Promise<{ discovered: number; errors: Record<string, string> }> {
+  async discover(options: CatalogDiscoveryOptions = {}): Promise<CatalogDiscoveryResult> {
     let discovered = 0;
     const errors: Record<string, string> = {};
+    const probes: CapabilityProbeResult[] = [];
     for (const [id, adapter] of this.providers) {
       try {
         const models = await adapter.listModels(options.signal);
@@ -65,10 +74,15 @@ export class ModelCatalog {
             continue;
           }
           try {
-            this.upsert(await options.capabilityProbe(adapter, model));
+            const result = await options.capabilityProbe(adapter, model);
+            probes.push(result);
+            this.upsert(result.info);
+            this.setModelAvailable(model.ref, result.available);
           } catch (error) {
-            errors[`${id}/${model.ref.model}:probe`] = error instanceof Error ? error.message : String(error);
-            this.upsert(model);
+            const message = error instanceof Error ? error.message : String(error);
+            errors[`${id}/${model.ref.model}:probe`] = message;
+            this.upsert({ ...model, source: "probe" });
+            this.setModelAvailable(model.ref, false);
           }
         }
         discovered += models.length;
@@ -78,7 +92,7 @@ export class ModelCatalog {
         this.providerAvailable.set(id, false);
       }
     }
-    return { discovered, errors };
+    return { discovered, errors, probes };
   }
 
   upsert(info: ModelInfo): CatalogEntry {
@@ -87,20 +101,32 @@ export class ModelCatalog {
     const entry: CatalogEntry = {
       info,
       stats: existing?.stats ?? { calls: 0, failures: 0, latencyMs: 0, quality: null, lastErrorKind: null, lastUsedAt: null },
-      available: this.providerAvailable.get(info.ref.provider) ?? true,
+      available: this.isModelAvailable(info.ref),
     };
     this.entries.set(key, entry);
     return entry;
   }
 
+  setModelAvailable(ref: ModelRef, available: boolean): void {
+    this.modelAvailable.set(modelRefKey(ref), available);
+    const entry = this.entries.get(modelRefKey(ref));
+    if (entry) entry.available = this.isModelAvailable(ref);
+  }
+
+  private isModelAvailable(ref: ModelRef): boolean {
+    const modelOk = this.modelAvailable.get(modelRefKey(ref)) ?? true;
+    const providerOk = this.providerAvailable.get(ref.provider) ?? true;
+    return modelOk && providerOk;
+  }
+
   get(ref: ModelRef): CatalogEntry | undefined {
     const e = this.entries.get(modelRefKey(ref));
     if (!e) return undefined;
-    return { ...e, available: this.providerAvailable.get(ref.provider) ?? false };
+    return { ...e, available: this.isModelAvailable(ref) };
   }
 
   list(): CatalogEntry[] {
-    return [...this.entries.values()].map((e) => ({ ...e, available: this.providerAvailable.get(e.info.ref.provider) ?? false }));
+    return [...this.entries.values()].map((e) => ({ ...e, available: this.isModelAvailable(e.info.ref) }));
   }
 
   setProviderAvailable(providerId: string, available: boolean): void {

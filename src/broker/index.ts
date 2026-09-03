@@ -1,3 +1,5 @@
+export { probeModelCapabilities } from "./capabilityProbe.js";
+export type { CapabilityProbeChecks, CapabilityProbeResult } from "./capabilityProbe.js";
 export * from "./types.js";
 export { ModelCatalog } from "./catalog.js";
 export type { CatalogDiscoveryOptions, CatalogEntry, ModelStats } from "./catalog.js";

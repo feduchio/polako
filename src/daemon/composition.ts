@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AgentRunner } from "../agents/runner.js";
 import { ModelBroker } from "../broker/broker.js";
+import { probeModelCapabilities } from "../broker/capabilityProbe.js";
 import { ModelCatalog } from "../broker/catalog.js";
 import { ModelRouter } from "../broker/router.js";
 import { BudgetTracker, QuotaTracker } from "../broker/quota.js";
@@ -29,7 +30,7 @@ import {
   type RunEngine,
 } from "../engine/index.js";
 import type { PhaseContext, PhaseDriver } from "../engine/types.js";
-import { OpenAICompatProvider } from "../providers/openaiCompat.js";
+import { createProviderFromConfig } from "../providers/factory.js";
 import {
   buildBaselineSnapshot,
   createCheckOutputPersister,
@@ -350,7 +351,26 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
 
 function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
   return async (ctx) => {
-    await deps.catalog.discover();
+    const discovery = await deps.catalog.discover({
+      capabilityProbe: (adapter, model) => probeModelCapabilities(adapter, model, { runId: ctx.run.id }),
+    });
+    const probeEvents: NewEvent[] = discovery.probes.map((probe) => ({
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "model.probed",
+      payload: {
+        ref: probe.info.ref,
+        available: probe.available,
+        checks: probe.checks,
+        capabilities: probe.info.capabilities,
+        source: probe.info.source,
+      },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [],
+    }));
+    if (probeEvents.length > 0) ctx.store.events.append(probeEvents);
     const models = deps.catalog.list().map((entry) => entry.info);
     return createDiscoveringModelsDriver(models)(ctx);
   };
@@ -462,35 +482,8 @@ function loadConfiguredProviders(config: PolishConfig, secrets: SecretStore): Pr
   for (const entry of config.providers) {
     if (!entry.enabled || entry.apiKeyEnv === undefined || !secrets.has(entry.apiKeyEnv)) continue;
     const apiKey = secrets.get(entry.apiKeyEnv);
-    if (entry.kind === "openrouter") {
-      providers.push(new OpenAICompatProvider({
-        id: entry.id,
-        kind: "openrouter",
-        baseUrl: entry.baseUrl ?? "https://openrouter.ai/api/v1",
-        apiKey,
-        concurrency: entry.concurrency ?? null,
-      }));
-      continue;
-    }
-    if (entry.kind === "groq") {
-      providers.push(new OpenAICompatProvider({
-        id: entry.id,
-        kind: "groq",
-        baseUrl: entry.baseUrl ?? "https://api.groq.com/openai/v1",
-        apiKey,
-        concurrency: entry.concurrency ?? null,
-      }));
-      continue;
-    }
-    if (entry.kind === "gemini") {
-      providers.push(new OpenAICompatProvider({
-        id: entry.id,
-        kind: "openai-compat",
-        baseUrl: entry.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta/openai",
-        apiKey,
-        concurrency: entry.concurrency ?? null,
-      }));
-    }
+    const adapter = createProviderFromConfig(entry, apiKey);
+    if (adapter !== null) providers.push(adapter);
   }
   return providers;
 }

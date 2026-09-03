@@ -114,6 +114,7 @@ export const ProviderConfigSchema = z.object({
   baseUrl: z.url().optional(),
   concurrency: z.number().int().min(1).optional(),
 });
+export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 
 export const PolishConfigSchema = z.object({
   home: z.string().default("~/.polish"),

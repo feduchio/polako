@@ -11,6 +11,7 @@ import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
+import { probeModelCapabilities } from "../broker/capabilityProbe.js";
 import {
   PRODUCTION_DRIVER_PHASES,
   buildProductionDeps,
@@ -61,6 +62,36 @@ describe("production composition", () => {
       expect(driver, `missing driver for ${phase}`).toBeDefined();
       expect(isStubDriver(driver!), `${phase} must not use stubDriverFor`).toBe(false);
     }
+  });
+
+  it("buildProductionDeps discovers models with capability probes", async () => {
+    const provider = new ScriptedProvider("scripted", [
+      { name: "worker", capabilities: FAKE_CAPABILITIES.frontier },
+      { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
+    ]);
+    provider.script("worker", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    provider.script("planner", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t2", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const config = defaultConfig();
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+    });
+    const runId = id("run", clock.now());
+    const discovery = await deps.catalog.discover({
+      capabilityProbe: (adapter, model) => probeModelCapabilities(adapter, model, { runId }),
+    });
+    expect(discovery.probes).toHaveLength(2);
+    expect(deps.catalog.get({ provider: "scripted", model: "worker" })?.info.source).toBe("probe");
+    expect(deps.catalog.get({ provider: "scripted", model: "worker" })?.available).toBe(true);
   });
 
   it("promotes PENDING tasks with satisfied dependencies to READY", () => {

@@ -1,0 +1,9 @@
+{
+  "name": "resume-dup-fetch",
+  "version": "1.0.0",
+  "description": "Fixture: duplicate request after resume bug",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/retryFetch.test.mjs"
+  }
+}

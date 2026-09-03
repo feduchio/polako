@@ -9,7 +9,7 @@ export type FetchLike = (input: string, init: { method: string; headers: Record<
 
 export interface OpenAICompatOptions {
   id: string;
-  kind: "openrouter" | "groq" | "openai-compat";
+  kind: "openrouter" | "groq" | "gemini" | "openai-compat";
   baseUrl: string;
   apiKey: string;
   fetch?: FetchLike;

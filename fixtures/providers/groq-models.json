@@ -1,0 +1,9 @@
+{
+  "data": [
+    {
+      "id": "llama-3.3-70b-versatile",
+      "context_length": 131072,
+      "supported_parameters": ["tools", "response_format", "temperature"]
+    }
+  ]
+}

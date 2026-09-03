@@ -1,0 +1,10 @@
+{
+  "data": [
+    {
+      "id": "gemini-2.0-flash",
+      "name": "Gemini 2.0 Flash",
+      "context_length": 1048576,
+      "supported_parameters": ["tools", "response_format"]
+    }
+  ]
+}

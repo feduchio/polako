@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FAKE_CAPABILITIES, ScriptedProvider, reply } from "../providers/scripted.js";
 import { RecordReplayProvider } from "../providers/recordReplay.js";
 import { OpenAICompatProvider, inferFamily, inferTier, type FetchLike } from "../providers/openaiCompat.js";
+import { GroqProvider } from "../providers/groq.js";
 import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
@@ -374,6 +375,70 @@ describe("RecordReplayProvider", () => {
       await expect(replay.complete(req("run_y", "m", "real", "other question"))).rejects.toThrow(/no recorded response/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("GroqProvider redaction", () => {
+  function fakeFetch(handler: (url: string, init: Parameters<FetchLike>[1]) => { status: number; body: unknown; headers?: Record<string, string> }): FetchLike {
+    return (url, init) => {
+      const r = handler(url, init);
+      return Promise.resolve({
+        status: r.status,
+        headers: { get: (n: string) => r.headers?.[n.toLowerCase()] ?? null },
+        text: () => Promise.resolve(typeof r.body === "string" ? r.body : JSON.stringify(r.body)),
+      });
+    };
+  }
+
+  it("never persists raw Groq API keys in model.call artifacts", async () => {
+    const secret = "gsk_live_secret_key_value_12345678";
+    const provider = new GroqProvider({
+      id: "groq",
+      apiKey: secret,
+      fetch: fakeFetch((url) => {
+        if (url.endsWith("/models")) {
+          return { status: 200, body: { data: [{ id: "llama-3.3-70b-versatile", context_length: 131072, supported_parameters: ["tools"] }] } };
+        }
+        return {
+          status: 200,
+          body: {
+            choices: [{ message: { content: `echo ${secret}` }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 5, completion_tokens: 5 },
+          },
+        };
+      }),
+    });
+    const redactCatalog = new ModelCatalog();
+    redactCatalog.register(provider);
+    await redactCatalog.refresh();
+    const redactDir = mkdtempSync(join(tmpdir(), "polish-broker-groq-"));
+    const redactStore = openStore({ artifactsDir: join(redactDir, "artifacts") });
+    const redactRunId = id("run");
+    try {
+      const redactBroker = new ModelBroker({
+        store: redactStore,
+        clock: new FakeClock(NOW),
+        catalog: redactCatalog,
+        quota: new QuotaTracker(new FakeClock(NOW), { concurrency: 1, rpm: null }),
+        budget: new BudgetTracker({ maxRunUsd: null, maxRunTokens: null, maxTaskTokens: null }),
+        secrets: SecretStore.fromValues({ GROQ_API_KEY: secret }),
+      });
+      await redactBroker.complete({
+        model: { provider: "groq", model: "llama-3.3-70b-versatile" },
+        messages: [{ role: "user", content: `use ${secret}` }],
+        metadata: { runId: redactRunId, purpose: "test", role: "worker" },
+      });
+      const events = redactStore.events.list(redactRunId, { types: ["model.call"] });
+      expect(events).toHaveLength(1);
+      for (const artifact of events[0]!.artifacts) {
+        const text = redactStore.artifacts.getText(artifact.sha256);
+        expect(text).not.toContain(secret);
+        expect(text).toContain("<redacted:GROQ_API_KEY>");
+      }
+    } finally {
+      redactStore.close();
+      rmSync(redactDir, { recursive: true, force: true });
     }
   });
 });

@@ -91,7 +91,7 @@ module.exports = {
     {
       name: "engine-is-not-imported-by-lower-layers",
       severity: "error",
-      from: { path: "^src/(?!engine/|daemon/)" },
+      from: { path: "^src/(?!engine/|daemon/|e2e/)" },
       to: { path: "^src/engine/" },
     },
     {
