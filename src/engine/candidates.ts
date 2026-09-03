@@ -1,3 +1,4 @@
+import type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../agents/types.js";
 import type { AcceptanceArtifact, MissionAcceptanceCorpus } from "../domain/acceptance.js";
 import type { ArtifactRef } from "../domain/common.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
@@ -12,29 +13,7 @@ import type { Sandbox, SandboxHandle } from "../sandbox/worktree.js";
 import { errorToString } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 
-export type WorkerOutcome =
-  | {
-      status: "completed";
-      evidenceRefs?: readonly ArtifactRef[];
-      transcriptRef?: ArtifactRef | null;
-    }
-  | {
-      status: "failed" | "interrupted";
-      error?: string;
-      evidenceRefs?: readonly ArtifactRef[];
-      transcriptRef?: ArtifactRef | null;
-    };
-
-/**
- * Narrow adapter implemented by B1's AgentRunner. Keeping the worktree handle in the
- * contract ensures all worker commands and writes remain inside the candidate sandbox.
- */
-export interface CandidateWorker<TTask = Task> {
-  run(task: TTask, worktree: SandboxHandle): Promise<WorkerOutcome>;
-}
-
-/** Creates a fresh worker instance per candidate so transcripts/context cannot leak across candidates. */
-export type CandidateWorkerFactory<TTask = Task> = (index: number) => CandidateWorker<TTask>;
+export type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../agents/types.js";
 
 /** Small deterministic worker useful to callers and tests before an AgentRunner is wired. */
 export class ScriptedCandidateWorker<TTask = Task> implements CandidateWorker<TTask> {

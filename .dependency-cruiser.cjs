@@ -75,6 +75,13 @@ module.exports = {
       to: { path: "^src/(?!runtime/|domain/|shared/|sandbox/)" },
     },
     {
+      name: "agents-depends-only-on-allowed",
+      comment: "B1 AgentRunner may use domain/shared/sandbox/intel/broker/providers/store/context",
+      severity: "error",
+      from: { path: "^src/agents/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/(?!agents/|domain/|shared/|sandbox/|intel/|broker/|providers/|store/|context/)" },
+    },
+    {
       name: "engine-is-not-imported-by-lower-layers",
       severity: "error",
       from: { path: "^src/(?!engine/|daemon/)" },
