@@ -44,25 +44,41 @@ pnpm test:watch
 
 ### Local CLI (`polish` / `polishd` on PATH)
 
-From this repository, one command installs the binaries into pnpm's global bin directory:
+This is a **development install/update** step. It must run under **Node >= 24**.
+Ordinary product usage after a successful link is just `polish run ...` — do not
+rebuild, relink, or kill `polishd` for everyday runs.
 
 ```bash
 cd ~/polish
+# Node 24 (nvm/fnm/volta). `pnpm cli:link` refuses Node < 24.
 pnpm cli:link
 ```
+
+The script builds, then installs shims into `~/.local/bin` (and pnpm's global bin
+when `pnpm bin -g` is available). It verifies `which polish` resolves to **this**
+repo's current `dist/`, and fails if a stale previous link would hide it.
 
 Then from **any** directory:
 
 ```bash
 polish --help
+polish run /path/to/project --runtime off --mission "..."
 polish status <runId>
 polish watch <runId>
+polish watch <runId> --plain
 polish log <runId>
 polish pause <runId>
 polish resume <runId>
 ```
 
-If `polish` is still not found, the script prints the `pnpm bin -g` directory to add to `PATH`. Do not add a machine-specific alias as the install mechanism. `pnpm cli:unlink` removes the global link.
+`polish run` on an interactive TTY attaches the same observer as `polish watch`.
+Use `--detach` / `-d` (or `--json` / a pipe) to return immediately. Ctrl-C from
+the observer detaches only; the daemon-owned run continues. Reattach with
+`polish watch <runId>`.
+
+If `polish` is still not found, add `~/.local/bin` to `PATH`. Do not add a
+machine-specific alias as the install mechanism. `pnpm cli:unlink` removes the
+link. Restart `polishd` only after linking a **new** daemon build.
 
 Module boundaries are enforced by `.dependency-cruiser.cjs`. Every block of the system is
 built under `docs/BVP.md` (independent verifier agents, bounded fix rounds).

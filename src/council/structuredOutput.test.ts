@@ -46,7 +46,9 @@ describe("planner intake schema contract", () => {
   it("A: malformed planner JSON is repaired once and creates a MissionInterpretation", async () => {
     const events: NewEvent[] = [];
     let plannerCalls = 0;
+    const roles: string[] = [];
     const inner = countingClient((request) => {
+      roles.push(request.metadata.role);
       if (request.metadata.role !== "planner") return VALID;
       plannerCalls += 1;
       return plannerCalls === 1 ? JSON.stringify(envelope(SMOKE)) : VALID;
@@ -70,6 +72,8 @@ describe("planner intake schema contract", () => {
     if (result.status !== "READY") return;
     expect(result.interpretation.requirements[0]?.ref).toBe("R1");
     expect(plannerCalls).toBe(2);
+    expect(roles.filter((role) => role === "scope_guardian")).toHaveLength(1);
+    expect(roles.filter((role) => role === "judge")).toHaveLength(1);
     expect(events.some((event) => event.type === "model.output_invalid")).toBe(true);
     expect(events.some((event) => event.type === "model.output_repair_attempted")).toBe(true);
     expect(events.find((event) => event.type === "model.output_invalid")?.payload["summary"]).toMatch(/requirements/);

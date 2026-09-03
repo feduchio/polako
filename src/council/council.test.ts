@@ -39,6 +39,11 @@ describe("SupervisorCouncil", () => {
     expect(intake.status).toBe("READY");
     if (intake.status !== "READY") return;
     expect(provider.calls).toHaveLength(3);
+    expect(provider.calls.map((call) => call.metadata.purpose)).toEqual([
+      "council_intake_planner",
+      "council_intake_scope",
+      "council_intake_judge",
+    ]);
     expect(new Set(provider.calls.map((call) => call.model.model))).toEqual(new Set(["planner", "scope", "judge"]));
     expect(intake.interpretation.requirements.length).toBeGreaterThanOrEqual(1);
     expect(intake.decision.opinions).toHaveLength(3);
@@ -117,6 +122,89 @@ describe("SupervisorCouncil", () => {
     await council.intake(BUGFIX_MISSION, PROFILE, BASELINE);
     expect(missionHash(BUGFIX_MISSION)).toBe(before);
     expect(BUGFIX_MISSION.hash).toBe(before);
+  });
+
+  it("does not NEEDS_HUMAN for missing lockfile when node --test checks already ran", async () => {
+    const provider = new ScriptedProvider("council", [
+      { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "scope", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "judge", capabilities: FAKE_CAPABILITIES.strong },
+    ]);
+    provider.script("planner", [
+      {
+        kind: "reply",
+        content: JSON.stringify({
+          decision: "approve",
+          rationale: "Requirements are concrete.",
+          concerns: [],
+          proposal: {
+            goals: ["Fix the retry bug"],
+            requirements: [{ ref: "R1", statement: "Retry transient failures", acceptance: ["Retry succeeds"] }],
+            constraints: [],
+            nonGoals: [],
+            definitionOfSuccess: ["Checks pass"],
+            ambiguities: [
+              {
+                question: "Discovery reports framework='unknown' and packageManager=null — need to confirm the project structure and test runner.",
+                options: ["Use node --test", "Add a lockfile"],
+                blocking: true,
+              },
+            ],
+          },
+        }),
+      },
+    ]);
+    provider.script("scope", [
+      opinion(
+        "needs_human",
+        "Discovery reports framework='unknown' and packageManager=null — need to confirm the project structure and test runner.",
+        ["packageManager=null", "framework='unknown'"],
+      ),
+    ]);
+    provider.script("judge", [opinion("revise", "This is a no-op diff during intake.", ["no-op diff"])]);
+    const council = new SupervisorCouncil({ roles: councilRoles(provider), now: () => 10 });
+    const result = await council.intake(BUGFIX_MISSION, SMOKE_PROFILE, SMOKE_BASELINE);
+    expect(result.status).toBe("READY");
+    expect(provider.calls).toHaveLength(3);
+    expect(provider.calls.map((call) => call.metadata.purpose)).toEqual([
+      "council_intake_planner",
+      "council_intake_scope",
+      "council_intake_judge",
+    ]);
+    const user = provider.calls[0]?.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(user).toContain("informational");
+    expect(user).toContain("authoritative");
+  });
+
+  it("invalid sibling JSON is OUTPUT_CONTRACT and does not start another intake trio", async () => {
+    const provider = new ScriptedProvider("council", [
+      { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "scope", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "judge", capabilities: FAKE_CAPABILITIES.strong },
+    ]);
+    provider.script("planner", [
+      {
+        kind: "reply",
+        content: JSON.stringify({
+          decision: "approve",
+          rationale: "ok",
+          concerns: [],
+          proposal: {
+            goals: ["Fix login"],
+            requirements: [{ ref: "R1", statement: "Fix login timeout", acceptance: ["Login works"] }],
+            constraints: [],
+            nonGoals: [],
+            definitionOfSuccess: ["Checks pass"],
+            ambiguities: [],
+          },
+        }),
+      },
+    ]);
+    provider.script("scope", [opinion("approve", "Scope is bounded.", [])]);
+    provider.script("judge", [{ kind: "reply", content: "definitely not json" }]);
+    const council = new SupervisorCouncil({ roles: councilRoles(provider), now: () => 10 });
+    await expect(council.intake(BUGFIX_MISSION, PROFILE, BASELINE)).rejects.toMatchObject({ code: "OUTPUT_CONTRACT" });
+    expect(provider.calls).toHaveLength(3);
   });
 });
 
@@ -197,7 +285,7 @@ function scriptedCouncil(
   return provider;
 }
 
-function opinion(decision: "approve" | "needs_human", rationale: string, concerns: string[]): {
+function opinion(decision: "approve" | "needs_human" | "revise", rationale: string, concerns: string[]): {
   kind: "reply";
   content: string;
 } {
@@ -232,4 +320,30 @@ const BASELINE: BaselineSnapshot = {
   scriptsHash: "a".repeat(64),
   toolchain: {},
   createdAt: 1,
+};
+
+const SMOKE_PROFILE: ProjectProfile = {
+  projectPath: "/tmp/polish-smoke",
+  alias: null,
+  packageManager: null,
+  framework: "node-test",
+  checks: [{ name: "test", kind: "test", command: ["npm", "run", "test"], mandatory: true, timeoutMs: 600_000 }],
+  manifestHashes: {},
+  scriptsHash: "a".repeat(64),
+  discoveredAt: 1,
+};
+
+const SMOKE_BASELINE: BaselineSnapshot = {
+  ...BASELINE,
+  checks: [
+    {
+      name: "test",
+      kind: "test",
+      status: "fail",
+      exitCode: 1,
+      durationMs: 125,
+      summary: null,
+      outputRef: null,
+    },
+  ],
 };

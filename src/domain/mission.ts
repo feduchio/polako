@@ -73,6 +73,7 @@ export const AmbiguitySchema = z.object({
   /** if true the run must stop with NEEDS_HUMAN before executing */
   blocking: z.boolean(),
 });
+export type Ambiguity = z.infer<typeof AmbiguitySchema>;
 
 /**
  * Project-aware understanding of the mission. Built only after project discovery and the

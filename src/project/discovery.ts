@@ -52,9 +52,12 @@ export function inspectManifestHashes(projectPath: string): {
 export function discoverProject(projectPath: string, alias: string | null = null): ProjectProfile {
   const pkgPath = join(projectPath, "package.json");
   if (!existsSync(pkgPath)) throw new Error(`no package.json at ${projectPath}`);
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, string> };
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+    scripts?: Record<string, string>;
+    packageManager?: unknown;
+  };
   const scripts = pkg.scripts ?? {};
-  const pm = detectPackageManager(projectPath);
+  const pm = detectPackageManager(projectPath, pkg);
   const { manifestHashes, scriptsHash } = inspectManifestHashes(projectPath);
   const framework = detectFramework(projectPath, scripts);
   const profile = ProjectProfileSchema.parse({
@@ -74,7 +77,12 @@ export function profileCacheKey(profile: Pick<ProjectProfile, "projectPath" | "m
   return hashJson({ projectPath: profile.projectPath, manifestHashes: profile.manifestHashes, scriptsHash: profile.scriptsHash });
 }
 
-function detectPackageManager(projectPath: string): ProjectProfile["packageManager"] {
+function detectPackageManager(
+  projectPath: string,
+  pkg: { packageManager?: unknown },
+): ProjectProfile["packageManager"] {
+  const fromField = parsePackageManagerField(pkg.packageManager);
+  if (fromField !== null) return fromField;
   if (existsSync(join(projectPath, "pnpm-lock.yaml"))) return PackageManagerSchema.parse("pnpm");
   if (existsSync(join(projectPath, "yarn.lock"))) return PackageManagerSchema.parse("yarn");
   if (existsSync(join(projectPath, "bun.lock")) || existsSync(join(projectPath, "bun.lockb"))) return PackageManagerSchema.parse("bun");
@@ -82,11 +90,21 @@ function detectPackageManager(projectPath: string): ProjectProfile["packageManag
   return null;
 }
 
+function parsePackageManagerField(raw: unknown): ProjectProfile["packageManager"] {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const name = raw.split("@")[0]?.trim().toLowerCase();
+  const parsed = PackageManagerSchema.safeParse(name);
+  return parsed.success ? parsed.data : null;
+}
+
 function detectFramework(projectPath: string, scripts: Record<string, string>): ProjectProfile["framework"] {
   const pkg = readFileSync(join(projectPath, "package.json"), "utf8");
   if (pkg.includes("vitest") || Object.values(scripts).some((s) => s.includes("vitest"))) return FrameworkHintSchema.parse("vitest");
   if (pkg.includes("jest") || existsSync(join(projectPath, "jest.config.js")) || existsSync(join(projectPath, "jest.config.ts"))) {
     return FrameworkHintSchema.parse("jest");
+  }
+  if (Object.values(scripts).some((script) => /\bnode\s+--test\b/.test(script) || script.includes("node:test"))) {
+    return FrameworkHintSchema.parse("node-test");
   }
   return FrameworkHintSchema.parse("unknown");
 }

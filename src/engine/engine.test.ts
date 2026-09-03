@@ -467,4 +467,47 @@ describe("RunEngine", () => {
     expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
     expect(attempts).toBe(1);
   });
+
+  it("does not start a second phase driver while one is in flight", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    let invocations = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    engine.registerPhase("CREATED", async () => {
+      invocations += 1;
+      await gate;
+      return { status: "complete", nextPhase: "DISCOVERING_PROJECT" };
+    });
+    const first = engine.tickRun(run.id);
+    await flushMicrotasks();
+    const second = engine.tickRun(run.id);
+    await flushMicrotasks();
+    expect(invocations).toBe(1);
+    release();
+    await Promise.all([first, second]);
+    expect(invocations).toBe(1);
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
+  });
+
+  it("pauses INTERPRETING_MISSION on unexpected throw so intake is not silently retried", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    let invocations = 0;
+    engine.registerPhase("CREATED", () => ({ status: "complete", nextPhase: "DISCOVERING_PROJECT" }));
+    engine.registerPhase("DISCOVERING_PROJECT", () => ({ status: "complete", nextPhase: "BASELINING" }));
+    engine.registerPhase("BASELINING", () => ({ status: "complete", nextPhase: "INTERPRETING_MISSION" }));
+    engine.registerPhase("INTERPRETING_MISSION", async () => {
+      invocations += 1;
+      throw new SyntaxError("sibling JSON exploded");
+    });
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+    await expect(engine.tickRun(run.id)).rejects.toThrow(/sibling JSON exploded/);
+    expect(store.repos.runs.get(run.id)!.control).toBe("PAUSED");
+    expect(invocations).toBe(1);
+    await engine.tickRun(run.id);
+    expect(invocations).toBe(1);
+  });
 });

@@ -286,6 +286,9 @@ export class DaemonService implements RpcHandler {
           this.writeReport(run);
         }
       }
+    } catch {
+      // Phase drivers pause on unexpected failure. Do not let an unhandled rejection
+      // clear the tick lock and silently re-enter INTERPRETING_MISSION.
     } finally {
       this.ticking = false;
     }

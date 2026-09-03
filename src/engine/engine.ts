@@ -40,6 +40,7 @@ export class RunEngine {
   private readonly config: EngineOptions["config"];
   private readonly assertProjectClean: (projectPath: string, policy?: RepositoryStartPolicy) => void;
   private readonly drivers = new Map<RunPhase, PhaseDriver>();
+  private readonly driving = new Set<string>();
 
   constructor(options: EngineOptions, installStubs = true) {
     this.store = options.store;
@@ -156,6 +157,16 @@ export class RunEngine {
 
   /** Drive a single run until its current phase driver waits or the run leaves the active set. */
   async tickRun(runId: string): Promise<void> {
+    if (this.driving.has(runId)) return;
+    this.driving.add(runId);
+    try {
+      await this.driveRun(runId);
+    } finally {
+      this.driving.delete(runId);
+    }
+  }
+
+  private async driveRun(runId: string): Promise<void> {
     let run = this.store.repos.runs.get(runId);
     if (!run) throw new PolishError("NOT_FOUND", `run ${runId} not found`);
     if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
@@ -183,8 +194,15 @@ export class RunEngine {
         config: this.config,
       });
     } catch (err) {
+      const phase = this.requireRun(runId).phase;
+      const councilPhase = phase === "INTERPRETING_MISSION" || phase === "PLANNING";
+      if (
+        councilPhase ||
+        (err instanceof PolishError && (err.code === "PROVIDERS_UNAVAILABLE" || err.code === "OUTPUT_CONTRACT"))
+      ) {
+        if (this.requireRun(runId).control === "RUNNING") this.control(runId, "pause");
+      }
       if (err instanceof PolishError && (err.code === "PROVIDERS_UNAVAILABLE" || err.code === "OUTPUT_CONTRACT")) {
-        this.control(runId, "pause");
         return;
       }
       throw err;

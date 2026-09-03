@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Event } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
 import { runCli } from "./index.js";
+import * as watch from "./watch.js";
 import { runWatch } from "./watch.js";
 
 const NOW = 1_700_000_000_000;
@@ -65,6 +66,48 @@ describe("operator CLI presentation", () => {
     expect(text.indexOf("Project discovered")).toBeLessThan(text.indexOf("→ planner"));
   });
 
+  it("interactive run attaches watch; --detach, --json, and non-TTY do not", async () => {
+    const run = sampleRun();
+    mocked.mockResolvedValue(run);
+    const spy = vi.spyOn(watch, "runWatch").mockResolvedValue("settled");
+    const stdout = process.stdout as NodeJS.WriteStream;
+    const previousTty = stdout.isTTY;
+    Object.defineProperty(stdout, "isTTY", { configurable: true, value: true });
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      mocked.mockClear();
+      mocked.mockResolvedValue(run);
+      await runCli(["run", "/tmp/p", "fix it"]);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]?.[0]?.runId).toBe(run.id);
+      expect(mocked.mock.calls.map((call) => call[0])).toEqual(["run"]);
+
+      spy.mockClear();
+      mocked.mockClear();
+      mocked.mockResolvedValue(run);
+      await runCli(["run", "/tmp/p", "fix it", "--detach"]);
+      expect(spy).not.toHaveBeenCalled();
+      expect(mocked.mock.calls.map((call) => call[0])).toEqual(["run"]);
+
+      mocked.mockClear();
+      await runCli(["run", "/tmp/p", "fix it", "-d"]);
+      expect(spy).not.toHaveBeenCalled();
+
+      mocked.mockClear();
+      await runCli(["run", "/tmp/p", "fix it", "--json"]);
+      expect(spy).not.toHaveBeenCalled();
+
+      Object.defineProperty(stdout, "isTTY", { configurable: true, value: false });
+      mocked.mockClear();
+      await runCli(["run", "/tmp/p", "fix it"]);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      write.mockRestore();
+      spy.mockRestore();
+      Object.defineProperty(stdout, "isTTY", { configurable: true, value: previousTty });
+    }
+  });
+
   it("log --json emits raw canonical events", async () => {
     const run = sampleRun();
     const events = [sampleEvent(0, "model.call", { ok: true, role: "planner" })];
@@ -77,6 +120,103 @@ describe("operator CLI presentation", () => {
     const parsed = JSON.parse(out.trim()) as Event;
     expect(parsed.type).toBe("model.call");
     expect(out).not.toContain("✓ planner");
+  });
+
+  it("plain watch emits each semantic event once across polls", async () => {
+    const run = sampleRun();
+    const events: Event[] = [
+      sampleEvent(0, "project.discovered", { profile: { packageManager: null, framework: "node-test" } }),
+      sampleEvent(1, "model.call_started", { role: "planner", model: { provider: "gemini", model: "flash" }, purpose: "council_intake_planner" }),
+    ];
+    let polls = 0;
+    const chunks: string[] = [];
+    await runWatch({
+      runId: run.id,
+      json: false,
+      verbose: false,
+      color: false,
+      isTTY: true,
+      plain: true,
+      pollMs: 1,
+      now: () => NOW,
+      stdout: { write: (chunk) => { chunks.push(chunk); return true; } },
+      rpc: {
+        status: async () => {
+          polls += 1;
+          return polls >= 3 ? { ...run, phase: "DONE", control: "STOPPED" } : run;
+        },
+        log: async (_id, afterSeq) => (afterSeq < 0 ? events : []),
+      },
+    });
+    const text = chunks.join("");
+    const feed = text.split("\n").filter((line) => /^\d{2}:\d{2}:\d{2}/.test(line));
+    expect(feed.filter((line) => line.includes("Project discovered"))).toHaveLength(1);
+    expect(feed.filter((line) => line.includes("→ planner"))).toHaveLength(1);
+  });
+
+  it("TTY watch enters and leaves the alternate screen and restores the cursor", async () => {
+    const run = sampleRun();
+    const chunks: string[] = [];
+    const abort = new AbortController();
+    const done = runWatch({
+      runId: run.id,
+      json: false,
+      verbose: false,
+      color: false,
+      isTTY: true,
+      pollMs: 20,
+      rows: 40,
+      signal: abort.signal,
+      now: () => NOW,
+      stdout: { write: (chunk) => { chunks.push(chunk); return true; }, rows: 40 },
+      rpc: {
+        status: async () => run,
+        log: async () => [],
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    abort.abort();
+    await done;
+    const text = chunks.join("");
+    expect(text).toContain("\x1b[?1049h");
+    expect(text).toContain("\x1b[?25l");
+    expect(text).toContain("\x1b[?25h");
+    expect(text).toContain("\x1b[?1049l");
+    expect(text.indexOf("\x1b[?1049h")).toBeLessThan(text.lastIndexOf("\x1b[?1049l"));
+  });
+
+  it("Ctrl-C from watch detaches without execution-control RPC", async () => {
+    const run = sampleRun();
+    const methods: string[] = [];
+    const abort = new AbortController();
+    const done = runWatch({
+      runId: run.id,
+      json: false,
+      verbose: false,
+      color: false,
+      isTTY: true,
+      pollMs: 15,
+      rows: 24,
+      signal: abort.signal,
+      now: () => NOW,
+      stdout: { write: () => true, rows: 24 },
+      rpc: {
+        status: async () => {
+          methods.push("status");
+          return run;
+        },
+        log: async () => {
+          methods.push("log");
+          return [];
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    abort.abort();
+    const reason = await done;
+    expect(reason).toBe("detached");
+    expect(methods.every((method) => method === "status" || method === "log")).toBe(true);
+    expect(methods.length).toBeGreaterThan(0);
   });
 });
 

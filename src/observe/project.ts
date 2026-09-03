@@ -496,8 +496,12 @@ export function summarize(event: Event): string {
       }
       return phase !== null ? `Phase ${phase}` : "Phase changed";
     }
-    case "model.call_started":
-      return `→ ${text(event.payload["role"]) ?? "model"} · ${displayModel(event.payload["model"])}`;
+    case "model.call_started": {
+      const stage = councilPurposeStage(text(event.payload["purpose"]));
+      const role = text(event.payload["role"]) ?? "model";
+      const model = displayModel(event.payload["model"]);
+      return `→ ${role} · ${model}${stage !== null ? ` · ${stage}` : ""}`;
+    }
     case "model.call": {
       const ok = event.payload["ok"] !== false;
       const role = text(event.payload["role"]) ?? "model";
@@ -591,13 +595,33 @@ export function displayModel(value: unknown): string {
 }
 
 export function humanizeModel(value: string): string {
-  const name = value.includes(":") ? value.slice(value.indexOf(":") + 1) : value;
-  const trimmed = name.replace(/^models\//, "").replace(/:free$/, "");
-  return trimmed
-    .split(/[-_/]+/)
+  const stripped = stripModelId(value);
+  const identity = stripped.includes("/") ? (stripped.slice(stripped.lastIndexOf("/") + 1) || stripped) : stripped;
+  return identity
+    .split(/[-_]+/)
     .filter((part) => part.length > 0 && part !== "z" && part !== "ai")
-    .map((part) => (part.toLowerCase() === "glm" ? "GLM" : part.charAt(0).toUpperCase() + part.slice(1)))
+    .map((part) => titleModelPart(part))
     .join(" ");
+}
+
+function stripModelId(value: string): string {
+  let name = value.replace(/:free$/i, "").replace(/^models\//, "");
+  name = name.replace(/^(openrouter|gemini|groq|openai|anthropic|google):/i, "");
+  return name;
+}
+
+function titleModelPart(part: string): string {
+  if (part.toLowerCase() === "glm") return "GLM";
+  if (part.toLowerCase() === "minimax") return "MiniMax";
+  if (/^m\d+$/i.test(part)) return part.toUpperCase();
+  return part.charAt(0).toUpperCase() + part.slice(1);
+}
+
+export function councilPurposeStage(purpose: string | null): string | null {
+  if (purpose === null || purpose === "") return null;
+  if (purpose.startsWith("council_intake_")) return "intake";
+  if (purpose.startsWith("council_decompose_")) return "decompose";
+  return purpose;
 }
 
 export function formatDuration(ms: number): string {

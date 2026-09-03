@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { runCli } from "./index.js";
+import { runCli, shouldAttachRunObserver } from "./index.js";
 
 describe("CLI parsing", () => {
   it("prints help for the help command", async () => {
@@ -30,5 +30,12 @@ describe("CLI parsing", () => {
 
   it("rejects answer without text", async () => {
     await expect(runCli(["answer", "run_test"])).rejects.toThrow(/answer is required/);
+  });
+
+  it("attaches the observer only for interactive non-detached run", () => {
+    expect(shouldAttachRunObserver({ detach: false, json: false, stdoutIsTTY: true })).toBe(true);
+    expect(shouldAttachRunObserver({ detach: true, json: false, stdoutIsTTY: true })).toBe(false);
+    expect(shouldAttachRunObserver({ detach: false, json: true, stdoutIsTTY: true })).toBe(false);
+    expect(shouldAttachRunObserver({ detach: false, json: false, stdoutIsTTY: false })).toBe(false);
   });
 });

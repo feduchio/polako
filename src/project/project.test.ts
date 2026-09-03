@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AcceptanceArtifact } from "../domain/acceptance.js";
 import type { ProtectedChangeWaiver, ProtectedChangeScope } from "../domain/protectedChangeWaiver.js";
@@ -105,6 +106,26 @@ describe("Project discovery", () => {
     expect(p.manifestHashes["package.json"]).toHaveLength(64);
     expect(p.manifestHashes["pnpm-lock.yaml"]).toHaveLength(64);
     expect(p.framework).toBe("vitest");
+  });
+
+  it("reads package.json.packageManager before lockfiles and recognizes node --test", () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ packageManager: "npm@10.9.0", scripts: { test: "node --test tests/*.test.mjs" } }, null, 2),
+    );
+    const p = discoverProject(dir);
+    expect(p.packageManager).toBe("npm");
+    expect(p.framework).toBe("node-test");
+    expect(p.checks[0]?.command).toEqual(["npm", "run", "test"]);
+  });
+
+  it("resume-dup-fetch smoke shape is node-test with no lockfile and still has an executable test command", () => {
+    const fixture = join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/resume-dup-fetch");
+    const p = discoverProject(fixture);
+    expect(p.framework).toBe("node-test");
+    expect(p.packageManager).toBeNull();
+    expect(p.checks.some((check) => check.name === "test" && check.mandatory && check.command.length > 0)).toBe(true);
+    expect(p.checks[0]?.command).toEqual(["npm", "run", "test"]);
   });
 
   it("ProfileCache returns cached profile until manifests change", () => {

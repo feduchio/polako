@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Event } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
-import { projectActivity, projectRunStatus } from "./project.js";
+import { humanizeModel, projectActivity, projectRunStatus } from "./project.js";
 import { renderRunStatus, renderWatchFrame } from "./render.js";
 import { openStore } from "../store/index.js";
 import { id } from "../shared/ids.js";
@@ -118,6 +118,23 @@ describe("RunObserver projection", () => {
     expect(text).toContain("↻ repair 1/1");
     expect(text).toContain("⇢ fallback");
     expect(text).toMatch(/Minimax M3|MiniMax M3/i);
+  });
+
+  it("preserves OpenRouter :free model identity instead of rendering Free", () => {
+    expect(humanizeModel("minimax/minimax-m3:free")).toBe("MiniMax M3");
+    expect(humanizeModel("dots-studio/dots-3-note-preview:free")).toBe("Dots 3 Note Preview");
+    expect(humanizeModel("z-ai/glm-5.2:free")).toBe("GLM 5.2");
+    expect(humanizeModel("openrouter:minimax/minimax-m3:free")).toBe("MiniMax M3");
+  });
+
+  it("activity lines include council stage from purpose", () => {
+    const events = [
+      evt(0, "model.call_started", { role: "planner", model: { provider: "gemini", model: "gemini-3.8-flash" }, purpose: "council_intake_planner" }, NOW),
+      evt(1, "model.call_started", { role: "planner", model: { provider: "gemini", model: "gemini-3.8-flash" }, purpose: "council_decompose_planner" }, NOW + 1),
+    ];
+    const text = projectActivity(events).map((line) => line.text).join("\n");
+    expect(text).toContain("intake");
+    expect(text).toContain("decompose");
   });
 
   it("watch fixture renders semantic transitions in order", () => {

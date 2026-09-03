@@ -1,4 +1,5 @@
 import type { CompletionRequest, CompletionResponse } from "../broker/types.js";
+import { outputContractError } from "./interpretationSchema.js";
 import type { CouncilRole, CouncilRoleConfig, RoleOpinion } from "./types.js";
 import { RoleOpinionSchema } from "./types.js";
 
@@ -33,12 +34,32 @@ export class CouncilRoleAgent {
     };
     const raw = await this.config.client.complete(request);
     const response = isBrokerResponse(raw) ? raw.response : raw;
-    const parsed: unknown = JSON.parse(stripFence(response.message.content));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stripFence(response.message.content));
+    } catch (error) {
+      throw outputContractError(`${this.role} returned invalid JSON`, {
+        role: this.role,
+        purpose: context.purpose,
+        issues: [{ path: "$", message: error instanceof Error ? error.message : "invalid JSON" }],
+      });
+    }
     const opinionValue = isRecord(parsed) && isRecord(parsed["opinion"]) ? parsed["opinion"] : parsed;
-    const opinion = RoleOpinionSchema.parse({
+    const opinionParsed = RoleOpinionSchema.safeParse({
       ...(isRecord(opinionValue) ? opinionValue : {}),
       role: this.role,
     });
+    if (!opinionParsed.success) {
+      throw outputContractError(`${this.role} returned invalid opinion JSON`, {
+        role: this.role,
+        purpose: context.purpose,
+        issues: opinionParsed.error.issues.map((issue) => ({
+          path: `$${issue.path.map((part) => (typeof part === "number" ? `[${part}]` : `.${String(part)}`)).join("")}`,
+          message: issue.message,
+        })),
+      });
+    }
+    const opinion = opinionParsed.data;
     return {
       opinion,
       proposal: isRecord(parsed) && "proposal" in parsed ? parsed["proposal"] : parsed,
@@ -68,10 +89,10 @@ export class Judge extends CouncilRoleAgent {
 function systemPrompt(role: CouncilRole): string {
   const focus =
     role === "planner"
-      ? 'Extract concrete goals and requirements. proposal.requirements must be a non-empty array of objects {"ref":"R1","statement":"...","acceptance":["observable criterion"]}; never a string array, never acceptanceCriteria.'
+      ? 'Extract concrete goals and requirements. proposal.requirements must be a non-empty array of objects {"ref":"R1","statement":"...","acceptance":["observable criterion"]}; never a string array, never acceptanceCriteria. profileHints are informational; do not invent a blocking ambiguity solely because packageManager is null or framework is unknown when execution.checks and baseline results exist.'
       : role === "scope_guardian"
-        ? "Protect explicit constraints and non-goals; identify ambiguity that blocks safe execution; during decomposition return dropRefs for out-of-scope requirements."
-        : "Independently adjudicate whether the proposal is complete, testable, and safe to execute; during decomposition you may restore dropped refs via restoreRefs.";
+        ? "Protect explicit constraints and non-goals. Identify ambiguity that blocks safe execution of the mission itself. profileHints (framework, packageManager) are informational labels, not blocking uncertainty: if execution.checks exist and baseline ran, do not vote needs_human solely because framework is unknown or packageManager is null. During decomposition return dropRefs for out-of-scope requirements."
+        : "Independently adjudicate whether the proposal is complete, testable, and safe to execute. profileHints are informational; execution.checks and baseline results are authoritative. Do not vote needs_human solely because a package-manager or framework hint is missing when mandatory checks already ran. A no-op diff is not a concern during intake (no code exists yet). During decomposition you may restore dropped refs via restoreRefs.";
   return (
     `You are the supervisor council ${role}. ${focus} Return JSON only: ` +
     '{"decision":"approve|revise|needs_human","rationale":"...","concerns":["..."],"proposal":{...}}.'

@@ -21,14 +21,35 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       }
       const budgetTokens = flag(args, "--budget-tokens");
       const budgetUsd = flag(args, "--budget-usd");
+      const json = args.includes("--json");
+      const requestedDetach = args.includes("--detach") || args.includes("-d");
+      const attach = shouldAttachRunObserver({
+        detach: requestedDetach,
+        json,
+        stdoutIsTTY: process.stdout.isTTY,
+      });
       const positional = withoutFlags(args, ["--mission", "--runtime", "--budget-tokens", "--budget-usd"]);
-      print(await callDaemon("run", {
+      const run = await callDaemon<Run>("run", {
         project: positional[0] ?? process.cwd(),
         mission: mission ?? positional.slice(1).join(" "),
         runtime,
         ...(budgetTokens === undefined ? {} : { budgetTokens: positiveInteger(budgetTokens, "--budget-tokens") }),
         ...(budgetUsd === undefined ? {} : { budgetUsd: Number(budgetUsd) }),
-      }));
+      });
+      if (!attach) {
+        print(run);
+        return;
+      }
+      const reason = await runWatch({
+        runId: run.id,
+        json: false,
+        verbose: false,
+        color: process.env["NO_COLOR"] === undefined && process.stdout.isTTY,
+        isTTY: true,
+      });
+      if (reason === "detached") {
+        process.stderr.write(`Observing detached. Run continues as ${run.id}.\nReattach: polish watch ${run.id}\n`);
+      }
       return;
     }
     case "status":
@@ -110,15 +131,24 @@ async function statusCommand(args: string[]): Promise<void> {
 async function watchCommand(args: string[]): Promise<void> {
   const json = args.includes("--json");
   const verbose = args.includes("--verbose");
+  const plain = args.includes("--plain");
   const noColor = args.includes("--no-color") || process.env["NO_COLOR"] !== undefined;
   const id = required(args.find((arg) => !arg.startsWith("-")), "run id");
-  await runWatch({
+  const reason = await runWatch({
     runId: id,
     json,
     verbose,
+    plain,
     color: !noColor && process.stdout.isTTY,
-    isTTY: process.stdout.isTTY && !json,
+    isTTY: process.stdout.isTTY && !json && !plain,
   });
+  if (reason === "detached") {
+    process.stderr.write(`Observing detached. Run continues as ${id}.\nReattach: polish watch ${id}\n`);
+  }
+}
+
+export function shouldAttachRunObserver(input: { detach: boolean; json: boolean; stdoutIsTTY: boolean | undefined }): boolean {
+  return input.stdoutIsTTY === true && !input.detach && !input.json;
 }
 
 async function logCommand(args: string[]): Promise<void> {
@@ -191,16 +221,19 @@ function print(value: unknown): void {
 
 const usage = `Usage:
   polish project add [path] [--name name]
-  polish run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n]
+  polish run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n] [--detach|-d] [--json]
   polish status [run-id] [--json]
-  polish watch <run-id> [--verbose] [--json] [--no-color]
+  polish watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   polish log <run-id> [--follow] [--json]
   polish diff <run-id>
   polish pause|resume|stop|kill <run-id>
   polish answer <run-id> <answer>
   polish apply <run-id>
 
-Local CLI setup (from the polish repo):
+Everyday use (after install):
+  polish run [project] --mission "..."
+
+Development install/update only (from the polish repo, Node >= 24):
   pnpm cli:link
 `;
 
