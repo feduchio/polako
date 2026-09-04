@@ -16,6 +16,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from clients import scripted_from_env
 
 
+def _attach_env_probe(response: dict[str, Any]) -> None:
+    raw = os.environ.get("POLISH_VERIFIER_ENV_PROBE", "").strip()
+    if not raw:
+        return
+    keys = [item.strip() for item in raw.split(",") if item.strip()]
+    if keys:
+        response["env_probe"] = {key: key in os.environ for key in keys}
+
+
 def _crash_if_requested() -> None:
     path = os.environ.get("POLISH_VERIFIER_CRASH_FILE")
     if path and os.path.exists(path):
@@ -229,6 +238,7 @@ def main() -> None:
                 response = handle(message)
         except Exception as error:
             response = {"id": None, "error": str(error), "trace": traceback.format_exc()}
+        _attach_env_probe(response)
         print(json.dumps(response, separators=(",", ":")), flush=True)
 
 

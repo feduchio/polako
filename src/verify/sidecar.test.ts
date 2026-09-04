@@ -227,6 +227,78 @@ describe("VerifierAdapter real Python child", () => {
     }
   }, 30_000);
 
+  it("does not let ambient process.env POLISH_VERIFIER_ALLOW_LIVE enable live create_client", async () => {
+    const previousLive = process.env["POLISH_VERIFIER_ALLOW_LIVE"];
+    const previousClient = process.env["POLISH_VERIFIER_CLIENT"];
+    process.env["POLISH_VERIFIER_ALLOW_LIVE"] = "1";
+    delete process.env["POLISH_VERIFIER_CLIENT"];
+    try {
+      const strategy = createVerifierStrategy(defaultConfig().verifier, {
+        command: python,
+        scriptPath: SCRIPT,
+        requestTimeoutMs: 8_000,
+        repeats: 1,
+        pivots: 2,
+      });
+      expect(strategy).toBeInstanceOf(VerifierAdapter);
+      const sidecar = strategy as VerifierAdapter;
+      adapters.push(sidecar);
+      const weak = candidate("cand-weak", 80, { checksPassed: 1, newFailures: 3 });
+      const strong = candidate("cand-strong", 2, { checksPassed: 9, newFailures: 0 });
+      const result = await sidecar.selectFrontier(
+        [strong, weak],
+        { runId: "run_ambient_allow_live", task: "Ignore inherited billing switch." },
+        { repeats: 1, pivots: 2 },
+      );
+      expect(result.winnerId).toBe("cand-strong");
+      expect(result.fallback).toBe(true);
+      expect(result.method).toBe("pairwise");
+      expect(sidecar.lastProvenance.client).toBe("scripted");
+      expect(sidecar.usedFallback).toBe(true);
+    } finally {
+      if (previousLive === undefined) delete process.env["POLISH_VERIFIER_ALLOW_LIVE"];
+      else process.env["POLISH_VERIFIER_ALLOW_LIVE"] = previousLive;
+      if (previousClient === undefined) delete process.env["POLISH_VERIFIER_CLIENT"];
+      else process.env["POLISH_VERIFIER_CLIENT"] = previousClient;
+    }
+  }, 30_000);
+
+  it("does not restore process.cwd() .env secrets into the sidecar child", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-c3-dotenv-"));
+    const previousCwd = process.cwd();
+    writeFileSync(
+      join(dir, ".env"),
+      [
+        "OPENAI_API_KEY=probe-from-dotenv",
+        "OPENAI_BASE_URL=https://probe.example",
+        "DEEPSEEK_API_KEY=probe-deepseek",
+      ].join("\n"),
+    );
+    process.chdir(dir);
+    try {
+      const sidecar = adapter({
+        POLISH_VERIFIER_PREFER: "a",
+        POLISH_VERIFIER_ENV_PROBE: "OPENAI_API_KEY,OPENAI_BASE_URL,DEEPSEEK_API_KEY",
+      });
+      const result = await sidecar.selectFrontier(
+        [candidate("a", 2), candidate("b", 20)],
+        { runId: "run_dotenv", task: "Ignore cwd dotenv secrets." },
+        { repeats: 1, pivots: 2 },
+      );
+      expect(result.winnerId).toBe("a");
+      expect(result.method).toBe("ppt");
+      expect(result.fallback).toBe(false);
+      expect(sidecar.lastEnvProbe).toEqual({
+        OPENAI_API_KEY: false,
+        OPENAI_BASE_URL: false,
+        DEEPSEEK_API_KEY: false,
+      });
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("does not let ambient process.env POLISH_VERIFIER_PREFER pick the production winner", async () => {
     const previousPrefer = process.env["POLISH_VERIFIER_PREFER"];
     const previousClient = process.env["POLISH_VERIFIER_CLIENT"];

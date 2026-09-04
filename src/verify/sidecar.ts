@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,9 @@ const SIDECAR_TEST_HOOKS = new Set([
   "POLISH_VERIFIER_SLEEP_MS",
   "POLISH_VERIFIER_FORCE_ERROR",
   "POLISH_VERIFIER_SCRIPTED_MODE",
+  "POLISH_VERIFIER_ALLOW_LIVE",
+  "POLISH_VERIFIER_CLIENT",
+  "POLISH_VERIFIER_ENV_PROBE",
 ]);
 
 const NON_DISCRIMINATING_RATIONALE =
@@ -73,7 +77,9 @@ export class VerifierAdapter implements VerifierStrategy {
   private readonly granularity: number;
   private readonly pivots: number;
   private readonly configuredCriteria: string[];
+  private readonly childCwd: string;
   usedFallback = false;
+  lastEnvProbe: Record<string, boolean> | null = null;
   lastProvenance: VerifierProvenance = {
     backend: "sidecar",
     fallback: false,
@@ -88,6 +94,7 @@ export class VerifierAdapter implements VerifierStrategy {
     this.timeoutMs = options.requestTimeoutMs ?? 3_000;
     this.fallback = options.fallback ?? new PairwiseJudge();
     this.env = scrubSidecarEnv(options.env);
+    this.childCwd = emptyVerifierCwd();
     this.repeats = options.repeats ?? 2;
     this.granularity = options.granularity ?? 20;
     this.pivots = options.pivots ?? 2;
@@ -363,6 +370,7 @@ export class VerifierAdapter implements VerifierStrategy {
     const child = spawn(this.command, [this.scriptPath], {
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env,
+      cwd: this.childCwd,
     });
     this.child = child;
     createInterface({ input: child.stdout }).on("line", (line) => {
@@ -408,6 +416,7 @@ export class VerifierAdapter implements VerifierStrategy {
       if (pending === undefined) return;
       clearTimeout(pending.timer);
       this.pending.delete(response["id"]);
+      this.captureEnvProbe(response);
       if (response["error"] !== undefined) {
         pending.reject(new Error(protocolError(response["error"])));
       } else {
@@ -426,6 +435,16 @@ export class VerifierAdapter implements VerifierStrategy {
       pending.reject(error);
     }
     this.pending.clear();
+  }
+
+  private captureEnvProbe(response: Record<string, unknown>): void {
+    const probe = response["env_probe"];
+    if (!isRecord(probe)) return;
+    const keys: Record<string, boolean> = {};
+    for (const [key, value] of Object.entries(probe)) {
+      if (typeof value === "boolean") keys[key] = value;
+    }
+    this.lastEnvProbe = keys;
   }
 
   private stop(error: Error): void {
@@ -550,15 +569,31 @@ function rankedIds(scores: Record<string, number>): string[] {
   return Object.keys(scores).sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0) || a.localeCompare(b));
 }
 
+let emptyVerifierDir: string | undefined;
+
+function emptyVerifierCwd(): string {
+  emptyVerifierDir ??= mkdtempSync(join(tmpdir(), "polish-verifier-cwd-"));
+  return emptyVerifierDir;
+}
+
+function isSecretEnvKey(key: string): boolean {
+  return SECRET_ENV.test(key) || key === "OPENAI_BASE_URL";
+}
+
 function scrubSidecarEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { PYTHONUNBUFFERED: "1" };
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined) continue;
-    if (SECRET_ENV.test(key) || key === "OPENAI_BASE_URL") continue;
+    if (isSecretEnvKey(key)) continue;
     if (SIDECAR_TEST_HOOKS.has(key)) continue;
     env[key] = value;
   }
-  if (extra !== undefined) Object.assign(env, extra);
+  if (extra !== undefined) {
+    for (const [key, value] of Object.entries(extra)) {
+      if (value === undefined || isSecretEnvKey(key)) continue;
+      env[key] = value;
+    }
+  }
   return injectDefaultVerifierClient(env);
 }
 
