@@ -25,6 +25,8 @@ import {
   foldModelCallUsage,
   hashPathologySample,
   provenC2RollbackTarget,
+  executablePersistedRollbackTarget,
+  resolveObservationBoundary,
   selectEligibleEnsemble,
   selectStrategy,
 } from "./index.js";
@@ -535,6 +537,75 @@ describe("C2 sample replay and broker fold equality", () => {
     expect(fold.unknownCostCalls).toEqual(["null-usd"]);
     expect(hashJson(budget.snapshot(runId))).toBe(hashJson(budgetSnapshotFromUsage(fold)));
     store.close();
+  });
+
+  it("observation boundaries ignore polling events and do not fall back to the last event", () => {
+    const runId = id("run", NOW);
+    const checkpoint: Event = {
+      schemaVersion: 1,
+      id: id("evt", NOW),
+      runId,
+      ts: NOW,
+      seq: 1,
+      type: "checkpoint.created",
+      payload: {},
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    };
+    const idle: Event = {
+      schemaVersion: 1,
+      id: id("evt", NOW + 1),
+      runId,
+      ts: NOW + 1,
+      seq: 2,
+      type: "run.phase_changed",
+      payload: {},
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    };
+    expect(resolveObservationBoundary([checkpoint, idle])?.id).toBe(checkpoint.id);
+    expect(resolveObservationBoundary([idle])).toBeNull();
+  });
+
+  it("persisted rollback execute keeps the exact hash and refuses a worse target", () => {
+    const runId = id("run", NOW);
+    const current = {
+      id: id("cp", NOW + 2),
+      runId,
+      seq: 2,
+      commitHash: HASH_B,
+      parentId: null,
+      source: "integration" as const,
+      taskId: null,
+      evidence: {
+        gates: { test: "pass" as const },
+        testsPassed: 1,
+        testsFailed: 0,
+        testsTotal: 1,
+        openValidatedFindings: emptyFindingCounts(),
+        diffLinesFromBaseline: 3,
+      },
+      createdAt: NOW + 2,
+    };
+    const worse = {
+      ...current,
+      id: id("cp", NOW),
+      seq: 0,
+      commitHash: HASH_A,
+      evidence: { ...current.evidence, testsPassed: 0, testsFailed: 1 },
+    };
+    const better = {
+      ...current,
+      id: id("cp", NOW + 1),
+      seq: 1,
+      commitHash: "c".repeat(40),
+      evidence: { ...current.evidence, testsPassed: 3 },
+    };
+    expect(executablePersistedRollbackTarget(current, worse)).toBeNull();
+    expect(executablePersistedRollbackTarget(current, better)?.commitHash).toBe(better.commitHash);
+    expect(provenC2RollbackTarget(current, [worse, better])?.commitHash).toBe(better.commitHash);
   });
 
   it("refuses rollback targets with fail/error/timeout gates", () => {

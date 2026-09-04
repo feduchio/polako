@@ -161,6 +161,95 @@ describe("C2 production CONVERGENCE_CHECK order", () => {
       expect(store.repos.runs.get(runId)?.currentCheckpointHash).toBe(priorHash);
     }
   });
+
+  it("four idle CONVERGENCE_CHECK polls without a new observation do not mint four samples or fire no_progress", async () => {
+    const { runId } = seed(store, clock, fixture, { cleanRounds: 1 });
+    const config = defaultConfig();
+    const driver = createConvergenceDriver();
+    const ctx = {
+      run: store.repos.runs.get(runId)!,
+      store,
+      scheduler: sched,
+      clock,
+      config,
+    };
+    for (let i = 0; i < 4; i += 1) {
+      store.events.append([
+        {
+          id: id("evt", clock.now() + 800 + i),
+          runId,
+          ts: clock.now() + 800 + i,
+          type: "run.phase_changed",
+          payload: { run: { ...store.repos.runs.get(runId)!, phase: "CONVERGENCE_CHECK", updatedAt: clock.now() + 800 + i } },
+          causedBy: [],
+          actor: { kind: "system" },
+          artifacts: [],
+        },
+      ]);
+      await driver({ ...ctx, run: store.repos.runs.get(runId)! });
+    }
+    expect(store.events.list(runId, { types: ["pathology.sample"] })).toHaveLength(1);
+    const detected = store.events.list(runId, { types: ["pathology.detected"] });
+    expect(detected.every((event) => (event.payload["finding"] as { kind?: string } | undefined)?.kind !== "no_progress")).toBe(true);
+    expect(store.events.list(runId, { types: ["pathology.decision"] })).toHaveLength(0);
+  });
+
+  it("dominated current with three clean rounds is not DONE", async () => {
+    const { runId, currentHash, priorHash } = seedDominatedWithCleanRounds(store, clock, fixture);
+    const runHead = {
+      read: vi.fn(async () => currentHash),
+      compareAndSet: vi.fn(async () => true),
+    };
+    engine.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver({ resolveRunHead: () => runHead }));
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).not.toBe("DONE");
+    expect(store.repos.runs.get(runId)?.phase).toBe("SIMPLIFYING");
+    expect(store.repos.runs.get(runId)?.currentCheckpointHash).toBe(priorHash);
+  });
+
+  it("executes only the persisted rollback hash and refuses a worse-than-current target", async () => {
+    const { runId, currentHash, worseHash, betterHash } = seedRollbackSwapFixture(store, clock, fixture);
+    const boundary = store.events.list(runId).find((event) => event.type === "checkpoint.created" && (event.payload["checkpoint"] as Checkpoint).commitHash === currentHash)!;
+    store.events.append([
+      {
+        id: id("evt", clock.now() + 400),
+        runId,
+        ts: clock.now() + 400,
+        type: "pathology.decision",
+        payload: {
+          decision: {
+            version: 1,
+            runId,
+            boundaryEventId: boundary.id,
+            decisionVersion: 1,
+            findings: [],
+            action: "ROLLBACK",
+            reason: "persisted worse target",
+            budget: { exhaustedDimensions: [], usageConflict: false },
+            targetCheckpointHash: worseHash,
+            targetEnsemble: null,
+            targetReviewRoundIndex: null,
+            causalEventIds: [boundary.id],
+          },
+        },
+        causedBy: [boundary.id],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
+    ]);
+    const runHead = {
+      read: vi.fn(async () => currentHash),
+      compareAndSet: vi.fn(async () => true),
+    };
+    engine.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver({ resolveRunHead: () => runHead }));
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("NEEDS_HUMAN");
+    expect(store.repos.runs.get(runId)?.currentCheckpointHash).toBe(currentHash);
+    expect(store.repos.checkpoints.listByRun(runId).some((checkpoint) => checkpoint.source === "rollback")).toBe(false);
+    expect(runHead.compareAndSet).not.toHaveBeenCalled();
+    expect(runHead.compareAndSet).not.toHaveBeenCalledWith(currentHash, betterHash);
+    expect(runHead.compareAndSet).not.toHaveBeenCalledWith(currentHash, worseHash);
+  });
 });
 
 function seed(
@@ -338,6 +427,16 @@ function seed(
         actor: { kind: "system" },
         artifacts: [],
       },
+      {
+        id: id("evt", clock.now() + 201),
+        runId,
+        ts: clock.now() + 201,
+        type: "budget.evaluated",
+        payload: { kind: "usage", observedAt: clock.now() + 201 },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
     ]);
   }
   if (options.findingsOscillation === true) {
@@ -380,6 +479,202 @@ function seed(
     }
   }
   return { runId, boundaryId: checkpointEvt };
+}
+
+function seedDominatedWithCleanRounds(
+  store: Store,
+  clock: FakeClock,
+  fixture: { repoDir: string; root: string; base: string; integrated: string },
+): { runId: string; currentHash: string; priorHash: string } {
+  const { runId } = seed(store, clock, fixture, { cleanRounds: 0, runtime: true });
+  const currentHash = "c".repeat(40);
+  const prior = store.repos.checkpoints.listByRun(runId)[0]!;
+  const dominated: Checkpoint = {
+    id: id("cp", clock.now() + 90),
+    runId,
+    seq: prior.seq + 1,
+    commitHash: currentHash,
+    parentId: prior.id,
+    source: "integration",
+    taskId: prior.taskId,
+    evidence: {
+      ...prior.evidence,
+      testsPassed: 0,
+      testsFailed: 0,
+      testsTotal: 1,
+    },
+    createdAt: clock.now() + 90,
+  };
+  const run = store.repos.runs.get(runId)!;
+  store.events.append([
+    {
+      id: id("evt", clock.now() + 91),
+      runId,
+      ts: clock.now() + 91,
+      type: "checkpoint.created",
+      payload: { checkpoint: dominated },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+    {
+      id: id("evt", clock.now() + 92),
+      runId,
+      ts: clock.now() + 92,
+      type: "run.phase_changed",
+      payload: { run: { ...run, currentCheckpointHash: currentHash, updatedAt: clock.now() + 92 } },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+  ]);
+  const corpus = new MissionAcceptanceService(store, clock);
+  corpus.recordRuntimeEvidence({
+    missionId: run.missionId,
+    requirementRef: "runtime.required_scenario",
+    evidence: {
+      id: id("rte", clock.now() + 93),
+      runId,
+      scenarioId: "project-runtime",
+      validator: "fixture",
+      kind: "node_script",
+      status: "passed",
+      summary: "runtime passed",
+      observations: {},
+      checkpointHash: currentHash,
+      sideEffects: { policy: "safe", destructiveExternalEffectsAllowed: false },
+      artifactHashes: [],
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+    },
+  });
+  for (let i = 1; i <= 3; i += 1) {
+    const proof = reviewRound(runId, currentHash, i, 1_000);
+    for (const [index, execution] of proof.entries()) {
+      store.events.append([
+        {
+          id: id("evt", clock.now() + 300 + i * 10 + index),
+          runId,
+          ts: clock.now() + 300 + i * 10 + index,
+          type: "review.finished",
+          payload: { execution },
+          causedBy: [],
+          actor: { kind: "system" },
+          artifacts: [],
+        },
+      ]);
+    }
+    store.events.append([
+      {
+        id: id("evt", clock.now() + 400 + i),
+        runId,
+        ts: clock.now() + 400 + i,
+        type: "clean_round.recorded",
+        payload: {
+          cleanRound: {
+            id: id("cr", clock.now() + 200 + i),
+            runId,
+            checkpointHash: currentHash,
+            roundIndex: i,
+            reviewRoundIndex: i,
+            axes: proof.map((execution) => execution.axis),
+            ensemble: proof.map((execution) => execution.requestedModel),
+            rawFindings: 0,
+            validatedBlocking: 0,
+            novel: true,
+            createdAt: clock.now() + i,
+          },
+        },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
+    ]);
+  }
+  return { runId, currentHash, priorHash: prior.commitHash };
+}
+
+function seedRollbackSwapFixture(
+  store: Store,
+  clock: FakeClock,
+  fixture: { repoDir: string; root: string; base: string; integrated: string },
+): { runId: string; currentHash: string; worseHash: string; betterHash: string } {
+  const { runId } = seed(store, clock, fixture, { cleanRounds: 1 });
+  const first = store.repos.checkpoints.listByRun(runId)[0]!;
+  const betterHash = "d".repeat(40);
+  const worseHash = "e".repeat(40);
+  const currentHash = "f".repeat(40);
+  const better: Checkpoint = {
+    ...first,
+    id: id("cp", clock.now() + 60),
+    seq: first.seq + 1,
+    commitHash: betterHash,
+    parentId: first.id,
+    evidence: { ...first.evidence, testsPassed: 3, testsFailed: 0, testsTotal: 3 },
+    createdAt: clock.now() + 60,
+  };
+  const worse: Checkpoint = {
+    ...first,
+    id: id("cp", clock.now() + 70),
+    seq: better.seq + 1,
+    commitHash: worseHash,
+    parentId: better.id,
+    evidence: { ...first.evidence, testsPassed: 0, testsFailed: 1, testsTotal: 1 },
+    createdAt: clock.now() + 70,
+  };
+  const current: Checkpoint = {
+    ...first,
+    id: id("cp", clock.now() + 80),
+    seq: worse.seq + 1,
+    commitHash: currentHash,
+    parentId: worse.id,
+    evidence: { ...first.evidence, testsPassed: 1, testsFailed: 0, testsTotal: 1 },
+    createdAt: clock.now() + 80,
+  };
+  const run = store.repos.runs.get(runId)!;
+  store.events.append([
+    {
+      id: id("evt", clock.now() + 61),
+      runId,
+      ts: clock.now() + 61,
+      type: "checkpoint.created",
+      payload: { checkpoint: better },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+    {
+      id: id("evt", clock.now() + 71),
+      runId,
+      ts: clock.now() + 71,
+      type: "checkpoint.created",
+      payload: { checkpoint: worse },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+    {
+      id: id("evt", clock.now() + 81),
+      runId,
+      ts: clock.now() + 81,
+      type: "checkpoint.created",
+      payload: { checkpoint: current },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+    {
+      id: id("evt", clock.now() + 82),
+      runId,
+      ts: clock.now() + 82,
+      type: "run.phase_changed",
+      payload: { run: { ...run, currentCheckpointHash: currentHash, updatedAt: clock.now() + 82 } },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+  ]);
+  return { runId, currentHash, worseHash, betterHash };
 }
 
 function persistOscillationSamples(store: Store, clock: FakeClock, runId: string, hashes: string[]): void {
@@ -483,9 +778,9 @@ function seedOscillating(
   return { runId, currentHash, priorHash: prior.commitHash };
 }
 
-function reviewRound(runId: string, checkpointHash: string, roundIndex: number): ReviewExecution[] {
+function reviewRound(runId: string, checkpointHash: string, roundIndex: number, salt = 0): ReviewExecution[] {
   return (["correctness", "regression", "adversarial"] as const).map((axis, index) => ({
-    id: id("rvex", NOW + roundIndex * 10 + index),
+    id: id("rvex", NOW + salt + roundIndex * 10 + index),
     runId,
     checkpointHash,
     roundIndex,

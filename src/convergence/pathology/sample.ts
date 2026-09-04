@@ -81,7 +81,7 @@ export function resolveObservationBoundary(events: readonly Event[]): Event | nu
     if (event === undefined) continue;
     if (isObservationBoundary(event, ordered.slice(0, i + 1))) return event;
   }
-  return ordered.at(-1) ?? null;
+  return null;
 }
 
 export function foldPrefix(events: readonly Event[]): FoldedPrefix {

@@ -24,7 +24,7 @@ import {
   findSample,
   listDecisions,
   listSamples,
-  provenC2RollbackTarget,
+  executablePersistedRollbackTarget,
   resolveObservationBoundary,
   runDetectors,
   sampleEvent,
@@ -65,14 +65,10 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
       return { status: "complete", nextPhase: antiFake.terminal };
     }
 
-    if (isB6DoneEligible(ctx, hash)) {
+    if (acceptedB6Done(ctx, controller, hash)) {
       emitFinalReport(ctx);
       return { status: "complete", nextPhase: "DONE" };
     }
-
-    const events = ctx.store.events.list(ctx.run.id);
-    const boundary = events.at(-1) ?? resolveObservationBoundary(events);
-    if (boundary == null) return b6ContinueOrRecover(ctx, controller, options, hash);
 
     const latestEvents = ctx.store.events.list(ctx.run.id);
     const unexecuted = listDecisions(latestEvents, ctx.run.id).find((decision) => {
@@ -82,6 +78,9 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
     if (unexecuted !== undefined) {
       return executePersistedDecision(ctx, unexecuted, options, hash);
     }
+
+    const boundary = resolveObservationBoundary(latestEvents);
+    if (boundary == null) return b6ContinueOrRecover(ctx, controller, options, hash);
     const completedStops = listDecisions(latestEvents, ctx.run.id).filter(
       (decision) =>
         decision.action === "BUDGET_STOP" && decisionState(latestEvents, ctx.run.id, decision.boundaryEventId) === "effect_completed",
@@ -177,12 +176,33 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
   };
 }
 
-function isB6DoneEligible(ctx: PhaseContext, hash: string): boolean {
+function acceptedB6Done(ctx: PhaseContext, controller: ConvergenceController, hash: string): boolean {
   if (!runtimeEvidenceAllowsDone(ctx, hash)) return false;
+  return acceptedB6Decision(ctx, controller, hash).action === "DONE";
+}
+
+function acceptedB6Decision(ctx: PhaseContext, controller: ConvergenceController, hash: string) {
   const findings = ctx.store.repos.findings.openForCheckpoint(ctx.run.id, hash);
   const openBlocking = findings.filter((finding) => finding.blocking && finding.status === "VALID").length;
-  if (openBlocking > 0) return false;
-  return ctx.store.repos.cleanRounds.forCheckpoint(ctx.run.id, hash).length >= ctx.config.convergence.requiredCleanRounds;
+  const investigationExhausted = findings.some(
+    (finding) =>
+      finding.status === "UNCERTAIN" &&
+      finding.investigationRounds >= ctx.config.convergence.maxInvestigationRoundsPerFinding,
+  );
+  const checkpoints = ctx.store.repos.checkpoints.listByRun(ctx.run.id);
+  const current = checkpoints.find((checkpoint) => checkpoint.commitHash === hash) ?? syntheticCheckpoint(ctx, hash);
+  const prior = checkpoints.filter((checkpoint) => checkpoint.commitHash !== hash);
+  return controller.decide({
+    current,
+    priorCheckpoints: prior,
+    cleanRounds: ctx.store.repos.cleanRounds.listByRun(ctx.run.id),
+    requiredCleanRounds: ctx.config.convergence.requiredCleanRounds,
+    openBlockingFindings: openBlocking,
+    investigationExhausted,
+    consecutiveNoProgress: 0,
+    simplifyAfterNoProgress: ctx.config.convergence.noProgressAttempts,
+    simplificationAvailable: true,
+  });
 }
 
 function budgetStopResult(): PhaseDriverResult {
@@ -302,8 +322,7 @@ async function executePersistedDecision(
       decision.targetCheckpointHash === null
         ? null
         : checkpoints.find((checkpoint) => checkpoint.commitHash === decision.targetCheckpointHash) ?? null;
-    const proven = target !== null && target.runId === ctx.run.id ? provenC2RollbackTarget(current, [target, ...checkpoints]) : null;
-    const chosen = proven ?? (target !== null && target.runId === ctx.run.id && !Object.values(target.evidence.gates).some((status) => status === "fail" || status === "error" || status === "timeout") ? target : null);
+    const chosen = executablePersistedRollbackTarget(current, target);
     if (chosen?.runId !== ctx.run.id) {
       emitNeedsHumanReport(ctx, humanTerminalReason("no proven rollback target"));
       ctx.store.events.append([effectLifecycleEvent("pathology.effect_completed", decision, ctx.clock.now(), [decision.boundaryEventId])]);
@@ -358,29 +377,9 @@ async function b6ContinueOrRecover(
     return { status: "complete", nextPhase: "REVIEWING" };
   }
 
-  const cleanRounds = ctx.store.repos.cleanRounds.listByRun(ctx.run.id);
-  const findings = ctx.store.repos.findings.openForCheckpoint(ctx.run.id, hash);
-  const openBlocking = findings.filter((finding) => finding.blocking && finding.status === "VALID").length;
-  const investigationExhausted = findings.some(
-    (finding) =>
-      finding.status === "UNCERTAIN" &&
-      finding.investigationRounds >= ctx.config.convergence.maxInvestigationRoundsPerFinding,
-  );
   const checkpoints = ctx.store.repos.checkpoints.listByRun(ctx.run.id);
   const current = checkpoints.find((checkpoint) => checkpoint.commitHash === hash) ?? syntheticCheckpoint(ctx, hash);
-  const prior = checkpoints.filter((checkpoint) => checkpoint.commitHash !== hash);
-
-  const decision = controller.decide({
-    current,
-    priorCheckpoints: prior,
-    cleanRounds,
-    requiredCleanRounds: ctx.config.convergence.requiredCleanRounds,
-    openBlockingFindings: openBlocking,
-    investigationExhausted,
-    consecutiveNoProgress: 0,
-    simplifyAfterNoProgress: ctx.config.convergence.noProgressAttempts,
-    simplificationAvailable: true,
-  });
+  const decision = acceptedB6Decision(ctx, controller, hash);
 
   switch (decision.action) {
     case "DONE":

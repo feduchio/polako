@@ -19,6 +19,17 @@ export function provenC2RollbackTarget(current: Checkpoint, prior: readonly Chec
   return target;
 }
 
+/**
+ * Execute only the persisted rollback hash. Never substitutes a different
+ * dominant checkpoint if the persisted target is missing, cross-run, gated, or not dominant.
+ */
+export function executablePersistedRollbackTarget(current: Checkpoint, target: Checkpoint | null): Checkpoint | null {
+  if (target === null) return null;
+  if (target.runId !== current.runId) return null;
+  if (hasFailedGate(target)) return null;
+  return rollbackTarget(current, [target]);
+}
+
 export interface StrategyContext {
   findings: readonly DetectorFinding[];
   ensembleChangesByPathology: Readonly<Record<Pathology, number>>;

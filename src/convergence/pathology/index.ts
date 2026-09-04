@@ -8,7 +8,13 @@ export {
   resolveObservationBoundary,
 } from "./sample.js";
 export { runDetectors, detectFindingOscillation, detectCheckpointOscillation, detectNoProgress, detectDisagreement, detectStyleOnlyGrowth } from "./detectors.js";
-export { selectStrategy, provenC2RollbackTarget, hasFailedGate, ensembleChangeCount } from "./strategy.js";
+export {
+  selectStrategy,
+  provenC2RollbackTarget,
+  executablePersistedRollbackTarget,
+  hasFailedGate,
+  ensembleChangeCount,
+} from "./strategy.js";
 export { selectEligibleEnsemble, pendingEnsembleOverride, orderReviewersByEnsemble } from "./ensemble.js";
 export {
   listSamples,

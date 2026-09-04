@@ -140,6 +140,61 @@ export interface TaskDraft {
 }
 
 /** The only way to create a coding task from a finding. Throws unless the finding is VALID + blocking with a VALID validation. */
+/**
+ * Persist style_only only from structured planner/scope-guardian fields on a legal
+ * simplify/refactor task. Missing or invalid classification fails safe to functional.
+ * Investigation can never be style_only. Title/description are not consulted.
+ */
+export function resolveWorkClassProvenance(input: {
+  kind: TaskKind;
+  originKind: TaskOrigin["kind"];
+  originRef: string;
+  workClass?: unknown;
+  classifiedBy?: unknown;
+  sourceRef?: unknown;
+  classificationEventId?: unknown;
+}): Partial<Pick<TaskDraft, "workClass" | "classifiedBy" | "sourceRef" | "classificationEventId">> {
+  const attempted =
+    input.workClass !== undefined ||
+    input.classifiedBy !== undefined ||
+    input.sourceRef !== undefined ||
+    input.classificationEventId !== undefined;
+  if (input.kind === "investigation" || input.originKind === "investigation") {
+    return attempted ? { workClass: "functional" } : {};
+  }
+  const parsed = TaskWorkClassProvenanceSchema.safeParse({
+    workClass: input.workClass,
+    classifiedBy: input.classifiedBy,
+    sourceRef: input.sourceRef,
+    classificationEventId: input.classificationEventId,
+  });
+  if (
+    parsed.success &&
+    parsed.data.workClass === "style_only" &&
+    (input.kind === "simplify" || input.kind === "refactor") &&
+    parsed.data.sourceRef === input.originRef
+  ) {
+    return parsed.data;
+  }
+  return attempted ? { workClass: "functional" } : {};
+}
+
+export function workClassDraftFields(
+  input: Parameters<typeof resolveWorkClassProvenance>[0],
+): Pick<TaskDraft, "workClass" | "classifiedBy" | "sourceRef" | "classificationEventId"> | Record<string, never> {
+  const resolved = resolveWorkClassProvenance(input);
+  if (resolved.workClass === "style_only" && resolved.classifiedBy !== undefined && resolved.sourceRef !== undefined && resolved.classificationEventId !== undefined) {
+    return {
+      workClass: "style_only",
+      classifiedBy: resolved.classifiedBy,
+      sourceRef: resolved.sourceRef,
+      classificationEventId: resolved.classificationEventId,
+    };
+  }
+  if (resolved.workClass === "functional") return { workClass: "functional" };
+  return {};
+}
+
 export function createTaskFromValidFinding(finding: Finding, validation: FindingValidation, draft: TaskDraft): Task {
   if (finding.status !== "VALID") {
     throw new PolishError("INVARIANT_VIOLATION", "coding task requires a VALID finding", { findingId: finding.id, status: finding.status });
@@ -166,6 +221,15 @@ export function createTaskFromValidFinding(finding: Finding, validation: Finding
     kind: draft.kind,
     origin: { kind: "valid_finding", findingId: finding.id, validationId: validation.id, verdict: "VALID" },
     touchesProductCode: true,
+    ...resolveWorkClassProvenance({
+      kind: draft.kind,
+      originKind: "valid_finding",
+      originRef: finding.id,
+      workClass: draft.workClass,
+      classifiedBy: draft.classifiedBy,
+      sourceRef: draft.sourceRef,
+      classificationEventId: draft.classificationEventId,
+    }),
   });
 }
 
@@ -175,6 +239,15 @@ export function createTaskFromRequirement(interpretationId: string, requirementR
     kind: draft.kind,
     origin: { kind: "mission_requirement", interpretationId, requirementRef },
     touchesProductCode: true,
+    ...resolveWorkClassProvenance({
+      kind: draft.kind,
+      originKind: "mission_requirement",
+      originRef: requirementRef,
+      workClass: draft.workClass,
+      classifiedBy: draft.classifiedBy,
+      sourceRef: draft.sourceRef,
+      classificationEventId: draft.classificationEventId,
+    }),
   });
 }
 
@@ -203,6 +276,15 @@ export function createInvestigationTask(
     kind: "investigation",
     origin: { kind: "investigation", findingId: finding.id, round },
     touchesProductCode: false,
+    ...resolveWorkClassProvenance({
+      kind: "investigation",
+      originKind: "investigation",
+      originRef: finding.id,
+      workClass: draft.workClass,
+      classifiedBy: draft.classifiedBy,
+      sourceRef: draft.sourceRef,
+      classificationEventId: draft.classificationEventId,
+    }),
   });
 }
 
@@ -221,10 +303,6 @@ function baseTask(draft: TaskDraft): Omit<Task, "kind" | "origin" | "touchesProd
     selectedCandidateId: null,
     createdAt: draft.now,
     updatedAt: draft.now,
-    ...(draft.workClass === undefined ? {} : { workClass: draft.workClass }),
-    ...(draft.classifiedBy === undefined ? {} : { classifiedBy: draft.classifiedBy }),
-    ...(draft.sourceRef === undefined ? {} : { sourceRef: draft.sourceRef }),
-    ...(draft.classificationEventId === undefined ? {} : { classificationEventId: draft.classificationEventId }),
   };
 }
 
