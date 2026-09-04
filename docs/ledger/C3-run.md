@@ -5,15 +5,15 @@ Do not treat this file as a second contract.
 
 | Field | Value |
 |---|---|
-| Status | LANES_RUNNING |
+| Status | GATES_DONE — blind comparison of two passing candidates |
 | Contract path | `docs/ledger/C3.md` |
 | Contract hash | d8618b8bf39e3db26ced211dac2d56aa1f116a8c8fe85926de7cd542e358a777 |
 | Base commit | `8cf0380b0cda8519966a28b68b5a081c981eee5c` |
 | HOST | `phase-b-collab-base` `0b21a6182507e9883d020ceba0c39aa4edcfff5b` worktree `/Users/fedorsvetlov/polish-host-b` POLISH_HOME `~/.polish-phase-c-host` |
-| Grok candidate | `a9fbc733139c99e25fe263ee7a4f890677713432` on `task/C3-candidate-grok` |
-| Composer candidate | branch `task/C3-candidate-composer` — still implementing (dirty tree, no candidate commit) |
-| Polish candidate / run id | `run_01m1pg5466nsksrer6s8x3` TARGET `/Users/fedorsvetlov/polish-c3-polish-target`. Intake APPROVED; PLANNING paused on `council.unavailable` (scope_guardian invalid JSON). Coordinator resumed. |
-| Deterministic results | Grok: independent `pnpm check` + `pnpm build` PASS on Node 24.20.0 (59 files / 491 tests). Composer: not yet. Polish: no candidate commit yet. |
+| Grok candidate | `a9fbc733139c99e25fe263ee7a4f890677713432` on `task/C3-candidate-grok` (blind label P) |
+| Composer candidate | `062bc7964d68ef0bfe0ab21c56c1c563112514e4` on `task/C3-candidate-composer` (blind label Q) |
+| Polish candidate / run id | `run_01m1pg5466nsksrer6s8x3` **FAIL**. Workers ran; GATING sent the sidecar task back to PLANNING five times, duplicating the task DAG each time (open B-4). After max attempts the original task is BLOCKED and the run is FAILED. No Polish candidate commit. TARGET still `8cf0380`. |
+| Deterministic results | Grok independent `pnpm check`+`build` PASS (59 files / 491 tests). Composer independent `pnpm check`+`build` PASS (60 files / 486 tests; `pretest` pip-installs `llm-verifier` into `.vendor`). Polish: no gated artifact. |
 | Selection | |
 | Integration commit | |
 | Polish verification runs | |
