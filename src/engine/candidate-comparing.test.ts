@@ -1,7 +1,8 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { BaselineSnapshot, CheckResult } from "../domain/checks.js";
 import { defaultConfig } from "../domain/config.js";
 import type { Candidate, GateReport } from "../domain/candidate.js";
@@ -17,8 +18,45 @@ import { stubDriverFor } from "./stubs.js";
 import { RunEngine } from "./engine.js";
 import { createComparingDriver } from "./candidateDrivers.js";
 import type { PolishConfig } from "../domain/config.js";
-import { VerifierAdapter } from "../verify/sidecar.js";
+import { defaultPython, sidecarScriptPath, VerifierAdapter } from "../verify/sidecar.js";
 import type { VerifierStrategy } from "../verify/strategy.js";
+
+const SIDECAR_SCRIPT = sidecarScriptPath();
+
+function ensureSidecarVenv(): string {
+  const python = defaultPython(SIDECAR_SCRIPT);
+  const probe = spawnSync(python, ["-c", "import llm_verifier, clients"], {
+    encoding: "utf8",
+    cwd: dirname(SIDECAR_SCRIPT),
+  });
+  if (probe.status === 0) return python;
+  const venvDir = join(dirname(SIDECAR_SCRIPT), ".venv");
+  execFileSync("python3", ["-m", "venv", venvDir], { stdio: "pipe" });
+  const venvPython = join(venvDir, "bin", "python");
+  execFileSync(venvPython, ["-m", "pip", "install", "--upgrade", "pip"], { stdio: "pipe" });
+  execFileSync(venvPython, ["-m", "pip", "install", "-r", join(dirname(SIDECAR_SCRIPT), "requirements.txt")], {
+    stdio: "pipe",
+  });
+  return venvPython;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function expectPidGone(pid: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!pidAlive(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(pidAlive(pid), `sidecar child ${pid} still alive after close()`).toBe(false);
+}
 
 const cleanup: string[] = [];
 
@@ -37,6 +75,10 @@ describe("B3 production comparing driver", () => {
   let tieBId: string;
   let passId: string;
   let failId: string;
+
+  beforeAll(() => {
+    ensureSidecarVenv();
+  }, 120_000);
 
   beforeEach(async () => {
     fixture = await repositoryFixture();
@@ -172,6 +214,69 @@ describe("B3 production comparing driver", () => {
     expect(compared?.payload["winner"]).toBe(tieAId);
     expect(store.repos.candidates.get(tieAId)?.state).toBe("WINNER");
   });
+
+  it("closes a closeable strategy when comparison throws", async () => {
+    let closed = 0;
+    const strategy: VerifierStrategy = {
+      comparePair: () => Promise.reject(new Error("judge exploded")),
+      selectFrontier: () => Promise.reject(new Error("judge exploded")),
+      close: () => {
+        closed += 1;
+      },
+    };
+    const { runId } = seedComparingRun(store, clock, fixture, [
+      passedCandidate(tieAId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+      passedCandidate(tieBId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+    ]);
+    const engine = engineWithComparing({ resolveVerifierStrategy: () => strategy });
+    await expect(engine.tickRun(runId)).rejects.toThrow("judge exploded");
+    expect(closed).toBe(1);
+  });
+
+  it("production createComparingDriver closes the real sidecar child after each COMPARING phase", async () => {
+    const closeDescriptor = Object.getOwnPropertyDescriptor(VerifierAdapter.prototype, "close");
+    if (closeDescriptor?.value === undefined) throw new Error("VerifierAdapter.close is missing");
+    const originalClose = closeDescriptor.value as (this: VerifierAdapter) => void;
+    const closedPids: number[] = [];
+    VerifierAdapter.prototype.close = function close(this: VerifierAdapter) {
+      const pid = this.childPid;
+      if (pid !== undefined) closedPids.push(pid);
+      originalClose.call(this);
+    };
+    try {
+      const sidecarConfig = defaultConfig();
+      sidecarConfig.verifier.backend = "sidecar";
+      const engine = engineWithComparing({}, sidecarConfig);
+
+      const first = seedComparingRun(store, clock, fixture, [
+        passedCandidate(tieAId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+        passedCandidate(tieBId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+      ]);
+      await engine.tickRun(first.runId);
+      expect(closedPids, "first COMPARING must close a live sidecar child").toHaveLength(1);
+      const firstPid = closedPids[0];
+      expect(firstPid).toBeTypeOf("number");
+      await expectPidGone(firstPid!);
+      expect(store.events.list(first.runId, { types: ["candidate.compared"] })[0]?.payload["backend"]).toBe("sidecar");
+
+      const secondA = id("cand", clock.now() + 10);
+      const secondB = id("cand", clock.now() + 11);
+      const second = seedComparingRun(store, clock, fixture, [
+        passedCandidate(secondA, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+        passedCandidate(secondB, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+      ]);
+      await engine.tickRun(second.runId);
+      expect(closedPids, "second COMPARING must close another sidecar child").toHaveLength(2);
+      const secondPid = closedPids[1];
+      expect(secondPid).toBeTypeOf("number");
+      expect(secondPid).not.toBe(firstPid);
+      await expectPidGone(secondPid!);
+      expect(pidAlive(firstPid!)).toBe(false);
+      expect(store.events.list(second.runId, { types: ["candidate.compared"] })[0]?.payload["backend"]).toBe("sidecar");
+    } finally {
+      Object.defineProperty(VerifierAdapter.prototype, "close", closeDescriptor);
+    }
+  }, 30_000);
 
   function engineWithComparing(
     extra: { resolveVerifierStrategy?: () => VerifierStrategy } = {},

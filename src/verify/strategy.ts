@@ -59,4 +59,6 @@ export interface VerifierStrategy {
     context: PairwiseContext,
     options?: FrontierSelectOptions,
   ): Promise<FrontierSelection>;
+  /** Release a held sidecar child. Production COMPARING must call this after the phase. */
+  close?(): void;
 }

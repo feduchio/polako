@@ -192,6 +192,12 @@ export class VerifierAdapter implements VerifierStrategy {
     this.stop(new Error("verifier sidecar closed"));
   }
 
+  /** Live sidecar child PID, if this adapter still holds a process. */
+  get childPid(): number | undefined {
+    const pid = this.child?.pid;
+    return pid === undefined || pid <= 0 ? undefined : pid;
+  }
+
   private criteriaFor(context: PairwiseContext): string[] {
     return decomposeCriteria(context.task, context.acceptance, this.configuredCriteria);
   }
@@ -450,7 +456,10 @@ export class VerifierAdapter implements VerifierStrategy {
   private stop(error: Error): void {
     const child = this.child;
     this.child = null;
-    if (child !== null && !child.killed) child.kill();
+    if (child !== null) {
+      if (!child.stdin.destroyed) child.stdin.end();
+      if (!child.killed) child.kill();
+    }
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);

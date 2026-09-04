@@ -202,55 +202,40 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
 
     const sources = eligible.map((candidate) => toTournamentSource(candidate, baseline));
     const strategy = await resolveVerifierStrategy(ctx, task, options);
-    const selection = await selectTournamentWinner({
-      candidates: sources,
-      baseline,
-      strategy,
-      context: { runId: ctx.run.id, task: task.description, acceptance: task.acceptance },
-      pivotFrom: ctx.config.verifier.pivotTournamentFrom,
-      pivots: 2,
-      repeats: ctx.config.verifier.repeats,
-      granularity: ctx.config.verifier.granularity,
-    });
-    const backend = selection.backend ?? (strategy instanceof VerifierAdapter ? "sidecar" : ctx.config.verifier.backend);
-    const fallback = selection.fallback ?? (strategy instanceof VerifierAdapter && strategy.usedFallback);
-    const client = selection.client
-      ?? (strategy instanceof VerifierAdapter ? strategy.lastProvenance.client : "none");
+    try {
+      return await finishComparing(ctx, task, eligible, sources, baseline, strategy);
+    } finally {
+      strategy.close?.();
+    }
+  };
+}
 
-    const rationaleRef = ctx.store.artifacts.put(
-      JSON.stringify({
-        taskId: task.id,
-        method: selection.method,
-        backend,
-        fallback,
-        client,
-        logprobScheme: selection.logprobScheme ?? null,
-        criteria: selection.criteria ?? [],
-        nComparisons: selection.nComparisons ?? selection.evidence.length,
-        frontier: selection.frontier,
-        winnerId: selection.winnerId,
-        ranking: selection.ranking.map((entry) => ({
-          candidateId: entry.candidate.id,
-          rank: entry.rank,
-          points: entry.points,
-          metrics: entry.metrics,
-        })),
-        evidence: selection.evidence.map((match) => ({
-          a: match.a,
-          b: match.b,
-          winner: match.verdict.winner,
-          rationale: match.verdict.rationale,
-          scores: match.verdict.scores,
-        })),
-      }, null, 2),
-      "comparison_rationale",
-      `task-${task.id}`,
-      ctx.clock.now(),
-    );
+async function finishComparing(
+  ctx: PhaseContext,
+  task: Task,
+  eligible: Candidate[],
+  sources: TournamentSourceCandidate[],
+  baseline: BaselineSnapshot,
+  strategy: VerifierStrategy,
+): Promise<{ status: "complete"; nextPhase: "INTEGRATING" | "PLANNING" | "NEEDS_HUMAN" | "FAILED" }> {
+  const selection = await selectTournamentWinner({
+    candidates: sources,
+    baseline,
+    strategy,
+    context: { runId: ctx.run.id, task: task.description, acceptance: task.acceptance },
+    pivotFrom: ctx.config.verifier.pivotTournamentFrom,
+    pivots: 2,
+    repeats: ctx.config.verifier.repeats,
+    granularity: ctx.config.verifier.granularity,
+  });
+  const backend = selection.backend ?? (strategy instanceof VerifierAdapter ? "sidecar" : ctx.config.verifier.backend);
+  const fallback = selection.fallback ?? (strategy instanceof VerifierAdapter && strategy.usedFallback);
+  const client = selection.client
+    ?? (strategy instanceof VerifierAdapter ? strategy.lastProvenance.client : "none");
 
-    const comparedEventId = appendComparedEvent(ctx, {
+  const rationaleRef = ctx.store.artifacts.put(
+    JSON.stringify({
       taskId: task.id,
-      winner: selection.winnerId,
       method: selection.method,
       backend,
       fallback,
@@ -258,39 +243,69 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
       logprobScheme: selection.logprobScheme ?? null,
       criteria: selection.criteria ?? [],
       nComparisons: selection.nComparisons ?? selection.evidence.length,
-      eligible: eligible.map((candidate) => candidate.id),
       frontier: selection.frontier,
-      metrics: Object.fromEntries(selection.ranking.map((entry) => [entry.candidate.id, entry.metrics])),
+      winnerId: selection.winnerId,
+      ranking: selection.ranking.map((entry) => ({
+        candidateId: entry.candidate.id,
+        rank: entry.rank,
+        points: entry.points,
+        metrics: entry.metrics,
+      })),
       evidence: selection.evidence.map((match) => ({
         a: match.a,
         b: match.b,
         winner: match.verdict.winner,
         rationale: match.verdict.rationale,
+        scores: match.verdict.scores,
       })),
-      rationaleRef,
-    });
+    }, null, 2),
+    "comparison_rationale",
+    `task-${task.id}`,
+    ctx.clock.now(),
+  );
 
-    if (selection.winnerId === null) {
-      return handleNoComparisonWinner(ctx, task, comparedEventId);
-    }
+  const comparedEventId = appendComparedEvent(ctx, {
+    taskId: task.id,
+    winner: selection.winnerId,
+    method: selection.method,
+    backend,
+    fallback,
+    client,
+    logprobScheme: selection.logprobScheme ?? null,
+    criteria: selection.criteria ?? [],
+    nComparisons: selection.nComparisons ?? selection.evidence.length,
+    eligible: eligible.map((candidate) => candidate.id),
+    frontier: selection.frontier,
+    metrics: Object.fromEntries(selection.ranking.map((entry) => [entry.candidate.id, entry.metrics])),
+    evidence: selection.evidence.map((match) => ({
+      a: match.a,
+      b: match.b,
+      winner: match.verdict.winner,
+      rationale: match.verdict.rationale,
+    })),
+    rationaleRef,
+  });
 
-    const now = ctx.clock.now();
-    const updated = eligible.map((candidate) => ({
-      ...candidate,
-      state: candidate.id === selection.winnerId ? "WINNER" as const : "LOSER" as const,
-      updatedAt: now,
-    }));
-    appendCandidateEvents(ctx, updated, "candidate.state_changed");
+  if (selection.winnerId === null) {
+    return handleNoComparisonWinner(ctx, task, comparedEventId);
+  }
 
-    const selected: Task = {
-      ...task,
-      state: "SELECTED",
-      selectedCandidateId: selection.winnerId,
-      updatedAt: now,
-    };
-    appendTaskEvent(ctx, selected, [comparedEventId]);
-    return { status: "complete", nextPhase: "INTEGRATING" };
+  const now = ctx.clock.now();
+  const updated = eligible.map((candidate) => ({
+    ...candidate,
+    state: candidate.id === selection.winnerId ? "WINNER" as const : "LOSER" as const,
+    updatedAt: now,
+  }));
+  appendCandidateEvents(ctx, updated, "candidate.state_changed");
+
+  const selected: Task = {
+    ...task,
+    state: "SELECTED",
+    selectedCandidateId: selection.winnerId,
+    updatedAt: now,
   };
+  appendTaskEvent(ctx, selected, [comparedEventId]);
+  return { status: "complete", nextPhase: "INTEGRATING" };
 }
 
 /** Production INTEGRATING driver: serial temporary workspace, gates, checkpoint CAS. */
