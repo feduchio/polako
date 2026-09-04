@@ -148,6 +148,40 @@ describe("VerifierAdapter real Python child", () => {
     expect(result.criteria.length).toBeGreaterThan(0);
   }, 30_000);
 
+  it("default createVerifierStrategy sidecar uses scripted PPT without POLISH_VERIFIER_CLIENT in options.env", async () => {
+    const previousClient = process.env["POLISH_VERIFIER_CLIENT"];
+    delete process.env["POLISH_VERIFIER_CLIENT"];
+    try {
+      const strategy = createVerifierStrategy(
+        { backend: "sidecar", repeats: 1, granularity: 20, criteria: [], pivotTournamentFrom: 4 },
+        {
+          command: python,
+          scriptPath: SCRIPT,
+          requestTimeoutMs: 8_000,
+          repeats: 1,
+          pivots: 2,
+          env: { POLISH_VERIFIER_PREFER: "d1" },
+        },
+      );
+      expect(strategy).toBeInstanceOf(VerifierAdapter);
+      const sidecar = strategy as VerifierAdapter;
+      adapters.push(sidecar);
+      const frontier = [candidate("d0", 1), candidate("d1", 80, { checksPassed: 1, newFailures: 3 })];
+      const result = await sidecar.selectFrontier(
+        frontier,
+        { runId: "run_default_scripted", task: "Pick the preferred id.", acceptance: ["Winner is the injected id"] },
+        { repeats: 1, pivots: 2 },
+      );
+      expect(result.method).toBe("ppt");
+      expect(result.fallback).toBe(false);
+      expect(result.winnerId).toBe("d1");
+      expect(sidecar.usedFallback).toBe(false);
+    } finally {
+      if (previousClient === undefined) delete process.env["POLISH_VERIFIER_CLIENT"];
+      else process.env["POLISH_VERIFIER_CLIENT"] = previousClient;
+    }
+  }, 30_000);
+
   it("records direct logprobs when the verifier exposes them", async () => {
     const sidecar = adapter({ POLISH_VERIFIER_SCRIPTED_MODE: "direct", POLISH_VERIFIER_PREFER: "a" });
     await sidecar.comparePair(candidate("a", 4), candidate("b", 4), { runId: "run_direct" });

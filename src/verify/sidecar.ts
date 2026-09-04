@@ -89,6 +89,7 @@ export class VerifierAdapter implements VerifierStrategy {
       criteria,
       n_evaluations: this.repeats,
       granularity: this.granularity,
+      ...this.protocolClient(),
     };
     try {
       const response = await this.request(request);
@@ -124,6 +125,7 @@ export class VerifierAdapter implements VerifierStrategy {
       pivots: options.pivots ?? this.pivots,
       granularity: options.granularity ?? this.granularity,
       on_error: options.onError ?? "raise",
+      ...this.protocolClient(),
     };
     try {
       return this.selectionFrom(await this.request(request), candidates, criteria, false);
@@ -251,6 +253,10 @@ export class VerifierAdapter implements VerifierStrategy {
       criteria,
       nComparisons: comparisons,
     };
+  }
+
+  private protocolClient(): { client: "scripted" } | Record<string, never> {
+    return this.env["POLISH_VERIFIER_CLIENT"] === "scripted" ? { client: "scripted" } : {};
   }
 
   private start(): void {
@@ -451,6 +457,14 @@ function scrubSidecarEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     env[key] = value;
   }
   if (extra !== undefined) Object.assign(env, extra);
+  return injectDefaultVerifierClient(env);
+}
+
+function injectDefaultVerifierClient(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const configured = env["POLISH_VERIFIER_CLIENT"]?.trim();
+  if (configured !== undefined && configured.length > 0) return env;
+  if (env["POLISH_VERIFIER_ALLOW_LIVE"] === "1") return env;
+  env["POLISH_VERIFIER_CLIENT"] = "scripted";
   return env;
 }
 
