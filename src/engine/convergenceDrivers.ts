@@ -167,7 +167,8 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
       action: selected.action,
       reason: selected.reason,
       findings,
-      targetCheckpointHash: selected.targetCheckpoint?.commitHash ?? null,
+      targetCheckpointHash:
+        selected.action === "CHANGE_ENSEMBLE" ? hash : selected.targetCheckpoint?.commitHash ?? null,
       targetEnsemble: selected.targetEnsemble,
       targetReviewRoundIndex: selected.targetReviewRoundIndex,
     });

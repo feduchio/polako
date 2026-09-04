@@ -11,6 +11,7 @@ import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
+import { eventsThroughBoundary, resolveObservationBoundary } from "../convergence/pathology/index.js";
 import { RunEngine } from "./engine.js";
 import { createValidatingDriver } from "./reviewDrivers.js";
 import { stubDriverFor } from "./stubs.js";
@@ -180,6 +181,24 @@ describe("B5 production VALIDATING driver", () => {
     const { runId } = seedValidatingRun(store, clock, fixture, [], [finding]);
     await engine.tickRun(runId);
     expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
+  });
+
+  it("CONVERGENCE_CHECK sample after one evidence-agent validation includes that validation", async () => {
+    engine.registerPhase(
+      "VALIDATING",
+      createValidatingDriver({
+        resolveWorker: () => new ScriptedFindingEvidenceWorker(() => rejectedAttempt()),
+      }),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
+    expect(store.events.list(runId, { types: ["finding.validated"] })).toHaveLength(1);
+    const events = store.events.list(runId);
+    const boundary = resolveObservationBoundary(events, defaultConfig().review.reviewersPerRound);
+    expect(boundary).not.toBeNull();
+    const prefix = eventsThroughBoundary(events, boundary!.id);
+    expect(prefix.some((event) => event.type === "finding.validated")).toBe(true);
   });
 });
 

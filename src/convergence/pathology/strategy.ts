@@ -112,7 +112,11 @@ export function selectStrategy(ctx: StrategyContext): SelectedStrategy {
   }
 
   const targetCheckpoint =
-    chosen.action === "ROLLBACK" && ctx.current !== null ? provenC2RollbackTarget(ctx.current, ctx.priorCheckpoints) : null;
+    chosen.action === "ROLLBACK" && ctx.current !== null
+      ? provenC2RollbackTarget(ctx.current, ctx.priorCheckpoints)
+      : chosen.action === "CHANGE_ENSEMBLE"
+        ? ctx.current
+        : null;
   return {
     action: chosen.action,
     reason: chosen.finding.reason,

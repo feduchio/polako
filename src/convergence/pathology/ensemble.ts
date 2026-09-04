@@ -58,11 +58,11 @@ export function pendingEnsembleOverride(
       (decision) =>
         decision.action === "CHANGE_ENSEMBLE" &&
         decision.targetReviewRoundIndex === roundIndex &&
+        decision.targetCheckpointHash === checkpointHash &&
         completed.has(decision.boundaryEventId),
     );
   const latest = matches.at(-1);
   if (latest?.targetEnsemble === null || latest === undefined) return null;
-  if (checkpointHash.length === 0) return latest.targetEnsemble;
   return latest.targetEnsemble;
 }
 

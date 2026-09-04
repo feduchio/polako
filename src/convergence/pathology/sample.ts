@@ -1,3 +1,4 @@
+import type { Actor } from "../../domain/common.js";
 import type { Checkpoint, EvidenceVector } from "../../domain/checkpoint.js";
 import type { CleanRound } from "../../domain/convergence.js";
 import type { Event } from "../../domain/event.js";
@@ -80,34 +81,18 @@ export function isObservationBoundary(event: Event, prefix: readonly Event[], re
     return isReviewRoundComplete(reviewExecutionsIn(prefix), execution.checkpointHash, execution.roundIndex, required);
   }
   if (event.type === "finding.validated") {
-    return completesValidationRound(event, prefix, required);
+    return completesValidationRound(event, prefix);
   }
   return true;
 }
 
-function completesValidationRound(event: Event, prefix: readonly Event[], requiredReviewers: number): boolean {
+function completesValidationRound(event: Event, prefix: readonly Event[]): boolean {
   const validation = asRecord(event.payload["validation"]) as FindingValidation | null;
   if (validation === null) return false;
   const fold = foldPrefix(prefix);
   const finding = fold.findings.find((item) => item.id === validation.findingId);
   if (finding === undefined) return false;
-  const roundIndex = validationRoundIndex(validation, fold);
-  if (roundIndex === null) return false;
-  if (!isReviewRoundComplete(fold.reviewExecutions, finding.checkpointHash, roundIndex, requiredReviewers)) {
-    return false;
-  }
-  const validationsForRound = fold.validations.filter((item) => {
-    const owner = fold.findings.find((row) => row.id === item.findingId);
-    if (owner?.checkpointHash !== finding.checkpointHash) return false;
-    return validationRoundIndex(item, fold) === roundIndex;
-  });
-  const independent = new Set(
-    validationsForRound.map((item) => {
-      const model = item.performedBy.model;
-      return model === undefined ? item.id : `${item.performedBy.kind}:${model.provider}:${model.model}`;
-    }),
-  );
-  return independent.size >= requiredReviewers;
+  return !fold.findings.some((item) => item.checkpointHash === finding.checkpointHash && item.status === "RAW");
 }
 
 export function resolveObservationBoundary(events: readonly Event[], requiredReviewers?: number): Event | null {
@@ -280,20 +265,33 @@ function validationRoundIndex(validation: FindingValidation, fold: FoldedPrefix)
   return matching.at(-1)?.roundIndex ?? reviews[0]?.roundIndex ?? null;
 }
 
-function opposingPositions(validations: readonly FindingValidation[]): boolean {
-  const verdicts = new Set(validations.map((item) => item.verdict));
-  if (verdicts.has("VALID") && verdicts.has("REJECTED")) return true;
-  const uncertain = validations.filter((item) => item.verdict === "UNCERTAIN");
-  if (uncertain.length === 0) return false;
-  const validIds = new Set(validations.filter((item) => item.verdict === "VALID").flatMap((item) => [item.id, ...item.evidenceRefs.map((ref) => ref.sha256)]));
-  const rejectedIds = new Set(
-    validations.filter((item) => item.verdict === "REJECTED").flatMap((item) => [item.id, ...item.evidenceRefs.map((ref) => ref.sha256)]),
+function independentActorId(actor: Actor): string {
+  const model = actor.model;
+  return model === undefined
+    ? `${actor.kind}:${actor.role ?? ""}`
+    : `${actor.kind}:${actor.role ?? ""}:${model.provider}:${model.model}`;
+}
+
+function hasIndependentOpposingSides(left: readonly FindingValidation[], right: readonly FindingValidation[]): boolean {
+  const leftIds = new Set(left.map((item) => independentActorId(item.performedBy)));
+  const rightIds = new Set(right.map((item) => independentActorId(item.performedBy)));
+  return [...leftIds].some((leftId) => [...rightIds].some((rightId) => rightId !== leftId));
+}
+
+function referencedValidations(validations: readonly FindingValidation[], refs: ReadonlySet<string>): FindingValidation[] {
+  return validations.filter(
+    (item) => refs.has(item.id) || item.evidenceRefs.some((ref) => refs.has(ref.sha256)),
   );
-  return uncertain.some((item) => {
+}
+
+function opposingPositions(validations: readonly FindingValidation[]): boolean {
+  const valid = validations.filter((item) => item.verdict === "VALID");
+  const rejected = validations.filter((item) => item.verdict === "REJECTED");
+  if (hasIndependentOpposingSides(valid, rejected)) return true;
+  return validations.some((item) => {
+    if (item.verdict !== "UNCERTAIN") return false;
     const refs = new Set([item.id, ...item.evidenceRefs.map((ref) => ref.sha256)]);
-    const seesValid = [...refs].some((ref) => validIds.has(ref));
-    const seesRejected = [...refs].some((ref) => rejectedIds.has(ref));
-    return seesValid && seesRejected;
+    return hasIndependentOpposingSides(referencedValidations(valid, refs), referencedValidations(rejected, refs));
   });
 }
 

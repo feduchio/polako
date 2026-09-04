@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { Actor } from "../../domain/common.js";
 import { defaultConfig } from "../../domain/config.js";
 import type { Event } from "../../domain/event.js";
 import type { Finding, FindingStatus, FindingValidation } from "../../domain/finding.js";
 import type { ReviewExecution } from "../../domain/review.js";
-import { emptyFindingCounts } from "../../domain/checkpoint.js";
+import { emptyFindingCounts, type Checkpoint } from "../../domain/checkpoint.js";
 import { FakeClock } from "../../shared/clock.js";
 import { hashJson } from "../../shared/hash.js";
 import { id } from "../../shared/ids.js";
@@ -24,10 +25,12 @@ import {
   detectNoProgress,
   detectStyleOnlyGrowth,
   disagreementRoundsOf,
+  eventsThroughBoundary,
   foldModelCallUsage,
   foldPrefix,
   hashPathologySample,
   isObservationBoundary,
+  pendingEnsembleOverride,
   provenC2RollbackTarget,
   executablePersistedRollbackTarget,
   resolveObservationBoundary,
@@ -268,6 +271,7 @@ describe("C2 sliding-window detectors", () => {
   });
 
   it("CHANGE_ENSEMBLE is bounded, quality-floor-respecting, and targets one next review round", () => {
+    const current = stubCheckpoint(HASH_A);
     const selected = selectStrategy({
       findings: [{ kind: "disagreement_not_shrinking", sampleKeys: ["a"], evidenceRefs: [], reason: "split" }],
       ensembleChangesByPathology: {
@@ -279,13 +283,14 @@ describe("C2 sliding-window detectors", () => {
       },
       maxEnsembleChangesPerPathology: 1,
       eligibleEnsemble: [{ provider: "p", model: "alt" }],
-      current: null,
+      current,
       priorCheckpoints: [],
       nextReviewRoundIndex: 4,
     });
     expect(selected.action).toBe("CHANGE_ENSEMBLE");
     expect(selected.targetReviewRoundIndex).toBe(4);
     expect(selected.targetEnsemble).toEqual([{ provider: "p", model: "alt" }]);
+    expect(selected.targetCheckpoint?.commitHash).toBe(HASH_A);
 
     const bounded = selectStrategy({
       findings: [{ kind: "disagreement_not_shrinking", sampleKeys: ["a"], evidenceRefs: [], reason: "split" }],
@@ -594,12 +599,45 @@ describe("C2 sample replay and broker fold equality", () => {
     expect(resolveObservationBoundary([first, second, third], required)?.id).toBe(third.id);
   });
 
-  it("does not treat a lone finding.validated as a completed-round boundary", () => {
+  it("does not treat an in-progress validation pass as a boundary while RAW findings remain", () => {
     const runId = id("run", NOW);
-    const finding = splitFinding(runId);
-    const validated = findingValidated(runId, 1, finding, "VALID", "v1");
-    expect(isObservationBoundary(validated, [validated], 3)).toBe(false);
-    expect(resolveObservationBoundary([validated], 3)).toBeNull();
+    const first = { ...splitFinding(runId), status: "RAW" as const };
+    const second = { ...splitFinding(runId), id: id("find", NOW + 1), fingerprint: "fp-open", status: "RAW" as const };
+    const raisedFirst = findingRaised(runId, 1, first);
+    const raisedSecond = findingRaised(runId, 2, second);
+    const validated = findingValidated(runId, 3, { ...first, status: "REJECTED" }, "REJECTED", "v1");
+    expect(isObservationBoundary(validated, [raisedFirst, raisedSecond, validated], 3)).toBe(false);
+    expect(resolveObservationBoundary([raisedFirst, raisedSecond, validated], 3)).toBeNull();
+  });
+
+  it("includes one evidence-agent finding.validated in the sample after a completed validation pass", () => {
+    const runId = id("run", NOW);
+    const finding = { ...splitFinding(runId), status: "RAW" as const };
+    const raised = findingRaised(runId, 1, finding);
+    const reviews = [
+      reviewFinished(runId, 2, 1, "m1", "correctness"),
+      reviewFinished(runId, 3, 1, "m2", "regression"),
+      reviewFinished(runId, 4, 1, "m3", "adversarial"),
+    ];
+    const validated = findingValidated(runId, 5, { ...finding, status: "REJECTED" }, "REJECTED", "evidence", {
+      kind: "evidence_agent",
+    });
+    const events = [raised, ...reviews, validated];
+    expect(isObservationBoundary(validated, events, 3)).toBe(true);
+    const boundary = resolveObservationBoundary(events, 3);
+    expect(boundary?.id).toBe(validated.id);
+    const prefix = eventsThroughBoundary(events, boundary!.id);
+    expect(prefix.some((event) => event.type === "finding.validated")).toBe(true);
+    expect(foldPrefix(prefix).validations).toHaveLength(1);
+    const sampleRow = buildPathologySample({ events, boundary: boundary!, config: defaultConfig() });
+    expect(sampleRow.findingObservations.some((row) => row.status === "REJECTED" && row.causalEventId === validated.id)).toBe(true);
+  });
+
+  it("ignores a CHANGE_ENSEMBLE override when the checkpoint hash differs", () => {
+    const runId = id("run", NOW);
+    const events = changeEnsembleEvents(runId, HASH_A, 1);
+    expect(pendingEnsembleOverride(events, HASH_A, 1)).toEqual([{ provider: "p", model: "alt" }]);
+    expect(pendingEnsembleOverride(events, HASH_B, 1)).toBeNull();
   });
 
   it("omits incomplete review rounds from disagreement positives", () => {
@@ -622,6 +660,22 @@ describe("C2 sample replay and broker fold equality", () => {
       { checkpointHash: HASH_A, roundIndex: 1, fingerprints: [finding.fingerprint] },
     ]);
     expect(disagreementRoundsOf(complete, 1)[0]?.fingerprints).toEqual([finding.fingerprint]);
+  });
+
+  it("does not treat one reviewer flip-flop in a completed round as disagreement", () => {
+    const runId = id("run", NOW);
+    const finding = splitFinding(runId);
+    const raised = findingRaised(runId, 1, finding);
+    const reviews = [
+      reviewFinished(runId, 2, 1, "m1", "correctness"),
+      reviewFinished(runId, 3, 1, "m2", "regression"),
+      reviewFinished(runId, 4, 1, "m3", "adversarial"),
+    ];
+    const valid = findingValidated(runId, 5, finding, "VALID", "same-reviewer");
+    const rejected = findingValidated(runId, 6, { ...finding, status: "REJECTED" }, "REJECTED", "same-reviewer");
+    expect(disagreementRoundsOf(foldPrefix([raised, ...reviews, valid, rejected]), 3)).toEqual([
+      { checkpointHash: HASH_A, roundIndex: 1, fingerprints: [] },
+    ]);
   });
 
   it("persisted rollback execute keeps the exact hash and refuses a worse target", () => {
@@ -768,12 +822,74 @@ function findingRaised(runId: string, seq: number, finding: Finding): Event {
   };
 }
 
+function stubCheckpoint(commitHash: string): Checkpoint {
+  const evidence = progress().evidence;
+  if (evidence === null) throw new Error("expected evidence");
+  return {
+    id: id("cp", NOW),
+    runId: id("run", NOW),
+    seq: 0,
+    commitHash,
+    parentId: null,
+    source: "baseline",
+    taskId: null,
+    evidence,
+    createdAt: NOW,
+  };
+}
+
+function changeEnsembleEvents(runId: string, checkpointHash: string, roundIndex: number): Event[] {
+  const boundaryId = id("evt", NOW);
+  return [
+    {
+      schemaVersion: 1,
+      id: id("evt", NOW + 1),
+      runId,
+      ts: NOW + 1,
+      seq: 1,
+      type: "pathology.decision",
+      payload: {
+        decision: {
+          version: 1,
+          runId,
+          boundaryEventId: boundaryId,
+          decisionVersion: 1,
+          findings: [],
+          action: "CHANGE_ENSEMBLE",
+          reason: "rotate",
+          budget: sample(0).budget,
+          targetCheckpointHash: checkpointHash,
+          targetEnsemble: [{ provider: "p", model: "alt" }],
+          targetReviewRoundIndex: roundIndex,
+          causalEventIds: [boundaryId],
+        },
+      },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+    {
+      schemaVersion: 1,
+      id: id("evt", NOW + 2),
+      runId,
+      ts: NOW + 2,
+      seq: 2,
+      type: "pathology.effect_completed",
+      payload: { boundaryEventId: boundaryId },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+  ];
+}
+
 function findingValidated(
   runId: string,
   seq: number,
   finding: Finding,
   verdict: FindingValidation["verdict"],
   model: string,
+  performedBy?: Actor,
 ): Event {
   const validation: FindingValidation = {
     id: id("fval", NOW + seq),
@@ -783,7 +899,7 @@ function findingValidated(
     verdict,
     rationale: verdict,
     evidenceRefs: [{ sha256: "a".repeat(64), kind: "check_output", bytes: 1 }],
-    performedBy: { kind: "reviewer", model: { provider: "p", model } },
+    performedBy: performedBy ?? { kind: "reviewer", model: { provider: "p", model } },
     createdAt: NOW + seq,
   };
   return {
