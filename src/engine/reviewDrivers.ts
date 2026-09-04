@@ -24,7 +24,7 @@ import { runAxisReview, type ReviewProvider } from "../review/swarm.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { id } from "../shared/ids.js";
 import {
-  latestCompletedReviewRound,
+  nextUnconsumedCompletedReviewRound,
   recordCleanRoundEvent,
 } from "../convergence/record.js";
 import { MissionAcceptanceService } from "../store/missionAcceptance.js";
@@ -156,16 +156,14 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
 function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): void {
   const required = ctx.config.review.reviewersPerRound;
   const reviewExecutions = ctx.store.repos.reviewExecutions.listByRun(ctx.run.id);
-  const latest = latestCompletedReviewRound(reviewExecutions, checkpointHash, required);
-  if (latest === null) return;
-
-  const completedReviewRounds = new Set(
-    reviewExecutions
-      .filter((execution) => execution.checkpointHash === checkpointHash)
-      .map((execution) => execution.roundIndex),
-  ).size;
-  const existingForCheckpoint = ctx.store.repos.cleanRounds.forCheckpoint(ctx.run.id, checkpointHash).length;
-  if (existingForCheckpoint >= completedReviewRounds) return;
+  const existingCleanRounds = ctx.store.repos.cleanRounds.listByRun(ctx.run.id);
+  const reviewRoundIndex = nextUnconsumedCompletedReviewRound(
+    existingCleanRounds,
+    reviewExecutions,
+    checkpointHash,
+    required,
+  );
+  if (reviewRoundIndex === null) return;
 
   const findings = ctx.store.repos.findings.listByRun(ctx.run.id);
   const event = recordCleanRoundEvent({
@@ -174,8 +172,8 @@ function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): 
     requiredReviewers: required,
     reviewExecutions,
     findings,
-    existingCleanRounds: ctx.store.repos.cleanRounds.listByRun(ctx.run.id),
-    reviewRoundIndex: latest,
+    existingCleanRounds,
+    reviewRoundIndex,
     now: ctx.clock.now(),
   });
   ctx.store.events.append([event]);

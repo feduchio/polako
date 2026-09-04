@@ -4,7 +4,9 @@ export { rollbackIfDominated, rollbackTarget } from "./dominance.js";
 export {
   buildCleanRoundFromReview,
   cleanRoundsHaveReviewProof,
+  completedReviewRoundIndexes,
   latestCompletedReviewRound,
+  nextUnconsumedCompletedReviewRound,
   recordCleanRoundEvent,
   type RecordCleanRoundInput,
 } from "./record.js";

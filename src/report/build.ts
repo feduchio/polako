@@ -107,13 +107,19 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
 
   const convergence: string[] = [];
   for (const round of cleanRounds) {
+    const reviewRound = round.reviewRoundIndex;
     const proof = reviews
-      .filter((execution) => execution.checkpointHash === round.checkpointHash && execution.roundIndex === round.roundIndex)
+      .filter(
+        (execution) =>
+          reviewRound !== undefined &&
+          execution.completed &&
+          execution.checkpointHash === round.checkpointHash &&
+          execution.roundIndex === reviewRound,
+      )
       .map((execution) => execution.id);
+    const reviewSuffix = reviewRound === undefined ? "" : ` review round ${reviewRound}`;
     const proofSuffix = proof.length > 0 ? ` proof [${proof.join(", ")}]` : "";
-    convergence.push(
-      `Round ${round.roundIndex} on ${round.checkpointHash}${proofSuffix}`,
-    );
+    convergence.push(`Round ${round.roundIndex}${reviewSuffix} on ${round.checkpointHash}${proofSuffix}`);
   }
 
   for (const execution of reviews) {

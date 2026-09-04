@@ -14,6 +14,8 @@ import { ConvergenceController } from "./controller.js";
 import { rollbackIfDominated, rollbackTarget } from "./dominance.js";
 import {
   buildCleanRoundFromReview,
+  cleanRoundsHaveReviewProof,
+  nextUnconsumedCompletedReviewRound,
   recordCleanRoundEvent,
 } from "./record.js";
 import { createRollbackCheckpoint } from "./rollback.js";
@@ -70,8 +72,9 @@ function reviewExecution(
   model: string,
   findingsCount = 0,
 ): ReviewExecution {
+  const axisOffset = axis === "correctness" ? 0 : axis === "regression" ? 1 : 2;
   return {
-    id: id("rvex", NOW + roundIndex),
+    id: id("rvex", NOW + roundIndex * 8 + axisOffset),
     runId: RUN_ID,
     checkpointHash: hash,
     roundIndex,
@@ -276,6 +279,7 @@ describe("clean round proof-of-review", () => {
     });
     expect(cleanRound.ensemble.map((entry) => entry.model)).toEqual(["m1", "m2", "m3"]);
     expect(cleanRound.rawFindings).toBe(0);
+    expect(cleanRound.reviewRoundIndex).toBe(1);
   });
 
   it("rejects when validated blocking findings remain", () => {
@@ -333,6 +337,146 @@ describe("clean round proof-of-review", () => {
     });
     expect(event.type).toBe("clean_round.recorded");
     expect((event.payload as { cleanRound: CleanRound }).cleanRound.validatedBlocking).toBe(0);
+    expect((event.payload as { cleanRound: CleanRound }).cleanRound.reviewRoundIndex).toBe(1);
+  });
+
+  function completeRound(hash: string, roundIndex: number, models: readonly [string, string, string] = ["m1", "m2", "m3"]): ReviewExecution[] {
+    return [
+      reviewExecution(hash, roundIndex, "correctness", models[0]),
+      reviewExecution(hash, roundIndex, "regression", models[1]),
+      reviewExecution(hash, roundIndex, "adversarial", models[2]),
+    ];
+  }
+
+  function historicalCleanRound(roundIndex: number, reviewRoundIndex?: number): CleanRound {
+    return {
+      id: id("cr", NOW + roundIndex),
+      runId: RUN_ID,
+      checkpointHash: HASH_B,
+      roundIndex,
+      ...(reviewRoundIndex === undefined ? {} : { reviewRoundIndex }),
+      axes: ["correctness", "regression", "adversarial"],
+      ensemble: [
+        { provider: "p", model: "m1" },
+        { provider: "p", model: "m2" },
+        { provider: "p", model: "m3" },
+      ],
+      rawFindings: 0,
+      validatedBlocking: 0,
+      novel: true,
+      createdAt: NOW + roundIndex,
+    };
+  }
+
+  it("A: three clean rounds plus one completed review round are not proof", () => {
+    const executions = completeRound(HASH_B, 1);
+    const lackingProvenance = [historicalCleanRound(1), historicalCleanRound(2), historicalCleanRound(3)];
+    expect(cleanRoundsHaveReviewProof(lackingProvenance, HASH_B, executions, 3)).toBe(false);
+    const allBoundToLatest = [1, 2, 3].map((roundIndex) => historicalCleanRound(roundIndex, 1));
+    expect(cleanRoundsHaveReviewProof(allBoundToLatest, HASH_B, executions, 3)).toBe(false);
+    const claimedDistinctRounds = [1, 2, 3].map((roundIndex) => historicalCleanRound(roundIndex, roundIndex));
+    expect(cleanRoundsHaveReviewProof(claimedDistinctRounds, HASH_B, executions, 3)).toBe(false);
+  });
+
+  it("B: a failure-only later review round does not consume another clean round", () => {
+    const failedOnly = {
+      ...reviewExecution(HASH_B, 2, "correctness", "gemma-free"),
+      id: id("rvex", NOW + 50),
+      completed: false,
+      finishedAt: null,
+    };
+    const executions = [...completeRound(HASH_B, 1), failedOnly];
+    const existing = [buildCleanRoundFromReview({
+      runId: RUN_ID,
+      checkpointHash: HASH_B,
+      requiredReviewers: 3,
+      reviewExecutions: executions,
+      findings: [],
+      existingCleanRounds: [],
+      reviewRoundIndex: 1,
+      now: NOW,
+    })];
+    expect(nextUnconsumedCompletedReviewRound(existing, executions, HASH_B, 3)).toBeNull();
+    expect(() =>
+      buildCleanRoundFromReview({
+        runId: RUN_ID,
+        checkpointHash: HASH_B,
+        requiredReviewers: 3,
+        reviewExecutions: executions,
+        findings: [],
+        existingCleanRounds: existing,
+        reviewRoundIndex: 2,
+        now: NOW + 1,
+      }),
+    ).toThrow(/incomplete|without completed review executions/);
+  });
+
+  it("C: three distinct completed review rounds prove exactly three bound clean rounds", () => {
+    const executions = [
+      ...completeRound(HASH_B, 1),
+      ...completeRound(HASH_B, 2, ["n1", "n2", "n3"]),
+      ...completeRound(HASH_B, 3, ["p1", "p2", "p3"]),
+    ];
+    const recorded: CleanRound[] = [];
+    for (const reviewRoundIndex of [1, 2, 3]) {
+      recorded.push(
+        buildCleanRoundFromReview({
+          runId: RUN_ID,
+          checkpointHash: HASH_B,
+          requiredReviewers: 3,
+          reviewExecutions: executions,
+          findings: [],
+          existingCleanRounds: recorded,
+          reviewRoundIndex,
+          now: NOW + reviewRoundIndex,
+        }),
+      );
+    }
+    expect(recorded.map((round) => round.reviewRoundIndex)).toEqual([1, 2, 3]);
+    expect(recorded.map((round) => round.roundIndex)).toEqual([1, 2, 3]);
+    expect(cleanRoundsHaveReviewProof(recorded, HASH_B, executions, 3)).toBe(true);
+  });
+
+  it("D: a clean round bound to a stale checkpoint review round is not proof", () => {
+    const onA = completeRound(HASH_A, 1);
+    const onB = completeRound(HASH_B, 1);
+    const cleanRound = historicalCleanRound(1, 1);
+    expect(cleanRoundsHaveReviewProof([cleanRound], HASH_B, onA, 3)).toBe(false);
+    expect(cleanRoundsHaveReviewProof([cleanRound], HASH_B, [...onA, ...completeRound(HASH_B, 2)], 3)).toBe(false);
+    expect(
+      cleanRoundsHaveReviewProof(
+        [{ ...cleanRound, ensemble: [{ provider: "p", model: "stale" }, { provider: "p", model: "wrong" }, { provider: "p", model: "models" }] }],
+        HASH_B,
+        onB,
+        3,
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects recording a second clean round against an already consumed review round", () => {
+    const executions = completeRound(HASH_B, 1);
+    const first = buildCleanRoundFromReview({
+      runId: RUN_ID,
+      checkpointHash: HASH_B,
+      requiredReviewers: 3,
+      reviewExecutions: executions,
+      findings: [],
+      existingCleanRounds: [],
+      reviewRoundIndex: 1,
+      now: NOW,
+    });
+    expect(() =>
+      buildCleanRoundFromReview({
+        runId: RUN_ID,
+        checkpointHash: HASH_B,
+        requiredReviewers: 3,
+        reviewExecutions: executions,
+        findings: [],
+        existingCleanRounds: [first],
+        reviewRoundIndex: 1,
+        now: NOW + 1,
+      }),
+    ).toThrow(/already proves a clean round/);
   });
 });
 

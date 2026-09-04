@@ -1,7 +1,8 @@
-import { SYSTEM_ACTOR } from "../domain/common.js";
+import { SYSTEM_ACTOR, type ModelRef } from "../domain/common.js";
 import { CleanRoundSchema, cleanRoundsFor, isNovelRound, type CleanRound } from "../domain/convergence.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Finding } from "../domain/finding.js";
+import type { ReviewAxis } from "../domain/finding.js";
 import {
   isReviewRoundComplete,
   reviewRoundExecutions,
@@ -20,20 +21,78 @@ export interface RecordCleanRoundInput {
   now: number;
 }
 
+/** Completed review-swarm round indexes for the checkpoint, ascending. */
+export function completedReviewRoundIndexes(
+  executions: readonly ReviewExecution[],
+  checkpointHash: string,
+  required: number,
+): number[] {
+  const rounds = new Set(
+    executions.filter((execution) => execution.checkpointHash === checkpointHash).map((execution) => execution.roundIndex),
+  );
+  return [...rounds]
+    .sort((a, b) => a - b)
+    .filter((roundIndex) => isReviewRoundComplete(executions, checkpointHash, roundIndex, required));
+}
+
 /** Latest review round index with all required reviewers completed for the checkpoint. */
 export function latestCompletedReviewRound(
   executions: readonly ReviewExecution[],
   checkpointHash: string,
   required: number,
 ): number | null {
-  const rounds = new Set(
-    executions.filter((execution) => execution.checkpointHash === checkpointHash).map((execution) => execution.roundIndex),
-  );
-  let latest: number | null = null;
-  for (const roundIndex of [...rounds].sort((a, b) => a - b)) {
-    if (isReviewRoundComplete(executions, checkpointHash, roundIndex, required)) latest = roundIndex;
+  return completedReviewRoundIndexes(executions, checkpointHash, required).at(-1) ?? null;
+}
+
+function consumedReviewRoundIndexes(cleanRounds: readonly CleanRound[], checkpointHash: string): Set<number> {
+  const consumed = new Set<number>();
+  for (const round of cleanRoundsFor(cleanRounds, checkpointHash)) {
+    if (round.reviewRoundIndex !== undefined) consumed.add(round.reviewRoundIndex);
   }
-  return latest;
+  return consumed;
+}
+
+/** First completed review round on this checkpoint that no CleanRound already binds. */
+export function nextUnconsumedCompletedReviewRound(
+  cleanRounds: readonly CleanRound[],
+  executions: readonly ReviewExecution[],
+  checkpointHash: string,
+  required: number,
+): number | null {
+  const consumed = consumedReviewRoundIndexes(cleanRounds, checkpointHash);
+  return completedReviewRoundIndexes(executions, checkpointHash, required).find((roundIndex) => !consumed.has(roundIndex)) ?? null;
+}
+
+function completedProofExecutions(
+  executions: readonly ReviewExecution[],
+  checkpointHash: string,
+  reviewRoundIndex: number,
+): ReviewExecution[] {
+  return reviewRoundExecutions(executions, checkpointHash, reviewRoundIndex).filter((execution) => execution.completed);
+}
+
+function proofSlice(executions: readonly ReviewExecution[]): { axes: ReviewAxis[]; ensemble: ModelRef[] } {
+  return {
+    axes: executions.map((execution) => execution.axis),
+    ensemble: executions.map((execution) => execution.requestedModel),
+  };
+}
+
+function sameProofSlice(
+  left: { axes: readonly ReviewAxis[]; ensemble: readonly ModelRef[] },
+  right: { axes: readonly ReviewAxis[]; ensemble: readonly ModelRef[] },
+): boolean {
+  if (left.axes.length !== right.axes.length || left.ensemble.length !== right.ensemble.length) return false;
+  for (let index = 0; index < left.axes.length; index += 1) {
+    if (left.axes[index] !== right.axes[index]) return false;
+  }
+  for (let index = 0; index < left.ensemble.length; index += 1) {
+    const a = left.ensemble[index];
+    const b = right.ensemble[index];
+    if (a === undefined || b === undefined) return false;
+    if (a.provider !== b.provider || a.model !== b.model) return false;
+  }
+  return true;
 }
 
 /**
@@ -42,14 +101,22 @@ export function latestCompletedReviewRound(
  */
 export function buildCleanRoundFromReview(input: RecordCleanRoundInput): CleanRound {
   const reviewRoundIndex =
-    input.reviewRoundIndex ?? latestCompletedReviewRound(input.reviewExecutions, input.checkpointHash, input.requiredReviewers);
+    input.reviewRoundIndex ??
+    nextUnconsumedCompletedReviewRound(
+      input.existingCleanRounds,
+      input.reviewExecutions,
+      input.checkpointHash,
+      input.requiredReviewers,
+    );
   if (reviewRoundIndex === null) {
     throw new Error("cannot record clean round without completed review executions");
   }
 
-  const roundExecutions = reviewRoundExecutions(input.reviewExecutions, input.checkpointHash, reviewRoundIndex).filter(
-    (execution) => execution.completed,
-  );
+  if (consumedReviewRoundIndexes(input.existingCleanRounds, input.checkpointHash).has(reviewRoundIndex)) {
+    throw new Error(`review round ${reviewRoundIndex} already proves a clean round`);
+  }
+
+  const roundExecutions = completedProofExecutions(input.reviewExecutions, input.checkpointHash, reviewRoundIndex);
   if (roundExecutions.length === 0) {
     throw new Error("cannot record clean round without completed review executions");
   }
@@ -72,8 +139,7 @@ export function buildCleanRoundFromReview(input: RecordCleanRoundInput): CleanRo
     throw new Error("validated blocking findings remain; round is not clean");
   }
 
-  const axes = roundExecutions.map((execution) => execution.axis);
-  const ensemble = roundExecutions.map((execution) => execution.requestedModel);
+  const { axes, ensemble } = proofSlice(roundExecutions);
   const rawFindings = roundExecutions.reduce((sum, execution) => sum + execution.findings.length, 0);
   const priorForCheckpoint = cleanRoundsFor(input.existingCleanRounds, input.checkpointHash);
   const roundIndex = (priorForCheckpoint.at(-1)?.roundIndex ?? 0) + 1;
@@ -83,6 +149,7 @@ export function buildCleanRoundFromReview(input: RecordCleanRoundInput): CleanRo
     runId: input.runId,
     checkpointHash: input.checkpointHash,
     roundIndex,
+    reviewRoundIndex,
     axes,
     ensemble,
     rawFindings,
@@ -116,13 +183,21 @@ export function cleanRoundsHaveReviewProof(
 ): boolean {
   const scoped = cleanRoundsFor(cleanRounds, checkpointHash);
   if (scoped.length === 0) return true;
-  const completedRound = latestCompletedReviewRound(reviewExecutions, checkpointHash, requiredReviewers);
-  if (completedRound === null) return false;
-  return scoped.every(() => {
-    const executions = reviewRoundExecutions(reviewExecutions, checkpointHash, completedRound);
-    return (
-      executions.length >= requiredReviewers &&
-      isReviewRoundComplete(reviewExecutions, checkpointHash, completedRound, requiredReviewers)
-    );
-  });
+
+  const seen = new Set<number>();
+  for (const round of scoped) {
+    if (round.reviewRoundIndex === undefined) return false;
+    if (seen.has(round.reviewRoundIndex)) return false;
+    seen.add(round.reviewRoundIndex);
+    if (
+      !isReviewRoundComplete(reviewExecutions, checkpointHash, round.reviewRoundIndex, requiredReviewers)
+    ) {
+      return false;
+    }
+    const completed = completedProofExecutions(reviewExecutions, checkpointHash, round.reviewRoundIndex);
+    if (completed.length < requiredReviewers) return false;
+    if (completed.some((execution) => execution.checkpointHash !== checkpointHash)) return false;
+    if (!sameProofSlice({ axes: round.axes, ensemble: round.ensemble }, proofSlice(completed))) return false;
+  }
+  return true;
 }

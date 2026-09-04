@@ -262,19 +262,25 @@ function seedConvergenceRun(
       createdAt: clock.now(),
       updatedAt: clock.now(),
     };
-    const reviewExecutions = reviewRound(runId, fixture.integrated, 1);
+    const reviewCount = Math.max(options.cleanRounds ?? 1, 1);
+    const reviewEvents = [];
+    for (let roundIndex = 1; roundIndex <= reviewCount; roundIndex += 1) {
+      for (const [index, execution] of reviewRound(runId, fixture.integrated, roundIndex).entries()) {
+        reviewEvents.push({
+          id: id("evt", clock.now() + 20 + roundIndex * 10 + index),
+          runId,
+          ts: clock.now() + 20 + roundIndex * 10 + index,
+          type: "review.finished" as const,
+          payload: { execution },
+          causedBy: [] as string[],
+          actor: { kind: "system" as const },
+          artifacts: [],
+        });
+      }
+    }
     store.events.append([
       { id: id("evt", clock.now() + 10), runId, ts: clock.now() + 10, type: "candidate.created", payload: { candidate }, causedBy: [], actor: { kind: "worker", model: candidate.model }, artifacts: [] },
-      ...reviewExecutions.map((execution, index) => ({
-        id: id("evt", clock.now() + 20 + index),
-        runId,
-        ts: clock.now() + 20 + index,
-        type: "review.finished" as const,
-        payload: { execution },
-        causedBy: [] as string[],
-        actor: { kind: "system" as const },
-        artifacts: [],
-      })),
+      ...reviewEvents,
     ]);
   }
 
@@ -361,7 +367,7 @@ function seedDominatedConvergenceRun(
 
 function reviewRound(runId: string, checkpointHash: string, roundIndex: number): ReviewExecution[] {
   return (["correctness", "regression", "adversarial"] as const).map((axis, index) => ({
-    id: id("rvex", NOW + index),
+    id: id("rvex", NOW + roundIndex * 10 + index),
     runId,
     checkpointHash,
     roundIndex,
@@ -369,24 +375,22 @@ function reviewRound(runId: string, checkpointHash: string, roundIndex: number):
     requestedModel: { provider: "p", model: `m${index + 1}` },
     completed: true,
     findings: [],
-    startedAt: NOW,
-    finishedAt: NOW,
+    startedAt: NOW + roundIndex,
+    finishedAt: NOW + roundIndex,
   }));
 }
 
 function recordCleanRounds(store: Store, clock: FakeClock, runId: string, checkpointHash: string, count: number): void {
   for (let i = 1; i <= count; i += 1) {
+    const proof = reviewRound(runId, checkpointHash, i);
     const cleanRound: CleanRound = {
       id: id("cr", clock.now() + i),
       runId,
       checkpointHash,
       roundIndex: i,
-      axes: ["correctness", "regression", "adversarial"],
-      ensemble: [
-        { provider: "p", model: "m1" },
-        { provider: "p", model: "m2" },
-        { provider: "p", model: "m3" },
-      ],
+      reviewRoundIndex: i,
+      axes: proof.map((execution) => execution.axis),
+      ensemble: proof.map((execution) => execution.requestedModel),
       rawFindings: 0,
       validatedBlocking: 0,
       novel: true,

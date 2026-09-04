@@ -11,6 +11,11 @@ export const CleanRoundSchema = z.object({
   runId: IdSchema,
   checkpointHash: GitHashSchema,
   roundIndex: z.number().int().positive(),
+  /**
+   * Review-swarm round that proves this clean round. Optional so historical events
+   * remain readable; anti-fake-DONE rejects absence.
+   */
+  reviewRoundIndex: z.number().int().positive().optional(),
   axes: z.array(ReviewAxisSchema).min(1),
   ensemble: z.array(ModelRefSchema).min(1),
   rawFindings: z.number().int().nonnegative(),
