@@ -5,7 +5,7 @@ Do not treat this file as a second contract.
 
 | Field | Value |
 |---|---|
-| Status | INTEGRATION — blocking VALID on production client injection; waiting second review then fix |
+| Status | INTEGRATION — blocking VALID on production client injection; Grok+Claude reviews; Composer retired |
 | Contract path | `docs/ledger/C3.md` |
 | Contract hash | d8618b8bf39e3db26ced211dac2d56aa1f116a8c8fe85926de7cd542e358a777 |
 | Base commit | `8cf0380b0cda8519966a28b68b5a081c981eee5c` |
@@ -18,7 +18,8 @@ Do not treat this file as a second contract.
 | Integration commit | `a9fbc733139c99e25fe263ee7a4f890677713432` branch `task/C3-integration` worktree `/Users/fedorsvetlov/polish-c3-integration` |
 | Polish verification runs | `run_01m1pkbnxz53215q9n0b3m` **FAIL** (same B-4: GATING→PLANNING duplicate ×5, 0 completed tasks). TARGET unchanged at `a9fbc73`. Not a C3 code finding; not a clean round. |
 | Grok review | running against `a9fbc73` |
-| Composer review | **FAIL** (blocking VALID). |
+| Claude review | launched against `a9fbc73` (required second Cursor reviewer after user dropped Composer) |
+| Composer review | historical only — **FAIL** (blocking VALID, independently reproduced). Not used again. |
 | Findings | **VALID blocking (integration `a9fbc73`):** production `VerifierAdapter` does not inject a scripted client. Reproduced: sidecar venv health=true, `selectFrontier` → `method=pairwise fallback=true`. Tests set `POLISH_VERIFIER_CLIENT=scripted` and hide the gap. **VALID non-blocking:** no production test of default sidecar PPT. **UNCERTAIN:** granularity unused; `pivotTournamentFrom` unused on PPT path. **VALID (Q):** unchanged. |
 | Fix rounds | 0 |
 | Clean rounds | 0/2 |

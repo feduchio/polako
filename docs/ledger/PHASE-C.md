@@ -2,6 +2,14 @@
 
 Phase B remains **OPEN**. This file does not accept Phase B and does not accept Phase C.
 
+## Collaboration lanes (user decision 2026-09-04)
+
+Independent implementation and review lanes are **Grok / Claude / Polish**.
+
+Composer is **not** used from this decision onward (implementers, blind compare, or adversarial review). Historical Composer C3 artifacts remain in the ledger as evidence already obtained; they are not a reason to launch Composer again.
+
+Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewers, plus Polish verification when HOST can complete it.
+
 ## Trusted generations
 
 | Role | Object | Notes |
