@@ -5,7 +5,7 @@ Do not treat this file as a second contract.
 
 | Field | Value |
 |---|---|
-| Status | INTEGRATION — P selected; integration gates PASS; Polish verify running |
+| Status | INTEGRATION — Polish HOST verify FAIL (B-4); Cursor adversarial reviews running |
 | Contract path | `docs/ledger/C3.md` |
 | Contract hash | d8618b8bf39e3db26ced211dac2d56aa1f116a8c8fe85926de7cd542e358a777 |
 | Base commit | `8cf0380b0cda8519966a28b68b5a081c981eee5c` |
@@ -16,9 +16,9 @@ Do not treat this file as a second contract.
 | Deterministic results | Grok PASS 491 tests. Composer PASS 486 tests. Integration (P) `pnpm check`+`build` PASS 491 tests at `a9fbc73`. |
 | Selection | **P** (`a9fbc73`). [compare A](f12bf60d-d3c0-4d4d-900b-2b5becebfba9) and [compare B](966063d4-c4c6-4b10-82e4-7f09a1b824e8) both recommend P. Q disqualified on VALID cost/secrets. Not spliced. |
 | Integration commit | `a9fbc733139c99e25fe263ee7a4f890677713432` branch `task/C3-integration` worktree `/Users/fedorsvetlov/polish-c3-integration` |
-| Polish verification runs | `run_01m1pkbnxz53215q9n0b3m` TARGET `/Users/fedorsvetlov/polish-c3-integration` checkpoint `a9fbc73` |
-| Grok review | pending (after verify/fix + gates) |
-| Composer review | pending (after verify/fix + gates) |
+| Polish verification runs | `run_01m1pkbnxz53215q9n0b3m` **FAIL** (same B-4: GATING→PLANNING duplicate ×5, 0 completed tasks). TARGET unchanged at `a9fbc73`. Not a C3 code finding; not a clean round. |
+| Grok review | running against `a9fbc73` |
+| Composer review | running against `a9fbc73` |
 | Findings | **VALID (Q):** `LazyClient().get()` default; unsanitized sidecar `process.env`; `verifierProvenance` snapshotted before PPT then spread last (stale fallback/scheme); no real-child timeout test. **VALID (P):** none. **UNCERTAIN (P):** PPT ignores `pivotTournamentFrom`; default COMPARING does not inject a scripted client, so sidecar scoring is env-opt-in and otherwise TS fallback. |
 | Fix rounds | 0 |
 | Clean rounds | 0/2 |
