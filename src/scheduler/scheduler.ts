@@ -30,6 +30,8 @@ export interface EnqueueInput {
   maxAttempts?: number;
   /** event ids that caused this job (why-chain) */
   causedBy?: string[];
+  /** persist a not-before timestamp; tick will not dispatch until then */
+  dueAt?: number | null;
 }
 
 export interface SchedulerOptions {
@@ -112,6 +114,7 @@ export class Scheduler {
       error: null,
       createdAt: now,
       updatedAt: now,
+      dueAt: input.dueAt ?? null,
     };
     this.store.events.append([this.event(job, "job.created", input.causedBy ?? [])]);
     return job;
@@ -161,6 +164,7 @@ export class Scheduler {
       if (control === null || !mayDispatchJobs(control)) continue; // vanished runs were failed in applyRunControl
       const run = this.store.repos.runs.get(job.runId);
       if (run === null || isTerminal(RUN_PHASE_TABLE, run.phase)) continue;
+      if (job.dueAt !== null && now < job.dueAt) continue;
       const used = running.get(job.lane) ?? 0;
       if (used >= this.laneLimit(job.lane)) continue;
       if (!this.handlers.has(job.type)) {

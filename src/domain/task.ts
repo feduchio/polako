@@ -34,6 +34,18 @@ export type TaskOrigin = z.infer<typeof TaskOriginSchema>;
 export const TaskKindSchema = z.enum(["bugfix", "feature", "refactor", "simplify", "investigation"]);
 export type TaskKind = z.infer<typeof TaskKindSchema>;
 
+/** Orthogonal to TaskOrigin. Missing historical values are functional (fail-safe). */
+export const TaskWorkClassSchema = z.enum(["functional", "style_only"]);
+export type TaskWorkClass = z.infer<typeof TaskWorkClassSchema>;
+
+export const TaskWorkClassProvenanceSchema = z.object({
+  workClass: TaskWorkClassSchema,
+  classifiedBy: z.string().min(1),
+  sourceRef: z.string().min(1),
+  classificationEventId: IdSchema,
+});
+export type TaskWorkClassProvenance = z.infer<typeof TaskWorkClassProvenanceSchema>;
+
 export const TaskStateSchema = z.enum([
   "PENDING",
   "READY",
@@ -92,6 +104,10 @@ export const TaskSchema = z.object({
   selectedCandidateId: IdSchema.nullable(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
+  workClass: TaskWorkClassSchema.optional(),
+  classifiedBy: z.string().min(1).optional(),
+  sourceRef: z.string().min(1).optional(),
+  classificationEventId: IdSchema.optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 
@@ -117,6 +133,10 @@ export interface TaskDraft {
   baseCheckpointHash: string;
   dependsOn?: string[];
   now: number;
+  workClass?: TaskWorkClass;
+  classifiedBy?: string;
+  sourceRef?: string;
+  classificationEventId?: string;
 }
 
 /** The only way to create a coding task from a finding. Throws unless the finding is VALID + blocking with a VALID validation. */
@@ -201,6 +221,10 @@ function baseTask(draft: TaskDraft): Omit<Task, "kind" | "origin" | "touchesProd
     selectedCandidateId: null,
     createdAt: draft.now,
     updatedAt: draft.now,
+    ...(draft.workClass === undefined ? {} : { workClass: draft.workClass }),
+    ...(draft.classifiedBy === undefined ? {} : { classifiedBy: draft.classifiedBy }),
+    ...(draft.sourceRef === undefined ? {} : { sourceRef: draft.sourceRef }),
+    ...(draft.classificationEventId === undefined ? {} : { classificationEventId: draft.classificationEventId }),
   };
 }
 

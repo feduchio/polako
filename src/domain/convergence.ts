@@ -58,3 +58,11 @@ export const PathologySchema = z.enum([
   "task_graph_growth_from_nonblocking",
 ]);
 export type Pathology = z.infer<typeof PathologySchema>;
+
+/** Stable total order for detector results and action ties. */
+export const PATHOLOGY_ORDER: readonly Pathology[] = PathologySchema.options;
+
+export const PATHOLOGY_DECISION_VERSION = 1;
+
+export const C2StrategyActionSchema = z.enum(["CHANGE_ENSEMBLE", "ROLLBACK", "NEEDS_HUMAN", "BUDGET_STOP"]);
+export type C2StrategyAction = z.infer<typeof C2StrategyActionSchema>;

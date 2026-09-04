@@ -50,7 +50,15 @@ export const ConvergenceStrategySchema = z.object({
   maxInvestigationRoundsPerFinding: z.number().int().min(0).default(2),
   /** consecutive attempts without evidence improvement before strategy change */
   noProgressAttempts: z.number().int().min(1).default(3),
+  /** sliding-window sizes; a detector is silent until its full window exists */
+  findingOscillationWindow: z.number().int().min(4).default(4),
+  checkpointOscillationWindow: z.number().int().min(4).default(4),
+  disagreementWindow: z.number().int().min(2).default(2),
+  taskGrowthWindow: z.number().int().min(1).default(3),
+  /** persisted CHANGE_ENSEMBLE cap per pathology kind */
+  maxEnsembleChangesPerPathology: z.number().int().min(1).default(1),
 });
+export type ConvergenceStrategy = z.infer<typeof ConvergenceStrategySchema>;
 
 export const VerifierStrategySchema = z.object({
   backend: z.enum(["ts", "sidecar"]).default("sidecar"),

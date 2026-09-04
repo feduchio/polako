@@ -1,5 +1,5 @@
 import type { PolishConfig } from "../domain/config.js";
-import type { Run, RunPhase } from "../domain/run.js";
+import type { Run, RunPhase, TerminalReason } from "../domain/run.js";
 import type { RepositoryStartPolicy } from "../project/index.js";
 import type { Scheduler } from "../scheduler/index.js";
 import type { Clock } from "../shared/clock.js";
@@ -16,7 +16,7 @@ export interface PhaseContext {
 /** Result of one phase-driver invocation. */
 export type PhaseDriverResult =
   | { status: "waiting" }
-  | { status: "complete"; nextPhase: RunPhase };
+  | { status: "complete"; nextPhase: RunPhase; terminalReason?: TerminalReason };
 
 export type PhaseDriver = (ctx: PhaseContext) => PhaseDriverResult | Promise<PhaseDriverResult>;
 

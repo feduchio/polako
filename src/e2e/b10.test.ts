@@ -46,7 +46,7 @@ function testConfig(overrides: Partial<PolishConfig> = {}): PolishConfig {
     ...defaultConfig(),
     candidates: { trivial: 1, normal: 1, complex: 1 },
     review: { reviewersPerRound: 1, rotateEnsembles: false, minQualityForRotation: 0 },
-    convergence: { requiredCleanRounds: 1, maxInvestigationRoundsPerFinding: 0, noProgressAttempts: 1 },
+    convergence: { ...defaultConfig().convergence, requiredCleanRounds: 1, maxInvestigationRoundsPerFinding: 0, noProgressAttempts: 1 },
     retry: { ...defaultConfig().retry, maxAttempts: 5 },
     ...overrides,
   };

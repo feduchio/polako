@@ -27,6 +27,7 @@ import {
   nextUnconsumedCompletedReviewRound,
   recordCleanRoundEvent,
 } from "../convergence/record.js";
+import { orderReviewersByEnsemble, pendingEnsembleOverride } from "../convergence/pathology/ensemble.js";
 import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import type { PhaseContext, PhaseDriver } from "./types.js";
 
@@ -60,7 +61,9 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
       (execution) => execution.checkpointHash === hash && execution.roundIndex === roundIndex,
     );
     const axes = await resolveAxes(ctx, options);
-    const reviewers = await resolveReviewers(ctx, options);
+    const override = pendingEnsembleOverride(ctx.store.events.list(ctx.run.id), hash, roundIndex);
+    const resolved = await resolveReviewers(ctx, options);
+    const reviewers = override === null ? resolved : orderReviewersByEnsemble(resolved, override);
     if (reviewers.length === 0) {
       if (recentlyRateLimitedReviewModels(ctx).length > 0) return { status: "waiting" };
       throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");

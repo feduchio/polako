@@ -15,9 +15,11 @@ export interface BudgetLimits {
 }
 
 export interface BudgetSnapshot {
+  /** Known USD only. Null provider prices never become zero. */
   runUsd: number;
   runTokens: number;
   perTask: Record<string, number>;
+  unknownCostCalls: string[];
 }
 
 /**
@@ -97,12 +99,17 @@ export class BudgetTracker {
   constructor(private readonly limits: BudgetLimits) {}
 
   snapshot(runId: string): BudgetSnapshot {
-    return this.runs.get(runId) ?? { runUsd: 0, runTokens: 0, perTask: {} };
+    return this.runs.get(runId) ?? { runUsd: 0, runTokens: 0, perTask: {}, unknownCostCalls: [] };
   }
 
   /** Restore from persisted usage (replayed `model.call` events). */
   restore(runId: string, snapshot: BudgetSnapshot): void {
-    this.runs.set(runId, snapshot);
+    this.runs.set(runId, {
+      runUsd: snapshot.runUsd,
+      runTokens: snapshot.runTokens,
+      perTask: { ...snapshot.perTask },
+      unknownCostCalls: [...snapshot.unknownCostCalls],
+    });
   }
 
   assertWithin(runId: string, taskId?: string): void {
@@ -118,11 +125,22 @@ export class BudgetTracker {
     }
   }
 
-  record(runId: string, usage: Usage, taskId?: string): BudgetSnapshot {
-    const s = { ...this.snapshot(runId), perTask: { ...this.snapshot(runId).perTask } };
+  record(runId: string, usage: Usage, taskId?: string, callId?: string): BudgetSnapshot {
+    const previous = this.snapshot(runId);
+    const s: BudgetSnapshot = {
+      runUsd: previous.runUsd,
+      runTokens: previous.runTokens,
+      perTask: { ...previous.perTask },
+      unknownCostCalls: [...previous.unknownCostCalls],
+    };
     const tokens = usage.inputTokens + usage.outputTokens;
     s.runTokens += tokens;
-    s.runUsd += usage.costUsd ?? 0;
+    if (usage.costUsd === null) {
+      const unknownId = callId ?? `unknown:${s.unknownCostCalls.length}`;
+      if (!s.unknownCostCalls.includes(unknownId)) s.unknownCostCalls.push(unknownId);
+    } else {
+      s.runUsd += usage.costUsd;
+    }
     if (taskId !== undefined) s.perTask[taskId] = (s.perTask[taskId] ?? 0) + tokens;
     this.runs.set(runId, s);
     return s;

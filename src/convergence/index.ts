@@ -12,3 +12,4 @@ export {
 } from "./record.js";
 export { createRollbackCheckpoint, type RollbackCheckpointInput, type RollbackCheckpointResult, type RunHead } from "./rollback.js";
 export { CleanRoundTracker, preferRotatedEnsemble, type CleanRoundDraft, type EnsembleOption } from "./tracker.js";
+export * from "./pathology/index.js";

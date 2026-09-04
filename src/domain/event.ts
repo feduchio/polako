@@ -57,7 +57,12 @@ export const KNOWN_EVENT_TYPES = [
   "council.role_resolved",
   "council.unavailable",
   "budget.updated",
+  "budget.evaluated",
   "pathology.detected",
+  "pathology.sample",
+  "pathology.decision",
+  "pathology.effect_started",
+  "pathology.effect_completed",
   "report.generated",
 ] as const;
 export type KnownEventType = (typeof KNOWN_EVENT_TYPES)[number];
