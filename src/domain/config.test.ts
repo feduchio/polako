@@ -14,6 +14,7 @@ describe("PolishConfig", () => {
     expect(cfg.routing.maxInputCostPerM).toBe(0);
     expect(cfg.routing.maxOutputCostPerM).toBe(0);
     expect(cfg.council.maxAttemptsPerModel).toBe(2);
+    expect(cfg.verifier.backend).toBe("sidecar");
   });
 
   it("accepts an ordered supervisor fallback chain", () => {

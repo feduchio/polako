@@ -3,7 +3,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "node_modules/**", "fixtures/**", "coverage/**", ".pnpm-store/**", "scripts/**"],
+    ignores: ["dist/**", "node_modules/**", "fixtures/**", "coverage/**", ".pnpm-store/**", "scripts/**", "sidecars/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,

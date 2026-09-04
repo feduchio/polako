@@ -53,7 +53,7 @@ export const ConvergenceStrategySchema = z.object({
 });
 
 export const VerifierStrategySchema = z.object({
-  backend: z.enum(["ts", "sidecar"]).default("ts"),
+  backend: z.enum(["ts", "sidecar"]).default("sidecar"),
   /** score granularity (letter tokens); default follows LLM-as-a-Verifier findings */
   granularity: z.number().int().min(2).max(26).default(20),
   /** repeated evaluations per pair */

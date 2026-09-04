@@ -16,6 +16,8 @@ import { Scheduler } from "../scheduler/index.js";
 import { stubDriverFor } from "./stubs.js";
 import { RunEngine } from "./engine.js";
 import { createComparingDriver } from "./candidateDrivers.js";
+import type { PolishConfig } from "../domain/config.js";
+import { VerifierAdapter } from "../verify/sidecar.js";
 import type { VerifierStrategy } from "../verify/strategy.js";
 
 const cleanup: string[] = [];
@@ -132,12 +134,52 @@ describe("B3 production comparing driver", () => {
     expect(compared?.payload["method"]).toBe("deterministic");
   });
 
-  function engineWithComparing(extra: { resolveVerifierStrategy?: () => VerifierStrategy } = {}): RunEngine {
+  it("does not require Python when backend=ts", async () => {
+    const { runId } = seedComparingRun(store, clock, fixture, [
+      passedCandidate(tieAId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+      passedCandidate(tieBId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 8, deletions: 0 }),
+    ]);
+    const tsConfig = defaultConfig();
+    tsConfig.verifier.backend = "ts";
+    const engine = engineWithComparing({}, tsConfig);
+    await engine.tickRun(runId);
+    const compared = store.events.list(runId, { types: ["candidate.compared"] })[0];
+    expect(compared?.payload["backend"]).toBe("ts");
+    expect(compared?.payload["fallback"]).toBe(false);
+    expect(compared?.payload["method"]).toBe("pairwise");
+    expect(compared?.payload["winner"]).toBe(tieAId);
+  });
+
+  it("still yields a tournament result when the sidecar is down", async () => {
+    const { runId } = seedComparingRun(store, clock, fixture, [
+      passedCandidate(tieAId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+      passedCandidate(tieBId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 8, deletions: 0 }),
+    ]);
+    const sidecarConfig = defaultConfig();
+    sidecarConfig.verifier.backend = "sidecar";
+    const engine = engineWithComparing({
+      resolveVerifierStrategy: () => new VerifierAdapter({
+        command: "__polish_missing_python__",
+        requestTimeoutMs: 50,
+      }),
+    }, sidecarConfig);
+    await engine.tickRun(runId);
+    const compared = store.events.list(runId, { types: ["candidate.compared"] })[0];
+    expect(compared?.payload["backend"]).toBe("sidecar");
+    expect(compared?.payload["fallback"]).toBe(true);
+    expect(compared?.payload["winner"]).toBe(tieAId);
+    expect(store.repos.candidates.get(tieAId)?.state).toBe("WINNER");
+  });
+
+  function engineWithComparing(
+    extra: { resolveVerifierStrategy?: () => VerifierStrategy } = {},
+    config: PolishConfig = defaultConfig(),
+  ): RunEngine {
     const engine = new RunEngine({
       store,
       clock,
       scheduler: sched,
-      config: defaultConfig(),
+      config,
       assertProjectClean: () => undefined,
     }, false);
     for (const phase of ["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "PLANNING", "REVIEWING", "VALIDATING", "CONVERGENCE_CHECK"] as const) {

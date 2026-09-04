@@ -11,7 +11,7 @@ import type { BaselineSnapshot } from "../domain/checks.js";
 import { compareToBaseline } from "../domain/checks.js";
 import type { GateResult } from "../project/checkRunner.js";
 import { createCheckOutputPersister } from "../project/checkRunner.js";
-import { PairwiseJudge } from "../verify/pairwise.js";
+import { createVerifierStrategy, VerifierAdapter } from "../verify/sidecar.js";
 import {
   selectTournamentWinner,
   type TournamentSourceCandidate,
@@ -208,12 +208,22 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
       strategy,
       context: { runId: ctx.run.id, task: task.description, acceptance: task.acceptance },
       pivotFrom: ctx.config.verifier.pivotTournamentFrom,
+      pivots: 2,
+      repeats: ctx.config.verifier.repeats,
+      granularity: ctx.config.verifier.granularity,
     });
+    const backend = selection.backend ?? (strategy instanceof VerifierAdapter ? "sidecar" : ctx.config.verifier.backend);
+    const fallback = selection.fallback ?? (strategy instanceof VerifierAdapter && strategy.usedFallback);
 
     const rationaleRef = ctx.store.artifacts.put(
       JSON.stringify({
         taskId: task.id,
         method: selection.method,
+        backend,
+        fallback,
+        logprobScheme: selection.logprobScheme ?? null,
+        criteria: selection.criteria ?? [],
+        nComparisons: selection.nComparisons ?? selection.evidence.length,
         frontier: selection.frontier,
         winnerId: selection.winnerId,
         ranking: selection.ranking.map((entry) => ({
@@ -239,6 +249,11 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
       taskId: task.id,
       winner: selection.winnerId,
       method: selection.method,
+      backend,
+      fallback,
+      logprobScheme: selection.logprobScheme ?? null,
+      criteria: selection.criteria ?? [],
+      nComparisons: selection.nComparisons ?? selection.evidence.length,
       eligible: eligible.map((candidate) => candidate.id),
       frontier: selection.frontier,
       metrics: Object.fromEntries(selection.ranking.map((entry) => [entry.candidate.id, entry.metrics])),
@@ -437,7 +452,7 @@ async function resolveVerifierStrategy(
   options: ComparingDriverOptions,
 ): Promise<VerifierStrategy> {
   if (options.resolveVerifierStrategy !== undefined) return options.resolveVerifierStrategy(ctx, task);
-  return new PairwiseJudge();
+  return createVerifierStrategy(ctx.config.verifier);
 }
 
 function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult, index: number): Candidate {

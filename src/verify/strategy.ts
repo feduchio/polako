@@ -23,10 +23,38 @@ export interface PairwiseVerdict {
   scores: Record<string, number>;
 }
 
+export type LogprobScheme = "direct" | "two_stage";
+export type VerifierBackend = "sidecar" | "ts";
+
+export interface FrontierSelectOptions {
+  pivots?: number;
+  repeats?: number;
+  granularity?: number;
+  criteria?: string[];
+  onError?: "tie" | "raise";
+}
+
+export interface FrontierSelection {
+  winnerId: string | null;
+  ranking: string[];
+  scores: Record<string, number>;
+  rationale: string;
+  method: "ppt" | "pairwise";
+  fallback: boolean;
+  logprobScheme?: LogprobScheme;
+  criteria: string[];
+  nComparisons: number;
+}
+
 export interface VerifierStrategy {
   comparePair(
     a: TournamentCandidate,
     b: TournamentCandidate,
     context: PairwiseContext,
   ): Promise<PairwiseVerdict>;
+  selectFrontier?(
+    candidates: readonly TournamentCandidate[],
+    context: PairwiseContext,
+    options?: FrontierSelectOptions,
+  ): Promise<FrontierSelection>;
 }

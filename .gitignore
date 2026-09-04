@@ -15,3 +15,7 @@ fixtures/**/.codegraph/
 !.cursor/skills/
 !.cursor/skills/polish/
 !.cursor/skills/polish/SKILL.md
+sidecars/llm_verifier/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

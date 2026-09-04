@@ -1,19 +1,32 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { PairwiseJudge } from "./pairwise.js";
 import type {
+  FrontierSelectOptions,
+  FrontierSelection,
   PairwiseContext,
   PairwiseVerdict,
   TournamentCandidate,
   VerifierStrategy,
 } from "./strategy.js";
 
+const DEFAULT_SCRIPT = fileURLToPath(new URL("../../sidecars/llm_verifier/main.py", import.meta.url));
+
+const SECRET_ENV = /(_API_KEY$|TOKEN|SECRET|PASSWORD|CREDENTIAL|^AWS_|^GH_|^GITHUB_|^OPENAI|^GEMINI|^GOOGLE|^GROQ|^OPENROUTER|^VERTEX|^ANTHROPIC|^DEEPSEEK)/i;
+
 export interface VerifierSidecarOptions {
   command?: string;
   scriptPath?: string;
   requestTimeoutMs?: number;
   fallback?: VerifierStrategy;
+  env?: NodeJS.ProcessEnv;
+  repeats?: number;
+  granularity?: number;
+  pivots?: number;
+  configuredCriteria?: string[];
 }
 
 interface PendingRequest {
@@ -22,9 +35,17 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+export interface VerifierProvenance {
+  backend: "sidecar" | "ts";
+  fallback: boolean;
+  logprobScheme?: "direct" | "two_stage";
+  criteria: string[];
+  nComparisons: number;
+}
+
 /**
- * JSON-lines verifier transport. A failed request gets one clean restart; if that also
- * fails, comparison falls back to the deterministic TypeScript pairwise judge.
+ * JSON-lines verifier transport over a persistent Python child.
+ * Crash, timeout, protocol error, unhealthy restart, or missing package ⇒ TS fallback.
  */
 export class VerifierAdapter implements VerifierStrategy {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -34,14 +55,24 @@ export class VerifierAdapter implements VerifierStrategy {
   private readonly command: string;
   private readonly scriptPath: string;
   private readonly timeoutMs: number;
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly repeats: number;
+  private readonly granularity: number;
+  private readonly pivots: number;
+  private readonly configuredCriteria: string[];
+  usedFallback = false;
+  lastProvenance: VerifierProvenance = { backend: "sidecar", fallback: false, criteria: [], nComparisons: 0 };
 
   constructor(options: VerifierSidecarOptions = {}) {
-    this.command = options.command ?? "python3";
-    this.scriptPath =
-      options.scriptPath ??
-      fileURLToPath(new URL("../../sidecars/llm_verifier/main.py", import.meta.url));
-    this.timeoutMs = options.requestTimeoutMs ?? 2_000;
+    this.scriptPath = options.scriptPath ?? DEFAULT_SCRIPT;
+    this.command = options.command ?? defaultPython(this.scriptPath);
+    this.timeoutMs = options.requestTimeoutMs ?? 3_000;
     this.fallback = options.fallback ?? new PairwiseJudge();
+    this.env = scrubSidecarEnv(options.env);
+    this.repeats = options.repeats ?? 2;
+    this.granularity = options.granularity ?? 20;
+    this.pivots = options.pivots ?? 2;
+    this.configuredCriteria = options.configuredCriteria ?? [];
   }
 
   async comparePair(
@@ -49,20 +80,59 @@ export class VerifierAdapter implements VerifierStrategy {
     b: TournamentCandidate,
     context: PairwiseContext,
   ): Promise<PairwiseVerdict> {
+    this.usedFallback = false;
+    const criteria = this.criteriaFor(context);
     const request = {
-      op: "score_pair",
+      op: "compare",
       candidates: [a, b],
       context,
-      criteria: decomposeCriteria(context.task),
+      criteria,
+      n_evaluations: this.repeats,
+      granularity: this.granularity,
     };
     try {
-      return parseVerdict(await this.request(request), a.id, b.id);
+      const response = await this.request(request);
+      this.lastProvenance = provenanceFrom(false, responseMeta(response, criteria), criteria);
+      return parseVerdict(response, a.id, b.id);
     } catch {
       try {
         await this.restart();
-        return parseVerdict(await this.request(request), a.id, b.id);
+        const response = await this.request(request);
+        this.lastProvenance = provenanceFrom(false, responseMeta(response, criteria), criteria);
+        return parseVerdict(response, a.id, b.id);
       } catch {
+        this.usedFallback = true;
+        this.lastProvenance = { backend: "sidecar", fallback: true, criteria, nComparisons: 1 };
         return this.fallback.comparePair(a, b, context);
+      }
+    }
+  }
+
+  async selectFrontier(
+    candidates: readonly TournamentCandidate[],
+    context: PairwiseContext,
+    options: FrontierSelectOptions = {},
+  ): Promise<FrontierSelection> {
+    this.usedFallback = false;
+    const criteria = options.criteria ?? this.criteriaFor(context);
+    const request = {
+      op: "select",
+      candidates: [...candidates],
+      context,
+      criteria,
+      n_evaluations: options.repeats ?? this.repeats,
+      pivots: options.pivots ?? this.pivots,
+      granularity: options.granularity ?? this.granularity,
+      on_error: options.onError ?? "raise",
+    };
+    try {
+      return this.selectionFrom(await this.request(request), candidates, criteria, false);
+    } catch {
+      try {
+        await this.restart();
+        return this.selectionFrom(await this.request(request), candidates, criteria, false);
+      } catch {
+        return this.fallbackFrontier(candidates, context, criteria);
       }
     }
   }
@@ -89,11 +159,105 @@ export class VerifierAdapter implements VerifierStrategy {
     this.stop(new Error("verifier sidecar closed"));
   }
 
+  private criteriaFor(context: PairwiseContext): string[] {
+    return decomposeCriteria(context.task, context.acceptance, this.configuredCriteria);
+  }
+
+  private selectionFrom(
+    value: unknown,
+    candidates: readonly TournamentCandidate[],
+    criteria: string[],
+    fallback: boolean,
+  ): FrontierSelection {
+    if (!isRecord(value) || typeof value["rationale"] !== "string" || !isRecord(value["scores"])) {
+      throw new TypeError("invalid verifier sidecar select response");
+    }
+    const ids = new Set(candidates.map((candidate) => candidate.id));
+    const winner = value["winner"];
+    if (winner !== null && (typeof winner !== "string" || !ids.has(winner))) {
+      throw new TypeError("sidecar selected an unknown candidate");
+    }
+    const ranking = Array.isArray(value["ranking"])
+      ? value["ranking"].filter((id): id is string => typeof id === "string" && ids.has(id))
+      : [];
+    const scores: Record<string, number> = {};
+    for (const candidate of candidates) {
+      const score = value["scores"][candidate.id];
+      if (typeof score !== "number" || !Number.isFinite(score)) {
+        throw new TypeError("sidecar scores must be finite numbers");
+      }
+      scores[candidate.id] = score;
+    }
+    const nComparisons = typeof value["n_comparisons"] === "number" ? value["n_comparisons"] : 0;
+    const logprobScheme = value["logprobScheme"] === "two_stage" || value["logprobScheme"] === "direct"
+      ? value["logprobScheme"]
+      : undefined;
+    const resolvedCriteria = Array.isArray(value["criteria"])
+      ? value["criteria"].filter((item): item is string => typeof item === "string")
+      : criteria;
+    const selection: FrontierSelection = {
+      winnerId: typeof winner === "string" ? winner : null,
+      ranking: ranking.length > 0 ? ranking : rankedIds(scores),
+      scores,
+      rationale: value["rationale"],
+      method: "ppt",
+      fallback,
+      criteria: resolvedCriteria,
+      nComparisons,
+    };
+    if (logprobScheme !== undefined) selection.logprobScheme = logprobScheme;
+    this.lastProvenance = {
+      backend: "sidecar",
+      fallback,
+      criteria: resolvedCriteria,
+      nComparisons,
+      ...(logprobScheme === undefined ? {} : { logprobScheme }),
+    };
+    return selection;
+  }
+
+  private async fallbackFrontier(
+    candidates: readonly TournamentCandidate[],
+    context: PairwiseContext,
+    criteria: string[],
+  ): Promise<FrontierSelection> {
+    this.usedFallback = true;
+    const scores: Record<string, number> = Object.fromEntries(candidates.map((candidate) => [candidate.id, 0]));
+    let comparisons = 0;
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const a = candidates[i];
+        const b = candidates[j];
+        if (a === undefined || b === undefined) continue;
+        const verdict = await this.fallback.comparePair(a, b, context);
+        comparisons++;
+        if (verdict.winner === a.id) scores[a.id] = (scores[a.id] ?? 0) + 2;
+        else if (verdict.winner === b.id) scores[b.id] = (scores[b.id] ?? 0) + 2;
+        else {
+          scores[a.id] = (scores[a.id] ?? 0) + 1;
+          scores[b.id] = (scores[b.id] ?? 0) + 1;
+        }
+      }
+    }
+    const ranking = rankedIds(scores);
+    this.lastProvenance = { backend: "sidecar", fallback: true, criteria, nComparisons: comparisons };
+    return {
+      winnerId: ranking[0] ?? null,
+      ranking,
+      scores,
+      rationale: "Sidecar unavailable; TypeScript pairwise fallback ranked the frontier.",
+      method: "pairwise",
+      fallback: true,
+      criteria,
+      nComparisons: comparisons,
+    };
+  }
+
   private start(): void {
     if (this.child !== null) return;
     const child = spawn(this.command, [this.scriptPath], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      env: this.env,
     });
     this.child = child;
     createInterface({ input: child.stdout }).on("line", (line) => {
@@ -171,16 +335,59 @@ export class VerifierAdapter implements VerifierStrategy {
   }
 }
 
-export function decomposeCriteria(task: string | undefined): string[] {
-  if (task === undefined || task.trim() === "") {
-    return ["correctness", "regression safety", "simplicity"];
-  }
-  const criteria = task
+export function createVerifierStrategy(
+  verifier: {
+    backend: "ts" | "sidecar";
+    repeats: number;
+    granularity: number;
+    criteria: string[];
+    pivotTournamentFrom: number;
+  },
+  options: VerifierSidecarOptions = {},
+): VerifierStrategy {
+  const fallback = options.fallback ?? new PairwiseJudge();
+  if (verifier.backend === "ts") return fallback;
+  return new VerifierAdapter({
+    ...options,
+    fallback,
+    repeats: options.repeats ?? verifier.repeats,
+    granularity: options.granularity ?? verifier.granularity,
+    configuredCriteria: options.configuredCriteria ?? verifier.criteria,
+    pivots: options.pivots ?? 2,
+  });
+}
+
+export function decomposeCriteria(
+  task: string | undefined,
+  acceptance?: readonly string[],
+  configured?: readonly string[],
+): string[] {
+  const fromTask = splitCriteria(task);
+  const fromAcceptance = (acceptance ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  const merged = [...fromTask, ...fromAcceptance].slice(0, 8);
+  if (merged.length > 0) return merged;
+  const defaults = (configured ?? []).map((item) => item.trim()).filter((item) => item.length > 0).slice(0, 8);
+  return defaults.length > 0 ? defaults : ["correctness", "regression safety", "simplicity"];
+}
+
+export function defaultPython(scriptPath: string): string {
+  const venvPython = join(dirname(scriptPath), ".venv", "bin", "python");
+  return existsSync(venvPython) ? venvPython : "python3";
+}
+
+export function sidecarScriptPath(): string {
+  return DEFAULT_SCRIPT;
+}
+
+function splitCriteria(task: string | undefined): string[] {
+  if (task === undefined || task.trim() === "") return [];
+  return task
     .split(/\n|[.;]\s+/)
     .map((criterion) => criterion.trim())
     .filter((criterion) => criterion.length > 0)
     .slice(0, 8);
-  return criteria.length > 0 ? criteria : ["correctness", "regression safety", "simplicity"];
 }
 
 function parseVerdict(value: unknown, aId: string, bId: string): PairwiseVerdict {
@@ -201,6 +408,50 @@ function parseVerdict(value: unknown, aId: string, bId: string): PairwiseVerdict
     rationale: value["rationale"],
     scores: { [aId]: aScore, [bId]: bScore },
   };
+}
+
+function responseMeta(value: unknown, criteria: string[]): Pick<VerifierProvenance, "logprobScheme" | "nComparisons" | "criteria"> {
+  if (!isRecord(value)) return { criteria, nComparisons: 1 };
+  const logprobScheme = value["logprobScheme"] === "two_stage" || value["logprobScheme"] === "direct"
+    ? value["logprobScheme"]
+    : undefined;
+  const resolved = Array.isArray(value["criteria"])
+    ? value["criteria"].filter((item): item is string => typeof item === "string")
+    : criteria;
+  return {
+    criteria: resolved,
+    nComparisons: typeof value["n_comparisons"] === "number" ? value["n_comparisons"] : 1,
+    ...(logprobScheme === undefined ? {} : { logprobScheme }),
+  };
+}
+
+function provenanceFrom(
+  fallback: boolean,
+  meta: Pick<VerifierProvenance, "logprobScheme" | "nComparisons" | "criteria">,
+  criteria: string[],
+): VerifierProvenance {
+  return {
+    backend: "sidecar",
+    fallback,
+    criteria: meta.criteria.length > 0 ? meta.criteria : criteria,
+    nComparisons: meta.nComparisons,
+    ...(meta.logprobScheme === undefined ? {} : { logprobScheme: meta.logprobScheme }),
+  };
+}
+
+function rankedIds(scores: Record<string, number>): string[] {
+  return Object.keys(scores).sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0) || a.localeCompare(b));
+}
+
+function scrubSidecarEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { PYTHONUNBUFFERED: "1" };
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (SECRET_ENV.test(key) || key === "OPENAI_BASE_URL") continue;
+    env[key] = value;
+  }
+  if (extra !== undefined) Object.assign(env, extra);
+  return env;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

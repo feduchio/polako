@@ -197,6 +197,43 @@ describe("pairwise tournament", () => {
     expect(result.method).toBe("deterministic");
     expect(result.evidence).toHaveLength(0);
   });
+
+  it("uses PPT selectFrontier for a non-dominated frontier and never sends failed-gate ids", async () => {
+    const seen: string[][] = [];
+    const strategy: VerifierStrategy = {
+      comparePair: () => Promise.reject(new Error("comparePair must not run when PPT is available")),
+      selectFrontier: (candidates) => {
+        seen.push(candidates.map((candidate) => candidate.id));
+        return Promise.resolve({
+          winnerId: "c",
+          ranking: ["c", "a", "b", "d"],
+          scores: { a: 0.2, b: 0.3, c: 0.9, d: 0.1 },
+          rationale: "PPT selected c",
+          method: "ppt",
+          fallback: false,
+          criteria: ["scope"],
+          nComparisons: 8,
+        });
+      },
+    };
+    const result = await selectTournamentWinner({
+      candidates: [
+        makeCandidate("a", 1, 2),
+        makeCandidate("b", 1, 2),
+        makeCandidate("c", 1, 2),
+        makeCandidate("d", 1, 2),
+        makeCandidate("failed", 1, 1, NO_REGRESSION, false),
+      ],
+      baseline: BASELINE,
+      strategy,
+      context: { runId: BASELINE.runId },
+      pivotFrom: 4,
+    });
+    expect(result.method).toBe("ppt");
+    expect(result.winnerId).toBe("c");
+    expect(seen).toEqual([["a", "b", "c", "d"]]);
+    expect(result.nComparisons).toBe(8);
+  });
 });
 
 function makeCandidate(
