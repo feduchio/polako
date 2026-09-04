@@ -213,6 +213,7 @@ describe("pairwise tournament", () => {
           fallback: false,
           criteria: ["scope"],
           nComparisons: 8,
+          client: "scripted",
         });
       },
     };

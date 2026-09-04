@@ -6,6 +6,7 @@ export {
   decomposeCriteria,
   defaultPython,
   sidecarScriptPath,
+  type VerifierProvenance,
   type VerifierSidecarOptions,
 } from "./sidecar.js";
 export type {
@@ -16,6 +17,7 @@ export type {
   PairwiseVerdict,
   TournamentCandidate,
   VerifierBackend,
+  VerifierClientKind,
   VerifierStrategy,
 } from "./strategy.js";
 export {

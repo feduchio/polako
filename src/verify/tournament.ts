@@ -5,6 +5,7 @@ import type {
   PairwiseContext,
   PairwiseVerdict,
   TournamentCandidate,
+  VerifierClientKind,
   VerifierStrategy,
 } from "./strategy.js";
 
@@ -55,6 +56,7 @@ export interface TournamentSelection {
   logprobScheme?: "direct" | "two_stage";
   criteria?: string[];
   nComparisons?: number;
+  client?: VerifierClientKind;
 }
 
 /** Candidates that passed independent gates and are not dominated on the evidence vector. */
@@ -159,6 +161,7 @@ export async function selectTournamentWinner(
       fallback: selection.fallback,
       criteria: selection.criteria,
       nComparisons: selection.nComparisons,
+      client: selection.client,
       ...(selection.logprobScheme === undefined ? {} : { logprobScheme: selection.logprobScheme }),
     };
   }
@@ -173,6 +176,7 @@ export async function selectTournamentWinner(
     frontier: frontierIds,
     backend: "ts",
     fallback: false,
+    client: "none",
   };
 }
 

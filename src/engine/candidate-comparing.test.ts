@@ -146,6 +146,7 @@ describe("B3 production comparing driver", () => {
     const compared = store.events.list(runId, { types: ["candidate.compared"] })[0];
     expect(compared?.payload["backend"]).toBe("ts");
     expect(compared?.payload["fallback"]).toBe(false);
+    expect(compared?.payload["client"]).toBe("none");
     expect(compared?.payload["method"]).toBe("pairwise");
     expect(compared?.payload["winner"]).toBe(tieAId);
   });
@@ -167,6 +168,7 @@ describe("B3 production comparing driver", () => {
     const compared = store.events.list(runId, { types: ["candidate.compared"] })[0];
     expect(compared?.payload["backend"]).toBe("sidecar");
     expect(compared?.payload["fallback"]).toBe(true);
+    expect(compared?.payload["client"]).toBe("scripted");
     expect(compared?.payload["winner"]).toBe(tieAId);
     expect(store.repos.candidates.get(tieAId)?.state).toBe("WINNER");
   });

@@ -214,6 +214,8 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
     });
     const backend = selection.backend ?? (strategy instanceof VerifierAdapter ? "sidecar" : ctx.config.verifier.backend);
     const fallback = selection.fallback ?? (strategy instanceof VerifierAdapter && strategy.usedFallback);
+    const client = selection.client
+      ?? (strategy instanceof VerifierAdapter ? strategy.lastProvenance.client : "none");
 
     const rationaleRef = ctx.store.artifacts.put(
       JSON.stringify({
@@ -221,6 +223,7 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
         method: selection.method,
         backend,
         fallback,
+        client,
         logprobScheme: selection.logprobScheme ?? null,
         criteria: selection.criteria ?? [],
         nComparisons: selection.nComparisons ?? selection.evidence.length,
@@ -251,6 +254,7 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
       method: selection.method,
       backend,
       fallback,
+      client,
       logprobScheme: selection.logprobScheme ?? null,
       criteria: selection.criteria ?? [],
       nComparisons: selection.nComparisons ?? selection.evidence.length,

@@ -25,6 +25,7 @@ export interface PairwiseVerdict {
 
 export type LogprobScheme = "direct" | "two_stage";
 export type VerifierBackend = "sidecar" | "ts";
+export type VerifierClientKind = "scripted" | "live" | "none";
 
 export interface FrontierSelectOptions {
   pivots?: number;
@@ -44,6 +45,7 @@ export interface FrontierSelection {
   logprobScheme?: LogprobScheme;
   criteria: string[];
   nComparisons: number;
+  client: VerifierClientKind;
 }
 
 export interface VerifierStrategy {

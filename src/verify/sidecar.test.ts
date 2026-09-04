@@ -5,6 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { CandidateMetrics } from "./metrics.js";
+import { defaultConfig } from "../domain/config.js";
 import { decomposeCriteria, defaultPython, sidecarScriptPath, createVerifierStrategy, VerifierAdapter } from "./sidecar.js";
 import { PairwiseJudge } from "./pairwise.js";
 import type { TournamentCandidate } from "./strategy.js";
@@ -143,6 +144,8 @@ describe("VerifierAdapter real Python child", () => {
     expect(result.method).toBe("ppt");
     expect(result.fallback).toBe(false);
     expect(result.winnerId).toBe("p4");
+    expect(result.client).toBe("scripted");
+    expect(sidecar.lastProvenance.client).toBe("scripted");
     expect(result.nComparisons).toBeGreaterThanOrEqual(frontier.length);
     expect(result.nComparisons).toBeLessThan(frontier.length * (frontier.length - 1));
     expect(result.criteria.length).toBeGreaterThan(0);
@@ -175,8 +178,85 @@ describe("VerifierAdapter real Python child", () => {
       expect(result.method).toBe("ppt");
       expect(result.fallback).toBe(false);
       expect(result.winnerId).toBe("d1");
+      expect(result.client).toBe("scripted");
+      expect(sidecar.lastProvenance.client).toBe("scripted");
       expect(sidecar.usedFallback).toBe(false);
     } finally {
+      if (previousClient === undefined) delete process.env["POLISH_VERIFIER_CLIENT"];
+      else process.env["POLISH_VERIFIER_CLIENT"] = previousClient;
+    }
+  }, 30_000);
+
+  it("default production sidecar uses TS judge when scripted PPT scores do not discriminate", async () => {
+    const previousPrefer = process.env["POLISH_VERIFIER_PREFER"];
+    const previousClient = process.env["POLISH_VERIFIER_CLIENT"];
+    delete process.env["POLISH_VERIFIER_PREFER"];
+    delete process.env["POLISH_VERIFIER_CLIENT"];
+    try {
+      const strategy = createVerifierStrategy(defaultConfig().verifier, {
+        command: python,
+        scriptPath: SCRIPT,
+        requestTimeoutMs: 8_000,
+        repeats: 1,
+        pivots: 2,
+      });
+      expect(strategy).toBeInstanceOf(VerifierAdapter);
+      const sidecar = strategy as VerifierAdapter;
+      adapters.push(sidecar);
+      const weak = candidate("cand-weak", 80, { checksPassed: 1, newFailures: 3 });
+      const mid = candidate("cand-mid", 20, { checksPassed: 4, newFailures: 1 });
+      const strong = candidate("cand-strong", 2, { checksPassed: 9, newFailures: 0 });
+      const context = { runId: "run_nondiscriminating", task: "Pick the stronger candidate." };
+      const forward = await sidecar.selectFrontier([weak, mid, strong], context, { repeats: 1, pivots: 2 });
+      const reversed = await sidecar.selectFrontier([strong, mid, weak], context, { repeats: 1, pivots: 2 });
+      expect(forward.winnerId).toBe("cand-strong");
+      expect(reversed.winnerId).toBe(forward.winnerId);
+      expect(forward.fallback).toBe(true);
+      expect(reversed.fallback).toBe(true);
+      expect(forward.method).toBe("pairwise");
+      expect(reversed.method).toBe("pairwise");
+      expect(sidecar.usedFallback).toBe(true);
+      expect(sidecar.lastProvenance.fallback).toBe(true);
+      expect(sidecar.lastProvenance.client).toBe("scripted");
+      expect(forward.client).toBe("scripted");
+    } finally {
+      if (previousPrefer === undefined) delete process.env["POLISH_VERIFIER_PREFER"];
+      else process.env["POLISH_VERIFIER_PREFER"] = previousPrefer;
+      if (previousClient === undefined) delete process.env["POLISH_VERIFIER_CLIENT"];
+      else process.env["POLISH_VERIFIER_CLIENT"] = previousClient;
+    }
+  }, 30_000);
+
+  it("does not let ambient process.env POLISH_VERIFIER_PREFER pick the production winner", async () => {
+    const previousPrefer = process.env["POLISH_VERIFIER_PREFER"];
+    const previousClient = process.env["POLISH_VERIFIER_CLIENT"];
+    process.env["POLISH_VERIFIER_PREFER"] = "cand-weak";
+    delete process.env["POLISH_VERIFIER_CLIENT"];
+    try {
+      const strategy = createVerifierStrategy(defaultConfig().verifier, {
+        command: python,
+        scriptPath: SCRIPT,
+        requestTimeoutMs: 8_000,
+        repeats: 1,
+        pivots: 2,
+      });
+      expect(strategy).toBeInstanceOf(VerifierAdapter);
+      const sidecar = strategy as VerifierAdapter;
+      adapters.push(sidecar);
+      const weak = candidate("cand-weak", 80, { checksPassed: 1, newFailures: 3 });
+      const strong = candidate("cand-strong", 2, { checksPassed: 9, newFailures: 0 });
+      const result = await sidecar.selectFrontier(
+        [strong, weak],
+        { runId: "run_ambient_prefer", task: "Ignore inherited test hooks." },
+        { repeats: 1, pivots: 2 },
+      );
+      expect(result.winnerId).toBe("cand-strong");
+      expect(result.fallback).toBe(true);
+      expect(result.method).toBe("pairwise");
+      expect(sidecar.lastProvenance.client).toBe("scripted");
+    } finally {
+      if (previousPrefer === undefined) delete process.env["POLISH_VERIFIER_PREFER"];
+      else process.env["POLISH_VERIFIER_PREFER"] = previousPrefer;
       if (previousClient === undefined) delete process.env["POLISH_VERIFIER_CLIENT"];
       else process.env["POLISH_VERIFIER_CLIENT"] = previousClient;
     }

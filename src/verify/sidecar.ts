@@ -10,12 +10,24 @@ import type {
   PairwiseContext,
   PairwiseVerdict,
   TournamentCandidate,
+  VerifierClientKind,
   VerifierStrategy,
 } from "./strategy.js";
 
 const DEFAULT_SCRIPT = fileURLToPath(new URL("../../sidecars/llm_verifier/main.py", import.meta.url));
 
 const SECRET_ENV = /(_API_KEY$|TOKEN|SECRET|PASSWORD|CREDENTIAL|^AWS_|^GH_|^GITHUB_|^OPENAI|^GEMINI|^GOOGLE|^GROQ|^OPENROUTER|^VERTEX|^ANTHROPIC|^DEEPSEEK)/i;
+
+const SIDECAR_TEST_HOOKS = new Set([
+  "POLISH_VERIFIER_PREFER",
+  "POLISH_VERIFIER_CRASH_FILE",
+  "POLISH_VERIFIER_SLEEP_MS",
+  "POLISH_VERIFIER_FORCE_ERROR",
+  "POLISH_VERIFIER_SCRIPTED_MODE",
+]);
+
+const NON_DISCRIMINATING_RATIONALE =
+  "Sidecar returned a non-discriminating PPT result; TypeScript pairwise fallback ranked the frontier.";
 
 export interface VerifierSidecarOptions {
   command?: string;
@@ -38,6 +50,7 @@ interface PendingRequest {
 export interface VerifierProvenance {
   backend: "sidecar" | "ts";
   fallback: boolean;
+  client: VerifierClientKind;
   logprobScheme?: "direct" | "two_stage";
   criteria: string[];
   nComparisons: number;
@@ -61,7 +74,13 @@ export class VerifierAdapter implements VerifierStrategy {
   private readonly pivots: number;
   private readonly configuredCriteria: string[];
   usedFallback = false;
-  lastProvenance: VerifierProvenance = { backend: "sidecar", fallback: false, criteria: [], nComparisons: 0 };
+  lastProvenance: VerifierProvenance = {
+    backend: "sidecar",
+    fallback: false,
+    client: "none",
+    criteria: [],
+    nComparisons: 0,
+  };
 
   constructor(options: VerifierSidecarOptions = {}) {
     this.scriptPath = options.scriptPath ?? DEFAULT_SCRIPT;
@@ -73,6 +92,7 @@ export class VerifierAdapter implements VerifierStrategy {
     this.granularity = options.granularity ?? 20;
     this.pivots = options.pivots ?? 2;
     this.configuredCriteria = options.configuredCriteria ?? [];
+    this.lastProvenance = { ...this.lastProvenance, client: this.clientKind() };
   }
 
   async comparePair(
@@ -93,18 +113,22 @@ export class VerifierAdapter implements VerifierStrategy {
     };
     try {
       const response = await this.request(request);
-      this.lastProvenance = provenanceFrom(false, responseMeta(response, criteria), criteria);
-      return parseVerdict(response, a.id, b.id);
+      if (this.isDiscriminatingPair(response, a.id, b.id)) {
+        this.lastProvenance = provenanceFrom(false, responseMeta(response, criteria), criteria, this.clientKind());
+        return parseVerdict(response, a.id, b.id);
+      }
+      return await this.fallbackPair(a, b, context, criteria);
     } catch {
       try {
         await this.restart();
         const response = await this.request(request);
-        this.lastProvenance = provenanceFrom(false, responseMeta(response, criteria), criteria);
-        return parseVerdict(response, a.id, b.id);
+        if (this.isDiscriminatingPair(response, a.id, b.id)) {
+          this.lastProvenance = provenanceFrom(false, responseMeta(response, criteria), criteria, this.clientKind());
+          return parseVerdict(response, a.id, b.id);
+        }
+        return await this.fallbackPair(a, b, context, criteria);
       } catch {
-        this.usedFallback = true;
-        this.lastProvenance = { backend: "sidecar", fallback: true, criteria, nComparisons: 1 };
-        return this.fallback.comparePair(a, b, context);
+        return await this.fallbackPair(a, b, context, criteria);
       }
     }
   }
@@ -128,13 +152,13 @@ export class VerifierAdapter implements VerifierStrategy {
       ...this.protocolClient(),
     };
     try {
-      return this.selectionFrom(await this.request(request), candidates, criteria, false);
+      return await this.selectionOrFallback(await this.request(request), candidates, context, criteria);
     } catch {
       try {
         await this.restart();
-        return this.selectionFrom(await this.request(request), candidates, criteria, false);
+        return await this.selectionOrFallback(await this.request(request), candidates, context, criteria);
       } catch {
-        return this.fallbackFrontier(candidates, context, criteria);
+        return await this.fallbackFrontier(candidates, context, criteria);
       }
     }
   }
@@ -163,6 +187,17 @@ export class VerifierAdapter implements VerifierStrategy {
 
   private criteriaFor(context: PairwiseContext): string[] {
     return decomposeCriteria(context.task, context.acceptance, this.configuredCriteria);
+  }
+
+  private selectionOrFallback(
+    value: unknown,
+    candidates: readonly TournamentCandidate[],
+    context: PairwiseContext,
+    criteria: string[],
+  ): Promise<FrontierSelection> {
+    const selection = this.selectionFrom(value, candidates, criteria, false);
+    if (this.isDiscriminatingSelection(selection)) return Promise.resolve(selection);
+    return this.fallbackFrontier(candidates, context, criteria, NON_DISCRIMINATING_RATIONALE);
   }
 
   private selectionFrom(
@@ -206,11 +241,13 @@ export class VerifierAdapter implements VerifierStrategy {
       fallback,
       criteria: resolvedCriteria,
       nComparisons,
+      client: this.clientKind(),
     };
     if (logprobScheme !== undefined) selection.logprobScheme = logprobScheme;
     this.lastProvenance = {
       backend: "sidecar",
       fallback,
+      client: this.clientKind(),
       criteria: resolvedCriteria,
       nComparisons,
       ...(logprobScheme === undefined ? {} : { logprobScheme }),
@@ -218,41 +255,103 @@ export class VerifierAdapter implements VerifierStrategy {
     return selection;
   }
 
+  private async fallbackPair(
+    a: TournamentCandidate,
+    b: TournamentCandidate,
+    context: PairwiseContext,
+    criteria: string[],
+  ): Promise<PairwiseVerdict> {
+    this.usedFallback = true;
+    this.lastProvenance = {
+      backend: "sidecar",
+      fallback: true,
+      client: this.clientKind(),
+      criteria,
+      nComparisons: 1,
+    };
+    return this.fallback.comparePair(a, b, context);
+  }
+
   private async fallbackFrontier(
     candidates: readonly TournamentCandidate[],
     context: PairwiseContext,
     criteria: string[],
+    rationale = "Sidecar unavailable; TypeScript pairwise fallback ranked the frontier.",
   ): Promise<FrontierSelection> {
     this.usedFallback = true;
     const scores: Record<string, number> = Object.fromEntries(candidates.map((candidate) => [candidate.id, 0]));
     let comparisons = 0;
     for (let i = 0; i < candidates.length; i++) {
       for (let j = i + 1; j < candidates.length; j++) {
-        const a = candidates[i];
-        const b = candidates[j];
-        if (a === undefined || b === undefined) continue;
-        const verdict = await this.fallback.comparePair(a, b, context);
+        const left = candidates[i];
+        const right = candidates[j];
+        if (left === undefined || right === undefined) continue;
+        const verdict = await this.fallback.comparePair(left, right, context);
         comparisons++;
-        if (verdict.winner === a.id) scores[a.id] = (scores[a.id] ?? 0) + 2;
-        else if (verdict.winner === b.id) scores[b.id] = (scores[b.id] ?? 0) + 2;
+        if (verdict.winner === left.id) scores[left.id] = (scores[left.id] ?? 0) + 2;
+        else if (verdict.winner === right.id) scores[right.id] = (scores[right.id] ?? 0) + 2;
         else {
-          scores[a.id] = (scores[a.id] ?? 0) + 1;
-          scores[b.id] = (scores[b.id] ?? 0) + 1;
+          scores[left.id] = (scores[left.id] ?? 0) + 1;
+          scores[right.id] = (scores[right.id] ?? 0) + 1;
         }
       }
     }
     const ranking = rankedIds(scores);
-    this.lastProvenance = { backend: "sidecar", fallback: true, criteria, nComparisons: comparisons };
+    this.lastProvenance = {
+      backend: "sidecar",
+      fallback: true,
+      client: this.clientKind(),
+      criteria,
+      nComparisons: comparisons,
+    };
     return {
       winnerId: ranking[0] ?? null,
       ranking,
       scores,
-      rationale: "Sidecar unavailable; TypeScript pairwise fallback ranked the frontier.",
+      rationale,
       method: "pairwise",
       fallback: true,
       criteria,
       nComparisons: comparisons,
+      client: this.clientKind(),
     };
+  }
+
+  private clientKind(): VerifierClientKind {
+    const configured = this.env["POLISH_VERIFIER_CLIENT"]?.trim();
+    if (configured === "scripted") return "scripted";
+    if (configured !== undefined && configured.length > 0) return "live";
+    if (this.env["POLISH_VERIFIER_ALLOW_LIVE"] === "1") return "live";
+    return "none";
+  }
+
+  private scriptedWithoutPreference(): boolean {
+    return this.clientKind() === "scripted" && (this.env["POLISH_VERIFIER_PREFER"] ?? "").trim() === "";
+  }
+
+  private isDiscriminatingPair(value: unknown, aId: string, bId: string): boolean {
+    if (this.scriptedWithoutPreference()) return false;
+    if (!isRecord(value) || !isRecord(value["scores"])) return false;
+    const aScore = value["scores"][aId];
+    const bScore = value["scores"][bId];
+    if (typeof aScore !== "number" || !Number.isFinite(aScore) || typeof bScore !== "number" || !Number.isFinite(bScore)) {
+      return false;
+    }
+    if (aScore === bScore) return false;
+    return value["winner"] === aId || value["winner"] === bId;
+  }
+
+  private isDiscriminatingSelection(selection: FrontierSelection): boolean {
+    if (this.scriptedWithoutPreference()) return false;
+    const values = Object.values(selection.scores);
+    if (values.length === 0) return false;
+    if (new Set(values).size <= 1) return false;
+    if (selection.winnerId === null) return false;
+    const max = Math.max(...values);
+    const winners = Object.entries(selection.scores)
+      .filter(([, score]) => score === max)
+      .map(([id]) => id);
+    return winners.length === 1 && winners[0] === selection.winnerId;
   }
 
   private protocolClient(): { client: "scripted" } | Record<string, never> {
@@ -435,10 +534,12 @@ function provenanceFrom(
   fallback: boolean,
   meta: Pick<VerifierProvenance, "logprobScheme" | "nComparisons" | "criteria">,
   criteria: string[],
+  client: VerifierClientKind,
 ): VerifierProvenance {
   return {
     backend: "sidecar",
     fallback,
+    client,
     criteria: meta.criteria.length > 0 ? meta.criteria : criteria,
     nComparisons: meta.nComparisons,
     ...(meta.logprobScheme === undefined ? {} : { logprobScheme: meta.logprobScheme }),
@@ -454,6 +555,7 @@ function scrubSidecarEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined) continue;
     if (SECRET_ENV.test(key) || key === "OPENAI_BASE_URL") continue;
+    if (SIDECAR_TEST_HOOKS.has(key)) continue;
     env[key] = value;
   }
   if (extra !== undefined) Object.assign(env, extra);
