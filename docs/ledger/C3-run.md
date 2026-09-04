@@ -5,14 +5,14 @@ Do not treat this file as a second contract.
 
 | Field | Value |
 |---|---|
-| Status | CONTRACT_FROZEN — implementation lanes starting |
+| Status | LANES_RUNNING |
 | Contract path | `docs/ledger/C3.md` |
 | Contract hash | d8618b8bf39e3db26ced211dac2d56aa1f116a8c8fe85926de7cd542e358a777 |
-| Base commit | `132e5df1cfb3503a3ca8fc2ef94f92aa47ac2f0f` |
-| HOST | `phase-b-collab-base` `0b21a6182507e9883d020ceba0c39aa4edcfff5b` |
-| Grok candidate | |
-| Composer candidate | |
-| Polish candidate / run id | |
+| Base commit | `8cf0380b0cda8519966a28b68b5a081c981eee5c` |
+| HOST | `phase-b-collab-base` `0b21a6182507e9883d020ceba0c39aa4edcfff5b` worktree `/Users/fedorsvetlov/polish-host-b` POLISH_HOME `~/.polish-phase-c-host` |
+| Grok candidate | branch `task/C3-candidate-grok` worktree `/Users/fedorsvetlov/polish-c3-grok` — in progress |
+| Composer candidate | branch `task/C3-candidate-composer` worktree `/Users/fedorsvetlov/polish-c3-composer` — in progress |
+| Polish candidate / run id | `run_01m1pg5466nsksrer6s8x3` TARGET `/Users/fedorsvetlov/polish-c3-polish-target` branch `task/C3-candidate-polish` |
 | Deterministic results | |
 | Selection | |
 | Integration commit | |
