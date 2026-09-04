@@ -15,6 +15,7 @@ import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import { parseTestOutput, statusFromProcess } from "./parsers.js";
+import { buildBaselineEvidenceView } from "./baselineEvidence.js";
 import {
   assessBaselineStability,
   buildBaselineSnapshot,
@@ -187,12 +188,94 @@ describe("parsers", () => {
     expect(s).toMatchObject({ total: 3, passed: 2, failed: 1, failingTests: ["suite name"] });
   });
 
+  it("parses resume-dup-fetch TAP node --test output into counts and failing identity", () => {
+    const stdout = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/resume-dup-fetch/baseline-test.stdout.txt"), "utf8");
+    for (const framework of ["node-test", "unknown"]) {
+      const s = parseTestOutput(framework, stdout, "");
+      expect(s).toMatchObject({ total: 3, passed: 2, failed: 1, skipped: 0 });
+      expect(s?.failingTests.some((name) => name.includes("retries after transient failure and succeeds"))).toBe(true);
+      expect(s?.failingTests.some((name) => name.includes("tests/retryFetch.test.mjs"))).toBe(true);
+      expect(s?.failingTests.some((name) => name === "RetryFetcher" || name.includes("1 subtest failed"))).toBe(false);
+    }
+  });
+
+  it("parses resume-dup-fetch spec reporter node --test output into counts and failing identity", () => {
+    const stdout = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/resume-dup-fetch/baseline-test.spec.txt"), "utf8");
+    const s = parseTestOutput("node-test", stdout, "");
+    expect(s).toMatchObject({ total: 3, passed: 2, failed: 1, skipped: 0 });
+    expect(s?.failingTests.some((name) => name.includes("retries after transient failure and succeeds"))).toBe(true);
+    expect(s?.failingTests.some((name) => name.includes("tests/retryFetch.test.mjs"))).toBe(true);
+  });
+
   it("maps process outcomes to check status", () => {
     expect(statusFromProcess(false, false, 0)).toBe("pass");
     expect(statusFromProcess(false, false, 1)).toBe("fail");
     expect(statusFromProcess(true, false, null)).toBe("timeout");
     expect(statusFromProcess(false, true, null)).toBe("skipped");
     expect(statusFromProcess(false, false, null)).toBe("error");
+  });
+});
+
+describe("baseline evidence view", () => {
+  it("loads compact diagnostics from persisted check_output and omits full TAP stdout", () => {
+    const stdout = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/resume-dup-fetch/baseline-test.stdout.txt"), "utf8");
+    const forensic = {
+      runId: "run_0000000000000000000000",
+      commitHash: "ed6b93c3c42143721193b026ba0f7ef709929fd0",
+      checkName: "test",
+      command: ["npm", "run", "test"],
+      status: "fail" as const,
+      exitCode: 1,
+      stdout,
+      stderr: "",
+      diagnostics: [
+        "    not ok 2 - retries after transient failure and succeeds",
+        "      error: 'duplicate in-flight request detected'",
+        "# tests 3",
+        "# pass 2",
+        "# fail 1",
+      ],
+      truncated: false,
+    };
+    const sha256 = "2f978b24b034778d852a6cef080ff689153b8e2318635bab6e44b48eec228b62";
+    const view = buildBaselineEvidenceView(
+      {
+        id: "base_0000000000000000000000",
+        runId: "run_0000000000000000000000",
+        commitHash: "abcdef1",
+        checks: [
+          {
+            name: "test",
+            kind: "test",
+            status: "fail",
+            exitCode: 1,
+            durationMs: 174,
+            summary: null,
+            outputRef: { sha256, kind: "check_output", bytes: stdout.length, label: "ed6b93c3c42143721193b026ba0f7ef709929fd0:test" },
+          },
+        ],
+        configHashes: {},
+        scriptsHash: "a".repeat(64),
+        toolchain: {},
+        createdAt: 1,
+      },
+      (sha) => (sha === sha256 ? JSON.stringify(forensic) : null),
+    );
+    expect(view).toHaveLength(1);
+    const check = view[0]!;
+    expect(check.command).toEqual(["npm", "run", "test"]);
+    expect(check.status).toBe("fail");
+    expect(check.exitCode).toBe(1);
+    expect(check.summary).toMatchObject({ total: 3, passed: 2, failed: 1, skipped: 0 });
+    expect(check.summary?.failingTests.some((name) => name.includes("retries after transient failure and succeeds"))).toBe(true);
+    expect(check.diagnostics.join("\n")).toContain("duplicate in-flight request detected");
+    expect(check.outputArtifact).toEqual({ sha256, kind: "check_output", bytes: stdout.length });
+    expect(check).not.toHaveProperty("stdout");
+    expect(check).not.toHaveProperty("stderr");
+    const encoded = JSON.stringify(check);
+    expect(encoded).not.toContain("TAP version 13");
+    expect(encoded).not.toContain("node:internal/test_runner");
+    expect(encoded.length).toBeLessThan(stdout.length);
   });
 });
 

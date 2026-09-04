@@ -77,9 +77,16 @@ describe("RunObserver projection", () => {
     ];
     const view = projectRunStatus(run, events, NOW + 3);
     expect(view.humanRequest?.question).toBe("Which API should remain compatible?");
+    expect(view.waiting?.kind).toBe("human");
+    expect(view.phase).toBe("NEEDS_HUMAN");
+    expect(view.control).toBe("RUNNING");
     const rendered = renderRunStatus(view);
     expect(rendered).toContain("Which API should remain compatible?");
     expect(rendered).toContain("HUMAN");
+    expect(rendered).toContain("waiting for input");
+    expect(rendered).not.toContain("NEEDS_HUMAN / RUNNING");
+    expect(JSON.stringify(view)).toContain('"phase":"NEEDS_HUMAN"');
+    expect(JSON.stringify(view)).toContain('"control":"RUNNING"');
     expect(projectActivity(events).map((line) => line.text).join("\n")).toContain("Needs human · Which API should remain compatible?");
   });
 

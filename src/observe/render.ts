@@ -11,7 +11,7 @@ export function renderRunStatus(view: RunStatusView): string {
   const lines = [
     `Polish · ${view.runId}`,
     `TARGET  ${view.target}`,
-    `STATE   ${view.phase} / ${view.control}`,
+    `STATE   ${renderState(view)}`,
     `TIME    ${formatClock(view.elapsedMs)}`,
     `LAST    ${last}`,
     "",
@@ -98,8 +98,16 @@ function renderCouncil(roles: readonly CouncilRoleStatus[]): string[] {
   return lines;
 }
 
+function renderState(view: RunStatusView): string {
+  if (view.waiting?.kind === "human") return "waiting for input";
+  return `${view.phase} / ${view.control}`;
+}
+
 function renderWaiting(view: RunStatusView): string {
   if (view.waiting === null) return DASH;
+  if (view.waiting.kind === "human") {
+    return `${view.waiting.summary} · polish answer ${view.runId}`;
+  }
   const parts = [view.waiting.summary];
   if (view.waiting.attempt !== null) {
     parts.push(`attempt ${view.waiting.attempt}/${view.waiting.maxAttempts ?? view.waiting.attempt}`);

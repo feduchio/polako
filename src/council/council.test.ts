@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { createMission, missionHash } from "../domain/mission.js";
@@ -124,56 +127,65 @@ describe("SupervisorCouncil", () => {
     expect(BUGFIX_MISSION.hash).toBe(before);
   });
 
-  it("does not NEEDS_HUMAN for missing lockfile when node --test checks already ran", async () => {
-    const provider = new ScriptedProvider("council", [
-      { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
-      { name: "scope", capabilities: FAKE_CAPABILITIES.strong },
-      { name: "judge", capabilities: FAKE_CAPABILITIES.strong },
-    ]);
-    provider.script("planner", [
-      {
-        kind: "reply",
-        content: JSON.stringify({
-          decision: "approve",
-          rationale: "Requirements are concrete.",
-          concerns: [],
-          proposal: {
-            goals: ["Fix the retry bug"],
-            requirements: [{ ref: "R1", statement: "Retry transient failures", acceptance: ["Retry succeeds"] }],
-            constraints: [],
-            nonGoals: [],
-            definitionOfSuccess: ["Checks pass"],
-            ambiguities: [
-              {
-                question: "Discovery reports framework='unknown' and packageManager=null — need to confirm the project structure and test runner.",
-                options: ["Use node --test", "Add a lockfile"],
-                blocking: true,
-              },
-            ],
-          },
-        }),
-      },
-    ]);
-    provider.script("scope", [
-      opinion(
-        "needs_human",
-        "Discovery reports framework='unknown' and packageManager=null — need to confirm the project structure and test runner.",
-        ["packageManager=null", "framework='unknown'"],
-      ),
-    ]);
-    provider.script("judge", [opinion("revise", "This is a no-op diff during intake.", ["no-op diff"])]);
+  it("intake payload includes bounded resume-dup-fetch baseline evidence, not a sha256-only snapshot", async () => {
+    const stdout = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/resume-dup-fetch/baseline-test.stdout.txt"),
+      "utf8",
+    );
+    const forensic = JSON.stringify({
+      command: ["npm", "run", "test"],
+      status: "fail",
+      exitCode: 1,
+      stdout,
+      stderr: "",
+      diagnostics: [
+        "    not ok 2 - retries after transient failure and succeeds",
+        "      error: 'duplicate in-flight request detected'",
+        "# tests 3",
+        "# pass 2",
+        "# fail 1",
+      ],
+    });
+    const provider = scriptedCouncil(false);
     const council = new SupervisorCouncil({ roles: councilRoles(provider), now: () => 10 });
-    const result = await council.intake(BUGFIX_MISSION, SMOKE_PROFILE, SMOKE_BASELINE);
+    const result = await council.intake(SMOKE_MISSION, SMOKE_PROFILE, SMOKE_BASELINE, {
+      readCheckOutput: (sha) => (sha === SMOKE_OUTPUT_SHA ? forensic : null),
+    });
     expect(result.status).toBe("READY");
-    expect(provider.calls).toHaveLength(3);
-    expect(provider.calls.map((call) => call.metadata.purpose)).toEqual([
-      "council_intake_planner",
-      "council_intake_scope",
-      "council_intake_judge",
-    ]);
     const user = provider.calls[0]?.messages.find((message) => message.role === "user")?.content ?? "";
     expect(user).toContain("informational");
     expect(user).toContain("authoritative");
+    expect(user).toContain("baselineEvidence");
+    expect(user).toContain("duplicate in-flight request detected");
+    expect(user).toContain("retries after transient failure and succeeds");
+    expect(user).toContain("npm");
+    expect(user).not.toContain("TAP version 13");
+    expect(user).not.toContain("node:internal/test_runner");
+    expect(user).not.toMatch(/"summary":null/);
+    expect(provider.calls[0]?.messages[0]?.content).toContain("baselineEvidence");
+    expect(provider.calls[2]?.messages[0]?.content).toContain("no code proposal");
+  });
+
+  it("keeps genuine product ambiguity as NEEDS_HUMAN even when baseline evidence is present", async () => {
+    const stdout = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/resume-dup-fetch/baseline-test.stdout.txt"),
+      "utf8",
+    );
+    const forensic = JSON.stringify({
+      command: ["npm", "run", "test"],
+      stdout,
+      stderr: "",
+      diagnostics: ["error: 'duplicate in-flight request detected'"],
+    });
+    const provider = scriptedCouncil(true);
+    const council = new SupervisorCouncil({ roles: councilRoles(provider) });
+    const result = await council.intake(SMOKE_MISSION, SMOKE_PROFILE, SMOKE_BASELINE, {
+      readCheckOutput: (sha) => (sha === SMOKE_OUTPUT_SHA ? forensic : null),
+    });
+    expect(result.status).toBe("NEEDS_HUMAN");
+    if (result.status === "NEEDS_HUMAN") {
+      expect(result.question).toBe("Which API should remain compatible?");
+    }
   });
 
   it("invalid sibling JSON is OUTPUT_CONTRACT and does not start another intake trio", async () => {
@@ -322,6 +334,15 @@ const BASELINE: BaselineSnapshot = {
   createdAt: 1,
 };
 
+const SMOKE_OUTPUT_SHA = "2f978b24b034778d852a6cef080ff689153b8e2318635bab6e44b48eec228b62";
+
+const SMOKE_MISSION = createMission({
+  id: "msn_0000000000000000000001",
+  projectPath: "/tmp/polish-smoke",
+  text: "Fix the RetryFetcher retry bug. A transient failure must retry and succeed without triggering duplicate in-flight detection. Preserve the existing public API and maxRetries semantics. Do not add dependencies or refactor unrelated code. This is one bounded coding task.",
+  createdAt: 1,
+});
+
 const SMOKE_PROFILE: ProjectProfile = {
   projectPath: "/tmp/polish-smoke",
   alias: null,
@@ -341,9 +362,14 @@ const SMOKE_BASELINE: BaselineSnapshot = {
       kind: "test",
       status: "fail",
       exitCode: 1,
-      durationMs: 125,
+      durationMs: 174,
       summary: null,
-      outputRef: null,
+      outputRef: {
+        sha256: SMOKE_OUTPUT_SHA,
+        kind: "check_output",
+        bytes: 2437,
+        label: "ed6b93c3c42143721193b026ba0f7ef709929fd0:test",
+      },
     },
   ],
 };

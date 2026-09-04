@@ -116,6 +116,19 @@ function projectWaiting(run: Run, events: readonly Event[], now: number): Waitin
       manualResumePossible: true,
     };
   }
+  if (run.phase === "NEEDS_HUMAN") {
+    return {
+      kind: "human",
+      summary: "waiting for input",
+      attempt: null,
+      maxAttempts: null,
+      backoffMs: null,
+      retryAt: null,
+      fallbackTo: null,
+      automaticRetryScheduled: false,
+      manualResumePossible: true,
+    };
+  }
   const unavailable = [...events].reverse().find((event) => event.type === "council.unavailable");
   if (unavailable !== undefined && (run.control === "PAUSED" || run.control === "PAUSE_REQUESTED" || run.control === "RUNNING")) {
     const attempted = Array.isArray(unavailable.payload["attempted"]) ? unavailable.payload["attempted"] : [];

@@ -1,20 +1,7 @@
 import type { BaselineSnapshot } from "../domain/checks.js";
-import type { Ambiguity, Mission } from "../domain/mission.js";
+import type { Mission } from "../domain/mission.js";
+import type { BaselineCheckEvidence } from "../project/baselineEvidence.js";
 import type { ProjectProfile } from "../project/profile.js";
-import type { RoleOpinion } from "./types.js";
-
-const PROFILE_HINT_RE =
-  /framework\s*[=:]?\s*['"]?unknown['"]?|packageManager\s*[=:]?\s*['"]?null['"]?/i;
-const INTAKE_NOOP_RE = /no-op diff|noop diff|no code (exists|yet)|during intake/i;
-
-function isNonBlockingIntakeNoise(text: string): boolean {
-  return isInformationalProfileHintText(text) || INTAKE_NOOP_RE.test(text);
-}
-
-/** Optional labels from manifests. Absence is not execution uncertainty. */
-export function isInformationalProfileHintText(text: string): boolean {
-  return PROFILE_HINT_RE.test(text);
-}
 
 export function executionEvidenceIsSufficient(
   discovery: ProjectProfile,
@@ -27,12 +14,14 @@ export function executionEvidenceIsSufficient(
 }
 
 /**
- * Payload for council intake: profile labels are informational; check commands + baseline are authoritative.
+ * Payload for council intake: profile labels are informational; checks + bounded
+ * baselineEvidence are authoritative. Full stdout/stderr stay in CAS.
  */
 export function intakeCouncilPayload(
   mission: Mission,
   discovery: ProjectProfile,
   baseline: BaselineSnapshot,
+  baselineEvidence: readonly BaselineCheckEvidence[],
 ): Record<string, unknown> {
   return {
     mission,
@@ -45,42 +34,11 @@ export function intakeCouncilPayload(
     execution: {
       kind: "authoritative",
       checks: discovery.checks,
-      baseline,
+      baseline: { id: baseline.id, runId: baseline.runId, commitHash: baseline.commitHash },
+      baselineEvidence,
       mandatoryCommandsDiscovered: discovery.checks.some((check) => check.mandatory && check.command.length > 0),
       baselineExecuted: baseline.checks.length > 0,
-      note: "Discovered mandatory check commands and baseline results are the execution evidence. A successful or failed baseline run means the test command is executable.",
+      note: "baselineEvidence already contains command, status, exit, summary, and compact diagnostics loaded from persisted check_output. outputArtifact is a CAS pointer to full stdout/stderr — not missing content. Do not vote needs_human because you only see a sha256, because source files are not inlined, or because a code diff is absent at intake. Workers read the repo later. needs_human is only for genuine mission or product ambiguity that this evidence cannot resolve.",
     },
   };
-}
-
-/** Drop needs_human votes that are only about missing profile hints when checks already ran. */
-export function neutralizeInformationalProfileVotes(
-  opinions: readonly RoleOpinion[],
-  discovery: ProjectProfile,
-  baseline: BaselineSnapshot,
-): RoleOpinion[] {
-  if (!executionEvidenceIsSufficient(discovery, baseline)) return [...opinions];
-  return opinions.map((opinion) => {
-    if (opinion.decision !== "needs_human" && opinion.decision !== "revise") return opinion;
-    const leftover = opinion.concerns.filter((concern) => !isNonBlockingIntakeNoise(concern));
-    const rationaleIsNoise = isNonBlockingIntakeNoise(opinion.rationale);
-    if (leftover.length === 0 && (rationaleIsNoise || opinion.concerns.length > 0)) {
-      return { ...opinion, decision: "approve", concerns: [] };
-    }
-    if (leftover.length !== opinion.concerns.length) return { ...opinion, concerns: leftover };
-    return opinion;
-  });
-}
-
-export function neutralizeInformationalAmbiguities(
-  ambiguities: readonly Ambiguity[],
-  discovery: ProjectProfile,
-  baseline: BaselineSnapshot,
-): Ambiguity[] {
-  if (!executionEvidenceIsSufficient(discovery, baseline)) return [...ambiguities];
-  return ambiguities.map((ambiguity) => {
-    if (!ambiguity.blocking) return ambiguity;
-    if (!isInformationalProfileHintText(ambiguity.question)) return ambiguity;
-    return { ...ambiguity, blocking: false };
-  });
 }

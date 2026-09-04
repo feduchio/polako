@@ -1,0 +1,23 @@
+▶ RetryFetcher
+  ✔ succeeds on first attempt (0.299791ms)
+  ✖ retries after transient failure and succeeds (0.128375ms)
+  ✔ throws after all retries exhausted (0.108458ms)
+✖ RetryFetcher (1.258083ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 2
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 37.53525
+
+✖ failing tests:
+
+test at tests/retryFetch.test.mjs:18:3
+✖ retries after transient failure and succeeds (0.128375ms)
+  Error: duplicate in-flight request detected
+      at RetryFetcher.fetch (file:///Users/fedorsvetlov/polish/fixtures/resume-dup-fetch/src/retryFetch.mjs:33:15)
+      at async TestContext.<anonymous> (file:///Users/fedorsvetlov/polish/fixtures/resume-dup-fetch/tests/retryFetch.test.mjs:30:20)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7)

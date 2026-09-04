@@ -22,7 +22,7 @@ export interface ActiveOperation {
 }
 
 export interface WaitingState {
-  kind: "retry" | "unavailable" | "output_contract";
+  kind: "retry" | "unavailable" | "output_contract" | "human";
   summary: string;
   attempt: number | null;
   maxAttempts: number | null;

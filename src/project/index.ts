@@ -8,7 +8,9 @@ export {
   type RegistryEntry,
 } from "./profile.js";
 export { discoverProject, inspectManifestHashes, ProfileCache, profileCacheKey } from "./discovery.js";
-export { parseTestOutput, statusFromProcess } from "./parsers.js";
+export { parseTestOutput, parseNodeTest, statusFromProcess } from "./parsers.js";
+export { buildBaselineEvidenceView } from "./baselineEvidence.js";
+export type { BaselineCheckEvidence, CheckOutputReader } from "./baselineEvidence.js";
 export {
   assertRepositoryClean,
   checkRepositoryClean,

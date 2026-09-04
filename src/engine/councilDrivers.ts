@@ -83,7 +83,15 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
     const council = createCouncil(ctx, options);
     let result: IntakeResult;
     try {
-      result = await council.intake(mission, profile, baseline);
+      result = await council.intake(mission, profile, baseline, {
+        readCheckOutput: (sha256) => {
+          try {
+            return ctx.store.artifacts.getText(sha256);
+          } catch {
+            return null;
+          }
+        },
+      });
     } catch (error) {
       recordCouncilUnavailable(ctx, error);
       throw error;

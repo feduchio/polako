@@ -87,12 +87,14 @@ export class Judge extends CouncilRoleAgent {
 }
 
 function systemPrompt(role: CouncilRole): string {
+  const evidence =
+    "execution.baselineEvidence is the failure content (command, status, exit, summary, compact diagnostics). outputArtifact is a CAS pointer to full stdout/stderr, not missing evidence. Do not vote needs_human because you only see a sha256, because source files are not inlined, or because profileHints.framework/packageManager are informational. Workers read the repo later. needs_human is only for genuine mission or product ambiguity this evidence cannot resolve.";
   const focus =
     role === "planner"
-      ? 'Extract concrete goals and requirements. proposal.requirements must be a non-empty array of objects {"ref":"R1","statement":"...","acceptance":["observable criterion"]}; never a string array, never acceptanceCriteria. profileHints are informational; do not invent a blocking ambiguity solely because packageManager is null or framework is unknown when execution.checks and baseline results exist.'
+      ? `Extract concrete goals and requirements. proposal.requirements must be a non-empty array of objects {"ref":"R1","statement":"...","acceptance":["observable criterion"]}; never a string array, never acceptanceCriteria. profileHints are informational. ${evidence} Do not invent a blocking ambiguity solely because packageManager is null or framework is unknown when execution.checks and baselineEvidence exist. Intake does not require a code diff.`
       : role === "scope_guardian"
-        ? "Protect explicit constraints and non-goals. Identify ambiguity that blocks safe execution of the mission itself. profileHints (framework, packageManager) are informational labels, not blocking uncertainty: if execution.checks exist and baseline ran, do not vote needs_human solely because framework is unknown or packageManager is null. During decomposition return dropRefs for out-of-scope requirements."
-        : "Independently adjudicate whether the proposal is complete, testable, and safe to execute. profileHints are informational; execution.checks and baseline results are authoritative. Do not vote needs_human solely because a package-manager or framework hint is missing when mandatory checks already ran. A no-op diff is not a concern during intake (no code exists yet). During decomposition you may restore dropped refs via restoreRefs.";
+        ? `Protect explicit constraints and non-goals. Identify ambiguity that blocks safe execution of the mission itself. profileHints (framework, packageManager) are informational labels, not blocking uncertainty. ${evidence} During decomposition return dropRefs for out-of-scope requirements.`
+        : `Independently adjudicate whether the mission plus baselineEvidence is sufficient to interpret a bounded coding task. At intake there is no code proposal or diff (roles run in parallel); do not vote needs_human for a missing code proposal, a CAS hash, or missing inlined source. profileHints are informational. ${evidence} During decomposition you may restore dropped refs via restoreRefs.`;
   return (
     `You are the supervisor council ${role}. ${focus} Return JSON only: ` +
     '{"decision":"approve|revise|needs_human","rationale":"...","concerns":["..."],"proposal":{...}}.'

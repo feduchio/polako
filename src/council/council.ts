@@ -10,18 +10,15 @@ import {
   type Requirement,
 } from "../domain/mission.js";
 import { createTaskFromRequirement, type Task, type TaskKind } from "../domain/task.js";
-import type { ProjectProfile } from "../project/profile.js";
 import { profileCacheKey } from "../project/discovery.js";
+import { buildBaselineEvidenceView, type CheckOutputReader } from "../project/baselineEvidence.js";
+import type { ProjectProfile } from "../project/profile.js";
 import { PolishError, errorToString, isOutputContractFailure, isProvidersUnavailable } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { isOperationalFailure } from "./operational.js";
 import { aggregateCouncilDecision } from "./judge.js";
 import { outputContractError } from "./interpretationSchema.js";
-import {
-  intakeCouncilPayload,
-  neutralizeInformationalAmbiguities,
-  neutralizeInformationalProfileVotes,
-} from "./profileHints.js";
+import { intakeCouncilPayload } from "./profileHints.js";
 import { Judge, Planner, ScopeGuardian } from "./roles.js";
 import type {
   CouncilDecision,
@@ -38,6 +35,10 @@ export interface SupervisorCouncilOptions {
   now?: () => number;
   runId?: string;
   baseCheckpointHash?: string;
+}
+
+export interface CouncilIntakeOptions {
+  readCheckOutput?: CheckOutputReader;
 }
 
 interface InterpretationProposal {
@@ -79,10 +80,12 @@ export class SupervisorCouncil {
     missionRaw: Mission | string,
     discovery: ProjectProfile,
     baseline: BaselineSnapshot,
+    options: CouncilIntakeOptions = {},
   ): Promise<IntakeResult> {
     this.baseline = baseline;
     const mission = normalizeMission(missionRaw, discovery.projectPath, this.now());
-    const context = intakeCouncilPayload(mission, discovery, baseline);
+    const baselineEvidence = buildBaselineEvidenceView(baseline, options.readCheckOutput ?? (() => null));
+    const context = intakeCouncilPayload(mission, discovery, baseline, baselineEvidence);
     const labeled = [
       { role: "planner" as const, promise: this.planner.analyze({ runId: baseline.runId, purpose: "council_intake_planner", payload: context }) },
       { role: "scope_guardian" as const, promise: this.scopeGuardian.analyze({ runId: baseline.runId, purpose: "council_intake_scope", payload: context }) },
@@ -112,15 +115,7 @@ export class SupervisorCouncil {
         { causeMessage: error instanceof Error ? error.message : String(error) },
       );
     }
-    interpretation = {
-      ...interpretation,
-      ambiguities: neutralizeInformationalAmbiguities(interpretation.ambiguities, discovery, baseline),
-    };
-    const opinions = neutralizeInformationalProfileVotes(
-      [plannerCall.opinion, scopeCall.opinion, judgeCall.opinion],
-      discovery,
-      baseline,
-    );
+    const opinions = [plannerCall.opinion, scopeCall.opinion, judgeCall.opinion];
     const aggregate = aggregateCouncilDecision(opinions, { blockingAmbiguity: hasBlockingAmbiguity(interpretation) });
     const decision = this.recordDecision(
       baseline.runId,
