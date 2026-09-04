@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfig } from "../../domain/config.js";
 import type { Event } from "../../domain/event.js";
-import type { FindingStatus } from "../../domain/finding.js";
+import type { Finding, FindingStatus, FindingValidation } from "../../domain/finding.js";
+import type { ReviewExecution } from "../../domain/review.js";
 import { emptyFindingCounts } from "../../domain/checkpoint.js";
 import { FakeClock } from "../../shared/clock.js";
 import { hashJson } from "../../shared/hash.js";
@@ -22,8 +23,11 @@ import {
   detectFindingOscillation,
   detectNoProgress,
   detectStyleOnlyGrowth,
+  disagreementRoundsOf,
   foldModelCallUsage,
+  foldPrefix,
   hashPathologySample,
+  isObservationBoundary,
   provenC2RollbackTarget,
   executablePersistedRollbackTarget,
   resolveObservationBoundary,
@@ -118,6 +122,9 @@ describe("C2 sliding-window detectors", () => {
     expect(detectFindingOscillation(statuses(runId, "fp1", ["RAW", "VALIDATING", "VALID", "RESOLVED"]), 4)).toBeNull();
     expect(detectFindingOscillation(statuses(runId, "fp1", ["VALID", "VALID", "VALID", "VALID"]), 4)).toBeNull();
     expect(detectFindingOscillation(statuses(runId, "fp1", ["VALID", "REJECTED", "VALID"]), 4)).toBeNull();
+    const evenSix = statuses(runId, "fp1", ["VALID", "REJECTED", "VALID", "REJECTED", "VALID", "REJECTED"]);
+    expect(detectFindingOscillation(evenSix, 6)).not.toBeNull();
+    expect(detectFindingOscillation(evenSix, 5)).toBeNull();
   });
 
   it("checkpoint A,B,A,B is positive; stable, linear, and one rollback then progress are negative", () => {
@@ -157,6 +164,10 @@ describe("C2 sliding-window detectors", () => {
       sample(2, { runId, progress: progress({ successfulGateFingerprints: [`${HASH_A}:test:pass`] }) }),
     ];
     expect(detectNoProgress(gateImproved, 3, false)).toBeNull();
+    const pair = [0, 1].map((index) => sample(index, { runId, progress: progress() }));
+    expect(detectNoProgress([pair[0]!], 2, false)).toBeNull();
+    expect(detectNoProgress(pair, 2, false)).not.toBeNull();
+    expect(detectNoProgress(pair, 1, false)).toBeNull();
   });
 
   it("disagreement 2-of-3 non-shrinking is positive; shrinking, resolved, incomplete, and single-position are negative", () => {
@@ -569,6 +580,50 @@ describe("C2 sample replay and broker fold equality", () => {
     expect(resolveObservationBoundary([idle])).toBeNull();
   });
 
+  it("treats a review round as complete only at reviewersPerRound independent reviews", () => {
+    const runId = id("run", NOW);
+    const first = reviewFinished(runId, 1, 1, "m1", "correctness");
+    const second = reviewFinished(runId, 2, 1, "m2", "regression");
+    const third = reviewFinished(runId, 3, 1, "m3", "adversarial");
+    const required = defaultConfig().review.reviewersPerRound;
+    expect(required).toBe(3);
+    expect(isObservationBoundary(first, [first], required)).toBe(false);
+    expect(isObservationBoundary(second, [first, second], required)).toBe(false);
+    expect(isObservationBoundary(third, [first, second, third], required)).toBe(true);
+    expect(resolveObservationBoundary([first, second], required)).toBeNull();
+    expect(resolveObservationBoundary([first, second, third], required)?.id).toBe(third.id);
+  });
+
+  it("does not treat a lone finding.validated as a completed-round boundary", () => {
+    const runId = id("run", NOW);
+    const finding = splitFinding(runId);
+    const validated = findingValidated(runId, 1, finding, "VALID", "v1");
+    expect(isObservationBoundary(validated, [validated], 3)).toBe(false);
+    expect(resolveObservationBoundary([validated], 3)).toBeNull();
+  });
+
+  it("omits incomplete review rounds from disagreement positives", () => {
+    const runId = id("run", NOW);
+    const finding = splitFinding(runId);
+    const raised = findingRaised(runId, 1, finding);
+    const oneReview = reviewFinished(runId, 2, 1, "m1", "correctness");
+    const valid = findingValidated(runId, 3, finding, "VALID", "v1");
+    const rejected = findingValidated(runId, 4, { ...finding, status: "REJECTED" }, "REJECTED", "v2");
+    const incomplete = foldPrefix([raised, oneReview, valid, rejected]);
+    expect(disagreementRoundsOf(incomplete, 3)).toEqual([]);
+
+    const reviews = [
+      reviewFinished(runId, 2, 1, "m1", "correctness"),
+      reviewFinished(runId, 3, 1, "m2", "regression"),
+      reviewFinished(runId, 4, 1, "m3", "adversarial"),
+    ];
+    const complete = foldPrefix([raised, ...reviews, valid, rejected]);
+    expect(disagreementRoundsOf(complete, 3)).toEqual([
+      { checkpointHash: HASH_A, roundIndex: 1, fingerprints: [finding.fingerprint] },
+    ]);
+    expect(disagreementRoundsOf(complete, 1)[0]?.fingerprints).toEqual([finding.fingerprint]);
+  });
+
   it("persisted rollback execute keeps the exact hash and refuses a worse target", () => {
     const runId = id("run", NOW);
     const current = {
@@ -642,3 +697,105 @@ describe("C2 sample replay and broker fold equality", () => {
     expect(provenC2RollbackTarget(current, [priorFail])).toBeNull();
   });
 });
+
+function reviewFinished(
+  runId: string,
+  seq: number,
+  roundIndex: number,
+  model: string,
+  axis: ReviewExecution["axis"],
+): Event {
+  const execution: ReviewExecution = {
+    id: id("rvex", NOW + seq),
+    runId,
+    checkpointHash: HASH_A,
+    roundIndex,
+    axis,
+    requestedModel: { provider: "p", model },
+    completed: true,
+    findings: [],
+    startedAt: NOW + seq,
+    finishedAt: NOW + seq,
+  };
+  return {
+    schemaVersion: 1,
+    id: id("evt", NOW + seq),
+    runId,
+    ts: NOW + seq,
+    seq,
+    type: "review.finished",
+    payload: { execution },
+    causedBy: [],
+    actor: { kind: "system" },
+    artifacts: [],
+  };
+}
+
+function splitFinding(runId: string): Finding {
+  return {
+    id: id("find", NOW),
+    runId,
+    checkpointHash: HASH_A,
+    axis: "correctness",
+    reportedBy: { kind: "reviewer", model: { provider: "p", model: "m1" } },
+    status: "VALID",
+    duplicateOf: null,
+    fingerprint: "fp-split",
+    investigationRounds: 0,
+    criterion: "x",
+    severity: "high",
+    blocking: true,
+    claim: "disputed",
+    evidence: [],
+    reproduction: ["x"],
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+function findingRaised(runId: string, seq: number, finding: Finding): Event {
+  return {
+    schemaVersion: 1,
+    id: id("evt", NOW + seq),
+    runId,
+    ts: NOW + seq,
+    seq,
+    type: "finding.raised",
+    payload: { finding },
+    causedBy: [],
+    actor: { kind: "system" },
+    artifacts: [],
+  };
+}
+
+function findingValidated(
+  runId: string,
+  seq: number,
+  finding: Finding,
+  verdict: FindingValidation["verdict"],
+  model: string,
+): Event {
+  const validation: FindingValidation = {
+    id: id("fval", NOW + seq),
+    findingId: finding.id,
+    runId,
+    method: "independent_reviewer_agreement",
+    verdict,
+    rationale: verdict,
+    evidenceRefs: [{ sha256: "a".repeat(64), kind: "check_output", bytes: 1 }],
+    performedBy: { kind: "reviewer", model: { provider: "p", model } },
+    createdAt: NOW + seq,
+  };
+  return {
+    schemaVersion: 1,
+    id: id("evt", NOW + seq),
+    runId,
+    ts: NOW + seq,
+    seq,
+    type: "finding.validated",
+    payload: { finding, validation },
+    causedBy: [],
+    actor: { kind: "system" },
+    artifacts: [],
+  };
+}

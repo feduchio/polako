@@ -4,7 +4,7 @@ import type { Event } from "../../domain/event.js";
 import type { Finding, FindingValidation } from "../../domain/finding.js";
 import type { ReviewExecution } from "../../domain/review.js";
 import type { Task } from "../../domain/task.js";
-import type { PolishConfig } from "../../domain/config.js";
+import { defaultConfig, type PolishConfig } from "../../domain/config.js";
 import { hashJson } from "../../shared/hash.js";
 import { isReviewRoundComplete } from "../../domain/review.js";
 import { buildPathologyBudgetSnapshot } from "./budget.js";
@@ -59,27 +59,64 @@ export function eventsThroughBoundary(events: readonly Event[], boundaryEventId:
   return ordered.slice(0, end + 1);
 }
 
-export function isObservationBoundary(event: Event, prefix: readonly Event[]): boolean {
+function requiredReviewersOf(requiredReviewers?: number): number {
+  return requiredReviewers ?? defaultConfig().review.reviewersPerRound;
+}
+
+function reviewExecutionsIn(prefix: readonly Event[]): ReviewExecution[] {
+  return prefix.flatMap((item) => {
+    if (item.type !== "review.finished" && item.type !== "review.started") return [];
+    const row = asRecord(item.payload["execution"]) as ReviewExecution | null;
+    return row === null ? [] : [row];
+  });
+}
+
+export function isObservationBoundary(event: Event, prefix: readonly Event[], requiredReviewers?: number): boolean {
   if (!OBSERVATION_TYPES.has(event.type)) return false;
+  const required = requiredReviewersOf(requiredReviewers);
   if (event.type === "review.finished") {
     const execution = asRecord(event.payload["execution"]) as ReviewExecution | null;
     if (!execution?.completed) return false;
-    const reviews = prefix.flatMap((item) => {
-      if (item.type !== "review.finished" && item.type !== "review.started") return [];
-      const row = asRecord(item.payload["execution"]) as ReviewExecution | null;
-      return row === null ? [] : [row];
-    });
-    return isReviewRoundComplete(reviews, execution.checkpointHash, execution.roundIndex, 1);
+    return isReviewRoundComplete(reviewExecutionsIn(prefix), execution.checkpointHash, execution.roundIndex, required);
+  }
+  if (event.type === "finding.validated") {
+    return completesValidationRound(event, prefix, required);
   }
   return true;
 }
 
-export function resolveObservationBoundary(events: readonly Event[]): Event | null {
+function completesValidationRound(event: Event, prefix: readonly Event[], requiredReviewers: number): boolean {
+  const validation = asRecord(event.payload["validation"]) as FindingValidation | null;
+  if (validation === null) return false;
+  const fold = foldPrefix(prefix);
+  const finding = fold.findings.find((item) => item.id === validation.findingId);
+  if (finding === undefined) return false;
+  const roundIndex = validationRoundIndex(validation, fold);
+  if (roundIndex === null) return false;
+  if (!isReviewRoundComplete(fold.reviewExecutions, finding.checkpointHash, roundIndex, requiredReviewers)) {
+    return false;
+  }
+  const validationsForRound = fold.validations.filter((item) => {
+    const owner = fold.findings.find((row) => row.id === item.findingId);
+    if (owner?.checkpointHash !== finding.checkpointHash) return false;
+    return validationRoundIndex(item, fold) === roundIndex;
+  });
+  const independent = new Set(
+    validationsForRound.map((item) => {
+      const model = item.performedBy.model;
+      return model === undefined ? item.id : `${item.performedBy.kind}:${model.provider}:${model.model}`;
+    }),
+  );
+  return independent.size >= requiredReviewers;
+}
+
+export function resolveObservationBoundary(events: readonly Event[], requiredReviewers?: number): Event | null {
   const ordered = [...events].sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id));
+  const required = requiredReviewersOf(requiredReviewers);
   for (let i = ordered.length - 1; i >= 0; i -= 1) {
     const event = ordered[i];
     if (event === undefined) continue;
-    if (isObservationBoundary(event, ordered.slice(0, i + 1))) return event;
+    if (isObservationBoundary(event, ordered.slice(0, i + 1), required)) return event;
   }
   return null;
 }
@@ -260,7 +297,8 @@ function opposingPositions(validations: readonly FindingValidation[]): boolean {
   });
 }
 
-export function disagreementRoundsOf(fold: FoldedPrefix): DisagreementRound[] {
+export function disagreementRoundsOf(fold: FoldedPrefix, requiredReviewers?: number): DisagreementRound[] {
+  const required = requiredReviewersOf(requiredReviewers);
   const byRound = new Map<string, { checkpointHash: string; roundIndex: number; validations: FindingValidation[] }>();
   for (const validation of fold.validations) {
     const finding = fold.findings.find((item) => item.id === validation.findingId);
@@ -273,18 +311,11 @@ export function disagreementRoundsOf(fold: FoldedPrefix): DisagreementRound[] {
     byRound.set(key, bucket);
   }
 
-  const completedReviewRounds = new Set(
-    fold.reviewExecutions.filter((execution) => execution.completed).map((execution) => `${execution.checkpointHash}:${execution.roundIndex}`),
-  );
-
   const rounds: DisagreementRound[] = [];
   for (const key of [...byRound.keys()].sort()) {
-    if (!completedReviewRounds.has(key) && !key.endsWith(":null")) {
-      // validation-only rounds still participate when a completed review exists for that checkpoint+index
-    }
     const bucket = byRound.get(key);
     if (bucket === undefined) continue;
-    if (!completedReviewRounds.has(key)) continue;
+    if (!isReviewRoundComplete(fold.reviewExecutions, bucket.checkpointHash, bucket.roundIndex, required)) continue;
     const byFingerprint = new Map<string, FindingValidation[]>();
     for (const validation of bucket.validations) {
       const finding = fold.findings.find((item) => item.id === validation.findingId);
@@ -305,7 +336,7 @@ export function disagreementRoundsOf(fold: FoldedPrefix): DisagreementRound[] {
 export function buildPathologySample(input: {
   events: readonly Event[];
   boundary: Event;
-  config: Pick<PolishConfig, "budget">;
+  config: Pick<PolishConfig, "budget" | "review">;
   cliBudget?: { budgetTokens?: number | null; budgetUsd?: number | null } | undefined;
 }): PathologySample {
   const prefix = eventsThroughBoundary(input.events, input.boundary.id);
@@ -322,7 +353,7 @@ export function buildPathologySample(input: {
     checkpointHash: fold.checkpointHash,
     findingObservations: observations,
     progress: progressVectorOf(fold),
-    disagreementRounds: disagreementRoundsOf(fold),
+    disagreementRounds: disagreementRoundsOf(fold, input.config.review.reviewersPerRound),
     taskIds: fold.tasks.map((task) => task.id).sort(),
     taskWorkClasses: workClassRecords(fold),
     budget: buildPathologyBudgetSnapshot({

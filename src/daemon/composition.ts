@@ -5,7 +5,8 @@ import { ModelBroker } from "../broker/broker.js";
 import { probeModelCapabilities } from "../broker/capabilityProbe.js";
 import { ModelCatalog } from "../broker/catalog.js";
 import { costEligibilityFromConfig } from "../broker/costEligibility.js";
-import { DEFAULT_ROUTER_POLICY, ModelRouter } from "../broker/router.js";
+import { DEFAULT_ROUTER_POLICY, ModelRouter, type Ranked } from "../broker/router.js";
+import type { EnsembleOption } from "../convergence/tracker.js";
 import { BudgetTracker, QuotaTracker } from "../broker/quota.js";
 import { SecretStore } from "../broker/secrets.js";
 import type { ProviderAdapter } from "../broker/types.js";
@@ -359,7 +360,43 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
   engine.registerPhase("REVIEWING", createReviewingDriver({ resolveReviewers: (ctx) => selectReviewProviders(deps, ctx) }));
   engine.registerPhase("VALIDATING", withReadyPromotion(createValidatingDriver()));
   engine.registerPhase("SIMPLIFYING", createSimplifyingDriver());
-  engine.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver());
+  engine.registerPhase(
+    "CONVERGENCE_CHECK",
+    createConvergenceDriver({
+      resolveEnsembleAlternatives: (ctx) => resolveEnsembleAlternatives(deps, ctx),
+    }),
+  );
+}
+
+function expectedReviewerQuality(row: Ranked): number {
+  return row.entry.stats.quality ?? DEFAULT_ROUTER_POLICY.priorByTier[row.entry.info.capabilities.tier];
+}
+
+/**
+ * Distinct cost/quality-eligible review ensembles from the same catalog/router REVIEWING uses.
+ * Fewer than two ensembles fail closed so CHANGE_ENSEMBLE becomes NEEDS_HUMAN.
+ */
+export function resolveEnsembleAlternatives(deps: ProductionDeps, ctx?: PhaseContext): EnsembleOption[] {
+  const size = deps.config.review.reviewersPerRound;
+  const minQuality = deps.config.review.minQualityForRotation;
+  const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
+  const ranked = deps.router.select({
+    role: "reviewer",
+    count: Math.max(size * 2, 8),
+    requireJson: true,
+    ...(exclude.length > 0 ? { exclude } : {}),
+  });
+  const eligible = ranked.filter((row) => expectedReviewerQuality(row) >= minQuality);
+  const options: EnsembleOption[] = [];
+  for (let offset = 0; offset + size <= eligible.length; offset += size) {
+    const slice = eligible.slice(offset, offset + size);
+    const qualities = slice.map(expectedReviewerQuality);
+    options.push({
+      ensemble: slice.map((row) => row.entry.info.ref),
+      quality: Math.min(...qualities),
+    });
+  }
+  return options.length >= 2 ? options : [];
 }
 
 function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {

@@ -8,6 +8,7 @@ export {
   createSimplifyingDriver,
   installProductionDrivers,
   parseRuntimeMode,
+  resolveEnsembleAlternatives,
   promoteEligibleTasksToReady,
   resolveRuntimeEvidence,
   type BuildProductionDepsOptions,

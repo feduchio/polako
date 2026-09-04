@@ -1,9 +1,11 @@
 export { foldModelCallUsage, budgetSnapshotFromUsage, buildPathologyBudgetSnapshot, budgetIsExhausted, liveBudgetLimits } from "./budget.js";
 export {
   buildPathologySample,
+  disagreementRoundsOf,
   eventsThroughBoundary,
   foldPrefix,
   hashPathologySample,
+  isObservationBoundary,
   progressImproved,
   resolveObservationBoundary,
 } from "./sample.js";

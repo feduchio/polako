@@ -155,6 +155,13 @@ describe("SupervisorCouncil", () => {
       sourceRef: "R1",
     });
     expect(styleDag.tasks[0]?.classificationEventId).toEqual(styleDag.decision.events[0]?.id);
+    const plannerPrompt = styleProvider.calls.find((call) => call.metadata.purpose === "council_decompose_planner")?.messages[0]?.content;
+    const scopePrompt = styleProvider.calls.find((call) => call.metadata.purpose === "council_decompose_scope")?.messages[0]?.content;
+    expect(plannerPrompt).toMatch(/workClass/);
+    expect(plannerPrompt).toMatch(/classifiedBy/);
+    expect(plannerPrompt).toMatch(/sourceRef/);
+    expect(scopePrompt).toMatch(/classifications|workClasses/);
+    expect(scopePrompt).toMatch(/workClass/);
 
     const keywordProvider = scriptedCouncil(false, {
       decomposeTasks: [

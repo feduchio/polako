@@ -19,7 +19,9 @@ import {
   createWorkerFactory,
   installProductionDrivers,
   promoteEligibleTasksToReady,
+  resolveEnsembleAlternatives,
 } from "./composition.js";
+import { selectEligibleEnsemble } from "../convergence/pathology/index.js";
 import { createTaskFromRequirement } from "../domain/task.js";
 import { id } from "../shared/ids.js";
 import type { PhaseContext } from "../engine/types.js";
@@ -65,6 +67,43 @@ describe("production composition", () => {
       expect(driver, `missing driver for ${phase}`).toBeDefined();
       expect(isStubDriver(driver!), `${phase} must not use stubDriverFor`).toBe(false);
     }
+  });
+
+  it("production ensemble wiring returns a non-null alternative when two eligible ensembles exist", async () => {
+    const config = defaultConfig();
+    const freeJson = {
+      ...FAKE_CAPABILITIES.strong,
+      supportsJson: true,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const provider = new ScriptedProvider(
+      "scripted",
+      Array.from({ length: 6 }, (_, index) => ({
+        name: `rev-${index + 1}`,
+        capabilities: { ...freeJson, family: `fam-${index + 1}` },
+      })),
+    );
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+    });
+    await deps.catalog.discover();
+    const options = resolveEnsembleAlternatives(deps);
+    expect(options.length).toBeGreaterThanOrEqual(2);
+    const alternative = selectEligibleEnsemble({
+      options,
+      previous: [],
+      checkpointHash: "a".repeat(40),
+      axes: ["correctness", "regression", "adversarial"],
+      minQualityForRotation: config.review.minQualityForRotation,
+      currentEnsemble: options[0]!.ensemble,
+    });
+    expect(alternative).not.toBeNull();
+    expect(alternative).not.toEqual(options[0]?.ensemble);
   });
 
   it("buildProductionDeps discovers models with capability probes", async () => {

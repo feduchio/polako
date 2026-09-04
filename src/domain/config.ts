@@ -49,16 +49,25 @@ export const ConvergenceStrategySchema = z.object({
   /** bounded investigation rounds for a single UNCERTAIN finding before NEEDS_HUMAN */
   maxInvestigationRoundsPerFinding: z.number().int().min(0).default(2),
   /** consecutive attempts without evidence improvement before strategy change */
-  noProgressAttempts: z.number().int().min(1).default(3),
+  noProgressAttempts: z.number().int().min(2).default(3),
   /** sliding-window sizes; a detector is silent until its full window exists */
-  findingOscillationWindow: z.number().int().min(4).default(4),
-  checkpointOscillationWindow: z.number().int().min(4).default(4),
+  findingOscillationWindow: evenWindowSize(4).default(4),
+  checkpointOscillationWindow: evenWindowSize(4).default(4),
   disagreementWindow: z.number().int().min(2).default(2),
-  taskGrowthWindow: z.number().int().min(1).default(3),
+  taskGrowthWindow: z.number().int().min(2).default(3),
   /** persisted CHANGE_ENSEMBLE cap per pathology kind */
   maxEnsembleChangesPerPathology: z.number().int().min(1).default(1),
 });
 export type ConvergenceStrategy = z.infer<typeof ConvergenceStrategySchema>;
+
+/** Oscillation windows must be even so A,B,A,B can fire; odd sizes would stay silent. */
+function evenWindowSize(min: number) {
+  return z
+    .number()
+    .int()
+    .min(min)
+    .refine((value) => value % 2 === 0, { message: `must be an even integer >= ${min}` });
+}
 
 export const VerifierStrategySchema = z.object({
   backend: z.enum(["ts", "sidecar"]).default("sidecar"),

@@ -15,6 +15,19 @@ describe("PolishConfig", () => {
     expect(cfg.routing.maxOutputCostPerM).toBe(0);
     expect(cfg.council.maxAttemptsPerModel).toBe(2);
     expect(cfg.verifier.backend).toBe("sidecar");
+    expect(cfg.convergence.noProgressAttempts).toBe(3);
+    expect(cfg.convergence.taskGrowthWindow).toBe(3);
+    expect(cfg.convergence.findingOscillationWindow).toBe(4);
+    expect(cfg.convergence.checkpointOscillationWindow).toBe(4);
+  });
+
+  it("rejects fail-open or permanently-silent C2 window knobs", () => {
+    expect(() => PolishConfigSchema.parse({ convergence: { findingOscillationWindow: 5 } })).toThrow();
+    expect(() => PolishConfigSchema.parse({ convergence: { checkpointOscillationWindow: 5 } })).toThrow();
+    expect(() => PolishConfigSchema.parse({ convergence: { noProgressAttempts: 1 } })).toThrow();
+    expect(() => PolishConfigSchema.parse({ convergence: { taskGrowthWindow: 1 } })).toThrow();
+    expect(PolishConfigSchema.parse({ convergence: { findingOscillationWindow: 6 } }).convergence.findingOscillationWindow).toBe(6);
+    expect(PolishConfigSchema.parse({ convergence: { noProgressAttempts: 2 } }).convergence.noProgressAttempts).toBe(2);
   });
 
   it("accepts an ordered supervisor fallback chain", () => {

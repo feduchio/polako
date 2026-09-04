@@ -35,7 +35,12 @@ function keys(samples: readonly PathologySample[]): string[] {
   return samples.map((sample) => sampleKey(sample.runId, sample.boundaryEventId));
 }
 
+function legalOscillationWindow(windowSize: number): boolean {
+  return Number.isInteger(windowSize) && windowSize >= 4 && windowSize % 2 === 0;
+}
+
 export function detectFindingOscillation(samples: readonly PathologySample[], windowSize: number): DetectorFinding | null {
+  if (!legalOscillationWindow(windowSize)) return null;
   const window = windowOf(samples, windowSize);
   if (window === null) return null;
   const fingerprints = new Set(window.flatMap((sample) => sample.findingObservations.map((row) => row.fingerprint)));
@@ -60,6 +65,7 @@ export function detectFindingOscillation(samples: readonly PathologySample[], wi
 }
 
 export function detectCheckpointOscillation(samples: readonly PathologySample[], windowSize: number): DetectorFinding | null {
+  if (!legalOscillationWindow(windowSize)) return null;
   const window = windowOf(samples, windowSize);
   if (window === null) return null;
   const hashes = window.map((sample) => sample.checkpointHash);
@@ -79,6 +85,7 @@ export function detectNoProgress(
   doneEligible: boolean,
 ): DetectorFinding | null {
   if (doneEligible) return null;
+  if (!Number.isInteger(attempts) || attempts < 2) return null;
   const window = windowOf(samples, attempts);
   if (window === null) return null;
   const first = window[0];
@@ -133,6 +140,7 @@ function validStyleOnly(record: TaskWorkClassRecord): boolean {
 }
 
 export function detectStyleOnlyGrowth(samples: readonly PathologySample[], windowSize: number): DetectorFinding | null {
+  if (!Number.isInteger(windowSize) || windowSize < 2) return null;
   const window = windowOf(samples, windowSize);
   if (window === null) return null;
   const first = window[0];

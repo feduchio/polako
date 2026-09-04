@@ -89,11 +89,17 @@ export class Judge extends CouncilRoleAgent {
 function systemPrompt(role: CouncilRole): string {
   const evidence =
     "execution.baselineEvidence is the failure content (command, status, exit, summary, compact diagnostics). outputArtifact is a CAS pointer to full stdout/stderr, not missing evidence. Do not vote needs_human because you only see a sha256, because source files are not inlined, or because profileHints.framework/packageManager are informational. Workers read the repo later. needs_human is only for genuine mission or product ambiguity this evidence cannot resolve.";
+  const workClass =
+    role === "planner"
+      ? ' During decomposition, each simplify/refactor task must include structured workClass ("functional"|"style_only"), classifiedBy ("planner"), and sourceRef (the requirement ref). style_only is legal only for simplify/refactor whose sourceRef is that mission requirement. Never infer workClass from title or description keywords.'
+      : role === "scope_guardian"
+        ? ' During decomposition, classify simplify/refactor work with proposal.classifications as [{"requirementRef":"R1","workClass":"functional|style_only","classifiedBy":"scope_guardian","sourceRef":"R1"}] or proposal.workClasses keyed by requirement ref. style_only is legal only for simplify/refactor whose sourceRef is that requirement. Never infer workClass from title or description keywords.'
+        : "";
   const focus =
     role === "planner"
-      ? `Extract concrete goals and requirements. proposal.requirements must be a non-empty array of objects {"ref":"R1","statement":"...","acceptance":["observable criterion"]}; never a string array, never acceptanceCriteria. profileHints are informational. ${evidence} Do not invent a blocking ambiguity solely because packageManager is null or framework is unknown when execution.checks and baselineEvidence exist. Intake does not require a code diff.`
+      ? `Extract concrete goals and requirements. proposal.requirements must be a non-empty array of objects {"ref":"R1","statement":"...","acceptance":["observable criterion"]}; never a string array, never acceptanceCriteria. profileHints are informational. ${evidence} Do not invent a blocking ambiguity solely because packageManager is null or framework is unknown when execution.checks and baselineEvidence exist. Intake does not require a code diff.${workClass}`
       : role === "scope_guardian"
-        ? `Protect explicit constraints and non-goals. Identify ambiguity that blocks safe execution of the mission itself. profileHints (framework, packageManager) are informational labels, not blocking uncertainty. ${evidence} During decomposition return dropRefs for out-of-scope requirements.`
+        ? `Protect explicit constraints and non-goals. Identify ambiguity that blocks safe execution of the mission itself. profileHints (framework, packageManager) are informational labels, not blocking uncertainty. ${evidence} During decomposition return dropRefs for out-of-scope requirements.${workClass}`
         : `Independently adjudicate whether the mission plus baselineEvidence is sufficient to interpret a bounded coding task. At intake there is no code proposal or diff (roles run in parallel); do not vote needs_human for a missing code proposal, a CAS hash, or missing inlined source. profileHints are informational. ${evidence} During decomposition you may restore dropped refs via restoreRefs.`;
   return (
     `You are the supervisor council ${role}. ${focus} Return JSON only: ` +

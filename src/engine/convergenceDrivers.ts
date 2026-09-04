@@ -79,7 +79,7 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
       return executePersistedDecision(ctx, unexecuted, options, hash);
     }
 
-    const boundary = resolveObservationBoundary(latestEvents);
+    const boundary = resolveObservationBoundary(latestEvents, ctx.config.review.reviewersPerRound);
     if (boundary == null) return b6ContinueOrRecover(ctx, controller, options, hash);
     const completedStops = listDecisions(latestEvents, ctx.run.id).filter(
       (decision) =>
