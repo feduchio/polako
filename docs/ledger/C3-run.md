@@ -5,7 +5,7 @@ Do not treat this file as a second contract.
 
 | Field | Value |
 |---|---|
-| Status | FIX ROUND 1 — Grok PASS on `9e784f6`; Claude review still running |
+| Status | FIX ROUND 2 — Claude FAIL on `9e784f6` (BLOCK-1/2 VALID); isolated fix starting |
 | Contract path | `docs/ledger/C3.md` |
 | Contract hash | d8618b8bf39e3db26ced211dac2d56aa1f116a8c8fe85926de7cd542e358a777 |
 | Base commit | `8cf0380b0cda8519966a28b68b5a081c981eee5c` |
@@ -18,10 +18,10 @@ Do not treat this file as a second contract.
 | Integration commit | `9e784f6459a67c3bddfd2a5606dc72a6464fdfef` on `task/C3-integration` (`a9fbc73` + C3-1). Fix lane `20e73bb92fdd355d25171fc470e2acdaee934189` on `task/C3-fix-1`. |
 | Polish verification runs | `run_01m1pkbnxz53215q9n0b3m` **FAIL** (same B-4: GATING→PLANNING duplicate ×5, 0 completed tasks). TARGET unchanged at `a9fbc73`. Not a C3 code finding; not a clean round. |
 | Grok review | **PASS** at `9e784f6` (C3-1 closed; no new blocking VALID). Non-blocking: `POLISH_VERIFIER_PREFER` can pick winner with ppt/`fallback=false`; `ALLOW_LIVE=1` still cannot live-score after secret scrub; regression uses `createVerifierStrategy` not `createComparingDriver`. |
-| Claude review | prior: **FAIL** at `a9fbc73` (C3-1). **New review running** on `9e784f6`. |
+| Claude review | **FAIL** at `9e784f6` — BLOCK-1 uniform scripted scores / array-index winner with `fallback=false`; BLOCK-2 PREFER + provenance cannot distinguish stub vs live |
 | Composer review | historical only — **FAIL** (blocking VALID, independently reproduced). Not used again. |
-| Findings | **C3-1 treated closed on `9e784f6` pending Claude.** Grok reproduced naked `createVerifierStrategy(defaultConfig().verifier)` → PPT, `fallback=false`. **VALID non-blocking (still open):** C3-2 two-stage only on fixture client; C3-3 inert knobs; C3-4 adapter never `close()`; C3-5 `"id": null` on exceptions; C3-6 `pnpm check` may pip-install; C3-7 synthesized PPT MatchEvidence; C3-8/`PREFER` hook now live on the default constructor (Grok VALID non-blocking). Historical C3-1 on `a9fbc73` remains the reason for fix round 1. |
-| Fix rounds | 1 landed (`20e73bb` / integration `9e784f6`). Independent Grok+Claude reviews of the **new** commit; prior reviews of `a9fbc73` do not count. |
+| Findings | **C3-1 closed** on `9e784f6` (sidecar injects scripted and calls `llm_verifier.select`). **VALID blocking BLOCK-1:** coordinator reproduced: no `POLISH_VERIFIER_PREFER` → all scores `0.5`, forward winner `cand-0`, reversed winner `cand-4`, `method=ppt fallback=false`. Scripted fixture ignores metrics (`clients.py` `_letter_for` empty prefer → `"T"`). TS fallback never engages because the stub response is successful. Worse than pre-patch PairwiseJudge. Grok treated PREFER as non-blocking; coordinator agrees with Claude: **blocking**. **VALID blocking BLOCK-2:** `PREFER` inherited from daemon env can pick a loser with plausible scores; provenance has no client/model field. **VALID non-blocking:** prior C3-2..C3-7; ALLOW_LIVE dead after scrub; `pivotTournamentFrom` inert; adapter leak; pip in tests. Out of fix-round-2 scope except BLOCK-1 + BLOCK-2. |
+| Fix rounds | 2 starting from `9e784f6` (`task/C3-fix-2`). Round 1 reviews of `9e784f6` do not count as a clean round. |
 | Clean rounds | 0/2 |
 | Accepted commit | |
 | Trusted capabilities added | none yet (C3 must not be used to accept C3) |
