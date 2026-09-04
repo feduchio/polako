@@ -133,6 +133,60 @@ describe("B4 production REVIEWING driver", () => {
     expect(isReviewRoundComplete(executions, checkpointHash, 1, 3)).toBe(true);
     expect(executions.filter((execution) => execution.completed)).toHaveLength(3);
   });
+
+  it("does not hammer a rate-limited reviewer on the next tick; falls back to another model", async () => {
+    const fallback = new ScriptedProvider("reviews", [
+      { name: "reviewer", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "other", capabilities: FAKE_CAPABILITIES.fast },
+    ]);
+    fallback.script("reviewer", [{ kind: "error", error: new ProviderError("reviews", "rate_limit", "429", { status: 429 }) }]);
+    fallback.script("other", [
+      { kind: "reply", content: reviewJson("correctness", "a.ts") },
+      { kind: "reply", content: reviewJson("regression", "b.ts") },
+      { kind: "reply", content: reviewJson("adversarial", "c.ts") },
+    ]);
+    engine.registerPhase("REVIEWING", createReviewingDriver({
+      resolveReviewers: () => [
+        { provider: fallback, model: { provider: "reviews", model: "reviewer" } },
+        { provider: fallback, model: { provider: "reviews", model: "other" } },
+      ],
+    }));
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    expect(executions.some((execution) => execution.error !== undefined && execution.requestedModel.model === "reviewer")).toBe(true);
+    expect(executions.filter((execution) => execution.completed && execution.requestedModel.model === "other").length).toBeGreaterThanOrEqual(1);
+    expect(fallback.calls.filter((call) => call.model.model === "reviewer")).toHaveLength(1);
+  });
+
+  it("skips a JSON-incapable 400 reviewer in the same tick and uses the next model", async () => {
+    const fallback = new ScriptedProvider("reviews", [
+      { name: "lyria", capabilities: FAKE_CAPABILITIES.fast },
+      { name: "ok", capabilities: FAKE_CAPABILITIES.strong },
+    ]);
+    fallback.script("lyria", [{
+      kind: "error",
+      error: new ProviderError("reviews", "bad_request", "JSON mode is not enabled", { status: 400 }),
+    }]);
+    fallback.script("ok", [
+      { kind: "reply", content: reviewJson("correctness", "a.ts") },
+      { kind: "reply", content: reviewJson("regression", "b.ts") },
+      { kind: "reply", content: reviewJson("adversarial", "c.ts") },
+    ]);
+    engine.registerPhase("REVIEWING", createReviewingDriver({
+      resolveReviewers: () => [
+        { provider: fallback, model: { provider: "reviews", model: "lyria" } },
+        { provider: fallback, model: { provider: "reviews", model: "ok" } },
+      ],
+    }));
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    expect(executions.some((execution) => !execution.completed && execution.requestedModel.model === "lyria")).toBe(true);
+    expect(executions.filter((execution) => execution.completed && execution.requestedModel.model === "ok").length).toBeGreaterThanOrEqual(1);
+    expect(fallback.calls.filter((call) => call.model.model === "lyria")).toHaveLength(1);
+    expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
+  });
 });
 
 interface Fixture {

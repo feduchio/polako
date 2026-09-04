@@ -253,6 +253,31 @@ describe("clean round proof-of-review", () => {
     ).toThrow(/incomplete/);
   });
 
+  it("records a clean round when rate-limit failures share the completed review round", () => {
+    const failed = {
+      ...reviewExecution(HASH_B, 1, "correctness", "gemma-free"),
+      id: id("rvex", NOW + 99),
+      completed: false,
+      finishedAt: null,
+    };
+    const cleanRound = buildCleanRoundFromReview({
+      runId: RUN_ID,
+      checkpointHash: HASH_B,
+      requiredReviewers: 3,
+      reviewExecutions: [
+        failed,
+        reviewExecution(HASH_B, 1, "correctness", "m1"),
+        reviewExecution(HASH_B, 1, "regression", "m2"),
+        reviewExecution(HASH_B, 1, "adversarial", "m3"),
+      ],
+      findings: [],
+      existingCleanRounds: [],
+      now: NOW,
+    });
+    expect(cleanRound.ensemble.map((entry) => entry.model)).toEqual(["m1", "m2", "m3"]);
+    expect(cleanRound.rawFindings).toBe(0);
+  });
+
   it("rejects when validated blocking findings remain", () => {
     expect(() =>
       buildCleanRoundFromReview({

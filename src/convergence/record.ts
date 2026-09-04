@@ -47,7 +47,9 @@ export function buildCleanRoundFromReview(input: RecordCleanRoundInput): CleanRo
     throw new Error("cannot record clean round without completed review executions");
   }
 
-  const roundExecutions = reviewRoundExecutions(input.reviewExecutions, input.checkpointHash, reviewRoundIndex);
+  const roundExecutions = reviewRoundExecutions(input.reviewExecutions, input.checkpointHash, reviewRoundIndex).filter(
+    (execution) => execution.completed,
+  );
   if (roundExecutions.length === 0) {
     throw new Error("cannot record clean round without completed review executions");
   }
@@ -59,9 +61,6 @@ export function buildCleanRoundFromReview(input: RecordCleanRoundInput): CleanRo
       throw new Error(
         `review execution checkpoint ${execution.checkpointHash} does not match clean round checkpoint ${input.checkpointHash}`,
       );
-    }
-    if (!execution.completed) {
-      throw new Error("required reviewers are incomplete for the review round");
     }
   }
 

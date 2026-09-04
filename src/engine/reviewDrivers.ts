@@ -1,8 +1,9 @@
-import { SYSTEM_ACTOR } from "../domain/common.js";
+import { SYSTEM_ACTOR, modelRefKey, type ModelRef } from "../domain/common.js";
 import type { CorpusEntry } from "../domain/acceptance.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Finding } from "../domain/finding.js";
 import type { ReviewAxis } from "../domain/finding.js";
+import { ProviderError } from "../broker/types.js";
 import {
   FindingValidator,
   ProjectFindingEvidenceWorker,
@@ -18,8 +19,9 @@ import {
   type ReviewExecution,
 } from "../domain/review.js";
 import { PolishError } from "../shared/errors.js";
-import { buildCheckpointReviewArtifact } from "../review/artifact.js";
+import { buildCheckpointReviewArtifact, type CheckpointReviewArtifact } from "../review/artifact.js";
 import { runAxisReview, type ReviewProvider } from "../review/swarm.js";
+import type { Checkpoint } from "../domain/checkpoint.js";
 import { id } from "../shared/ids.js";
 import {
   latestCompletedReviewRound,
@@ -60,6 +62,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
     const axes = await resolveAxes(ctx, options);
     const reviewers = await resolveReviewers(ctx, options);
     if (reviewers.length === 0) {
+      if (recentlyRateLimitedReviewModels(ctx).length > 0) return { status: "waiting" };
       throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
     }
     const baseline = ctx.store.repos.baselines.listByRun(ctx.run.id)[0];
@@ -74,29 +77,19 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
       throw new Error(`checkpoint artifact hash ${artifact.commitHash} does not match run checkpoint ${hash}`);
     }
 
+    const rateLimited = new Set<string>();
     for (const axis of missingAxes(axes, roundExecutions, required)) {
-      const reviewer = reviewers[axes.indexOf(axis) % reviewers.length];
-      if (reviewer === undefined) {
-        throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
-      }
-      const started = startExecution(ctx, hash, roundIndex, axis, reviewer);
-      try {
-        const result = await runAxisReview({
-          checkpoint,
-          axis,
-          artifact,
-          provider: reviewer,
-          repositoryRoot: ctx.run.projectPath,
-          now: ctx.clock.now(),
-        });
-        finishExecution(ctx, started, result.findings, result.model, result.promptDigest);
-        for (const finding of result.findings) {
-          raiseFinding(ctx, finding, started.id);
-        }
-      } catch (err) {
-        failExecution(ctx, started, err instanceof Error ? err.message : String(err));
-        return { status: "waiting" };
-      }
+      const outcome = await reviewAxisWithFallback(ctx, {
+        hash,
+        roundIndex,
+        axis,
+        reviewers,
+        preferredIndex: Math.max(0, axes.indexOf(axis)),
+        checkpoint,
+        artifact,
+        rateLimited,
+      });
+      if (outcome === "waiting") return { status: "waiting" };
     }
 
     const refreshed = ctx.store.repos.reviewExecutions.listByRun(ctx.run.id);
@@ -186,6 +179,97 @@ function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): 
     now: ctx.clock.now(),
   });
   ctx.store.events.append([event]);
+}
+
+/** Models whose latest review on this checkpoint is a sticky failure (429, 400, schema). */
+export function recentlyRateLimitedReviewModels(ctx: PhaseContext): ModelRef[] {
+  const hash = ctx.run.currentCheckpointHash;
+  if (hash === null) return [];
+  const latest = new Map<string, ReviewExecution>();
+  for (const execution of ctx.store.repos.reviewExecutions.listByRun(ctx.run.id)) {
+    if (execution.checkpointHash !== hash) continue;
+    if (!execution.completed && execution.error === undefined) continue;
+    const key = modelRefKey(execution.requestedModel);
+    const prev = latest.get(key);
+    const stamp = execution.finishedAt ?? execution.startedAt;
+    const prevStamp = prev === undefined ? -1 : (prev.finishedAt ?? prev.startedAt);
+    if (prev === undefined || stamp >= prevStamp) latest.set(key, execution);
+  }
+  const excluded: ModelRef[] = [];
+  const completedKeys = new Set<string>();
+  for (const execution of ctx.store.repos.reviewExecutions.listByRun(ctx.run.id)) {
+    if (execution.checkpointHash === hash && execution.completed) {
+      completedKeys.add(modelRefKey(execution.requestedModel));
+    }
+  }
+  for (const execution of latest.values()) {
+    if (execution.completed || execution.error === undefined) continue;
+    if (!isStickyReviewSkip(undefined, execution.error)) continue;
+    const key = modelRefKey(execution.requestedModel);
+    if (completedKeys.has(key)) continue;
+    excluded.push(execution.requestedModel);
+  }
+  return excluded;
+}
+
+function isRateLimitMessage(message: string): boolean {
+  return /rate.?limit|\b429\b/i.test(message);
+}
+
+/** Capability/schema mismatches that should not be retried on this checkpoint. */
+function isStickyReviewSkip(err: unknown, message: string): boolean {
+  if (err instanceof ProviderError && (err.kind === "bad_request" || err.kind === "auth" || err.kind === "not_found" || err.kind === "context_length")) {
+    return true;
+  }
+  if (err instanceof Error && (err.name === "ZodError" || err instanceof TypeError)) return true;
+  return (
+    isRateLimitMessage(message) ||
+    /\bbad request\b|\b400\b|JSON mode is not enabled/i.test(message) ||
+    /invalid_type|expected array|findings array/i.test(message)
+  );
+}
+
+async function reviewAxisWithFallback(
+  ctx: PhaseContext,
+  input: {
+    hash: string;
+    roundIndex: number;
+    axis: ReviewAxis;
+    reviewers: readonly ReviewProvider[];
+    preferredIndex: number;
+    checkpoint: Checkpoint;
+    artifact: CheckpointReviewArtifact;
+    rateLimited: Set<string>;
+  },
+): Promise<"ok" | "waiting"> {
+  const count = input.reviewers.length;
+  for (let offset = 0; offset < count; offset++) {
+    const reviewer = input.reviewers[(input.preferredIndex + offset) % count];
+    if (reviewer === undefined) continue;
+    const key = modelRefKey(reviewer.model);
+    if (input.rateLimited.has(key)) continue;
+    const started = startExecution(ctx, input.hash, input.roundIndex, input.axis, reviewer);
+    try {
+      const result = await runAxisReview({
+        checkpoint: input.checkpoint,
+        axis: input.axis,
+        artifact: input.artifact,
+        provider: reviewer,
+        repositoryRoot: ctx.run.projectPath,
+        now: ctx.clock.now(),
+      });
+      finishExecution(ctx, started, result.findings, result.model, result.promptDigest);
+      for (const finding of result.findings) {
+        raiseFinding(ctx, finding, started.id);
+      }
+      return "ok";
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failExecution(ctx, started, message);
+      input.rateLimited.add(key);
+    }
+  }
+  return "waiting";
 }
 
 function missingAxes(

@@ -30,6 +30,7 @@ import {
   createInterpretingMissionDriver,
   createPlanningDriver,
   createReviewingDriver,
+  recentlyRateLimitedReviewModels,
   createValidatingDriver,
   type RunEngine,
 } from "../engine/index.js";
@@ -355,7 +356,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
   engine.registerPhase("GATING", createGatingDriver(candidateOptions));
   engine.registerPhase("COMPARING", createComparingDriver());
   engine.registerPhase("INTEGRATING", createIntegratingDriver(candidateOptions));
-  engine.registerPhase("REVIEWING", createReviewingDriver({ resolveReviewers: () => selectReviewProviders(deps) }));
+  engine.registerPhase("REVIEWING", createReviewingDriver({ resolveReviewers: (ctx) => selectReviewProviders(deps, ctx) }));
   engine.registerPhase("VALIDATING", withReadyPromotion(createValidatingDriver()));
   engine.registerPhase("SIMPLIFYING", createSimplifyingDriver());
   engine.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver());
@@ -400,13 +401,21 @@ function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDr
 }
 
 /** Router-selected reviewers with exact ModelRef; never listModels()[0]. */
-export function selectReviewProviders(deps: ProductionDeps): ReviewProvider[] {
+export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseContext): Promise<ReviewProvider[]> {
+  if (deps.catalog.list().length === 0) {
+    await deps.catalog.discover({
+      costEligibility: costEligibilityFromConfig(deps.config.routing),
+    });
+  }
+  const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
   const ranked = deps.router.select({
     role: "reviewer",
-    count: deps.config.review.reviewersPerRound,
+    count: Math.max(deps.config.review.reviewersPerRound, 8),
     requireJson: true,
+    ...(exclude.length > 0 ? { exclude } : {}),
   });
   if (ranked.length === 0) {
+    if (exclude.length > 0) return [];
     throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
   }
   return ranked.map((row) => {
@@ -415,7 +424,17 @@ export function selectReviewProviders(deps: ProductionDeps): ReviewProvider[] {
     if (adapter === undefined) {
       throw new PolishError("CONFIG_ERROR", `no provider adapter for review model ${ref.provider}:${ref.model}`);
     }
-    return { provider: adapter, model: ref };
+    return {
+      provider: {
+        id: adapter.id,
+        kind: adapter.kind,
+        concurrency: adapter.concurrency,
+        listModels: (signal) => adapter.listModels(signal),
+        health: (signal) => adapter.health(signal),
+        complete: async (request) => (await deps.broker.complete(request)).response,
+      },
+      model: ref,
+    };
   });
 }
 

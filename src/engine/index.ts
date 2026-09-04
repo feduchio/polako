@@ -39,6 +39,7 @@ export {
 export {
   createReviewingDriver,
   createValidatingDriver,
+  recentlyRateLimitedReviewModels,
   type ReviewDriverOptions,
   type ValidatingDriverOptions,
 } from "./reviewDrivers.js";
