@@ -26,6 +26,7 @@ import type { Sandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
 import type { Task } from "../domain/task.js";
+import { incompleteCodingWorkTerminal } from "../convergence/antiFakeDone.js";
 import {
   runCandidatesParallel,
   runGates,
@@ -380,7 +381,11 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       baseCheckpointHash: checkpoint.commitHash,
       updatedAt: ctx.clock.now(),
     });
-    return { status: "complete", nextPhase: "REVIEWING" };
+    const remaining = incompleteCodingWorkTerminal(
+      ctx.store.repos.tasks.listByRun(ctx.run.id),
+      ctx.config.retry.maxAttempts,
+    );
+    return { status: "complete", nextPhase: remaining ?? "REVIEWING" };
   };
 }
 

@@ -431,6 +431,7 @@ export function gatherCompletionEvidence(ctx: PhaseContext): MissionCompletionEv
     baselineCommitHash: baseline?.commitHash ?? null,
     currentCheckpointHash: ctx.run.currentCheckpointHash,
     requiredReviewers: ctx.config.review.reviewersPerRound,
+    maxAttempts: ctx.config.retry.maxAttempts,
   };
 }
 

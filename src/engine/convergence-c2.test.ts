@@ -318,7 +318,7 @@ function seed(
   store.events.append([
     { id: id("evt", clock.now()), runId, ts: clock.now(), type: "run.created", payload: { run }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
     { id: id("evt", clock.now() + 1), runId, ts: clock.now() + 1, type: "baseline.snapshotted", payload: { baseline }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
-    { id: id("evt", clock.now() + 2), runId, ts: clock.now() + 2, type: "task.created", payload: { task }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
+    { id: id("evt", clock.now() + 2), runId, ts: clock.now() + 2, type: "task.created", payload: { task: { ...task, state: "INTEGRATED" as const } }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
     { id: checkpointEvt, runId, ts: clock.now() + 3, type: "checkpoint.created", payload: { checkpoint }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
   ]);
   const candidate = {

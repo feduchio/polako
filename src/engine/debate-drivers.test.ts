@@ -586,7 +586,7 @@ function seedConvergenceOpenDebate(
       runId,
       ts: clock.now() + 5,
       type: "task.created",
-      payload: { task },
+      payload: { task: { ...task, state: "INTEGRATED" as const } },
       causedBy: [],
       actor: { kind: "system" },
       artifacts: [],

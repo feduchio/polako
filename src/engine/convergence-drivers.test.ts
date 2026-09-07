@@ -231,7 +231,7 @@ function seedConvergenceRun(
   const events = [
     { id: id("evt", clock.now()), runId, ts: clock.now(), type: "run.created" as const, payload: { run }, causedBy: [] as string[], actor: { kind: "system" as const }, artifacts: [] },
     { id: id("evt", clock.now() + 1), runId, ts: clock.now() + 1, type: "baseline.snapshotted" as const, payload: { baseline }, causedBy: [] as string[], actor: { kind: "system" as const }, artifacts: [] },
-    { id: id("evt", clock.now() + 2), runId, ts: clock.now() + 2, type: "task.created" as const, payload: { task }, causedBy: [] as string[], actor: { kind: "system" as const }, artifacts: [] },
+    { id: id("evt", clock.now() + 2), runId, ts: clock.now() + 2, type: "task.created" as const, payload: { task: { ...task, state: "INTEGRATED" as const } }, causedBy: [] as string[], actor: { kind: "system" as const }, artifacts: [] },
     { id: id("evt", clock.now() + 3), runId, ts: clock.now() + 3, type: "checkpoint.created" as const, payload: { checkpoint }, causedBy: [] as string[], actor: { kind: "system" as const }, artifacts: [] },
   ];
   store.events.append(events);

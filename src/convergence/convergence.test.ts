@@ -111,7 +111,7 @@ function baseEvidence(overrides: Partial<MissionCompletionEvidence> = {}): Missi
     now: NOW,
   });
   return {
-    tasks: [task],
+    tasks: [{ ...task, state: "INTEGRATED" }],
     candidates: [
       {
         id: id("cand", NOW),
@@ -525,6 +525,95 @@ describe("anti-fake-DONE", () => {
     });
     expect(empty.ok).toBe(false);
     if (!empty.ok) expect(resultReasons(empty)).toContain("worker");
+  });
+
+  it("rejects one INTEGRATED coding task plus a READY sibling (check 4)", () => {
+    const evidence = baseEvidence();
+    const sibling = { ...evidence.tasks[0]!, id: id("task", NOW + 9), state: "READY" as const };
+    const result = assertCodeChangeMissionMayComplete({ ...evidence, tasks: [...evidence.tasks, sibling] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/incomplete coding/);
+      expect(result.terminal).toBe("PLANNING");
+    }
+  });
+
+  it("rejects a non-terminal valid_finding coding sibling (check 5)", () => {
+    const evidence = baseEvidence();
+    const finding = {
+      ...evidence.tasks[0]!,
+      id: id("task", NOW + 10),
+      state: "READY" as const,
+      origin: {
+        kind: "valid_finding" as const,
+        findingId: id("find", NOW),
+        validationId: id("fval", NOW),
+        verdict: "VALID" as const,
+      },
+    };
+    const result = assertCodeChangeMissionMayComplete({ ...evidence, tasks: [...evidence.tasks, finding] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.terminal).toBe("PLANNING");
+  });
+
+  it("allows the multi-task axis when every coding task is INTEGRATED (check 6)", () => {
+    const second = { ...baseEvidence().tasks[0]!, id: id("task", NOW + 11), state: "INTEGRATED" as const };
+    const result = assertCodeChangeMissionMayComplete({
+      ...baseEvidence(),
+      tasks: [...baseEvidence().tasks, second],
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects an INTEGRATED task plus a BLOCKED sibling as exhausted (check 7)", () => {
+    const blocked = { ...baseEvidence().tasks[0]!, id: id("task", NOW + 12), state: "BLOCKED" as const };
+    const result = assertCodeChangeMissionMayComplete({
+      ...baseEvidence(),
+      tasks: [...baseEvidence().tasks, blocked],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/exhausted/);
+      expect(result.terminal).toBe("FAILED");
+    }
+  });
+
+  it("does not fail the multi-task axis for pre-seeded REJECTED or CANCELLED siblings (check 8)", () => {
+    const rejected = { ...baseEvidence().tasks[0]!, id: id("task", NOW + 13), state: "REJECTED" as const };
+    const cancelled = { ...baseEvidence().tasks[0]!, id: id("task", NOW + 14), state: "CANCELLED" as const };
+    const result = assertCodeChangeMissionMayComplete({
+      ...baseEvidence(),
+      tasks: [...baseEvidence().tasks, rejected, cancelled],
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("does not force-fail review-only missions on the multi-task axis (check 10)", () => {
+    const investigation = createTaskFromRequirement(id("interp", NOW), "R1", {
+      id: id("task", NOW + 15),
+      runId: RUN_ID,
+      title: "investigate",
+      description: "d",
+      kind: "bugfix",
+      acceptance: ["done"],
+      complexity: "normal",
+      baseCheckpointHash: HASH_A,
+      now: NOW,
+    });
+    const result = assertCodeChangeMissionMayComplete({
+      ...baseEvidence(),
+      tasks: [{
+        ...investigation,
+        kind: "investigation",
+        touchesProductCode: false,
+        origin: { kind: "investigation", findingId: id("find", NOW + 1), round: 1 },
+      }],
+      candidates: [],
+      checkpoints: [],
+      reviewExecutions: [],
+      cleanRounds: [],
+    });
+    expect(result.ok).toBe(true);
   });
 });
 
