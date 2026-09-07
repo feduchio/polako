@@ -358,7 +358,11 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
         updatedAt: ctx.clock.now(),
       });
       const retry = failed.attempts < ctx.config.retry.maxAttempts;
-      return { status: "complete", nextPhase: retry ? "PLANNING" : "FAILED" };
+      if (retry) {
+        patchTask(ctx, { ...failed, state: "READY", updatedAt: ctx.clock.now() });
+        return { status: "complete", nextPhase: "PLANNING" };
+      }
+      return { status: "complete", nextPhase: "FAILED" };
     }
 
     const integratedCommit = result.integratedCommit;

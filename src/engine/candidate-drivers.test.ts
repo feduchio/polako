@@ -113,6 +113,8 @@ describe("B2 production candidate drivers", () => {
     expect(finished?.payload["advanced"]).toBe(false);
     const runHead = new GitBranchRunHead(fixture.repoDir, "run");
     expect(await runHead.read()).toBe(fixture.base);
+    expect(run.phase).toBe("PLANNING");
+    expect(store.repos.tasks.listByRun(runId)[0]?.state).toBe("READY");
   });
 
   it("revalidates a stale winner against the moved head and leaves head unchanged on conflict", async () => {
