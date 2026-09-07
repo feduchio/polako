@@ -5,7 +5,7 @@ Do not treat this file as a second contract.
 
 | Field | Value |
 |---|---|
-| Status | **CONTRACT FROZEN** — implementation next |
+| Status | **ACCEPTED** at `84f2f7e` — clean 2/2. Phase B not fully closed. Phase C not accepted. |
 | Exact base | `311203830720a4d1e917785e577eaf868281bc8a` (accepted C8) |
 | Source finding | `docs/ledger/B-selfhost-remaining.md` item 4 |
 | Trusted predecessor | C8 accepted `3112038`; Phase-C pause for bounded B |
@@ -16,24 +16,28 @@ Do not treat this file as a second contract.
 | Claude contract review | **FAIL** on draft `636e2aa…`; 5 blocking VALID |
 | Review findings | all blocking findings incorporated; no second Claude contract review |
 | Contract freeze commit | `7489ad167902b5d590860d70c6fc97b9aac2c2de` |
-| Implementation | pending Grok on `task/B-selfhost-4-candidate-grok` |
+| Implementation | Grok `84f2f7ef55f4d97e7936b5e7d775bba358f60c90`; Claude unused; Polish deferred |
+| Polish run | none required for accept |
 | Paid/live calls | forbidden; none |
-| Clean rounds | 0/2 |
-| Next bounded step | Implement frozen contract. Do not enter Phase D. Do not tag `phase-c-accepted`. |
+| Clean rounds | 2/2 on `84f2f7e` (Grok+Claude PASS, then Grok+Claude PASS) |
+| Accepted commit | `84f2f7ef55f4d97e7936b5e7d775bba358f60c90` (`task/B-selfhost-4-candidate-grok` / `task/B-selfhost-4-integration`) |
+| Next bounded step | Continue pause: next remaining B finding (user order or item 3). Do not enter Phase D. Do not tag `phase-c-accepted`. |
 
-## Independent contract reviews
+## Execution plan (completed for B-selfhost-4)
 
-Both lanes reviewed draft hash `636e2aa…0180` and exact base `3112038`.
+1. Draft + Grok/Claude contract reviews of hash `636e2aa…` → FAIL/FAIL.
+2. Incorporate blocking findings; freeze `7489ad1` / contract hash `c93c122b…f825b`.
+3. Grok implementer on exact base → `84f2f7e`.
+4. Coordinator gates: Node 24.20.0 typecheck + **584** tests.
+5. Clean rounds 2/2 PASS/PASS. Accept.
 
-### Grok — FAIL (incorporated)
+## Accepted candidate `84f2f7e`
 
-1. INTEGRATION_FAILED never restored to READY — hang after no-decompose.
-2. Mission-origin / logical work undefined; title-skip hatch.
-3. Re-entry still allowed to call decompose / NEEDS_HUMAN.
-4. Optional GATING→EXECUTING left createPlanningDriver unfixed.
-5. BLOCKED-only → REVIEWING contradiction.
-6. Investigation routed to EXECUTING which cannot schedule it.
+Worktree: `/Users/fedorsvetlov/polish-worktrees/phase-c/B-selfhost-4/grok`. Integration: `/Users/fedorsvetlov/polish-worktrees/phase-c/B-selfhost-4/integration`. Frozen `B-selfhost-4.md` unchanged.
 
-### Claude — FAIL (incorporated)
+| Round | Grok | Claude |
+|---|---|---|
+| 1 | PASS | PASS |
+| 2 | PASS | PASS |
 
-B-1 INTEGRATING stall; B-2 investigation → DONE silent drop; B-3 illegal GATING→EXECUTING; B-4 invariant 1 vs 6 / no decompose spy; B-5 undefined mission-origin / inconsistent checks.
+No blocking VALID at accepted commit. Recorded non-blocking: broader `liveCoding→EXECUTING` than literal REVIEWING for unschedulable leftover states (stalls safely; crash-recovery item 12); bare driver in unit tests vs `withReadyPromotion`; stale `selectedCandidateId` on INTEGRATING retry.

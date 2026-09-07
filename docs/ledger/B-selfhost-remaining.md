@@ -15,7 +15,7 @@ Use as Mission Acceptance Corpus / explicit contracts for the self-host mission.
 Full Phase-B self-host closure is **DEFERRED_BY_USER** until operator observability/resilience is mature enough for multi-hour unattended work. These items remain OPEN. They are not optional and are not fixed.
 
 3. Multi-task DONE: `assertCodeChangeMissionMayComplete` does not require every required task terminal; after first integration FSM goes to REVIEWING.
-4. Planning re-entry duplicates original tasks (`createPlanningDriver` always full decompose).
+4. ~~Planning re-entry duplicates original tasks (`createPlanningDriver` always full decompose).~~ — **ACCEPTED** as `docs/ledger/B-selfhost-4.md` at `84f2f7ef55f4d97e7936b5e7d775bba358f60c90`.
 5. Review/evidence use `projectPath` (user checkout), not isolated checkout of `checkpointHash`.
 6. Runtime templates live in `project.discovered`; `validateRuntimeIfNeeded` drops evidence; `resolveRuntimeEvidence` uses a fake checkpoint hash and is not the production path.
 7. `createRun` mutates shared `config.runtimeValidation.mode` (concurrent-run leak).
