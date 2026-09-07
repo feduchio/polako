@@ -15,7 +15,7 @@ Do not treat this file as a second contract.
 | Grok contract review | **FAIL** on draft `636e2aa…`; 6 blocking VALID |
 | Claude contract review | **FAIL** on draft `636e2aa…`; 5 blocking VALID |
 | Review findings | all blocking findings incorporated; no second Claude contract review |
-| Contract freeze commit | pending (this ledger update) |
+| Contract freeze commit | `7489ad167902b5d590860d70c6fc97b9aac2c2de` |
 | Implementation | pending Grok on `task/B-selfhost-4-candidate-grok` |
 | Paid/live calls | forbidden; none |
 | Clean rounds | 0/2 |
