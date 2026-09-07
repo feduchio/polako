@@ -16,7 +16,8 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 |---|---|---|
 | HOST (immutable during a C task verification run) | tag `phase-b-collab-base` → `0b21a6182507e9883d020ceba0c39aa4edcfff5b` | Used for C3 Polish lane. Phase B not fully accepted. |
 | C3 accepted | `0abcf62e8d277481dfb34aa8a047a9c40f4e8c50` on `task/C3-integration` | Task C3 only. Phase C not accepted. Do not tag `phase-c-accepted`. |
-| C2 accepted (next HOST for later C) | `7139e9cc2ad8a58e35a5b1535941eddbf4c25f13` on `task/C2-integration` | Task C2 only. B-8 remains OPEN. Phase C not accepted. Do not tag `phase-c-accepted`. |
+| C2 accepted | `7139e9cc2ad8a58e35a5b1535941eddbf4c25f13` on `task/C2-integration` | Task C2 only. B-8 remains OPEN. Phase C not accepted. Do not tag `phase-c-accepted`. |
+| C4 accepted (next HOST for later C) | `4fae1473f5dd5430f58d613ad7c90beed1128cf9` on `task/C4-integration` | Task C4 only. B-4/B-8/B-11 remain OPEN. Phase C not accepted. Do not tag `phase-c-accepted`. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -73,4 +74,6 @@ C3. Contract: `docs/ledger/C3.md`. Provenance: `docs/ledger/C3-run.md`. **Task A
 
 C2. Contract: `docs/ledger/C2.md`. Provenance: `docs/ledger/C2-run.md`. **Task ACCEPTED** at `7139e9cc2ad8a58e35a5b1535941eddbf4c25f13`.
 
-C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Contract FROZEN**. Next: C4 implementation. Do not enter Phase D.
+C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Task ACCEPTED** at `4fae1473f5dd5430f58d613ad7c90beed1128cf9`.
+
+C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Contract FROZEN**. Next: C8 implementation. Do not enter Phase D.
