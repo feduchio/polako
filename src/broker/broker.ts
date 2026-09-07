@@ -280,13 +280,14 @@ export class ModelBroker {
   }
 }
 
-function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "verifier" | "evidence_agent" | "scout" | "system" {
+function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "verifier" | "evidence_agent" | "prosecutor" | "defender" | "judge" | "scout" | "system" {
   switch (role) {
     case "supervisor":
     case "planner":
     case "scope_guardian":
-    case "judge":
       return "supervisor";
+    case "judge":
+      return "judge";
     case "worker":
       return "worker";
     case "reviewer":
@@ -295,6 +296,10 @@ function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "
       return "verifier";
     case "evidence":
       return "evidence_agent";
+    case "prosecutor":
+      return "prosecutor";
+    case "defender":
+      return "defender";
     case "scout":
       return "scout";
     default:

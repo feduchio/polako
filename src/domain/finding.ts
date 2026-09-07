@@ -99,6 +99,7 @@ export const ValidationMethodSchema = z.enum([
   "llm_verifier",
   "runtime_evidence",
   "investigation",
+  "finding_debate",
 ]);
 export type ValidationMethod = z.infer<typeof ValidationMethodSchema>;
 

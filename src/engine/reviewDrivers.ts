@@ -1,16 +1,40 @@
 import { SYSTEM_ACTOR, modelRefKey, type ModelRef } from "../domain/common.js";
 import type { CorpusEntry } from "../domain/acceptance.js";
-import type { NewEvent } from "../domain/event.js";
-import type { Finding } from "../domain/finding.js";
+import type { Event, NewEvent } from "../domain/event.js";
+import { FINDING_TABLE, FindingSchema, FindingValidationStrictSchema, findingStatusFromVerdict, type Finding, type FindingValidation, type ValidationVerdict } from "../domain/finding.js";
 import type { ReviewAxis } from "../domain/finding.js";
+import { assertTransition } from "../domain/fsm.js";
+import { createInvestigationTask, createTaskFromValidFinding, type Task } from "../domain/task.js";
 import { ProviderError } from "../broker/types.js";
 import {
+  DEBATE_ARGUMENT,
+  DEBATE_METHOD,
+  DEBATE_OUTCOME,
+  DEBATE_STARTED,
   FindingValidator,
   ProjectFindingEvidenceWorker,
+  argumentRecords,
+  assertDebateMayStart,
+  causalB5ValidationId,
+  collectPreDebateEvidenceRefs,
+  debateActor,
+  debateEventsFor,
+  debateValidationFor,
+  deriveDebateCorpusKind,
+  legalDebateValid,
+  nextDebateStep,
+  outcomePayload,
+  parseJudgeVerdict,
+  rolePrompt,
+  startedPayload,
+  threeDistinctDebateRoles,
   type CorpusAppender,
+  type DebateRole,
+  type DebateRoles,
   type FindingEvidenceWorker,
   type FindingValidationResult,
 } from "../findings/index.js";
+import { emitNeedsHumanReport } from "../report/emit.js";
 import {
   assertExecutionCheckpoint,
   currentReviewRoundIndex,
@@ -36,8 +60,18 @@ export interface ReviewDriverOptions {
   resolveAxes?: (ctx: PhaseContext) => ReviewAxis[] | Promise<ReviewAxis[]>;
 }
 
+export interface DebateCompletionRequest {
+  role: DebateRole;
+  model: ModelRef;
+  prompt: string;
+  finding: Finding;
+}
+
 export interface ValidatingDriverOptions {
   resolveWorker?: (ctx: PhaseContext) => FindingEvidenceWorker | Promise<FindingEvidenceWorker>;
+  /** Three distinct cost-eligible models, or null to skip debate (no invented verdict). */
+  resolveDebateRoles?: (ctx: PhaseContext) => DebateRoles | null | Promise<DebateRoles | null>;
+  completeDebate?: (ctx: PhaseContext, request: DebateCompletionRequest) => Promise<string>;
 }
 
 /** Production REVIEWING driver: fresh independent reviewers on the integrated checkpoint artifact. */
@@ -113,11 +147,6 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
     const raw = allFindings
       .filter((finding) => finding.status === "RAW" && finding.checkpointHash === hash)
       .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-    if (raw.length === 0) {
-      if (hasPendingFindingWork(ctx, hash)) return { status: "complete", nextPhase: "PLANNING" };
-      recordCleanRoundIfEligible(ctx, hash);
-      return { status: "complete", nextPhase: "CONVERGENCE_CHECK" };
-    }
 
     const worker = await resolveEvidenceWorker(ctx, options);
     const deferredCorpus = new DeferredCorpusAppender(ctx.clock.now());
@@ -139,7 +168,8 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
       });
       known = known.map((item) => (item.id === finding.id ? result.finding : item));
       const causedBy = findRaisedEventId(ctx, finding.id);
-      const validationEventId = persistValidationResult(ctx, finding, result, causedBy === null ? [] : [causedBy]);
+      const persist = result.finding.status === "UNCERTAIN" ? { ...result, task: null } : result;
+      const validationEventId = persistValidationResult(ctx, finding, persist, causedBy === null ? [] : [causedBy]);
       if (deferredCorpus.pending !== null && validationEventId !== null) {
         const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
         corpus.record({
@@ -150,10 +180,445 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
       }
     }
 
+    const afterRaw = ctx.store.repos.findings.listByRun(ctx.run.id);
+    const debateTargets = afterRaw
+      .filter((finding) => finding.checkpointHash === hash && needsDebateWork(ctx, finding))
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    let escalateHuman = false;
+    for (const finding of debateTargets) {
+      const outcome = await runFindingDebate(ctx, finding, options, requirementRef);
+      if (outcome === "needs_human") escalateHuman = true;
+    }
+    if (escalateHuman) {
+      const reason = {
+        code: "pathology_detected" as const,
+        summary: "an uncertain finding exhausted its investigation budget",
+        question: "An UNCERTAIN finding exhausted investigation after debate. How should the run proceed?",
+        options: ["Provide more evidence", "Stop the run"],
+      };
+      emitNeedsHumanReport(ctx, reason);
+      return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
+    }
+
     if (hasPendingFindingWork(ctx, hash)) return { status: "complete", nextPhase: "PLANNING" };
     recordCleanRoundIfEligible(ctx, hash);
     return { status: "complete", nextPhase: "CONVERGENCE_CHECK" };
   };
+}
+
+function needsDebateWork(ctx: PhaseContext, finding: Finding): boolean {
+  if (finding.status !== "UNCERTAIN") return false;
+  const events = ctx.store.events.list(ctx.run.id);
+  const validations = ctx.store.repos.validations.listByFinding(finding.id);
+  if (debateValidationFor(validations, finding.id) !== null) return false;
+  const debate = debateEventsFor(events, finding.id, finding.checkpointHash);
+  if (debate.outcome !== null || debate.started !== null) return true;
+  if (causalB5ValidationId(events, finding.id) === null) return false;
+  return !hasInvestigationForFinding(ctx, finding.id);
+}
+
+function hasInvestigationForFinding(ctx: PhaseContext, findingId: string): boolean {
+  return ctx.store.repos.tasks.listByRun(ctx.run.id).some(
+    (task) => task.origin.kind === "investigation" && task.origin.findingId === findingId,
+  );
+}
+
+async function runFindingDebate(
+  ctx: PhaseContext,
+  finding: Finding,
+  options: ValidatingDriverOptions,
+  requirementRef: string,
+): Promise<"ok" | "needs_human"> {
+  assertDebateMayStart(finding);
+  const events = ctx.store.events.list(ctx.run.id);
+  const validations = ctx.store.repos.validations.listByFinding(finding.id);
+  if (debateValidationFor(validations, finding.id) !== null) return "ok";
+
+  const debate = debateEventsFor(events, finding.id, finding.checkpointHash);
+  if (debate.outcome === null) {
+    const prepared = await persistDebateThroughOutcome(ctx, finding, options, debate.started);
+    if (prepared === "skipped") return handleResidualUncertain(ctx, finding, requirementRef, null);
+  }
+
+  const latest = debateEventsFor(ctx.store.events.list(ctx.run.id), finding.id, finding.checkpointHash);
+  if (latest.outcome === null) return handleResidualUncertain(ctx, finding, requirementRef, null);
+  return applyDebateOutcome(ctx, finding, latest.outcome, requirementRef);
+}
+
+async function persistDebateThroughOutcome(
+  ctx: PhaseContext,
+  finding: Finding,
+  options: ValidatingDriverOptions,
+  startedEvent: Event | null,
+): Promise<"debated" | "skipped"> {
+  let started = startedEvent;
+  if (started === null) {
+    const roles = (await options.resolveDebateRoles?.(ctx)) ?? null;
+    if (roles === null || !threeDistinctDebateRoles(roles) || options.completeDebate === undefined) {
+      return "skipped";
+    }
+    const causal = causalB5ValidationId(ctx.store.events.list(ctx.run.id), finding.id);
+    if (causal === null) return "skipped";
+    started = persistDebateStarted(ctx, finding, roles, causal);
+  }
+
+  const roles = startedPayload(started).roles;
+  if (!threeDistinctDebateRoles(roles) || options.completeDebate === undefined) {
+    persistDebateOutcome(ctx, finding, {
+      verdict: "UNCERTAIN",
+      rationale: "debate roles could not be completed without inventing a verdict",
+      hardFailure: true,
+    });
+    return "debated";
+  }
+
+  const maxRounds = ctx.config.convergence.maxDebateRounds;
+  const validations = ctx.store.repos.validations.listByFinding(finding.id);
+  const preDebateRefs = collectPreDebateEvidenceRefs(finding, validations);
+
+  const maxSteps = maxRounds * 3 + 1;
+  for (let stepIndex = 0; stepIndex < maxSteps; stepIndex++) {
+    const records = argumentRecords(debateEventsFor(ctx.store.events.list(ctx.run.id), finding.id, finding.checkpointHash).arguments);
+    const step = nextDebateStep(records, maxRounds);
+    if ("done" in step) {
+      const lastJudge = [...records].reverse().find((item) => item.role === "judge");
+      const parsed = lastJudge === undefined ? null : parseJudgeVerdict(lastJudge.text);
+      persistDebateOutcome(ctx, finding, {
+        verdict: parsed?.verdict ?? "UNCERTAIN",
+        rationale:
+          parsed?.rationale ??
+          (step.hardFailure === true
+            ? "malformed or empty judge verdict"
+            : `debate remained UNCERTAIN after ${maxRounds} rounds`),
+        hardFailure: step.hardFailure === true || parsed === null,
+      });
+      return "debated";
+    }
+
+    const prompt = rolePrompt(step.role, finding, validations, preDebateRefs, records, step.roundIndex);
+    try {
+      const text = await options.completeDebate(ctx, {
+        role: step.role,
+        model: roles[step.role],
+        prompt,
+        finding,
+      });
+      if (step.role !== "judge" && text.trim() === "") {
+        persistDebateOutcome(ctx, finding, {
+          verdict: "UNCERTAIN",
+          rationale: `${step.role} returned an empty argument`,
+          hardFailure: true,
+        });
+        return "debated";
+      }
+      if (step.role === "judge" && parseJudgeVerdict(text) === null) {
+        persistRoleArgument(ctx, finding, step.role, step.roundIndex, text, roles[step.role]);
+        persistDebateOutcome(ctx, finding, {
+          verdict: "UNCERTAIN",
+          rationale: "malformed or empty judge verdict",
+          hardFailure: true,
+        });
+        return "debated";
+      }
+      persistRoleArgument(ctx, finding, step.role, step.roundIndex, text, roles[step.role]);
+    } catch (error) {
+      persistDebateOutcome(ctx, finding, {
+        verdict: "UNCERTAIN",
+        rationale: `debate role ${step.role} failed: ${error instanceof Error ? error.message : String(error)}`,
+        hardFailure: true,
+      });
+      return "debated";
+    }
+  }
+  persistDebateOutcome(ctx, finding, {
+    verdict: "UNCERTAIN",
+    rationale: "debate exceeded the bounded role schedule",
+    hardFailure: true,
+  });
+  return "debated";
+}
+
+function persistDebateStarted(ctx: PhaseContext, finding: Finding, roles: DebateRoles, causalValidationId: string) {
+  const event: NewEvent = {
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: DEBATE_STARTED,
+    payload: {
+      findingId: finding.id,
+      checkpointHash: finding.checkpointHash,
+      roles,
+      causalValidationId,
+    },
+    causedBy: [causalValidationId],
+    actor: SYSTEM_ACTOR,
+    artifacts: [],
+  };
+  const [stored] = ctx.store.events.append([event]);
+  if (stored === undefined) throw new Error("debate_started persist failed");
+  return stored;
+}
+
+function persistRoleArgument(
+  ctx: PhaseContext,
+  finding: Finding,
+  role: DebateRole,
+  roundIndex: number,
+  text: string,
+  model: ModelRef,
+): void {
+  const artifact = ctx.store.artifacts.put(text, `debate.${role}`, `${finding.id}:${role}:${roundIndex}`, ctx.clock.now());
+  const event: NewEvent = {
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: DEBATE_ARGUMENT,
+    payload: {
+      findingId: finding.id,
+      checkpointHash: finding.checkpointHash,
+      role,
+      roundIndex,
+      text,
+    },
+    causedBy: [],
+    actor: debateActor(role, model),
+    artifacts: [artifact],
+  };
+  ctx.store.events.append([event]);
+}
+
+function persistDebateOutcome(
+  ctx: PhaseContext,
+  finding: Finding,
+  input: { verdict: ValidationVerdict; rationale: string; hardFailure: boolean },
+): void {
+  const debate = debateEventsFor(ctx.store.events.list(ctx.run.id), finding.id, finding.checkpointHash);
+  const records = argumentRecords(debate.arguments);
+  const causalRefs = [debate.started?.id, ...debate.arguments.map((event) => event.id)].filter(
+    (value): value is string => value !== undefined,
+  );
+  const event: NewEvent = {
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: DEBATE_OUTCOME,
+    payload: {
+      findingId: finding.id,
+      checkpointHash: finding.checkpointHash,
+      verdict: input.verdict,
+      rationale: input.rationale,
+      roundCount: records.reduce((max, item) => Math.max(max, item.roundIndex), 0),
+      hardFailure: input.hardFailure,
+      causalRefs,
+    },
+    causedBy: causalRefs,
+    actor: SYSTEM_ACTOR,
+    artifacts: debate.arguments.flatMap((item) => item.artifacts),
+  };
+  ctx.store.events.append([event]);
+}
+
+function applyDebateOutcome(
+  ctx: PhaseContext,
+  before: Finding,
+  outcomeEvent: Event,
+  requirementRef: string,
+): "ok" | "needs_human" {
+  if (debateValidationFor(ctx.store.repos.validations.listByFinding(before.id), before.id) !== null) {
+    return "ok";
+  }
+  const outcome = outcomePayload(outcomeEvent);
+  const validations = ctx.store.repos.validations.listByFinding(before.id);
+  const preDebateRefs = collectPreDebateEvidenceRefs(before, validations);
+  let verdict: ValidationVerdict = outcome.verdict;
+  let rationale = outcome.rationale;
+  if (verdict === "VALID" && !legalDebateValid(preDebateRefs)) {
+    verdict = "UNCERTAIN";
+    rationale = "debate VALID without pre-debate evidence refs is a hard failure";
+  }
+
+  const now = ctx.clock.now();
+  const debateState = debateEventsFor(ctx.store.events.list(ctx.run.id), before.id, before.checkpointHash);
+  const debateArtifacts = debateState.arguments.flatMap((event) => event.artifacts);
+  const evidenceRefs = verdict === "VALID" ? [...preDebateRefs, ...debateArtifacts] : debateArtifacts;
+  if (debateState.started === null) {
+    return handleResidualUncertain(ctx, before, requirementRef, null);
+  }
+  const judgeModel = startedPayload(debateState.started).roles.judge;
+
+  const validating = FindingSchema.parse({ ...before, status: "VALIDATING", updatedAt: now });
+  const terminalStatus = findingStatusFromVerdict(verdict);
+  const residualInvestigate =
+    terminalStatus === "UNCERTAIN" &&
+    before.investigationRounds < ctx.config.convergence.maxInvestigationRoundsPerFinding;
+  const terminalFinding = FindingSchema.parse({
+    ...validating,
+    status: terminalStatus,
+    investigationRounds: residualInvestigate ? before.investigationRounds + 1 : before.investigationRounds,
+    updatedAt: now,
+  });
+  const validation = FindingValidationStrictSchema.parse({
+    id: id("fval", now),
+    findingId: before.id,
+    runId: before.runId,
+    method: DEBATE_METHOD,
+    verdict,
+    rationale,
+    evidenceRefs,
+    performedBy: debateActor("judge", judgeModel),
+    createdAt: now,
+  });
+
+  assertTransition(FINDING_TABLE, `finding ${before.id}`, before.status, "VALIDATING");
+  assertTransition(FINDING_TABLE, `finding ${before.id}`, "VALIDATING", terminalStatus);
+
+  let task: Task | null = null;
+  if (verdict === "VALID" && terminalFinding.blocking) {
+    task = createTaskFromValidFinding(terminalFinding, validation, {
+      id: id("task", now),
+      runId: terminalFinding.runId,
+      title: `Fix: ${terminalFinding.claim}`,
+      description: `WHAT: ${terminalFinding.claim}\nWHY: ${validation.rationale}`,
+      kind: "bugfix",
+      acceptance: acceptanceLines(terminalFinding),
+      complexity: "normal",
+      baseCheckpointHash: terminalFinding.checkpointHash,
+      now,
+    });
+  } else if (residualInvestigate) {
+    task = createInvestigationTask({ ...terminalFinding, investigationRounds: before.investigationRounds }, ctx.config.convergence.maxInvestigationRoundsPerFinding, {
+      id: id("task", now),
+      runId: terminalFinding.runId,
+      title: `Investigate: ${terminalFinding.claim}`,
+      description: `WHAT: ${terminalFinding.claim}\nWHY: ${validation.rationale}`,
+      acceptance: acceptanceLines(terminalFinding),
+      complexity: "normal",
+      baseCheckpointHash: terminalFinding.checkpointHash,
+      now,
+    });
+  }
+
+  const validatingEventId = id("evt", now);
+  const debateValidatedId = id("evt", now + 1);
+  const terminalStatusId = id("evt", now + 2);
+  const events: NewEvent[] = [
+    {
+      id: validatingEventId,
+      runId: ctx.run.id,
+      ts: now,
+      type: "finding.status_changed",
+      payload: { finding: validating, from: before.status, to: "VALIDATING" },
+      causedBy: [outcomeEvent.id],
+      actor: debateActor("judge", judgeModel),
+      artifacts: [],
+    },
+    {
+      id: debateValidatedId,
+      runId: ctx.run.id,
+      ts: now,
+      type: "finding.validated",
+      payload: { validation, finding: terminalFinding },
+      causedBy: [outcomeEvent.id, validatingEventId],
+      actor: debateActor("judge", judgeModel),
+      artifacts: validation.evidenceRefs,
+    },
+    {
+      id: terminalStatusId,
+      runId: ctx.run.id,
+      ts: now,
+      type: "finding.status_changed",
+      payload: { finding: terminalFinding, from: "VALIDATING", to: terminalStatus },
+      causedBy: [debateValidatedId],
+      actor: debateActor("judge", judgeModel),
+      artifacts: [],
+    },
+  ];
+  if (task !== null) {
+    events.push({
+      id: id("evt", now + 3),
+      runId: ctx.run.id,
+      ts: now,
+      type: "task.created",
+      payload: { task },
+      causedBy: [debateValidatedId],
+      actor: debateActor("judge", judgeModel),
+      artifacts: [],
+    });
+  }
+  ctx.store.events.append(events);
+
+  if (verdict === "VALID") {
+    const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
+    corpus.record({
+      missionId: ctx.run.missionId,
+      sourceRunId: terminalFinding.runId,
+      requirementRef,
+      kind: deriveDebateCorpusKind(validations, preDebateRefs),
+      summary: `Debate-validated finding: ${terminalFinding.claim}`,
+      evidenceRefs: [debateValidatedId],
+      artifactHashes: preDebateRefs.map((ref) => ref.sha256),
+      metadata: { findingId: terminalFinding.id, validationId: validation.id, method: DEBATE_METHOD },
+    });
+  }
+
+  if (terminalStatus === "UNCERTAIN" && !residualInvestigate) return "needs_human";
+  return "ok";
+}
+
+function handleResidualUncertain(
+  ctx: PhaseContext,
+  finding: Finding,
+  _requirementRef: string,
+  _validation: FindingValidation | null,
+): "ok" | "needs_human" {
+  const max = ctx.config.convergence.maxInvestigationRoundsPerFinding;
+  if (finding.investigationRounds >= max) return "needs_human";
+  if (hasInvestigationForFinding(ctx, finding.id)) return "ok";
+  const now = ctx.clock.now();
+  const updated = FindingSchema.parse({
+    ...finding,
+    investigationRounds: finding.investigationRounds + 1,
+    updatedAt: now,
+  });
+  const task = createInvestigationTask(finding, max, {
+    id: id("task", now),
+    runId: finding.runId,
+    title: `Investigate: ${finding.claim}`,
+    description: `WHAT: ${finding.claim}\nWHY: residual UNCERTAIN after debate skip`,
+    acceptance: acceptanceLines(finding),
+    complexity: "normal",
+    baseCheckpointHash: finding.checkpointHash,
+    now,
+  });
+  ctx.store.events.append([
+    {
+      id: id("evt", now),
+      runId: ctx.run.id,
+      ts: now,
+      type: "finding.status_changed",
+      payload: { finding: updated, from: finding.status, to: finding.status },
+      causedBy: [],
+      actor: { kind: "evidence_agent" },
+      artifacts: [],
+    },
+    {
+      id: id("evt", now + 1),
+      runId: ctx.run.id,
+      ts: now,
+      type: "task.created",
+      payload: { task },
+      causedBy: [],
+      actor: { kind: "evidence_agent" },
+      artifacts: [],
+    },
+  ]);
+  return "ok";
+}
+
+function acceptanceLines(finding: Finding): string[] {
+  if (finding.suggestedCheck !== undefined) return [finding.suggestedCheck];
+  if (finding.reproduction.length > 0) return [`The reproduction no longer demonstrates the issue: ${finding.reproduction.join(" → ")}`];
+  return [`Independent gates show that "${finding.claim}" is resolved`];
 }
 
 function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): void {

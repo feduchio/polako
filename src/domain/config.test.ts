@@ -19,6 +19,12 @@ describe("PolishConfig", () => {
     expect(cfg.convergence.taskGrowthWindow).toBe(3);
     expect(cfg.convergence.findingOscillationWindow).toBe(4);
     expect(cfg.convergence.checkpointOscillationWindow).toBe(4);
+    expect(cfg.convergence.maxDebateRounds).toBe(2);
+  });
+
+  it("rejects a non-positive maxDebateRounds and keeps existing toml parseable", () => {
+    expect(() => PolishConfigSchema.parse({ convergence: { maxDebateRounds: 0 } })).toThrow();
+    expect(PolishConfigSchema.parse({ convergence: { requiredCleanRounds: 2 } }).convergence.maxDebateRounds).toBe(2);
   });
 
   it("rejects fail-open or permanently-silent C2 window knobs", () => {

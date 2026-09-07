@@ -69,6 +69,7 @@ describe("ProtocolRegistry", () => {
       "reviewer-simplicity",
       "evidence-agent",
       "defender",
+      "prosecutor",
       "scope-guardian",
       "planner",
       "judge",

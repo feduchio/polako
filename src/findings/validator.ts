@@ -131,7 +131,10 @@ export class FindingValidator {
     };
 
     if (validation.verdict === "UNCERTAIN") {
-      const task = createInvestigationTask(finding, this.options.maxInvestigationRounds, draft);
+      const task =
+        finding.investigationRounds < this.options.maxInvestigationRounds
+          ? createInvestigationTask(finding, this.options.maxInvestigationRounds, draft)
+          : null;
       return { finding, triage, validation, task, corpusEntry: null };
     }
 

@@ -33,8 +33,10 @@ import {
   createReviewingDriver,
   recentlyRateLimitedReviewModels,
   createValidatingDriver,
+  type DebateCompletionRequest,
   type RunEngine,
 } from "../engine/index.js";
+import { threeDistinctDebateRoles, type DebateRoles } from "../findings/index.js";
 import type { PhaseContext, PhaseDriver } from "../engine/types.js";
 import { createProviderFromConfig } from "../providers/factory.js";
 import type { ReviewProvider } from "../review/swarm.js";
@@ -358,7 +360,15 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
   engine.registerPhase("COMPARING", createComparingDriver());
   engine.registerPhase("INTEGRATING", createIntegratingDriver(candidateOptions));
   engine.registerPhase("REVIEWING", createReviewingDriver({ resolveReviewers: (ctx) => selectReviewProviders(deps, ctx) }));
-  engine.registerPhase("VALIDATING", withReadyPromotion(createValidatingDriver()));
+  engine.registerPhase(
+    "VALIDATING",
+    withReadyPromotion(
+      createValidatingDriver({
+        resolveDebateRoles: (ctx) => selectDebateRoles(deps, ctx),
+        completeDebate: async (ctx, request) => completeDebateRole(deps, ctx, request),
+      }),
+    ),
+  );
   engine.registerPhase("SIMPLIFYING", createSimplifyingDriver());
   engine.registerPhase(
     "CONVERGENCE_CHECK",
@@ -435,6 +445,53 @@ function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDr
     const models = deps.catalog.list().map((entry) => entry.info);
     return createDiscoveringModelsDriver(models)(ctx);
   };
+}
+
+/** Three distinct cost-eligible debate models, or null to skip without inventing a verdict. */
+export function selectDebateRoles(deps: ProductionDeps, ctx?: PhaseContext): DebateRoles | null {
+  if (deps.catalog.list().length === 0) return null;
+  const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
+  const ranked = deps.router.select({
+    role: "reviewer",
+    count: 3,
+    requireJson: true,
+    ...(exclude.length > 0 ? { exclude } : {}),
+  });
+  if (ranked.length < 3) return null;
+  const prosecutor = ranked[0]?.entry.info.ref;
+  const defender = ranked[1]?.entry.info.ref;
+  const judge = ranked[2]?.entry.info.ref;
+  if (prosecutor === undefined || defender === undefined || judge === undefined) return null;
+  const roles = { prosecutor, defender, judge };
+  return threeDistinctDebateRoles(roles) ? roles : null;
+}
+
+async function completeDebateRole(
+  deps: ProductionDeps,
+  ctx: PhaseContext,
+  request: DebateCompletionRequest,
+): Promise<string> {
+  const record = await deps.broker.complete({
+    model: request.model,
+    messages: [
+      {
+        role: "system",
+        content:
+          request.role === "judge"
+            ? 'Judge an evidence-bound finding debate. Return JSON only: {"verdict":"VALID|REJECTED|UNCERTAIN","rationale":"non-empty explanation"}.'
+            : `${request.role} in an evidence-bound finding debate. Cite only supplied evidence. Do not invent facts.`,
+      },
+      { role: "user", content: request.prompt },
+    ],
+    responseFormat: request.role === "judge" ? "json" : "text",
+    temperature: 0,
+    metadata: {
+      runId: ctx.run.id,
+      purpose: "finding_debate",
+      role: request.role,
+    },
+  });
+  return record.response.message.content;
 }
 
 /** Router-selected reviewers with exact ModelRef; never listModels()[0]. */

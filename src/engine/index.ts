@@ -40,6 +40,7 @@ export {
   createReviewingDriver,
   createValidatingDriver,
   recentlyRateLimitedReviewModels,
+  type DebateCompletionRequest,
   type ReviewDriverOptions,
   type ValidatingDriverOptions,
 } from "./reviewDrivers.js";

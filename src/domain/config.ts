@@ -48,6 +48,8 @@ export const ConvergenceStrategySchema = z.object({
   requiredCleanRounds: z.number().int().min(1).default(3),
   /** bounded investigation rounds for a single UNCERTAIN finding before NEEDS_HUMAN */
   maxInvestigationRoundsPerFinding: z.number().int().min(0).default(2),
+  /** bounded Prosecutor/Defender/Judge rounds for a single UNCERTAIN finding */
+  maxDebateRounds: z.number().int().min(1).default(2),
   /** consecutive attempts without evidence improvement before strategy change */
   noProgressAttempts: z.number().int().min(2).default(3),
   /** sliding-window sizes; a detector is silent until its full window exists */
