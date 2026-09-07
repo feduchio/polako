@@ -66,6 +66,32 @@ mode = "off"
     expect(config.supervisors).toHaveLength(3);
     expect(config.runtimeValidation.mode).toBe("off");
     expect(config.supervisors[0]?.model).toBe("scripted:planner");
+    expect(config.audition.enabled).toBe(false);
+  });
+
+  it("parses an additive [audition] section from polish.toml", () => {
+    const home = mkdtempSync(join(tmpdir(), "polish-config-audition-"));
+    dirs.push(home);
+    writeFileSync(
+      join(home, "polish.toml"),
+      `
+[audition]
+enabled = true
+strategy = "micro-tasks"
+minScoresForRouting = 3
+maxModels = 2
+maxTasks = 2
+
+[[audition.tasks]]
+id = "echo"
+prompt = "Reply with exactly: ok"
+expected = "ok"
+`,
+    );
+    const config = loadPolishConfig(home);
+    expect(config.audition.enabled).toBe(true);
+    expect(config.audition.strategy).toBe("micro-tasks");
+    expect(config.audition.tasks).toEqual([{ id: "echo", prompt: "Reply with exactly: ok", expected: "ok" }]);
   });
 
   it("parses a supervisor fallback chain from models", () => {

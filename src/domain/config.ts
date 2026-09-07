@@ -125,6 +125,30 @@ export const RoutingConfigSchema = z.object({
 });
 export type RoutingConfig = z.infer<typeof RoutingConfigSchema>;
 
+export const AuditionTaskConfigSchema = z.object({
+  id: z.string().min(1),
+  prompt: z.string().min(1),
+  expected: z.string().optional(),
+});
+export type AuditionTaskConfig = z.infer<typeof AuditionTaskConfigSchema>;
+
+/** Small explicit default micro-tasks. Used only when audition is enabled with micro-tasks. */
+export const DEFAULT_AUDITION_TASKS: AuditionTaskConfig[] = [
+  { id: "echo-ok", prompt: "Reply with exactly: ok", expected: "ok" },
+  { id: "add-two", prompt: "Reply with exactly: 2", expected: "2" },
+  { id: "say-yes", prompt: "Reply with exactly: yes", expected: "yes" },
+];
+
+export const AuditionConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  strategy: z.enum(["noop", "micro-tasks"]).default("noop"),
+  minScoresForRouting: z.number().int().min(1).default(3),
+  maxModels: z.number().int().min(1).default(4),
+  maxTasks: z.number().int().min(1).default(4),
+  tasks: z.array(AuditionTaskConfigSchema).default(DEFAULT_AUDITION_TASKS),
+});
+export type AuditionConfig = z.infer<typeof AuditionConfigSchema>;
+
 export const RuntimeValidationConfigSchema = z.object({
   mode: z.enum(["auto", "required", "off"]).default("auto"),
   level: z.enum(["smoke", "affected", "full"]).default("smoke"),
@@ -210,6 +234,7 @@ export const PolishConfigSchema = z.object({
   agent: AgentConfigSchema.prefault({}),
   discovery: DiscoveryConfigSchema.prefault({}),
   routing: RoutingConfigSchema.prefault({}),
+  audition: AuditionConfigSchema.prefault({}),
   retry: RetryPolicySchema.prefault({}),
   candidates: CandidateStrategySchema.prefault({}),
   review: ReviewStrategySchema.prefault({}),

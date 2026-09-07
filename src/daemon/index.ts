@@ -4,6 +4,7 @@ export {
   applyRunBudgetOverrides,
   buildProductionDeps,
   createBaseliningDriver,
+  createDiscoveringModelsDriverFromCatalog,
   createDiscoveringProjectDriver,
   createSimplifyingDriver,
   installProductionDrivers,

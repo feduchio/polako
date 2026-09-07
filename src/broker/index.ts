@@ -19,5 +19,25 @@ export type { BudgetLimits, BudgetSnapshot, ProviderLimits } from "./quota.js";
 export { SecretStore, parseDotenv } from "./secrets.js";
 export { ModelBroker, DEFAULT_RETRY_POLICY } from "./broker.js";
 export type { BrokerDeps, ModelCallRecord, RetryPolicy } from "./broker.js";
-export { ModelObservationRepository } from "./observations.js";
-export type { ModelObservation } from "./observations.js";
+export { ModelObservationRepository, DEFAULT_MIN_SCORES_FOR_ROUTING } from "./observations.js";
+export type {
+  ModelObservation,
+  ModelObservationRepositoryOptions,
+  ObservationRestoreOptions,
+} from "./observations.js";
+export {
+  MicroTaskAuditionStrategy,
+  ModelAuditioner,
+  NoopAuditionStrategy,
+  createAuditionStrategyFromConfig,
+  exactMatchScorer,
+} from "./audition.js";
+export type {
+  AuditionCompleter,
+  AuditionResult,
+  AuditionScorer,
+  AuditionStrategy,
+  AuditionTask,
+  AuditionTaskScore,
+  ModelAuditionerOptions,
+} from "./audition.js";

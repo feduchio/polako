@@ -2,10 +2,21 @@ import { modelRefKey, type ModelRef } from "../domain/common.js";
 import { GLOBAL_MODEL_OBSERVATIONS_RUN_ID } from "../domain/event.js";
 import type { NewEvent } from "../domain/event.js";
 import { SYSTEM_ACTOR } from "../domain/common.js";
+import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import type { Db } from "../store/db.js";
 import type { EventLog } from "../store/eventLog.js";
 import type { ModelCatalog } from "./catalog.js";
+
+export const DEFAULT_MIN_SCORES_FOR_ROUTING = 3;
+
+export interface ObservationRestoreOptions {
+  minScoresForRouting?: number;
+}
+
+export interface ModelObservationRepositoryOptions {
+  minScoresForRouting?: number;
+}
 
 export type ModelObservation =
   | {
@@ -43,7 +54,14 @@ export interface ModelObservationStore {
  * other runs.
  */
 export class ModelObservationRepository {
-  constructor(private readonly store: ModelObservationStore) {}
+  private readonly minScoresForRouting: number;
+
+  constructor(
+    private readonly store: ModelObservationStore,
+    options: ModelObservationRepositoryOptions = {},
+  ) {
+    this.minScoresForRouting = options.minScoresForRouting ?? DEFAULT_MIN_SCORES_FOR_ROUTING;
+  }
 
   recordCall(
     model: ModelRef,
@@ -81,6 +99,12 @@ export class ModelObservationRepository {
     model: ModelRef,
     input: { taskId: string; score: number; detail?: string; at: number },
   ): ModelObservation {
+    if (!Number.isFinite(input.score)) {
+      throw new PolishError("INVALID_ARGUMENT", "audition score must be finite", {
+        taskId: input.taskId,
+        score: input.score,
+      });
+    }
     const observation: ModelObservation = {
       id: id("mobs", input.at),
       kind: "audition",
@@ -103,10 +127,18 @@ export class ModelObservationRepository {
     return this.store.events.rebuildModelObservations();
   }
 
-  restoreCatalog(catalog: ModelCatalog): void {
+  restoreCatalog(catalog: ModelCatalog, options: ObservationRestoreOptions = {}): void {
+    const minScores = options.minScoresForRouting ?? this.minScoresForRouting;
     this.rebuild();
     catalog.resetCallStats();
     const observations = this.list();
+    const auditionCounts = new Map<string, number>();
+    for (const observation of observations) {
+      if (observation.kind === "audition") {
+        const key = modelRefKey(observation.model);
+        auditionCounts.set(key, (auditionCounts.get(key) ?? 0) + 1);
+      }
+    }
     const qualityModels = new Map<string, ModelRef>();
     for (const observation of observations) {
       if (observation.kind === "quality" || observation.kind === "audition") {
@@ -119,7 +151,7 @@ export class ModelObservationRepository {
         catalog.recordCall(observation.model, { ...observation.outcome, at: observation.observedAt });
       } else if (observation.kind === "quality") {
         catalog.recordQuality(observation.model, observation.quality);
-      } else {
+      } else if ((auditionCounts.get(modelRefKey(observation.model)) ?? 0) >= minScores) {
         catalog.recordQuality(observation.model, observation.score);
       }
     }

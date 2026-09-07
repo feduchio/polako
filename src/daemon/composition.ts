@@ -1,10 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AgentRunner } from "../agents/runner.js";
+import {
+  createAuditionStrategyFromConfig,
+  ModelAuditioner,
+} from "../broker/audition.js";
 import { ModelBroker } from "../broker/broker.js";
 import { probeModelCapabilities } from "../broker/capabilityProbe.js";
 import { ModelCatalog } from "../broker/catalog.js";
-import { costEligibilityFromConfig } from "../broker/costEligibility.js";
+import { costEligibilityFromConfig, isCostEligible } from "../broker/costEligibility.js";
+import { ModelObservationRepository } from "../broker/observations.js";
 import { DEFAULT_ROUTER_POLICY, ModelRouter, type Ranked } from "../broker/router.js";
 import type { EnsembleOption } from "../convergence/tracker.js";
 import { BudgetTracker, QuotaTracker } from "../broker/quota.js";
@@ -128,6 +133,9 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
   const catalog = new ModelCatalog();
   const providers = options.providers ?? loadConfiguredProviders(options.config, secrets, options.home);
   for (const provider of providers) catalog.register(provider);
+  const observations = new ModelObservationRepository(options.store, {
+    minScoresForRouting: options.config.audition.minScoresForRouting,
+  });
   const broker = new ModelBroker({
     store: options.store,
     clock: options.clock,
@@ -135,6 +143,7 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     quota: new QuotaTracker(options.clock, { concurrency: options.config.lanes["llm.default"], rpm: null }),
     budget: new BudgetTracker(options.config.budget),
     secrets,
+    observations,
   });
   const sandbox = options.resolveSandbox ?? ((ctx) => new WorktreeSandbox(
     ctx.run.projectPath,
@@ -409,7 +418,7 @@ export function resolveEnsembleAlternatives(deps: ProductionDeps, ctx?: PhaseCon
   return options.length >= 2 ? options : [];
 }
 
-function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
+export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
   const pinnedModels = deps.config.supervisors.flatMap((entry) =>
     supervisorModelChain(entry).map((value) => parseModelRefString(value)),
   );
@@ -442,9 +451,46 @@ function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDr
       artifacts: [],
     }));
     if (probeEvents.length > 0) ctx.store.events.append(probeEvents);
+    await runConfiguredAudition(deps, ctx);
     const models = deps.catalog.list().map((entry) => entry.info);
     return createDiscoveringModelsDriver(models)(ctx);
   };
+}
+
+function brokerAuditionTransport(broker: ModelBroker) {
+  return {
+    complete: async (request: Parameters<ModelBroker["complete"]>[0]) => (await broker.complete(request)).response,
+  };
+}
+
+async function runConfiguredAudition(deps: ProductionDeps, ctx: PhaseContext): Promise<void> {
+  const audition = deps.config.audition;
+  const strategy = createAuditionStrategyFromConfig(
+    audition,
+    brokerAuditionTransport(deps.broker),
+    ctx.run.id,
+  );
+  if (!audition.enabled || audition.strategy !== "micro-tasks") return;
+  const observations = new ModelObservationRepository(deps.store, {
+    minScoresForRouting: audition.minScoresForRouting,
+  });
+  const policy = costEligibilityFromConfig(deps.config.routing);
+  const models = deps.catalog
+    .list()
+    .filter((entry) => isCostEligible(entry.info.capabilities, policy))
+    .map((entry) => entry.info.ref)
+    .slice(0, audition.maxModels);
+  const tasks = audition.tasks.slice(0, audition.maxTasks).map((task) => ({
+    id: task.id,
+    prompt: task.prompt,
+    ...(task.expected === undefined ? {} : { expected: task.expected }),
+  }));
+  await new ModelAuditioner(observations, () => ctx.clock.now(), { enabled: audition.enabled }).run(
+    models,
+    tasks,
+    strategy,
+  );
+  observations.restoreCatalog(deps.catalog);
 }
 
 /** Three distinct cost-eligible debate models, or null to skip without inventing a verdict. */
