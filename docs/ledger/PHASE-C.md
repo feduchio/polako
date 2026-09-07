@@ -74,4 +74,6 @@ C3. Contract: `docs/ledger/C3.md`. Provenance: `docs/ledger/C3-run.md`. **Task A
 
 C2. Contract: `docs/ledger/C2.md`. Provenance: `docs/ledger/C2-run.md`. **Task ACCEPTED** at `7139e9cc2ad8a58e35a5b1535941eddbf4c25f13`.
 
-C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Task ACCEPTED** at `4fae1473f5dd5430f58d613ad7c90beed1128cf9`. Next: C8. Do not enter Phase D.
+C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Task ACCEPTED** at `4fae1473f5dd5430f58d613ad7c90beed1128cf9`.
+
+C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Contract FROZEN**. Next: C8 implementation. Do not enter Phase D.
