@@ -368,13 +368,21 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
   engine.registerPhase("GATING", createGatingDriver(candidateOptions));
   engine.registerPhase("COMPARING", createComparingDriver());
   engine.registerPhase("INTEGRATING", createIntegratingDriver(candidateOptions));
-  engine.registerPhase("REVIEWING", createReviewingDriver({ resolveReviewers: (ctx) => selectReviewProviders(deps, ctx) }));
+  const sandboxFor = (ctx: PhaseContext) => resolveSandbox(deps, ctx);
+  engine.registerPhase(
+    "REVIEWING",
+    createReviewingDriver({
+      resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
+      sandbox: sandboxFor,
+    }),
+  );
   engine.registerPhase(
     "VALIDATING",
     withReadyPromotion(
       createValidatingDriver({
         resolveDebateRoles: (ctx) => selectDebateRoles(deps, ctx),
         completeDebate: async (ctx, request) => completeDebateRole(deps, ctx, request),
+        sandbox: sandboxFor,
       }),
     ),
   );

@@ -12,7 +12,6 @@ import {
   DEBATE_OUTCOME,
   DEBATE_STARTED,
   FindingValidator,
-  ProjectFindingEvidenceWorker,
   argumentRecords,
   assertDebateMayStart,
   causalB5ValidationId,
@@ -54,10 +53,22 @@ import {
 import { orderReviewersByEnsemble, pendingEnsembleOverride } from "../convergence/pathology/ensemble.js";
 import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import type { PhaseContext, PhaseDriver } from "./types.js";
+import {
+  assertIsolatedCheckout,
+  CheckpointCheckoutEvidenceWorker,
+  createCheckpointCheckout,
+  detachedCheckoutPolicy,
+  destroyCheckout,
+  uniqueCheckoutId,
+} from "./checkpointCheckout.js";
+import type { CommandPolicy } from "../sandbox/allowlist.js";
+import type { Sandbox, SandboxHandle } from "../sandbox/worktree.js";
 
 export interface ReviewDriverOptions {
   resolveReviewers?: (ctx: PhaseContext) => ReviewProvider[] | Promise<ReviewProvider[]>;
   resolveAxes?: (ctx: PhaseContext) => ReviewAxis[] | Promise<ReviewAxis[]>;
+  sandbox?: Sandbox | ((ctx: PhaseContext) => Sandbox | Promise<Sandbox>);
+  policy?: CommandPolicy | ((ctx: PhaseContext) => CommandPolicy | Promise<CommandPolicy>);
 }
 
 export interface DebateCompletionRequest {
@@ -72,10 +83,13 @@ export interface ValidatingDriverOptions {
   /** Three distinct cost-eligible models, or null to skip debate (no invented verdict). */
   resolveDebateRoles?: (ctx: PhaseContext) => DebateRoles | null | Promise<DebateRoles | null>;
   completeDebate?: (ctx: PhaseContext, request: DebateCompletionRequest) => Promise<string>;
+  sandbox?: Sandbox | ((ctx: PhaseContext) => Sandbox | Promise<Sandbox>);
+  policy?: CommandPolicy | ((ctx: PhaseContext) => CommandPolicy | Promise<CommandPolicy>);
 }
 
 /** Production REVIEWING driver: fresh independent reviewers on the integrated checkpoint artifact. */
 export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseDriver {
+  let checkoutSeq = 0;
   return async (ctx) => {
     const hash = ctx.run.currentCheckpointHash;
     if (hash === null) return { status: "waiting" };
@@ -102,43 +116,68 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
       if (recentlyRateLimitedReviewModels(ctx).length > 0) return { status: "waiting" };
       throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
     }
+    if (options.sandbox === undefined) {
+      throw new PolishError("CONFIG_ERROR", "production REVIEWING requires a sandbox");
+    }
+
+    const sandbox = await resolveDriverValue(options.sandbox, ctx);
+    const policy = options.policy === undefined ? detachedCheckoutPolicy() : await resolveDriverValue(options.policy, ctx);
     const baseline = ctx.store.repos.baselines.listByRun(ctx.run.id)[0];
     const parent = checkpoint.parentId === null ? null : ctx.store.repos.checkpoints.get(checkpoint.parentId);
-    const artifact = await buildCheckpointReviewArtifact({
-      projectPath: ctx.run.projectPath,
-      checkpoint,
-      baselineCommit: baseline?.commitHash ?? null,
-      parentCommit: parent?.commitHash ?? null,
-    });
-    if (artifact.commitHash !== hash) {
-      throw new Error(`checkpoint artifact hash ${artifact.commitHash} does not match run checkpoint ${hash}`);
-    }
-
-    const rateLimited = new Set<string>();
-    for (const axis of missingAxes(axes, roundExecutions, required)) {
-      const outcome = await reviewAxisWithFallback(ctx, {
-        hash,
-        roundIndex,
-        axis,
-        reviewers,
-        preferredIndex: Math.max(0, axes.indexOf(axis)),
-        checkpoint,
-        artifact,
-        rateLimited,
+    let handle: SandboxHandle | undefined;
+    try {
+      handle = await createCheckpointCheckout(sandbox, {
+        id: uniqueCheckoutId("rev", ctx.run.id, ++checkoutSeq),
+        baseCommit: hash,
+        policy,
       });
-      if (outcome === "waiting") return { status: "waiting" };
-    }
+      await assertIsolatedCheckout(handle, ctx.run.projectPath, hash);
+      const artifact = await buildCheckpointReviewArtifact({
+        projectPath: handle.path,
+        checkpoint,
+        baselineCommit: baseline?.commitHash ?? null,
+        parentCommit: parent?.commitHash ?? null,
+      });
+      if (artifact.commitHash !== hash) {
+        throw new Error(`checkpoint artifact hash ${artifact.commitHash} does not match run checkpoint ${hash}`);
+      }
 
-    const refreshed = ctx.store.repos.reviewExecutions.listByRun(ctx.run.id);
-    if (isReviewRoundComplete(refreshed, hash, roundIndex, required)) {
-      return { status: "complete", nextPhase: "VALIDATING" };
+      const rateLimited = new Set<string>();
+      for (const axis of missingAxes(axes, roundExecutions, required)) {
+        const outcome = await reviewAxisWithFallback(ctx, {
+          hash,
+          roundIndex,
+          axis,
+          reviewers,
+          preferredIndex: Math.max(0, axes.indexOf(axis)),
+          checkpoint,
+          artifact,
+          repositoryRoot: handle.path,
+          rateLimited,
+        });
+        if (outcome === "waiting") return { status: "waiting" };
+      }
+
+      const refreshed = ctx.store.repos.reviewExecutions.listByRun(ctx.run.id);
+      if (isReviewRoundComplete(refreshed, hash, roundIndex, required)) {
+        return { status: "complete", nextPhase: "VALIDATING" };
+      }
+      return { status: "waiting" };
+    } catch (err) {
+      if (handle === undefined) {
+        recordCheckoutCreateFailure(ctx, hash, roundIndex, axes[0] ?? "correctness", reviewers[0], err);
+      }
+      if (err instanceof PolishError) throw err;
+      throw new PolishError("SANDBOX_ERROR", err instanceof Error ? err.message : String(err));
+    } finally {
+      await destroyCheckout(handle);
     }
-    return { status: "waiting" };
   };
 }
 
 /** Production VALIDATING driver: triage, reproduce, persist validation evidence, spawn tasks. */
 export function createValidatingDriver(options: ValidatingDriverOptions = {}): PhaseDriver {
+  let checkoutSeq = 0;
   return async (ctx) => {
     const hash = ctx.run.currentCheckpointHash;
     if (hash === null) return { status: "waiting" };
@@ -148,35 +187,38 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
       .filter((finding) => finding.status === "RAW" && finding.checkpointHash === hash)
       .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 
-    const worker = await resolveEvidenceWorker(ctx, options);
-    const deferredCorpus = new DeferredCorpusAppender(ctx.clock.now());
-    const validator = new FindingValidator({
-      clock: ctx.clock,
-      worker,
-      corpus: deferredCorpus,
-      maxInvestigationRounds: ctx.config.convergence.maxInvestigationRoundsPerFinding,
-    });
     const requirementRef = resolveRequirementRef(ctx);
     let known = [...allFindings];
 
-    for (const finding of raw) {
-      const result = await validator.validate({
-        finding,
-        existingFindings: known.filter((item) => item.id !== finding.id),
-        missionId: ctx.run.missionId,
-        requirementRef,
+    if (raw.length > 0) {
+      const worker = await resolveEvidenceWorker(ctx, options, () => ++checkoutSeq);
+      const deferredCorpus = new DeferredCorpusAppender(ctx.clock.now());
+      const validator = new FindingValidator({
+        clock: ctx.clock,
+        worker,
+        corpus: deferredCorpus,
+        maxInvestigationRounds: ctx.config.convergence.maxInvestigationRoundsPerFinding,
       });
-      known = known.map((item) => (item.id === finding.id ? result.finding : item));
-      const causedBy = findRaisedEventId(ctx, finding.id);
-      const persist = result.finding.status === "UNCERTAIN" ? { ...result, task: null } : result;
-      const validationEventId = persistValidationResult(ctx, finding, persist, causedBy === null ? [] : [causedBy]);
-      if (deferredCorpus.pending !== null && validationEventId !== null) {
-        const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
-        corpus.record({
-          ...deferredCorpus.pending,
-          evidenceRefs: [validationEventId, ...deferredCorpus.pending.evidenceRefs],
+
+      for (const finding of raw) {
+        const result = await validator.validate({
+          finding,
+          existingFindings: known.filter((item) => item.id !== finding.id),
+          missionId: ctx.run.missionId,
+          requirementRef,
         });
-        deferredCorpus.pending = null;
+        known = known.map((item) => (item.id === finding.id ? result.finding : item));
+        const causedBy = findRaisedEventId(ctx, finding.id);
+        const persist = result.finding.status === "UNCERTAIN" ? { ...result, task: null } : result;
+        const validationEventId = persistValidationResult(ctx, finding, persist, causedBy === null ? [] : [causedBy]);
+        if (deferredCorpus.pending !== null && validationEventId !== null) {
+          const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
+          corpus.record({
+            ...deferredCorpus.pending,
+            evidenceRefs: [validationEventId, ...deferredCorpus.pending.evidenceRefs],
+          });
+          deferredCorpus.pending = null;
+        }
       }
     }
 
@@ -703,10 +745,11 @@ async function reviewAxisWithFallback(
     axis: ReviewAxis;
     reviewers: readonly ReviewProvider[];
     preferredIndex: number;
-    checkpoint: Checkpoint;
-    artifact: CheckpointReviewArtifact;
-    rateLimited: Set<string>;
-  },
+        checkpoint: Checkpoint;
+        artifact: CheckpointReviewArtifact;
+        repositoryRoot: string;
+        rateLimited: Set<string>;
+      },
 ): Promise<"ok" | "waiting"> {
   const count = input.reviewers.length;
   for (let offset = 0; offset < count; offset++) {
@@ -721,7 +764,7 @@ async function reviewAxisWithFallback(
         axis: input.axis,
         artifact: input.artifact,
         provider: reviewer,
-        repositoryRoot: ctx.run.projectPath,
+        repositoryRoot: input.repositoryRoot,
         now: ctx.clock.now(),
       });
       finishExecution(ctx, started, result.findings, result.model, result.promptDigest);
@@ -773,13 +816,42 @@ function hasPendingFindingWork(ctx: PhaseContext, checkpointHash: string): boole
   );
 }
 
-async function resolveEvidenceWorker(ctx: PhaseContext, options: ValidatingDriverOptions): Promise<FindingEvidenceWorker> {
+async function resolveEvidenceWorker(
+  ctx: PhaseContext,
+  options: ValidatingDriverOptions,
+  nextSeq: () => number,
+): Promise<FindingEvidenceWorker> {
   if (options.resolveWorker) return options.resolveWorker(ctx);
-  return new ProjectFindingEvidenceWorker({
+  if (options.sandbox === undefined) {
+    throw new PolishError("CONFIG_ERROR", "production VALIDATING requires a sandbox when no resolveWorker is provided");
+  }
+  const sandbox = await resolveDriverValue(options.sandbox, ctx);
+  const policy = options.policy === undefined ? detachedCheckoutPolicy() : await resolveDriverValue(options.policy, ctx);
+  return new CheckpointCheckoutEvidenceWorker({
+    sandbox,
+    policy,
     projectPath: ctx.run.projectPath,
     persistOutput: (output, kind, label) => ctx.store.artifacts.put(output, kind, label),
     now: () => ctx.clock.now(),
+    nextId: () => uniqueCheckoutId("val", ctx.run.id, nextSeq()),
   });
+}
+
+async function resolveDriverValue<T>(value: T | ((ctx: PhaseContext) => T | Promise<T>), ctx: PhaseContext): Promise<T> {
+  return typeof value === "function" ? (value as (ctx: PhaseContext) => T | Promise<T>)(ctx) : value;
+}
+
+function recordCheckoutCreateFailure(
+  ctx: PhaseContext,
+  hash: string,
+  roundIndex: number,
+  axis: ReviewAxis,
+  reviewer: ReviewProvider | undefined,
+  err: unknown,
+): void {
+  if (reviewer === undefined) return;
+  const started = startExecution(ctx, hash, roundIndex, axis, reviewer);
+  failExecution(ctx, started, err instanceof Error ? err.message : String(err));
 }
 
 function resolveRequirementRef(ctx: PhaseContext): string {
