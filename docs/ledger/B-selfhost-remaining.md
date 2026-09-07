@@ -16,7 +16,7 @@ Full Phase-B self-host closure is **DEFERRED_BY_USER** until operator observabil
 
 3. ~~Multi-task DONE: `assertCodeChangeMissionMayComplete` does not require every required task terminal; after first integration FSM goes to REVIEWING.~~ — **ACCEPTED** as `docs/ledger/B-selfhost-3.md` at `fd8a99c402656f7fe3aa6dc02377cc76713ab411`.
 4. ~~Planning re-entry duplicates original tasks (`createPlanningDriver` always full decompose).~~ — **ACCEPTED** as `docs/ledger/B-selfhost-4.md` at `84f2f7ef55f4d97e7936b5e7d775bba358f60c90`.
-5. Review/evidence use `projectPath` (user checkout), not isolated checkout of `checkpointHash`.
+5. ~~Review/evidence use `projectPath` (user checkout), not isolated checkout of `checkpointHash`.~~ — **ACCEPTED** as `docs/ledger/B-selfhost-5.md` at `916f7f26df1b7490d35289781a4e799d7cd8e7ed`.
 6. Runtime templates live in `project.discovered`; `validateRuntimeIfNeeded` drops evidence; `resolveRuntimeEvidence` uses a fake checkpoint hash and is not the production path.
 7. `createRun` mutates shared `config.runtimeValidation.mode` (concurrent-run leak).
 8. `--budget-tokens` / `--budget-usd` stored in facade metadata; `applyRunBudgetOverrides` unused; Option A hard caps required (not C2).

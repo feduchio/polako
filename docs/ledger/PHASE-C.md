@@ -20,7 +20,8 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | C4 accepted | `4fae1473f5dd5430f58d613ad7c90beed1128cf9` on `task/C4-integration` | Task C4 only. B-4/B-8/B-11 remain OPEN. Phase C not accepted. Do not tag `phase-c-accepted`. |
 | C8 accepted | `311203830720a4d1e917785e577eaf868281bc8a` on `task/C8-integration` | Task C8 only. |
 | B-selfhost-4 accepted | `84f2f7ef55f4d97e7936b5e7d775bba358f60c90` on `task/B-selfhost-4-integration` | Bounded B finding 4 only. |
-| B-selfhost-3 accepted (next HOST for later C / remaining B) | `fd8a99c402656f7fe3aa6dc02377cc76713ab411` on `task/B-selfhost-3-integration` | Bounded B finding 3 only. Phase B not fully closed. Phase C not accepted. Do not tag `phase-c-accepted`. |
+| B-selfhost-3 accepted | `fd8a99c402656f7fe3aa6dc02377cc76713ab411` on `task/B-selfhost-3-integration` | Bounded B finding 3 only. |
+| B-selfhost-5 accepted (next HOST) | `916f7f26df1b7490d35289781a4e799d7cd8e7ed` on `task/B-selfhost-5-integration` | Bounded B finding 5 only. Phase B not fully closed. Phase C not accepted. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -33,7 +34,7 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open items: **5–9, 11–15**. Items **3** and **4** ACCEPTED (`B-selfhost-3` at `fd8a99c`, `B-selfhost-4` at `84f2f7e`).
+Open items: **6–9, 11–15**. Items **3–5** ACCEPTED.
 
 Item 10 (`listModels()[0]` reviewer selection) was lifted into `B-bootstrap-cost-eligibility` (ACCEPTED). Full Phase-B self-host closure remains **DEFERRED_BY_USER**.
 
@@ -81,4 +82,4 @@ C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Task A
 
 C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Task ACCEPTED** at `311203830720a4d1e917785e577eaf868281bc8a`.
 
-**Pause (user-authorized, full remaining plan):** B-selfhost-3/4 ACCEPTED. **B-selfhost-5** draft in progress (`docs/ledger/B-selfhost-5.md`). Then items 6–9, 11–15, then remaining Fable C. Do not enter Phase D. Do not tag `phase-c-accepted`.
+**Pause (user-authorized, full remaining plan):** B-selfhost-3/4/5 ACCEPTED (`fd8a99c` / `84f2f7e` / `916f7f2`). Next: items 6–9, 11–15, then remaining Fable C. Do not enter Phase D. Do not tag `phase-c-accepted`.
