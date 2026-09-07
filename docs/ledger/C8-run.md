@@ -17,7 +17,7 @@ Do not treat this file as a second contract. After freeze the contract is immuta
 | Grok contract review | **FAIL** on reviewed draft; 7 blocking VALID |
 | Claude contract review | **FAIL** on reviewed draft; 5 blocking VALID |
 | Review findings | all blocking findings resolved in the frozen text; no second Claude contract review |
-| Contract freeze commit | filled by this freeze commit |
+| Contract freeze commit | `2276ffb20080823d2308c2fe670bf440a6b7a730` |
 | Implementation | NOT STARTED |
 | Polish run | none for contract freeze |
 | Paid/live calls | forbidden; none |
