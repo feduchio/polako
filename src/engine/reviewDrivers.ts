@@ -43,7 +43,7 @@ import {
 } from "../domain/review.js";
 import { PolishError } from "../shared/errors.js";
 import { buildCheckpointReviewArtifact, type CheckpointReviewArtifact } from "../review/artifact.js";
-import { runAxisReview, type ReviewProvider } from "../review/swarm.js";
+import { runAxisReview, type ReviewProvider, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { id } from "../shared/ids.js";
 import {
@@ -69,6 +69,7 @@ export interface ReviewDriverOptions {
   resolveAxes?: (ctx: PhaseContext) => ReviewAxis[] | Promise<ReviewAxis[]>;
   sandbox?: Sandbox | ((ctx: PhaseContext) => Sandbox | Promise<Sandbox>);
   policy?: CommandPolicy | ((ctx: PhaseContext) => CommandPolicy | Promise<CommandPolicy>);
+  runAxisReview?: (input: RunAxisReviewInput) => Promise<RunAxisReviewResult>;
 }
 
 export interface DebateCompletionRequest {
@@ -154,6 +155,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
           artifact,
           repositoryRoot: handle.path,
           rateLimited,
+          review: options.runAxisReview ?? runAxisReview,
         });
         if (outcome === "waiting") return { status: "waiting" };
       }
@@ -749,6 +751,7 @@ async function reviewAxisWithFallback(
         artifact: CheckpointReviewArtifact;
         repositoryRoot: string;
         rateLimited: Set<string>;
+        review: (input: RunAxisReviewInput) => Promise<RunAxisReviewResult>;
       },
 ): Promise<"ok" | "waiting"> {
   const count = input.reviewers.length;
@@ -759,7 +762,7 @@ async function reviewAxisWithFallback(
     if (input.rateLimited.has(key)) continue;
     const started = startExecution(ctx, input.hash, input.roundIndex, input.axis, reviewer);
     try {
-      const result = await runAxisReview({
+      const result = await input.review({
         checkpoint: input.checkpoint,
         axis: input.axis,
         artifact: input.artifact,

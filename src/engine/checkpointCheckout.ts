@@ -87,6 +87,7 @@ export class CheckpointCheckoutEvidenceWorker implements FindingEvidenceWorker {
 
   async reproduce(finding: Finding): Promise<EvidenceAttempt> {
     let handle: SandboxHandle | undefined;
+    let isolated = false;
     try {
       handle = await createCheckpointCheckout(this.options.sandbox, {
         id: this.options.nextId(),
@@ -94,21 +95,23 @@ export class CheckpointCheckoutEvidenceWorker implements FindingEvidenceWorker {
         policy: this.options.policy,
       });
       await assertIsolatedCheckout(handle, this.options.projectPath, finding.checkpointHash);
-    } catch (err) {
-      return {
-        method: "investigation",
-        verdict: "UNCERTAIN",
-        rationale: `checkpoint checkout failed: ${err instanceof Error ? err.message : String(err)}`,
-        evidenceRefs: [],
-      };
-    }
-    try {
+      isolated = true;
       const worker = new ProjectFindingEvidenceWorker({
         projectPath: handle.path,
         persistOutput: this.options.persistOutput,
         now: this.options.now,
       });
       return await worker.reproduce(finding);
+    } catch (err) {
+      if (!isolated) {
+        return {
+          method: "investigation",
+          verdict: "UNCERTAIN",
+          rationale: `checkpoint checkout failed: ${err instanceof Error ? err.message : String(err)}`,
+          evidenceRefs: [],
+        };
+      }
+      throw err;
     } finally {
       await destroyCheckout(handle);
     }

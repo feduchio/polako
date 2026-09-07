@@ -16,7 +16,9 @@ import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
-import { createReviewingDriver, createValidatingDriver } from "./reviewDrivers.js";
+import { runAxisReview, type RunAxisReviewResult } from "../review/swarm.js";
+import { CheckpointCheckoutEvidenceWorker, detachedCheckoutPolicy } from "./checkpointCheckout.js";
+import { createReviewingDriver, createValidatingDriver, type ReviewDriverOptions } from "./reviewDrivers.js";
 import { stubDriverFor } from "./stubs.js";
 
 const NOW = 1_700_000_000_000;
@@ -31,12 +33,26 @@ describe("B-selfhost-5 checkpoint checkout isolation", () => {
     const fixture = await polarityRepo();
     const created: CheckoutSnap[] = [];
     const destroyed: string[] = [];
-    const { engine, store, clock } = reviewingHarness(fixture, spySandbox(fixture, created, destroyed), (provider) => {
-      provider
-        .script("reviewer", [{ kind: "reply", content: reviewJson("correctness", "checkpoint-only.ts") }])
-        .script("reviewer", [{ kind: "reply", content: reviewJson("regression", "user-only.ts") }])
-        .script("reviewer", [{ kind: "reply", content: reviewJson("adversarial", "checkpoint-only.ts") }]);
-    });
+    const usedRoots: { path: string; head: string }[] = [];
+    const reviewed: RunAxisReviewResult[] = [];
+    const { engine, store, clock } = reviewingHarness(
+      fixture,
+      spySandbox(fixture, created, destroyed),
+      (provider) => {
+        provider
+          .script("reviewer", [{ kind: "reply", content: reviewJson("correctness", "checkpoint-only.ts") }])
+          .script("reviewer", [{ kind: "reply", content: reviewJson("regression", "user-only.ts") }])
+          .script("reviewer", [{ kind: "reply", content: reviewJson("adversarial", "checkpoint-only.ts") }]);
+      },
+      async (input) => {
+        const root = input.repositoryRoot;
+        expect(root).toBeDefined();
+        usedRoots.push({ path: realpathSync(root!), head: await new Git(root!).revParse() });
+        const result = await runAxisReview(input);
+        reviewed.push(result);
+        return result;
+      },
+    );
     const { runId } = seedRun(store, clock, fixture, "REVIEWING");
     await engine.tickRun(runId);
 
@@ -50,6 +66,62 @@ describe("B-selfhost-5 checkpoint checkout isolation", () => {
     expect(existsSync(join(fixture.repoDir, "checkpoint-only.ts"))).toBe(false);
     expect(destroyed).toEqual([snap.id]);
     expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
+
+    expect(usedRoots.length).toBeGreaterThan(0);
+    for (const used of usedRoots) {
+      expect(used.path).not.toBe(realpathSync(fixture.repoDir));
+      expect(used.head).toBe(fixture.checkpoint);
+    }
+    const findings = reviewed.flatMap((item) => item.findings);
+    const userOnly = findings.find((finding) => finding.evidence.some((ref) => ref.path === "user-only.ts"));
+    expect(userOnly).toBeDefined();
+    expect(userOnly!.evidenceIssues.some((issue) => /does not exist/i.test(issue))).toBe(true);
+    const checkpointOnly = findings.find((finding) => finding.evidence.some((ref) => ref.path === "checkpoint-only.ts"));
+    expect(checkpointOnly).toBeDefined();
+    expect(checkpointOnly!.evidenceIssues).toEqual([]);
+  });
+
+  it("destroys a created checkout when isolation assert fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "polish-b5-destroy-"));
+    cleanup.push(root);
+    const destroyed: string[] = [];
+    const handle: SandboxHandle = {
+      id: "val-leak",
+      path: root,
+      branch: null,
+      baseCommit: "a".repeat(40),
+      git: new Git(root),
+      run: async () => {
+        throw new Error("unused");
+      },
+      headCommit: async () => "a".repeat(40),
+      commitAll: async () => null,
+      changedFiles: async () => [],
+      diffStat: async () => ({ files: 0, insertions: 0, deletions: 0 }),
+      diff: async () => "",
+      destroy: async () => {
+        destroyed.push("val-leak");
+      },
+    };
+    const sandbox: Sandbox = {
+      kind: "worktree",
+      isolates: false,
+      create: async () => handle,
+      list: async () => [],
+      destroyAll: async () => undefined,
+    };
+    const worker = new CheckpointCheckoutEvidenceWorker({
+      sandbox,
+      policy: detachedCheckoutPolicy(),
+      projectPath: root,
+      persistOutput: () => ({ sha256: "c".repeat(64), kind: "test_output", bytes: 0 }),
+      now: () => NOW,
+      nextId: () => "val-leak",
+    });
+    const result = await worker.reproduce(testFinding("a".repeat(40)));
+    expect(result.verdict).toBe("UNCERTAIN");
+    expect(result.rationale).toMatch(/must not equal run.projectPath/);
+    expect(destroyed).toEqual(["val-leak"]);
   });
 
   it("VALIDATING failing-test does not treat clean wrong-HEAD user content as VALID", async () => {
@@ -295,6 +367,7 @@ function reviewingHarness(
   fixture: Fixture,
   sandbox: Sandbox | undefined,
   script: (provider: ScriptedProvider) => void,
+  runAxisReviewImpl?: ReviewDriverOptions["runAxisReview"],
 ): { engine: RunEngine; store: Store; clock: FakeClock } {
   const store = openStore({ artifactsDir: join(fixture.root, `artifacts-${Math.random().toString(16).slice(2)}`) });
   const clock = new FakeClock(NOW);
@@ -310,6 +383,7 @@ function reviewingHarness(
     createReviewingDriver({
       resolveReviewers: () => [{ provider, model: { provider: "reviews", model: "reviewer" } }],
       ...(sandbox === undefined ? {} : { sandbox }),
+      ...(runAxisReviewImpl === undefined ? {} : { runAxisReview: runAxisReviewImpl }),
     }),
   );
   return { engine, store, clock };
