@@ -5,7 +5,7 @@ Do not treat this file as a second contract. After freeze the contract is immuta
 
 | Field | Value |
 |---|---|
-| Status | CONTRACT FROZEN — no implementation |
+| Status | **ACCEPTED** at `4fae147` — clean 2/2. Phase C is **not** complete. B-4/B-8/B-11 remain OPEN. |
 | Exact base | `7139e9cc2ad8a58e35a5b1535941eddbf4c25f13` (accepted C2; `task/C2-integration`) |
 | Trusted predecessor | C2 accepted `7139e9c`; C3 accepted `0abcf62` (not a C4 oracle) |
 | Fable scope | §17 C4 — Prosecutor / Defender / Judge for UNCERTAIN findings |
@@ -18,20 +18,20 @@ Do not treat this file as a second contract. After freeze the contract is immuta
 | Claude contract review | **FAIL** on reviewed draft; 5 blocking VALID |
 | Review findings | all blocking findings resolved in the frozen text; no second Claude contract review |
 | Contract freeze commit | `8442203db768c4fd0b648895398d7530442ddb45` |
-| Implementation | NOT STARTED |
-| Polish run | none for contract freeze |
+| Implementation | Grok `4fae1473f5dd5430f58d613ad7c90beed1128cf9`; Claude implementer unused; Polish deferred (B-4) |
+| Polish run | none (B-4); not a C4 code finding |
 | Paid/live calls | forbidden; none |
-| Clean rounds | not applicable to contract freeze |
-| Accepted C4 commit | none |
-| Next bounded step | after freeze only: create centralized C4 implementation worktrees with OWNERSHIP.json, then launch Grok implementer from exact base |
+| Clean rounds | 2/2 on `4fae147` (Grok+Claude PASS, then Grok+Claude PASS; no code change after that SHA) |
+| Accepted C4 commit | `4fae1473f5dd5430f58d613ad7c90beed1128cf9` (`task/C4-candidate-grok` / `task/C4-integration`) |
+| Next bounded step | C8 contract freeze (Model Audition / observations). Do not enter Phase D. Do not tag `phase-c-accepted`. |
 
-## Execution plan (this round)
+## Execution plan (completed for C4)
 
-1. Draft bounded `docs/ledger/C4.md` + this provenance stub on `phase-c-collab`.
-2. Hash the draft; one Grok and one Claude contract review of the **same** hash.
-3. Incorporate all blocking findings into the draft; freeze with a docs-only commit (no second Claude on the contract).
-4. After freeze: `/Users/fedorsvetlov/polish-worktrees/phase-c/C4/` + Grok implementer.
-5. Do not start C8 or Phase D. Do not tag `phase-c-accepted`.
+1. Draft + Grok/Claude contract reviews of hash `a0a3d2d8…02ff` → FAIL/FAIL.
+2. Incorporate blocking findings; freeze `8442203` / contract hash `549ed35b…c6c4c7`.
+3. Grok implementer on exact base → `4fae147`.
+4. Coordinator gates: Node 24.20.0 typecheck + 557 tests.
+5. Clean rounds 2/2 PASS/PASS. Accept C4. Polish deferred (B-4).
 
 ## Independent contract reviews
 
@@ -39,35 +39,21 @@ Both lanes reviewed the exact same `C4.md` hash `a0a3d2d8…02ff` and exact base
 
 ### Grok
 
-Result: **FAIL**.
-
-Validated and incorporated:
-
-- `C4-CR-01` BLOCKING — three distinct models required; skip must not invent REJECTED/VALID; same-model Judge forbidden.
-- `C4-CR-02` BLOCKING — debate VALID requires pre-debate evidence refs; debate text alone insufficient.
-- `C4-CR-03` BLOCKING — wire inside `createValidatingDriver` before investigation `task.created`; reconcile `investigationRounds` with B6 predicate; residual UNCERTAIN may investigate if not exhausted.
-- `C4-CR-04` BLOCKING — named debate events; legal `UNCERTAIN→VALIDATING→verdict` only at terminal apply; crash/resume cut points.
-- `C4-CR-05` BLOCKING — `ValidationMethod` must be `finding_debate` only.
-- `C4-CR-06` BLOCKING — corpus kind derived from pre-debate evidence; no fabricated runtime_scenario from transcripts.
+Result: **FAIL**. Incorporated: CR-01…CR-06 (distinct models, pre-debate evidence, driver wiring, events/resume, `finding_debate` method, honest corpus).
 
 ### Claude
 
-Result: **FAIL**.
+Result: **FAIL**. Incorporated: B1…B5 (DONE visibility during debate, mid-debate crash, persist ordering, pre-debate evidence, corpus honesty).
 
-Validated and incorporated:
+## Accepted candidate `4fae147`
 
-- `C4-B1` BLOCKING — in-debate finding must remain DONE-visible as `UNCERTAIN` (no stranded `VALIDATING` that hides investigationExhausted).
-- `C4-B2` BLOCKING — mid-debate crash recovery while status stays `UNCERTAIN`.
-- `C4-B3` BLOCKING — persist-before-terminal-effect vs entry transition ordering reconciled (status stays UNCERTAIN until terminal batch).
-- `C4-B4` BLOCKING — same as CR-02 (pre-debate evidence for VALID).
-- `C4-B5` BLOCKING — honest corpus registration; no fabricated runtime_scenario for debate-only text.
+Worktree: `/Users/fedorsvetlov/polish-worktrees/phase-c/C4/grok`. Integration: `/Users/fedorsvetlov/polish-worktrees/phase-c/C4/integration`. Frozen `C4.md` unchanged. B-4/B-8/B-11 OPEN.
 
-Non-blocking incorporated where cheap: config `maxDebateRounds` additive; Actor role provenance; FindingValidator stays RAW-only; exhaustion predicate named exactly.
+| Round | Grok | Claude |
+|---|---|---|
+| 1 | PASS | PASS |
+| 2 | PASS | PASS |
 
-## Centralized worktree proposal
+No blocking VALID at accepted commit. Recorded non-blocking (not C4 blockers): skip-path `UNCERTAIN→UNCERTAIN` status_changed for round bump; `deriveDebateCorpusKind` fallback arm; broker `judge` actor remap vs council; unused protocol SKILLs; production exhaustion→NEEDS_HUMAN rarely reachable until investigation re-entry exists (B-class coherence, not C4 inventing VALID).
 
-Proposal only during freeze:
-
-`/Users/fedorsvetlov/polish-worktrees/phase-c/C4/`
-
-Planned children: `grok/`, `claude/`, `polish/`, `integration/`. Existing worktrees remain in place. Any move/delete requires explicit user approval.
+Polish HOST verify still deferred (B-4). C3 sidecar was not used as an oracle.
