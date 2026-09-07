@@ -15,8 +15,8 @@ Do not treat this file as a second contract.
 | Grok contract review | **FAIL** on draft `bb5ba00f…`; 4 blocking VALID |
 | Claude contract review | **FAIL** on draft `bb5ba00f…`; 5 blocking VALID |
 | Review findings | all blocking findings incorporated; no second Claude contract review |
-| Contract freeze commit | pending |
-| Implementation | pending Grok on `task/B-selfhost-3-candidate-grok` |
+| Contract freeze commit | `8fd73184455cdf508f90a10fb8bc9b78a8ae7857` |
+| Implementation | `8fd73184455cdf508f90a10fb8bc9b78a8ae7857` Grok on `task/B-selfhost-3-candidate-grok` |
 | Paid/live calls | forbidden; none |
 | Clean rounds | 0/2 |
 | Next bounded step | Implement frozen contract. Do not enter Phase D. Do not tag `phase-c-accepted`. |
