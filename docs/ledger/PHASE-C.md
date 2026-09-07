@@ -81,4 +81,4 @@ C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Task A
 
 C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Task ACCEPTED** at `311203830720a4d1e917785e577eaf868281bc8a`.
 
-**Pause (user-authorized):** bounded remaining Phase-B findings one-by-one. **B-selfhost-4 ACCEPTED** at `84f2f7e`. **B-selfhost-3 ACCEPTED** at `fd8a99c402656f7fe3aa6dc02377cc76713ab411` (multi-task DONE). Next: items 5–9, 11–15. Do not enter Phase D. Do not tag `phase-c-accepted`.
+**Pause (user-authorized, full remaining plan):** B-selfhost-3/4 ACCEPTED. **B-selfhost-5** draft in progress (`docs/ledger/B-selfhost-5.md`). Then items 6–9, 11–15, then remaining Fable C. Do not enter Phase D. Do not tag `phase-c-accepted`.
