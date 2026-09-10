@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { type PolishConfig } from "../domain/config.js";
+import { withRuntimeValidationMode, type PolishConfig } from "../domain/config.js";
 import { createMission } from "../domain/mission.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
@@ -12,6 +12,7 @@ import {
   renderFinalReport,
   renderNeedsHumanReport,
 } from "../report/index.js";
+import type { RuntimeCapabilityMode } from "../runtime/index.js";
 import { Git } from "../sandbox/git.js";
 import { Scheduler } from "../scheduler/index.js";
 import { systemClock, type Clock } from "../shared/clock.js";
@@ -56,6 +57,8 @@ export class DaemonService implements RpcHandler {
   private readonly tickMs: number;
   private readonly config: PolishConfig;
   private readonly productionDeps: ProductionDeps;
+  /** Requested runtime mode per run; facade metadata is the durable source. */
+  private readonly runtimeModes = new Map<string, RuntimeCapabilityMode>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
 
@@ -86,6 +89,7 @@ export class DaemonService implements RpcHandler {
       clock: this.clock,
       scheduler: this.scheduler,
       config: this.config,
+      resolveRunConfig: (run) => this.runConfig(run.id),
     }, false);
     installProductionDrivers(this.engine, this.productionDeps);
     this.engine.recover();
@@ -170,7 +174,6 @@ export class DaemonService implements RpcHandler {
     budgetUsd: number | undefined;
   }): Promise<Run> {
     const runtime = parseRuntimeMode(input.runtime);
-    this.config.runtimeValidation.mode = runtime;
     if (input.budgetTokens !== undefined && (!Number.isInteger(input.budgetTokens) || input.budgetTokens < 1)) {
       throw new PolishError("CONFIG_ERROR", "budgetTokens must be a positive integer");
     }
@@ -224,6 +227,7 @@ export class DaemonService implements RpcHandler {
       ...(input.budgetUsd === undefined ? {} : { budgetUsd: input.budgetUsd }),
     };
     this.writeMetadata(metadata);
+    this.runtimeModes.set(run.id, runtime);
     await this.tick();
     return this.requireRun(run.id);
   }
@@ -304,7 +308,7 @@ export class DaemonService implements RpcHandler {
       return;
     }
 
-    const ctx = { run, store: this.store, clock: this.clock, config: this.config };
+    const ctx = { run, store: this.store, clock: this.clock, config: this.runConfig(run.id) };
     if (run.phase === "NEEDS_HUMAN") {
       const reason = run.terminalReason ?? {
         code: "product_decision_required" as const,
@@ -339,6 +343,28 @@ export class DaemonService implements RpcHandler {
 
   private projectsPath(): string {
     return join(this.home, "projects.json");
+  }
+
+  /**
+   * Per-run configuration for `resolveRunConfig`. The requested runtime mode is already
+   * persisted in the run's facade metadata, so a run recovered after a daemon restart
+   * still resolves its own mode instead of whatever the last run asked for.
+   */
+  private runConfig(runId: string): PolishConfig {
+    const mode = this.runtimeModes.get(runId) ?? this.persistedRuntimeMode(runId);
+    if (mode === null) return this.config;
+    this.runtimeModes.set(runId, mode);
+    return withRuntimeValidationMode(this.config, mode);
+  }
+
+  private persistedRuntimeMode(runId: string): RuntimeCapabilityMode | null {
+    if (!existsSync(this.metadataPath(runId))) return null;
+    try {
+      const runtime = this.readMetadata(runId).runtime;
+      return runtime === undefined ? null : parseRuntimeMode(runtime);
+    } catch {
+      return null;
+    }
   }
 
   private runDir(runId: string): string {

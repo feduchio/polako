@@ -253,3 +253,16 @@ export type PolishConfig = z.infer<typeof PolishConfigSchema>;
 export function defaultConfig(): PolishConfig {
   return PolishConfigSchema.parse({});
 }
+
+/**
+ * Run-scoped view of `base` that differs only in `runtimeValidation.mode`.
+ * Never assigns into `base`: concurrent runs share one loaded config object and a
+ * per-run mode must not leak between them.
+ */
+export function withRuntimeValidationMode(
+  base: PolishConfig,
+  mode: RuntimeValidationConfig["mode"],
+): PolishConfig {
+  if (base.runtimeValidation.mode === mode) return base;
+  return { ...base, runtimeValidation: { ...base.runtimeValidation, mode } };
+}

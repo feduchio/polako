@@ -25,6 +25,12 @@ export interface EngineOptions {
   clock: Clock;
   scheduler: Scheduler;
   config: PolishConfig;
+  /**
+   * Per-run view of `config` used to build each `PhaseContext`. Defaults to the shared
+   * config. Runs are driven concurrently, so this must derive a new object rather than
+   * mutate and restore the shared one.
+   */
+  resolveRunConfig?: (run: Run) => PolishConfig;
   /** Defaults to the Phase A clean-tree assertion; injectable for non-filesystem tests. */
   assertProjectClean?: (projectPath: string, policy?: RepositoryStartPolicy) => void;
 }

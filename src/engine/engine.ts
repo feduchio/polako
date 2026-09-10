@@ -43,6 +43,7 @@ export class RunEngine {
   private readonly clock: Clock;
   private readonly scheduler: Scheduler;
   private readonly config: EngineOptions["config"];
+  private readonly resolveRunConfig: (run: Run) => EngineOptions["config"];
   private readonly assertProjectClean: (projectPath: string, policy?: RepositoryStartPolicy) => void;
   private readonly drivers = new Map<RunPhase, PhaseDriver>();
   private readonly driving = new Set<string>();
@@ -52,6 +53,7 @@ export class RunEngine {
     this.clock = options.clock;
     this.scheduler = options.scheduler;
     this.config = options.config;
+    this.resolveRunConfig = options.resolveRunConfig ?? (() => this.config);
     this.assertProjectClean = options.assertProjectClean ?? assertRepositoryClean;
     registerBudgetEvaluateHandler(this.scheduler, this.store);
     if (installStubs) {
@@ -199,7 +201,7 @@ export class RunEngine {
         store: this.store,
         scheduler: this.scheduler,
         clock: this.clock,
-        config: this.config,
+        config: this.resolveRunConfig(run),
       });
     } catch (err) {
       const phase = this.requireRun(runId).phase;
