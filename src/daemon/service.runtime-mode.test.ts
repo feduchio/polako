@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PolishConfig } from "../domain/config.js";
 import type { PhaseDriver } from "../engine/types.js";
@@ -13,6 +14,7 @@ const dirs: string[] = [];
 const services: DaemonService[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const service of services.splice(0)) await service.close();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -47,11 +49,12 @@ describe("B-selfhost-7 per-run runtime mode", () => {
 
   it("never assigns runtimeValidation anywhere in non-test source", () => {
     const offenders: string[] = [];
-    for (const file of sourceFiles(new URL("../", import.meta.url).pathname)) {
+    for (const file of sourceFiles(fileURLToPath(new URL("../", import.meta.url)))) {
       if (file.endsWith(".test.ts")) continue;
       const lines = readFileSync(file, "utf8").split("\n");
       for (const [index, line] of lines.entries()) {
-        if (/\.runtimeValidation(\.\w+)?\s*=[^=]/.test(line)) offenders.push(`${file}:${index + 1}`);
+        // `=(?!=)` so a wrapped assignment ending the line still counts, while `===` does not.
+        if (/\.runtimeValidation(\.\w+)?\s*=(?!=)/.test(line)) offenders.push(`${file}:${index + 1}`);
       }
     }
     expect(offenders).toEqual([]);
@@ -153,14 +156,16 @@ describe("B-selfhost-7 per-run runtime mode", () => {
     // `createRun` makes the run tickable, then awaits git before persisting metadata. Drive
     // the engine from inside that await, which is where a background timer tick would land.
     let tickedDuringCreate = false;
-    const createBranch = vi
-      .spyOn(Git.prototype, "createBranch")
-      .mockImplementation(async function (this: Git, ...args: Parameters<Git["createBranch"]>) {
-        tickedDuringCreate = true;
-        await fixture.service.engine.tick();
-        createBranch.mockRestore();
-        return this.createBranch(...args);
-      });
+    // `…Once` so the nested call below dispatches to the real method, and `afterEach`
+    // restores the prototype even if the tick throws.
+    vi.spyOn(Git.prototype, "createBranch").mockImplementationOnce(async function (
+      this: Git,
+      ...args: Parameters<Git["createBranch"]>
+    ) {
+      tickedDuringCreate = true;
+      await fixture.service.engine.tick();
+      return this.createBranch(...args);
+    });
 
     const runId = await fixture.createRun("required");
 
