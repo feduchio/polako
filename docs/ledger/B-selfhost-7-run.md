@@ -4,7 +4,7 @@
 | Exact base | `df49a5ef75996da5ee17c51b4f66e974d8952fc0` |
 | Draft reviewed | `6157eb428ad98f351a84a7345e9a0f0f83a7a04013bb79ccf3dc7b19ab384c76` FAIL/FAIL |
 | Frozen hash | `bba8198de33abf746be2b7cc58f8bfcc9ba54bba63d285abe4003748862d797d` |
-| Freeze commit | pending |
+| Freeze commit | `f759a719caf1a36ceed274299059a7b0368fd90d` |
 | Impl | pending |
 | Clean | 0/2 |
 
