@@ -68,10 +68,28 @@ Recorded before implementation. User authorized reordering within Phase C for bo
 2. **C2** — safe long-running autonomy.
 3. **C4** — UNCERTAIN-finding arbitration.
 4. **C8** — model observations / audition scope from the original plan.
-5. **Pause** — bounded remaining B findings, one-by-one, using the stronger HOST.
-6. Remaining Fable C: C1, C5, C6, C7, C9, C10, C11 in dependency order as above.
+5. **Pause** — bounded remaining B findings, one-by-one, using the stronger HOST. Order revised 2026-09-10 to **7 → 8 → 9 + 19 → 18 → 11 → 12 → 13, 15 → 14 → 20**; rationale in *Prompt-path ordering constraints* below.
+6. Remaining Fable C: C1, C5, C6, C7, C9, C10, C11 in dependency order as above, with **C1 after finding 18** (the simplification pass drives workers) and **C7 after finding 19** (a `scout` role needs composed protocols; `scout` and `evidence` are declared in `ModelRole` and `roleToActorKind` but `router.select({ role: "scout" })` has no production caller).
 
 Do not invent C scope outside Fable §17 Phase C. Do not enter Phase D. Do not tag `phase-c-accepted` while unresolved MISSION_CRITICAL B defects can invalidate C guarantees, unless the user explicitly defers them at the release boundary.
+
+## Prompt-path ordering constraints (recorded 2026-09-10)
+
+Findings 18–20 in `docs/ledger/B-selfhost-remaining.md` are scheduled into the pause block rather than left unscheduled, because two of them change the exact bytes of every worker LLM request and therefore collide with items already in the authorized sequence. This section records the collision, not new scope beyond those findings.
+
+**Hard constraint — item 14 runs last.** `RecordReplayProvider.requestKey` hashes `messages` together with `model`, `tools`, `responseFormat`, `maxTokens` and `temperature` (`src/providers/recordReplay.ts:32-41`), and a replay miss raises `not_found` (`:56`). Item 14 records those cassettes with **real paid providers**. Finding 19 adds a system prompt and a composed context pack to `messages`; finding 18 replaces the appended transcript outright and changes the per-call `maxTokens`. Either landing after item 14 invalidates every recorded response and forces a second paid recording pass. Item 14 therefore runs after both, as the last implementation item of the B block.
+
+**Soft constraints.**
+
+- **19 before 11.** Item 11 injects a provider into `PairwiseJudge`; finding 19 composes the `judge` role protocol. Reversed, the judge prompt is authored twice.
+- **19 alongside 9.** Both edit `createWorkerFactory` (`src/daemon/composition.ts:441-459`).
+- **18 before 13 and 15.** `ScriptedProvider` is a FIFO queue per model (`src/providers/scripted.ts:38-57`), insensitive to prompt text but sensitive to call count and order, and finding 18 changes the worker loop's turn profile.
+- **18 before 20.** Auditioning models against a worker loop that is about to be replaced discards the observations.
+- **8 keeps its position, but must not be calibrated to current behavior.** Item 8 wires the unused `applyRunBudgetOverrides` and Option A hard caps. The plumbing is independent of finding 18, but any cap *value* chosen against today's quadratic consumption becomes wrong once the prompt footprint is bounded. Choose caps that hold in both regimes, or defer the numbers until after 18.
+
+Findings 18 and 19 require frozen contracts on the established pattern — Grok + Claude review of the draft, then 2 clean Grok + Claude rounds on the final commit — before implementation. Finding 18's contract MUST NOT be frozen against the illustrative arithmetic recorded in the finding; a real turn and token distribution computed from stored `agent_transcript` artifacts is a prerequisite for its acceptance checks.
+
+Evaluated and rejected as sources of new scope: LiveBench (`github.com/livebench/livebench`) — see finding 20; `spotify/portal-ai-plugins` — a Backstage-catalog plugin marketplace for third-party coding agents, whose only transferable idea (the `shunt` plugin's delegation of I/O-heavy work to cheap worker models) is already the intent of the existing `scout` / `evidence` roles and Fable C7.
 
 ## First task
 
@@ -83,4 +101,4 @@ C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Task A
 
 C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Task ACCEPTED** at `311203830720a4d1e917785e577eaf868281bc8a`.
 
-**Pause (user-authorized, full remaining plan):** B-selfhost-3/4/5/6 ACCEPTED (`fd8a99c` / `84f2f7e` / `916f7f2` / `df49a5e`). **B-selfhost-7** contract drafted, not yet frozen. Then 8–9, 11–15, then remaining Fable C. Item 16 recorded but not scheduled. Do not enter Phase D. Do not tag `phase-c-accepted`.
+**Pause (user-authorized, full remaining plan):** B-selfhost-3/4/5/6 ACCEPTED (`fd8a99c` / `84f2f7e` / `916f7f2` / `df49a5e`). **B-selfhost-7** contract FROZEN at `f759a71` (frozen hash `bba8198d…`, impl pending, clean 0/2 — `docs/ledger/B-selfhost-7-run.md`). Then **8 → 9 + 19 → 18 → 11 → 12 → 13, 15 → 14 → 20** per *Prompt-path ordering constraints*, then remaining Fable C. Items 16 and 17 recorded but not scheduled. Do not enter Phase D. Do not tag `phase-c-accepted`.
