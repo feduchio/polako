@@ -233,16 +233,18 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     await driveToConvergence(fixture, plain);
     await driveToConvergence(fixture, usdOnly);
 
+    // Every dimension, not a subset: MC5 makes only two of the four overridable, and C2 decides
+    // exhaustion from all of them, so a widened override would be a decision defect here.
     const overriddenBudget = persistedSampleBudget(fixture, overridden);
-    expect(overriddenBudget.limits).toMatchObject({ maxRunTokens: 30, maxRunUsd: null, maxTaskTokens: null });
+    expect(overriddenBudget.limits).toEqual({ maxRunTokens: 30, maxRunUsd: null, maxTaskTokens: null, maxRunWallClockMinutes: null });
     expect(overriddenBudget.unusedCliMetadata).toEqual({ budgetTokens: 30, budgetUsd: null, applied: true });
 
     const plainBudget = persistedSampleBudget(fixture, plain);
-    expect(plainBudget.limits).toMatchObject({ maxRunTokens: 50, maxRunUsd: null });
+    expect(plainBudget.limits).toEqual({ maxRunTokens: 50, maxRunUsd: null, maxTaskTokens: null, maxRunWallClockMinutes: null });
     expect(plainBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: null, applied: false });
 
     const usdOnlyBudget = persistedSampleBudget(fixture, usdOnly);
-    expect(usdOnlyBudget.limits).toMatchObject({ maxRunUsd: 2, maxRunTokens: 50 });
+    expect(usdOnlyBudget.limits).toEqual({ maxRunUsd: 2, maxRunTokens: 50, maxTaskTokens: null, maxRunWallClockMinutes: null });
     expect(usdOnlyBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: 2, applied: true });
   });
 
@@ -280,6 +282,12 @@ describe("B-selfhost-8 per-run budget overrides", () => {
       await restarted.service.close();
       services.splice(services.indexOf(restarted.service), 1);
     }
+
+    // Unreadable, not merely wrong: the fallback must survive a file that does not parse.
+    writeFileSync(facade, "{ not json");
+    const restarted = fixture.restart();
+    await callTimes(restarted, corrupt, 5);
+    expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ limit: 50 });
   });
 
   it("leaves the loaded config instance shared and untouched", async () => {
