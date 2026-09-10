@@ -200,17 +200,27 @@ describe("B-selfhost-8 per-run budget overrides", () => {
   it("has the override in force on a tick that lands before metadata is written", async () => {
     const fixture = await daemonFixture({ maxRunTokens: 50 });
     const observed: number[] = [];
+    let created: string | null = null;
     fixture.service.engine.registerPhase("CREATED", (ctx) => {
+      created = ctx.run.id;
       observed.push(ctx.config.budget.maxRunTokens ?? -1);
       return { status: "waiting" };
     });
     let ticked = false;
+    let boundInWindow: Record<string, unknown> | null = null;
     vi.spyOn(Git.prototype, "createBranch").mockImplementationOnce(async function (
       this: Git,
       ...args: Parameters<Git["createBranch"]>
     ) {
       ticked = true;
       await fixture.service.engine.tick();
+      // The contract registers limits before a run can be driven *or issue a model call*, so
+      // the guard must bind here too. A resolver reading only persisted metadata finds none.
+      const runId = created;
+      if (runId !== null) {
+        await callTimes(fixture, runId, 2);
+        boundInWindow = (await budgetErrorOf(fixture.call(runId))).details;
+      }
       return this.createBranch(...args);
     });
 
@@ -219,6 +229,7 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(ticked).toBe(true);
     expect(observed.length).toBeGreaterThan(0);
     expect(new Set(observed)).toEqual(new Set([20]));
+    expect(boundInWindow).toMatchObject({ budget: "run_tokens", limit: 20 });
   });
 
   it("reports the same limits to C2 that the broker enforces, and records them as applied", async () => {
