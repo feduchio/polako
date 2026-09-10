@@ -95,8 +95,31 @@ export class QuotaTracker {
 /** Token/USD budgets per run and per task. Exceeding a budget throws before the call is made. */
 export class BudgetTracker {
   private readonly runs = new Map<string, BudgetSnapshot>();
+  private readonly runLimits = new Map<string, BudgetLimits>();
 
-  constructor(private readonly limits: BudgetLimits) {}
+  /**
+   * `limits` are the daemon-wide defaults and are never written to: a run's own limits go
+   * into `runLimits`. `resolveRunLimits` supplies them lazily for runs this process never
+   * created, such as those recovered after a restart.
+   */
+  constructor(
+    private readonly limits: BudgetLimits,
+    private readonly resolveRunLimits?: (runId: string) => BudgetLimits | null,
+  ) {}
+
+  /** Registers one run's own limits. Later calls for that run enforce these. */
+  setRunLimits(runId: string, limits: BudgetLimits): void {
+    this.runLimits.set(runId, limits);
+  }
+
+  limitsFor(runId: string): BudgetLimits {
+    const registered = this.runLimits.get(runId);
+    if (registered !== undefined) return registered;
+    const resolved = this.resolveRunLimits?.(runId) ?? null;
+    if (resolved === null) return this.limits;
+    this.runLimits.set(runId, resolved);
+    return resolved;
+  }
 
   snapshot(runId: string): BudgetSnapshot {
     return this.runs.get(runId) ?? { runUsd: 0, runTokens: 0, perTask: {}, unknownCostCalls: [] };
@@ -114,14 +137,15 @@ export class BudgetTracker {
 
   assertWithin(runId: string, taskId?: string): void {
     const s = this.snapshot(runId);
-    if (this.limits.maxRunUsd !== null && s.runUsd >= this.limits.maxRunUsd) {
-      throw new PolishError("CONFLICT", "run USD budget exhausted", { runId, spent: s.runUsd, limit: this.limits.maxRunUsd, budget: "run_usd" });
+    const limits = this.limitsFor(runId);
+    if (limits.maxRunUsd !== null && s.runUsd >= limits.maxRunUsd) {
+      throw new PolishError("CONFLICT", "run USD budget exhausted", { runId, spent: s.runUsd, limit: limits.maxRunUsd, budget: "run_usd" });
     }
-    if (this.limits.maxRunTokens !== null && s.runTokens >= this.limits.maxRunTokens) {
-      throw new PolishError("CONFLICT", "run token budget exhausted", { runId, spent: s.runTokens, limit: this.limits.maxRunTokens, budget: "run_tokens" });
+    if (limits.maxRunTokens !== null && s.runTokens >= limits.maxRunTokens) {
+      throw new PolishError("CONFLICT", "run token budget exhausted", { runId, spent: s.runTokens, limit: limits.maxRunTokens, budget: "run_tokens" });
     }
-    if (taskId !== undefined && this.limits.maxTaskTokens !== null && (s.perTask[taskId] ?? 0) >= this.limits.maxTaskTokens) {
-      throw new PolishError("CONFLICT", "task token budget exhausted", { runId, taskId, spent: s.perTask[taskId], limit: this.limits.maxTaskTokens, budget: "task_tokens" });
+    if (taskId !== undefined && limits.maxTaskTokens !== null && (s.perTask[taskId] ?? 0) >= limits.maxTaskTokens) {
+      throw new PolishError("CONFLICT", "task token budget exhausted", { runId, taskId, spent: s.perTask[taskId], limit: limits.maxTaskTokens, budget: "task_tokens" });
     }
   }
 

@@ -22,7 +22,10 @@ import { openStore, type Store } from "../store/index.js";
 import { applyRunBranch } from "./apply.js";
 import { loadPolishConfig } from "./configLoad.js";
 import {
+  applyRunBudgetOverrides,
   buildProductionDeps,
+  hasNoRunBudget,
+  type RunBudgetLimits,
   installProductionDrivers,
   parseRuntimeMode,
   type ProductionDeps,
@@ -59,6 +62,8 @@ export class DaemonService implements RpcHandler {
   private readonly productionDeps: ProductionDeps;
   /** Requested runtime mode per run; facade metadata is the durable source. */
   private readonly runtimeModes = new Map<string, RuntimeCapabilityMode>();
+  /** Requested budget overrides per run; facade metadata is the durable source. */
+  private readonly runBudgets = new Map<string, RunBudgetLimits>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
 
@@ -82,6 +87,7 @@ export class DaemonService implements RpcHandler {
       clock: this.clock,
       config: this.config,
       home: this.home,
+      resolveRunBudget: (runId) => this.runBudget(runId),
       ...(options.providers === undefined ? {} : { providers: options.providers }),
     });
     this.engine = new RunEngine({
@@ -191,8 +197,12 @@ export class DaemonService implements RpcHandler {
 
     const run = this.engine.createRun({ projectPath: project.path });
     // Registered before anything can await: `createRun` makes the run tickable, and a timer
-    // tick landing before `writeMetadata` must still resolve this run's own mode.
+    // tick or model call landing before `writeMetadata` must still see this run's own settings.
     this.runtimeModes.set(run.id, runtime);
+    this.runBudgets.set(run.id, {
+      ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+      ...(input.budgetUsd === undefined ? {} : { budgetUsd: input.budgetUsd }),
+    });
     const mission = createMission({
       id: run.missionId,
       projectPath: project.path,
@@ -353,10 +363,38 @@ export class DaemonService implements RpcHandler {
    * still resolves its own mode instead of whatever the last run asked for.
    */
   private runConfig(runId: string): PolishConfig {
+    let config = this.config;
     const mode = this.runtimeModes.get(runId) ?? this.persistedRuntimeMode(runId);
-    if (mode === null) return this.config;
-    this.runtimeModes.set(runId, mode);
-    return withRuntimeValidationMode(this.config, mode);
+    if (mode !== null) {
+      this.runtimeModes.set(runId, mode);
+      config = withRuntimeValidationMode(config, mode);
+    }
+    const budget = this.runBudget(runId);
+    if (!hasNoRunBudget(budget)) config = applyRunBudgetOverrides(config, budget);
+    return config;
+  }
+
+  /** A run's own budget overrides, so C2 and the broker's tracker resolve the same numbers. */
+  private runBudget(runId: string): RunBudgetLimits {
+    const cached = this.runBudgets.get(runId);
+    if (cached !== undefined) return cached;
+    const persisted = this.persistedRunBudget(runId);
+    if (persisted === null) return {};
+    this.runBudgets.set(runId, persisted);
+    return persisted;
+  }
+
+  private persistedRunBudget(runId: string): RunBudgetLimits | null {
+    if (!existsSync(this.metadataPath(runId))) return null;
+    try {
+      const metadata = this.readMetadata(runId);
+      return {
+        ...(metadata.budgetTokens === undefined ? {} : { budgetTokens: metadata.budgetTokens }),
+        ...(metadata.budgetUsd === undefined ? {} : { budgetUsd: metadata.budgetUsd }),
+      };
+    } catch {
+      return null;
+    }
   }
 
   private persistedRuntimeMode(runId: string): RuntimeCapabilityMode | null {

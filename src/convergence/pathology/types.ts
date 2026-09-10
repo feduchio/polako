@@ -49,10 +49,14 @@ export interface PathologyBudgetLimits {
   maxRunWallClockMinutes: number | null;
 }
 
+/**
+ * The run's CLI budget as C2 sees it. Named for the era when it was never applied; the name
+ * is load-bearing because these snapshots are persisted and read back unvalidated.
+ */
 export interface UnusedCliBudgetMetadata {
   budgetTokens: number | null;
   budgetUsd: number | null;
-  applied: false;
+  applied: boolean;
 }
 
 export interface CanonicalBudgetUsage {

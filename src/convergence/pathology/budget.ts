@@ -111,11 +111,10 @@ export function unusedCliMetadata(input?: {
   budgetTokens?: number | null;
   budgetUsd?: number | null;
 }): UnusedCliBudgetMetadata {
-  return {
-    budgetTokens: input?.budgetTokens ?? null,
-    budgetUsd: input?.budgetUsd ?? null,
-    applied: false,
-  };
+  const budgetTokens = input?.budgetTokens ?? null;
+  const budgetUsd = input?.budgetUsd ?? null;
+  // A resolved override is an applied one: the same resolution feeds the broker's tracker.
+  return { budgetTokens, budgetUsd, applied: budgetTokens !== null || budgetUsd !== null };
 }
 
 export function exhaustedDimensions(usage: CanonicalBudgetUsage, limits: PathologyBudgetLimits, elapsedMs: number): string[] {

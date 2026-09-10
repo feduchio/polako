@@ -98,6 +98,8 @@ export interface ProductionDeps {
   router: ModelRouter;
   providers: ProviderAdapter[];
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
+  /** A run's own `--budget-tokens` / `--budget-usd`, empty when it has none. */
+  resolveRunBudget?: (runId: string) => RunBudgetLimits;
 }
 
 export interface BuildProductionDepsOptions {
@@ -107,6 +109,12 @@ export interface BuildProductionDepsOptions {
   home: string;
   providers?: ProviderAdapter[];
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
+  resolveRunBudget?: (runId: string) => RunBudgetLimits;
+}
+
+/** True when a run carries neither budget flag, so it uses the daemon-wide limits. */
+export function hasNoRunBudget(limits: RunBudgetLimits): boolean {
+  return limits.budgetTokens === undefined && limits.budgetUsd === undefined;
 }
 
 /** Merge CLI/daemon per-run budget overrides into engine config. */
@@ -139,7 +147,13 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     clock: options.clock,
     catalog,
     quota: new QuotaTracker(options.clock, { concurrency: options.config.lanes["llm.default"], rpm: null }),
-    budget: new BudgetTracker(options.config.budget),
+    // One resolution of a run's overrides feeds both enforcement surfaces: the tracker here
+    // and C2's view through `ctx.config`, which `DaemonService.runConfig` derives the same way.
+    budget: new BudgetTracker(options.config.budget, (runId) => {
+      const overrides = options.resolveRunBudget?.(runId) ?? {};
+      if (hasNoRunBudget(overrides)) return null;
+      return applyRunBudgetOverrides(options.config, overrides).budget;
+    }),
     secrets,
     observations,
   });
@@ -155,6 +169,7 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     home: options.home,
     catalog,
     broker,
+    ...(options.resolveRunBudget === undefined ? {} : { resolveRunBudget: options.resolveRunBudget }),
     router: new ModelRouter(catalog, {
       ...DEFAULT_ROUTER_POLICY,
       costEligibility: costEligibilityFromConfig(options.config.routing),
@@ -338,6 +353,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
     "CONVERGENCE_CHECK",
     createConvergenceDriver({
       resolveEnsembleAlternatives: (ctx) => resolveEnsembleAlternatives(deps, ctx),
+      resolveCliBudget: (ctx) => deps.resolveRunBudget?.(ctx.run.id),
     }),
   );
 }

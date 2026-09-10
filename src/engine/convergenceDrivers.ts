@@ -43,7 +43,8 @@ export interface ConvergenceDriverOptions {
   controller?: ConvergenceController;
   resolveRunHead?: (ctx: PhaseContext) => RunHead;
   resolveEnsembleAlternatives?: (ctx: PhaseContext) => EnsembleOption[];
-  cliBudget?: { budgetTokens?: number | null; budgetUsd?: number | null };
+  /** Per-run, because the CLI budget belongs to a run and the driver is daemon-wide. */
+  resolveCliBudget?: (ctx: PhaseContext) => { budgetTokens?: number | null; budgetUsd?: number | null } | undefined;
 }
 
 /**
@@ -98,7 +99,7 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
         events: latestEvents,
         boundary,
         config: ctx.config,
-        cliBudget: options.cliBudget,
+        cliBudget: options.resolveCliBudget?.(ctx),
       });
       ctx.store.events.append([sampleEvent(sample, ctx.clock.now(), [boundary.id])]);
     }
