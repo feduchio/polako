@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PolishConfig } from "../domain/config.js";
 import type { PhaseDriver } from "../engine/types.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
@@ -145,6 +145,28 @@ describe("B-selfhost-7 per-run runtime mode", () => {
     await expect(fixture.createRun("sometimes")).rejects.toThrow(/runtime must be one of/);
     expect(fixture.service.getConfig().runtimeValidation.mode).toBe("off");
     await expect(fixture.service.handle("status", {})).resolves.toEqual([]);
+  });
+
+  it("resolves a run's mode on a tick that lands before its metadata is written", async () => {
+    const fixture = await daemonFixture({ configuredMode: "off" });
+    const observed = observeCreatedPhase(fixture.service);
+    // `createRun` makes the run tickable, then awaits git before persisting metadata. Drive
+    // the engine from inside that await, which is where a background timer tick would land.
+    let tickedDuringCreate = false;
+    const createBranch = vi
+      .spyOn(Git.prototype, "createBranch")
+      .mockImplementation(async function (this: Git, ...args: Parameters<Git["createBranch"]>) {
+        tickedDuringCreate = true;
+        await fixture.service.engine.tick();
+        createBranch.mockRestore();
+        return this.createBranch(...args);
+      });
+
+    const runId = await fixture.createRun("required");
+
+    expect(tickedDuringCreate).toBe(true);
+    expect(observed.modesFor(runId).length).toBeGreaterThan(1);
+    expect(new Set(observed.modesFor(runId))).toEqual(new Set(["required"]));
   });
 
   it("still resolves a run's own mode after a daemon restart", async () => {

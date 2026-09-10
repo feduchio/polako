@@ -190,6 +190,9 @@ export class DaemonService implements RpcHandler {
     if (targetBranch === "") throw new PolishError("CONFLICT", "cannot start a run from detached HEAD");
 
     const run = this.engine.createRun({ projectPath: project.path });
+    // Registered before anything can await: `createRun` makes the run tickable, and a timer
+    // tick landing before `writeMetadata` must still resolve this run's own mode.
+    this.runtimeModes.set(run.id, runtime);
     const mission = createMission({
       id: run.missionId,
       projectPath: project.path,
@@ -227,7 +230,6 @@ export class DaemonService implements RpcHandler {
       ...(input.budgetUsd === undefined ? {} : { budgetUsd: input.budgetUsd }),
     };
     this.writeMetadata(metadata);
-    this.runtimeModes.set(run.id, runtime);
     await this.tick();
     return this.requireRun(run.id);
   }
