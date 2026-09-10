@@ -150,6 +150,20 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(fixture.call(raised))).details).toMatchObject({ limit: 100 });
   });
 
+  it("keeps the configured USD cap for a run with no override and one that overrides tokens", async () => {
+    // The dimension a token override does not name must survive it, and must survive the new
+    // per-run resolution for a run that names nothing at all.
+    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 1, costUsd: 0.5 });
+    const plain = await fixture.createRun({});
+    const tokenOnly = await fixture.createRun({ budgetTokens: 1_000_000 });
+
+    await callTimes(fixture, plain, 2);
+    expect((await budgetErrorOf(fixture.call(plain))).details).toMatchObject({ budget: "run_usd", limit: 1 });
+
+    await callTimes(fixture, tokenOnly, 2);
+    expect((await budgetErrorOf(fixture.call(tokenOnly))).details).toMatchObject({ budget: "run_usd", limit: 1 });
+  });
+
   it("keeps the configured per-task cap for a run that overrides run tokens", async () => {
     const fixture = await daemonFixture({ maxRunTokens: null, maxTaskTokens: 30 });
     const runId = await fixture.createRun({ budgetTokens: 1_000_000 });
@@ -237,7 +251,9 @@ describe("B-selfhost-8 per-run budget overrides", () => {
   });
 
   it("reports the same limits to C2 that the broker enforces, and records them as applied", async () => {
-    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    // Every dimension configured finite. Two of them a run may never override, and against a
+    // `null` configuration an assertion on those compares nothing to nothing.
+    const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
     const overridden = await fixture.createRun({ budgetTokens: 30 });
     const plain = await fixture.createRun({});
     // USD-only: pins the USD half of the agreement, and pins that a partial override leaves
@@ -251,15 +267,15 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     // Every dimension, not a subset: MC5 makes only two of the four overridable, and C2 decides
     // exhaustion from all of them, so a widened override would be a decision defect here.
     const overriddenBudget = persistedSampleBudget(fixture, overridden);
-    expect(overriddenBudget.limits).toEqual({ maxRunTokens: 30, maxRunUsd: null, maxTaskTokens: null, maxRunWallClockMinutes: null });
+    expect(overriddenBudget.limits).toEqual({ maxRunTokens: 30, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
     expect(overriddenBudget.unusedCliMetadata).toEqual({ budgetTokens: 30, budgetUsd: null, applied: true });
 
     const plainBudget = persistedSampleBudget(fixture, plain);
-    expect(plainBudget.limits).toEqual({ maxRunTokens: 50, maxRunUsd: null, maxTaskTokens: null, maxRunWallClockMinutes: null });
+    expect(plainBudget.limits).toEqual({ maxRunTokens: 50, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
     expect(plainBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: null, applied: false });
 
     const usdOnlyBudget = persistedSampleBudget(fixture, usdOnly);
-    expect(usdOnlyBudget.limits).toEqual({ maxRunUsd: 2, maxRunTokens: 50, maxTaskTokens: null, maxRunWallClockMinutes: null });
+    expect(usdOnlyBudget.limits).toEqual({ maxRunUsd: 2, maxRunTokens: 50, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
     expect(usdOnlyBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: 2, applied: true });
   });
 
@@ -274,6 +290,18 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     const restarted = fixture.restart();
     await callTimes(restarted, runId, 3);
     expect((await budgetErrorOf(restarted.call(runId))).details).toMatchObject({ budget: "run_usd", limit: 1.25 });
+  });
+
+  it("reports a raised cap to C2 as raised, not clamped to the configured one", async () => {
+    // The lowering case cannot tell replacement from clamping: both land on the same number.
+    const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
+    const raised = await fixture.createRun({ budgetTokens: 100 });
+
+    await driveToConvergence(fixture, raised);
+
+    const budget = persistedSampleBudget(fixture, raised);
+    expect(budget.limits).toEqual({ maxRunTokens: 100, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
+    expect(budget.unusedCliMetadata).toEqual({ budgetTokens: 100, budgetUsd: null, applied: true });
   });
 
   it("falls back to the daemon-wide limit when a run's persisted budget is corrupt", async () => {
@@ -458,6 +486,7 @@ async function daemonFixture(options: {
   maxRunTokens?: number | null;
   maxRunUsd?: number | null;
   maxTaskTokens?: number | null;
+  maxRunWallClockMinutes?: number | null;
   costUsd?: number;
 }): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), "polish-b8-budget-"));
@@ -474,6 +503,9 @@ async function daemonFixture(options: {
     options.maxRunTokens === undefined || options.maxRunTokens === null ? [] : [`maxRunTokens = ${options.maxRunTokens}`],
     options.maxRunUsd === undefined || options.maxRunUsd === null ? [] : [`maxRunUsd = ${options.maxRunUsd}`],
     options.maxTaskTokens === undefined || options.maxTaskTokens === null ? [] : [`maxTaskTokens = ${options.maxTaskTokens}`],
+    options.maxRunWallClockMinutes === undefined || options.maxRunWallClockMinutes === null
+      ? []
+      : [`maxRunWallClockMinutes = ${options.maxRunWallClockMinutes}`],
   ].flat();
   writeFileSync(join(home, "polish.toml"), `[budget]\n${limits.join("\n")}\n`);
 
