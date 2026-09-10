@@ -28,6 +28,7 @@ Full Phase-B self-host closure is **DEFERRED_BY_USER** until operator observabil
 14. Controlled **real-provider coding** E2E + RecordReplay (B11 recorded probes only).
 15. Runtime=required happy path on a safe fixture with persisted corpus identity.
 16. `corpusRuntimeEvidenceAllowsDone` has no early return for `off`, so a failed current-hash entry blocks DONE even when runtime validation is disabled. Found during B-selfhost-6 review; the helper faithfully extracts base logic, so it was left alone there. Not part of the currently authorized 7–9 / 11–15 sequence.
+17. `polish.toml`'s `runtimeValidation.mode` is dead for daemon-created runs: both the RPC handler and the CLI default an omitted `--runtime` to `"auto"`, so the configured value is never the effective one. Found during B-selfhost-7 contract review; B-selfhost-7 deliberately preserves this base behavior rather than changing it. Not part of the currently authorized sequence.
 
 ## Out of scope (Phase C — do not implement)
 
