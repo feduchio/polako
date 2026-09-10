@@ -163,10 +163,14 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     const fixture = await daemonFixture({ maxRunTokens: 50 });
 
     for (const budgetTokens of [0, -1, 1.5]) {
-      await expect(fixture.createRun({ budgetTokens })).rejects.toThrow(/budgetTokens must be a positive integer/);
+      const error = await rejectionOf(fixture.createRun({ budgetTokens }));
+      expect(error.code).toBe("CONFIG_ERROR");
+      expect(error.message).toMatch(/budgetTokens must be a positive integer/);
     }
     for (const budgetUsd of [0, -1]) {
-      await expect(fixture.createRun({ budgetUsd })).rejects.toThrow(/budgetUsd must be a positive number/);
+      const error = await rejectionOf(fixture.createRun({ budgetUsd }));
+      expect(error.code).toBe("CONFIG_ERROR");
+      expect(error.message).toMatch(/budgetUsd must be a positive number/);
     }
 
     await expect(fixture.service.handle("status", {})).resolves.toEqual([]);
@@ -376,6 +380,17 @@ async function callTimes(fixture: Fixture, runId: string, times: number, taskId?
   for (let i = 0; i < times; i += 1) {
     await expect(fixture.call(runId, taskId)).resolves.toBeDefined();
   }
+}
+
+/** The rejection itself, so a check can name the code and not only the message. */
+async function rejectionOf(promise: Promise<unknown>): Promise<PolishError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof PolishError) return error;
+    throw error;
+  }
+  throw new Error("expected a rejection");
 }
 
 async function budgetErrorOf(promise: Promise<unknown>): Promise<PolishError> {
