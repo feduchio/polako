@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { AgentRunner } from "../agents/runner.js";
 import {
   createAuditionStrategyFromConfig,
@@ -18,7 +18,6 @@ import type { ProviderAdapter } from "../broker/types.js";
 import { createResilientCouncilClient } from "../council/fallback.js";
 import { createStructuredCouncilClient } from "../council/structuredOutput.js";
 import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } from "../council/types.js";
-import type { RuntimeEvidence } from "../domain/acceptance.js";
 import type { PolishConfig } from "../domain/config.js";
 import { supervisorModelChain } from "../domain/config.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
@@ -54,7 +53,6 @@ import {
 } from "../project/index.js";
 import type { FinalReportInput } from "../report/reports.js";
 import {
-  discoverRuntimeValidator,
   discoverProjectRuntime,
   FixtureRuntimeValidator,
   type RuntimeCapabilityMode,
@@ -64,7 +62,7 @@ import { WorktreeSandbox, type Sandbox } from "../sandbox/worktree.js";
 import type { Clock } from "../shared/clock.js";
 import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
-import { MissionAcceptanceService, type Store } from "../store/index.js";
+import type { Store } from "../store/index.js";
 import type { FacadeRunMetadata } from "./types.js";
 import { parseModelRefString } from "./configLoad.js";
 
@@ -164,57 +162,6 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     providers,
     resolveSandbox: sandbox,
   };
-}
-
-/**
- * Resolve and optionally execute a project runtime scenario under the requested mode.
- * `required` fails closed when no validator is available.
- */
-export async function resolveRuntimeEvidence(input: {
-  projectPath: string;
-  runId: string;
-  mode: RuntimeCapabilityMode;
-  missionId: string;
-  store: Store;
-  clock: Clock;
-}): Promise<{ selectionReason: string; evidence: RuntimeEvidence | null }> {
-  const discovery = discoverProjectRuntime(input.projectPath);
-  if (discovery.templates.length === 0) {
-    if (input.mode === "required") {
-      throw new PolishError(
-        "CONFIG_ERROR",
-        "runtime=required but no project runtime scenario was found under runtime/",
-        { projectPath: input.projectPath },
-      );
-    }
-    return { selectionReason: discovery.reason, evidence: null };
-  }
-
-  const template = discovery.templates[0];
-  if (template === undefined) {
-    return { selectionReason: discovery.reason, evidence: null };
-  }
-  const scenario = {
-    id: template.id,
-    runId: input.runId,
-    kind: template.kind,
-    fixtureRoot: resolve(input.projectPath),
-    script: template.relativeScript,
-    checkpointHash: "0".repeat(40),
-  };
-  const selection = await discoverRuntimeValidator(input.mode, scenario, [new FixtureRuntimeValidator()]);
-  if (selection.validator === null) {
-    return { selectionReason: selection.reason, evidence: null };
-  }
-  const evidence = await selection.validator.validate(scenario);
-  const corpus = new MissionAcceptanceService(input.store, input.clock);
-  corpus.recordRuntimeEvidence({
-    missionId: input.missionId,
-    requirementRef: "runtime.required_scenario",
-    evidence,
-    summary: evidence.summary,
-  });
-  return { selectionReason: selection.reason, evidence };
 }
 
 /** Production DISCOVERING_PROJECT: manifest profile + runtime capability recording. */

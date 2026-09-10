@@ -11,7 +11,6 @@ export {
   parseRuntimeMode,
   resolveEnsembleAlternatives,
   promoteEligibleTasksToReady,
-  resolveRuntimeEvidence,
   type BuildProductionDepsOptions,
   type ProductionDeps,
   type RunBudgetLimits,

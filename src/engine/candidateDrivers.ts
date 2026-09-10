@@ -19,8 +19,16 @@ import {
 import type { VerifierStrategy } from "../verify/strategy.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { discoverRuntimeValidator } from "../runtime/discovery.js";
-import { bindNodeScenario, rerunRuntimeScenarios, templatesFromCorpus } from "../runtime/corpus.js";
-import type { RuntimeValidator } from "../runtime/types.js";
+import { discoverProjectRuntime } from "../runtime/projectDiscovery.js";
+import {
+  bindNodeScenario,
+  resolveProductionRuntimeTemplates,
+  rerunRuntimeScenarios,
+  templatesFromCorpus,
+  templatesFromDiscoveredPayload,
+} from "../runtime/corpus.js";
+import { RuntimeUnavailableError, type RuntimeValidator } from "../runtime/types.js";
+import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { Sandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
@@ -659,9 +667,14 @@ async function validateRuntimeIfNeeded(
   const mode = ctx.config.runtimeValidation.mode;
   if (mode === "off") return true;
   const validators = await resolveValue(options.runtimeValidators ?? [], ctx);
-  if (validators.length === 0) return mode !== "required";
-  const templates = templatesFromCorpus(ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId));
-  if (templates.length === 0) return mode !== "required";
+  const templates = resolveProductionRuntimeTemplates({
+    checkoutTemplates: discoverProjectRuntime(checkoutDir).templates,
+    discoveredTemplates: templatesFromDiscoveredPayload(
+      ctx.store.events.list(ctx.run.id, { types: ["project.discovered"] }).at(-1)?.payload,
+    ),
+    corpusTemplates: templatesFromCorpus(ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId)),
+  });
+  if (validators.length === 0 || templates.length === 0) return mode !== "required";
   const first = templates[0];
   if (first === undefined) return mode !== "required";
   const scenario = bindNodeScenario({
@@ -670,7 +683,13 @@ async function validateRuntimeIfNeeded(
     runId: ctx.run.id,
     checkpointHash: integratedCommit,
   });
-  const selection = await discoverRuntimeValidator(mode, scenario, validators);
+  let selection;
+  try {
+    selection = await discoverRuntimeValidator(mode, scenario, validators);
+  } catch (error) {
+    if (error instanceof RuntimeUnavailableError) return mode !== "required";
+    throw error;
+  }
   if (selection.validator === null) return mode !== "required";
   const evidences = await rerunRuntimeScenarios({
     templates,
@@ -680,6 +699,15 @@ async function validateRuntimeIfNeeded(
     validator: selection.validator,
     level: ctx.config.runtimeValidation.level,
   });
+  const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
+  for (const evidence of evidences) {
+    corpus.recordRuntimeEvidence({
+      missionId: ctx.run.missionId,
+      requirementRef: `runtime.${evidence.scenarioId}`,
+      evidence,
+      expectedCheckpointHash: integratedCommit,
+    });
+  }
   return evidences.every((evidence) => runtimeAllowsDone(mode, evidence, integratedCommit));
 }
 

@@ -1,12 +1,14 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { RuntimeEvidence } from "../domain/acceptance.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { defaultConfig } from "../domain/config.js";
 import { createTaskFromRequirement } from "../domain/task.js";
 import { inspectManifestHashes } from "../project/discovery.js";
 import type { ProjectProfile } from "../project/profile.js";
+import { FixtureRuntimeValidator } from "../runtime/index.js";
 import { CommandPolicy } from "../sandbox/allowlist.js";
 import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
@@ -59,6 +61,20 @@ describe("B2 production candidate drivers", () => {
   afterEach(() => {
     store.close();
   });
+
+  /** INTEGRATING-only engine with a real fixture validator, for B-selfhost-6 runtime evidence. */
+  function runtimeEngine(mode: "auto" | "required"): RunEngine {
+    const config = { ...defaultConfig(), runtimeValidation: { mode, level: "smoke" as const } };
+    const withRuntime = new RunEngine(
+      { store, clock, scheduler: sched, config, assertProjectClean: () => undefined },
+      false,
+    );
+    withRuntime.registerPhase(
+      "INTEGRATING",
+      createIntegratingDriver({ ...driverOptions, runtimeValidators: [new FixtureRuntimeValidator()] }),
+    );
+    return withRuntime;
+  }
 
   it("EXECUTING creates N worktrees with commits and candidate.created events", async () => {
     const { runId, taskId } = seedRun(store, clock, fixture);
@@ -215,7 +231,103 @@ describe("B2 production candidate drivers", () => {
     expect(finished?.payload["advanced"]).toBe(false);
     expect(finished?.payload["status"]).toBe("failed_runtime");
   });
+
+  it("persists checkpoint-bound runtime evidence from the integration checkout under auto", async () => {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-auto-runtime", "pass", {
+      "runtime/check.mjs": "process.exit(0);\n",
+    });
+    const { runId } = seedIntegratingRun(store, clock, fixture, winner);
+    await runtimeEngine("auto").tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.currentCheckpointHash).not.toBe(fixture.base);
+    const evidence = runtimeEvidenceEntries(store, run.missionId);
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.status).toBe("passed");
+    expect(evidence[0]?.checkpointHash).toBe(run.currentCheckpointHash);
+    expect(evidence[0]?.scenarioId).toBe("runtime/check.mjs");
+  });
+
+  it("falls back to project.discovered templates when the checkout has no runtime directory", async () => {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-discovered-runtime", "pass", {
+      "scripts/smoke.mjs": "process.exit(0);\n",
+    });
+    const { runId } = seedIntegratingRun(store, clock, fixture, winner);
+    appendDiscoveredTemplates(store, clock, runId, ["scripts/smoke.mjs"]);
+    await runtimeEngine("required").tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.currentCheckpointHash).not.toBe(fixture.base);
+    const evidence = runtimeEvidenceEntries(store, run.missionId);
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.status).toBe("passed");
+    expect(evidence[0]?.scenarioId).toBe("scripts/smoke.mjs");
+    expect(evidence[0]?.checkpointHash).toBe(run.currentCheckpointHash);
+  });
+
+  it("prefers checkout discovery over stale run-start templates", async () => {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-fresh-runtime", "pass", {
+      "runtime/check.mjs": "process.exit(0);\n",
+      "scripts/stale.mjs": "process.exit(1);\n",
+    });
+    const { runId } = seedIntegratingRun(store, clock, fixture, winner);
+    appendDiscoveredTemplates(store, clock, runId, ["scripts/stale.mjs"]);
+    await runtimeEngine("auto").tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.currentCheckpointHash).not.toBe(fixture.base);
+    const evidence = runtimeEvidenceEntries(store, run.missionId);
+    expect(evidence.map((entry) => entry.scenarioId)).toEqual(["runtime/check.mjs"]);
+  });
+
+  it("keeps failed auto runtime evidence blocking integration while still recording it", async () => {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-failing-runtime", "pass", {
+      "runtime/check.mjs": "process.exit(1);\n",
+    });
+    const { runId } = seedIntegratingRun(store, clock, fixture, winner);
+    await runtimeEngine("auto").tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.currentCheckpointHash).toBe(fixture.base);
+    const finished = store.events.list(runId, { types: ["integration.finished"] })[0];
+    expect(finished?.payload["advanced"]).toBe(false);
+    expect(finished?.payload["status"]).toBe("failed_runtime");
+    const evidence = runtimeEvidenceEntries(store, run.missionId);
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.status).toBe("failed");
+    expect(evidence[0]?.checkpointHash).toBe(finished?.payload["integratedCommit"]);
+  });
 });
+
+function runtimeEvidenceEntries(store: Store, missionId: string): RuntimeEvidence[] {
+  return store.repos.acceptanceCorpus
+    .forMission(missionId)
+    .entries.filter((entry) => entry.kind === "runtime_evidence")
+    .map((entry) => entry.runtimeEvidence)
+    .filter((evidence): evidence is RuntimeEvidence => evidence !== undefined);
+}
+
+function appendDiscoveredTemplates(store: Store, clock: FakeClock, runId: string, scripts: string[]): void {
+  store.events.append([
+    {
+      id: id("evt", clock.now() + 5),
+      runId,
+      ts: clock.now() + 5,
+      type: "project.discovered",
+      payload: {
+        runtimeTemplates: scripts.map((script) => ({
+          id: script,
+          kind: "node_script",
+          relativeScript: script,
+          sideEffectPolicy: "safe",
+        })),
+      },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    },
+  ]);
+}
 
 function buildDriverOptions(
   fixture: Awaited<ReturnType<typeof repositoryFixture>>,
@@ -314,10 +426,16 @@ async function commitOnBranch(
   base: string,
   branch: string,
   outcome: string,
+  extraFiles: Record<string, string> = {},
 ): Promise<string> {
   const git = new Git(repoDir);
   await git.run(["checkout", "-q", "-b", branch, base]);
   writeFileSync(join(repoDir, "outcome.txt"), outcome);
+  for (const [relativePath, body] of Object.entries(extraFiles)) {
+    const target = join(repoDir, relativePath);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, body, { mode: 0o644 });
+  }
   const commit = await git.commitAll(branch);
   if (commit === null) throw new Error("winner commit missing");
   await git.run(["checkout", "-q", "run"]);

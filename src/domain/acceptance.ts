@@ -113,6 +113,27 @@ export function runtimeCorpusAllowsDone(
   return requiredScenarioIds.every((id) => current.some((e) => e.scenarioId === id && e.status === "passed"));
 }
 
+/**
+ * CONVERGENCE_CHECK view of persisted runtime evidence for one checkpoint.
+ * `required` needs at least one passing current-hash entry; `auto` fails only on
+ * a failed current-hash run.
+ */
+export function corpusRuntimeEvidenceAllowsDone(
+  mode: RuntimeValidationMode,
+  corpus: MissionAcceptanceCorpus,
+  checkpointHash: string,
+): boolean {
+  const evidences = corpus.entries
+    .map((entry) => entry.runtimeEvidence)
+    .filter((evidence): evidence is RuntimeEvidence => evidence !== undefined);
+  const current = evidences.filter((evidence) => evidence.checkpointHash === checkpointHash);
+  if (mode === "required") {
+    return current.some((evidence) => runtimeAllowsDone(mode, evidence, checkpointHash));
+  }
+  if (current.some((evidence) => evidence.status === "failed")) return false;
+  return current.length === 0 || current.some((evidence) => runtimeAllowsDone(mode, evidence, checkpointHash));
+}
+
 export const CorpusEntrySchema = z.object({
   id: IdSchema,
   missionId: IdSchema,

@@ -1,4 +1,4 @@
-import { runtimeAllowsDone, type RuntimeEvidence } from "../domain/acceptance.js";
+import { corpusRuntimeEvidenceAllowsDone } from "../domain/acceptance.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
 import type { ModelRef } from "../domain/common.js";
 import { SYSTEM_ACTOR } from "../domain/common.js";
@@ -436,17 +436,11 @@ export function gatherCompletionEvidence(ctx: PhaseContext): MissionCompletionEv
 }
 
 function runtimeEvidenceAllowsDone(ctx: PhaseContext, checkpointHash: string): boolean {
-  const mode = ctx.config.runtimeValidation.mode;
-  const corpus = ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId);
-  const evidences = corpus.entries
-    .map((entry) => entry.runtimeEvidence)
-    .filter((evidence): evidence is RuntimeEvidence => evidence !== undefined);
-  const current = evidences.filter((evidence) => evidence.checkpointHash === checkpointHash);
-  if (mode === "required") {
-    return current.some((evidence) => runtimeAllowsDone(mode, evidence, checkpointHash));
-  }
-  if (current.some((evidence) => evidence.status === "failed")) return false;
-  return current.length === 0 || current.some((evidence) => runtimeAllowsDone(mode, evidence, checkpointHash));
+  return corpusRuntimeEvidenceAllowsDone(
+    ctx.config.runtimeValidation.mode,
+    ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId),
+    checkpointHash,
+  );
 }
 
 function humanTerminalReason(summary: string): TerminalReason {

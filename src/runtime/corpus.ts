@@ -32,6 +32,67 @@ export function templatesFromCorpus(corpus: MissionAcceptanceCorpus | readonly C
   return out;
 }
 
+/** Parse `project.discovered` payload templates without trusting untyped event JSON. */
+export function templatesFromDiscoveredPayload(payload: unknown): DiscoveredRuntimeTemplate[] {
+  if (payload === null || typeof payload !== "object") return [];
+  const raw = (payload as { runtimeTemplates?: unknown }).runtimeTemplates;
+  if (!Array.isArray(raw)) return [];
+  const out: DiscoveredRuntimeTemplate[] = [];
+  for (const item of raw) {
+    const template = asDiscoveredTemplate(item);
+    if (template !== null) out.push(template);
+  }
+  return out;
+}
+
+/**
+ * Production INTEGRATING template order: checkout discovery, else run-start
+ * `project.discovered.runtimeTemplates`, else corpus. Corpus may supplement a
+ * non-empty primary set but must not replace it.
+ */
+export function resolveProductionRuntimeTemplates(input: {
+  checkoutTemplates: readonly DiscoveredRuntimeTemplate[];
+  discoveredTemplates: readonly DiscoveredRuntimeTemplate[];
+  corpusTemplates?: readonly DiscoveredRuntimeTemplate[];
+}): DiscoveredRuntimeTemplate[] {
+  const primary = input.checkoutTemplates.length > 0 ? input.checkoutTemplates : input.discoveredTemplates;
+  const corpus = input.corpusTemplates ?? [];
+  if (primary.length === 0) return [...corpus];
+  return supplementTemplates(primary, corpus);
+}
+
+function asDiscoveredTemplate(item: unknown): DiscoveredRuntimeTemplate | null {
+  if (item === null || typeof item !== "object") return null;
+  const rec = item as Record<string, unknown>;
+  const templateId = rec["id"];
+  const relativeScript = rec["relativeScript"];
+  const sideEffectPolicy = rec["sideEffectPolicy"];
+  if (typeof templateId !== "string" || templateId.length === 0) return null;
+  if (rec["kind"] !== "node_script") return null;
+  if (typeof relativeScript !== "string" || relativeScript.length === 0) return null;
+  if (sideEffectPolicy !== "safe" && sideEffectPolicy !== "explicit") return null;
+  return {
+    id: templateId,
+    kind: "node_script",
+    relativeScript,
+    sideEffectPolicy,
+  };
+}
+
+function supplementTemplates(
+  primary: readonly DiscoveredRuntimeTemplate[],
+  extra: readonly DiscoveredRuntimeTemplate[],
+): DiscoveredRuntimeTemplate[] {
+  const seen = new Set(primary.map((template) => template.relativeScript));
+  const out = [...primary];
+  for (const template of extra) {
+    if (seen.has(template.relativeScript)) continue;
+    seen.add(template.relativeScript);
+    out.push(template);
+  }
+  return out;
+}
+
 export function bindNodeScenario(input: {
   template: DiscoveredRuntimeTemplate;
   projectPath: string;
