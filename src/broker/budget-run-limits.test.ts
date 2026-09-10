@@ -8,6 +8,11 @@ function spend(tracker: BudgetTracker, runId: string, tokens: number, costUsd: n
   tracker.record(runId, { inputTokens: tokens, outputTokens: 0, costUsd }, taskId);
 }
 
+/** Mirrors production: a run's limits reach the tracker only through the lazy resolver. */
+function trackerWith(overrides: Record<string, BudgetLimits>): BudgetTracker {
+  return new BudgetTracker(SHARED, (runId) => overrides[runId] ?? null);
+}
+
 function budgetErrorOf(fn: () => void): PolishError {
   try {
     fn();
@@ -32,15 +37,13 @@ describe("BudgetTracker per-run limits", () => {
   });
 
   it("enforces a registered run's own limit instead of the shared one", () => {
-    const tracker = new BudgetTracker(SHARED);
-    tracker.setRunLimits("run_a", { maxRunUsd: null, maxRunTokens: 10, maxTaskTokens: null });
+    const tracker = trackerWith({ run_a: { maxRunUsd: null, maxRunTokens: 10, maxTaskTokens: null } });
     spend(tracker, "run_a", 10);
     expect(budgetErrorOf(() => { tracker.assertWithin("run_a"); }).details["limit"]).toBe(10);
   });
 
   it("leaves every other run on the shared limit", () => {
-    const tracker = new BudgetTracker(SHARED);
-    tracker.setRunLimits("run_a", { maxRunUsd: null, maxRunTokens: 10, maxTaskTokens: null });
+    const tracker = trackerWith({ run_a: { maxRunUsd: null, maxRunTokens: 10, maxTaskTokens: null } });
     spend(tracker, "run_b", 50);
     expect(() => { tracker.assertWithin("run_b"); }).not.toThrow();
     spend(tracker, "run_b", 50);
@@ -48,8 +51,7 @@ describe("BudgetTracker per-run limits", () => {
   });
 
   it("lets a run raise the shared limit, not only lower it", () => {
-    const tracker = new BudgetTracker(SHARED);
-    tracker.setRunLimits("run_a", { maxRunUsd: null, maxRunTokens: 1000, maxTaskTokens: null });
+    const tracker = trackerWith({ run_a: { maxRunUsd: null, maxRunTokens: 1000, maxTaskTokens: null } });
     spend(tracker, "run_a", 150);
     expect(() => { tracker.assertWithin("run_a"); }).not.toThrow();
     spend(tracker, "run_a", 850);
@@ -75,8 +77,7 @@ describe("BudgetTracker per-run limits", () => {
   });
 
   it("keeps per-task and USD dimensions independent of the run token override", () => {
-    const tracker = new BudgetTracker(SHARED);
-    tracker.setRunLimits("run_a", { maxRunUsd: 1, maxRunTokens: 1000, maxTaskTokens: 5 });
+    const tracker = trackerWith({ run_a: { maxRunUsd: 1, maxRunTokens: 1000, maxTaskTokens: 5 } });
     spend(tracker, "run_a", 6, 0.1, "task_1");
     expect(budgetErrorOf(() => { tracker.assertWithin("run_a", "task_1"); }).details["budget"]).toBe("task_tokens");
     spend(tracker, "run_a", 0, 0.9);

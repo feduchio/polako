@@ -178,18 +178,23 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
   it("still enforces each run's own override after a daemon restart", async () => {
     const fixture = await daemonFixture({ maxRunTokens: 50 });
-    const tight = await fixture.createRun({ budgetTokens: 20 });
+    const tight = await fixture.createRun({ budgetTokens: 1 });
     const loose = await fixture.createRun({ budgetTokens: 10_000 });
-
     await fixture.service.close();
     services.splice(services.indexOf(fixture.service), 1);
-    const restarted = fixture.restart();
 
-    // `loose` is touched first: a resolver keyed by anything but the run would poison `tight`.
-    await callTimes(restarted, loose, 8);
-    await callTimes(restarted, tight, 2);
-    expect((await budgetErrorOf(restarted.call(tight))).details).toMatchObject({ limit: 20 });
-    await expect(restarted.call(loose)).resolves.toBeDefined();
+    // Both touch orders, each over its own restart: a resolver keyed by anything but the run,
+    // or one caching the last override it saw, survives only one of the two.
+    for (const looseFirst of [true, false]) {
+      const restarted = fixture.restart();
+      if (looseFirst) await callTimes(restarted, loose, 8);
+      await callTimes(restarted, tight, 1);
+      expect((await budgetErrorOf(restarted.call(tight))).details).toMatchObject({ limit: 1 });
+      if (!looseFirst) await callTimes(restarted, loose, 8);
+      await expect(restarted.call(loose)).resolves.toBeDefined();
+      await restarted.service.close();
+      services.splice(services.indexOf(restarted.service), 1);
+    }
   });
 
   it("has the override in force on a tick that lands before metadata is written", async () => {

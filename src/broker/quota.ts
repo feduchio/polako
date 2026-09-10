@@ -107,11 +107,6 @@ export class BudgetTracker {
     private readonly resolveRunLimits?: (runId: string) => BudgetLimits | null,
   ) {}
 
-  /** Registers one run's own limits. Later calls for that run enforce these. */
-  setRunLimits(runId: string, limits: BudgetLimits): void {
-    this.runLimits.set(runId, limits);
-  }
-
   limitsFor(runId: string): BudgetLimits {
     const registered = this.runLimits.get(runId);
     if (registered !== undefined) return registered;
