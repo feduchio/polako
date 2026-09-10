@@ -150,18 +150,23 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(fixture.call(raised))).details).toMatchObject({ limit: 100 });
   });
 
-  it("lets a USD override raise a finite configured USD cap", async () => {
-    // The token twin of this runs above. Against a `null` configured cap there is nothing to
-    // clamp against, so only a finite one can tell a raise from a clamp on this surface.
-    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 1, costUsd: 0.5 });
-    const raised = await fixture.createRun({ budgetUsd: 3 });
+  it("replaces a finite configured USD cap in both directions", async () => {
+    // Against a `null` configured cap there is nothing to clamp or floor against, so only a
+    // finite one can tell replacement from either. The token twin of this runs above.
+    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 4, costUsd: 0.5 });
+    const raised = await fixture.createRun({ budgetUsd: 9 });
+    const lowered = await fixture.createRun({ budgetUsd: 1 });
     const plain = await fixture.createRun({});
 
-    // Past the configured cap and still running: a clamp would have stopped this at 1.
-    await callTimes(fixture, raised, 6);
-    await callTimes(fixture, plain, 2);
-    expect((await budgetErrorOf(fixture.call(plain))).details).toMatchObject({ budget: "run_usd", limit: 1 });
-    expect((await budgetErrorOf(fixture.call(raised))).details).toMatchObject({ budget: "run_usd", limit: 3 });
+    await callTimes(fixture, lowered, 2);
+    expect((await budgetErrorOf(fixture.call(lowered))).details).toMatchObject({ budget: "run_usd", limit: 1 });
+
+    // Past the configured cap and still running, then bound by its own.
+    await callTimes(fixture, raised, 8);
+    await callTimes(fixture, plain, 8);
+    expect((await budgetErrorOf(fixture.call(plain))).details).toMatchObject({ budget: "run_usd", limit: 4 });
+    await callTimes(fixture, raised, 10);
+    expect((await budgetErrorOf(fixture.call(raised))).details).toMatchObject({ budget: "run_usd", limit: 9 });
   });
 
   it("keeps the configured USD cap for a run with no override and one that overrides tokens", async () => {
