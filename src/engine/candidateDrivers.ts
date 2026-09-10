@@ -687,7 +687,9 @@ async function validateRuntimeIfNeeded(
   try {
     selection = await discoverRuntimeValidator(mode, scenario, validators);
   } catch (error) {
-    if (error instanceof RuntimeUnavailableError) return mode !== "required";
+    // Only `required` turns an unusable validator into a clean fail-closed result; any other
+    // throw must keep propagating so integration reports an error rather than advancing.
+    if (mode === "required" && error instanceof RuntimeUnavailableError) return false;
     throw error;
   }
   if (selection.validator === null) return mode !== "required";

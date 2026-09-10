@@ -9,6 +9,7 @@ import { createTaskFromRequirement } from "../domain/task.js";
 import { inspectManifestHashes } from "../project/discovery.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { FixtureRuntimeValidator } from "../runtime/index.js";
+import type { RuntimeValidator } from "../runtime/types.js";
 import { CommandPolicy } from "../sandbox/allowlist.js";
 import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
@@ -232,6 +233,30 @@ describe("B2 production candidate drivers", () => {
     expect(finished?.payload["status"]).toBe("failed_runtime");
   });
 
+  it("fails required integration closed when templates exist but no validator can run them", async () => {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-unusable-validator", "pass", {
+      "runtime/check.mjs": "process.exit(0);\n",
+    });
+    const { runId } = seedIntegratingRun(store, clock, fixture, winner);
+    const config = { ...defaultConfig(), runtimeValidation: { mode: "required" as const, level: "smoke" as const } };
+    const unusableEngine = new RunEngine(
+      { store, clock, scheduler: sched, config, assertProjectClean: () => undefined },
+      false,
+    );
+    unusableEngine.registerPhase(
+      "INTEGRATING",
+      createIntegratingDriver({ ...driverOptions, runtimeValidators: [unsupportedValidator()] }),
+    );
+    await unusableEngine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.currentCheckpointHash).toBe(fixture.base);
+    const finished = store.events.list(runId, { types: ["integration.finished"] })[0];
+    expect(finished?.payload["advanced"]).toBe(false);
+    expect(finished?.payload["status"]).toBe("failed_runtime");
+    expect(runtimeEvidenceEntries(store, run.missionId)).toEqual([]);
+  });
+
   it("persists checkpoint-bound runtime evidence from the integration checkout under auto", async () => {
     const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-auto-runtime", "pass", {
       "runtime/check.mjs": "process.exit(0);\n",
@@ -298,6 +323,16 @@ describe("B2 production candidate drivers", () => {
     expect(evidence[0]?.checkpointHash).toBe(finished?.payload["integratedCommit"]);
   });
 });
+
+/** Present but unusable: forces `required` down the RuntimeUnavailableError path. */
+function unsupportedValidator(): RuntimeValidator {
+  return {
+    id: "unsupported-runtime",
+    supports: () => false,
+    availability: () => Promise.resolve({ available: false, capability: "UNAVAILABLE", reason: "unsupported" }),
+    validate: () => Promise.reject(new Error("unsupported validator must never execute a scenario")),
+  };
+}
 
 function runtimeEvidenceEntries(store: Store, missionId: string): RuntimeEvidence[] {
   return store.repos.acceptanceCorpus
