@@ -359,6 +359,21 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ limit: 50 });
   });
 
+  it("keeps a run's runtime mode when it also carries a budget override", async () => {
+    // The two per-run settings compose on one config. Budget checks all run with the mode off
+    // and mode checks all run without a budget, so only a run carrying both can see them meet.
+    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    const observed: { mode: string; tokens: number | null }[] = [];
+    fixture.service.engine.registerPhase("CREATED", (ctx) => {
+      observed.push({ mode: ctx.config.runtimeValidation.mode, tokens: ctx.config.budget.maxRunTokens });
+      return { status: "waiting" };
+    });
+
+    await fixture.createRun({ budgetTokens: 20, runtime: "required" });
+
+    expect(observed).toContainEqual({ mode: "required", tokens: 20 });
+  });
+
   it("leaves the loaded config instance shared and untouched", async () => {
     const fixture = await daemonFixture({ maxRunTokens: 50 });
     const before = fixture.service.getConfig();
@@ -376,7 +391,7 @@ interface Fixture {
   home: string;
   repoDir: string;
   gate: Gate;
-  createRun: (budget: { budgetTokens?: number; budgetUsd?: number }) => Promise<string>;
+  createRun: (budget: { budgetTokens?: number; budgetUsd?: number; runtime?: string }) => Promise<string>;
   call: (runId: string, taskId?: string) => Promise<ModelCallRecord>;
   restart: () => Fixture;
 }
