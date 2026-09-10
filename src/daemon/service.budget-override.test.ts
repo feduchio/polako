@@ -246,6 +246,19 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(usdOnlyBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: 2, applied: true });
   });
 
+  it("carries a fractional USD budget across a restart", async () => {
+    // The persisted-budget guard must not demand an integer here: USD budgets are not, and
+    // rejecting one downgrades a valid run to the daemon-wide limit without saying so.
+    const fixture = await daemonFixture({ maxRunUsd: null, costUsd: 0.5 });
+    const runId = await fixture.createRun({ budgetUsd: 1.25 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const restarted = fixture.restart();
+    await callTimes(restarted, runId, 3);
+    expect((await budgetErrorOf(restarted.call(runId))).details).toMatchObject({ budget: "run_usd", limit: 1.25 });
+  });
+
   it("falls back to the daemon-wide limit when a run's persisted budget is corrupt", async () => {
     const fixture = await daemonFixture({ maxRunTokens: 50 });
     const corrupt = await fixture.createRun({ budgetTokens: 10_000 });
@@ -255,13 +268,18 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     const facade = join(fixture.home, "runs", corrupt, "facade.json");
     const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
     expect(metadata["budgetTokens"]).toBe(10_000);
-    // Left unvalidated this reaches the guard as a NaN comparison, which never fires: the run
-    // would carry no cap at all rather than the daemon's.
-    writeFileSync(facade, JSON.stringify({ ...metadata, budgetTokens: "lots" }));
 
-    const restarted = fixture.restart();
-    await callTimes(restarted, corrupt, 5);
-    expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ limit: 50 });
+    // "lots" reaches the guard as a NaN comparison and never fires, so the run would carry no
+    // cap at all; the rest would bind a nonsense cap of their own. Every one must give way to
+    // the daemon's, and none of these can be written by `handle("run", …)` in the first place.
+    for (const budgetTokens of ["lots", 0, -5, 1.5, null]) {
+      writeFileSync(facade, JSON.stringify({ ...metadata, budgetTokens }));
+      const restarted = fixture.restart();
+      await callTimes(restarted, corrupt, 5);
+      expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ limit: 50 });
+      await restarted.service.close();
+      services.splice(services.indexOf(restarted.service), 1);
+    }
   });
 
   it("leaves the loaded config instance shared and untouched", async () => {
