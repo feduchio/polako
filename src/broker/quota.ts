@@ -107,7 +107,7 @@ export class BudgetTracker {
     private readonly resolveRunLimits?: (runId: string) => BudgetLimits | null,
   ) {}
 
-  limitsFor(runId: string): BudgetLimits {
+  private limitsFor(runId: string): BudgetLimits {
     const registered = this.runLimits.get(runId);
     if (registered !== undefined) return registered;
     const resolved = this.resolveRunLimits?.(runId) ?? null;

@@ -388,9 +388,11 @@ export class DaemonService implements RpcHandler {
     if (!existsSync(this.metadataPath(runId))) return null;
     try {
       const metadata = this.readMetadata(runId);
+      const tokens = DaemonService.budgetOrUndefined(metadata.budgetTokens, true);
+      const usd = DaemonService.budgetOrUndefined(metadata.budgetUsd, false);
       return {
-        ...(metadata.budgetTokens === undefined ? {} : { budgetTokens: metadata.budgetTokens }),
-        ...(metadata.budgetUsd === undefined ? {} : { budgetUsd: metadata.budgetUsd }),
+        ...(tokens === undefined ? {} : { budgetTokens: tokens }),
+        ...(usd === undefined ? {} : { budgetUsd: usd }),
       };
     } catch {
       return null;
@@ -413,6 +415,16 @@ export class DaemonService implements RpcHandler {
 
   private metadataPath(runId: string): string {
     return join(this.runDir(runId), "facade.json");
+  }
+
+  /**
+   * Facade metadata is read back with an unchecked cast, so a corrupt budget must fall back to
+   * the daemon-wide limit. Left as-is it would reach `assertWithin` as a NaN comparison, which
+   * is always false: the run would end up with no cap at all.
+   */
+  private static budgetOrUndefined(value: unknown, integral: boolean): number | undefined {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+    return integral && !Number.isInteger(value) ? undefined : value;
   }
 
   private readMetadata(runId: string): FacadeRunMetadata {

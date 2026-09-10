@@ -225,17 +225,43 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     const fixture = await daemonFixture({ maxRunTokens: 50 });
     const overridden = await fixture.createRun({ budgetTokens: 30 });
     const plain = await fixture.createRun({});
+    // USD-only: pins the USD half of the agreement, and pins that a partial override leaves
+    // the other dimension at its configured value rather than clearing it.
+    const usdOnly = await fixture.createRun({ budgetUsd: 2 });
 
     await driveToConvergence(fixture, overridden);
     await driveToConvergence(fixture, plain);
+    await driveToConvergence(fixture, usdOnly);
 
     const overriddenBudget = persistedSampleBudget(fixture, overridden);
-    expect(overriddenBudget.limits).toMatchObject({ maxRunTokens: 30, maxTaskTokens: null });
+    expect(overriddenBudget.limits).toMatchObject({ maxRunTokens: 30, maxRunUsd: null, maxTaskTokens: null });
     expect(overriddenBudget.unusedCliMetadata).toEqual({ budgetTokens: 30, budgetUsd: null, applied: true });
 
     const plainBudget = persistedSampleBudget(fixture, plain);
-    expect(plainBudget.limits).toMatchObject({ maxRunTokens: 50 });
+    expect(plainBudget.limits).toMatchObject({ maxRunTokens: 50, maxRunUsd: null });
     expect(plainBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: null, applied: false });
+
+    const usdOnlyBudget = persistedSampleBudget(fixture, usdOnly);
+    expect(usdOnlyBudget.limits).toMatchObject({ maxRunUsd: 2, maxRunTokens: 50 });
+    expect(usdOnlyBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: 2, applied: true });
+  });
+
+  it("falls back to the daemon-wide limit when a run's persisted budget is corrupt", async () => {
+    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    const corrupt = await fixture.createRun({ budgetTokens: 10_000 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const facade = join(fixture.home, "runs", corrupt, "facade.json");
+    const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+    expect(metadata["budgetTokens"]).toBe(10_000);
+    // Left unvalidated this reaches the guard as a NaN comparison, which never fires: the run
+    // would carry no cap at all rather than the daemon's.
+    writeFileSync(facade, JSON.stringify({ ...metadata, budgetTokens: "lots" }));
+
+    const restarted = fixture.restart();
+    await callTimes(restarted, corrupt, 5);
+    expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ limit: 50 });
   });
 
   it("leaves the loaded config instance shared and untouched", async () => {

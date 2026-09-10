@@ -70,6 +70,15 @@ describe("BudgetTracker per-run limits", () => {
     expect(asked).toEqual(["run_a"]);
   });
 
+  it("does not cache the absence of a run limit", () => {
+    let limits: BudgetLimits | null = null;
+    const tracker = new BudgetTracker(SHARED, () => limits);
+    spend(tracker, "run_a", 50);
+    expect(() => { tracker.assertWithin("run_a"); }).not.toThrow();
+    limits = { maxRunUsd: null, maxRunTokens: 10, maxTaskTokens: null };
+    expect(budgetErrorOf(() => { tracker.assertWithin("run_a"); }).details["limit"]).toBe(10);
+  });
+
   it("falls back to the shared limits when the resolver has nothing for a run", () => {
     const tracker = new BudgetTracker(SHARED, () => null);
     spend(tracker, "run_b", 100);
