@@ -174,7 +174,7 @@ describe("B-selfhost-8 per-run budget overrides", () => {
   });
 
   it("rejects invalid budgets before a run exists and leaves no residue", async () => {
-    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
 
     for (const budgetTokens of [0, -1, 1.5]) {
       const error = await rejectionOf(fixture.createRun({ budgetTokens }));
@@ -188,7 +188,13 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     }
 
     await expect(fixture.service.handle("status", {})).resolves.toEqual([]);
-    expect(fixture.service.getConfig().budget.maxRunTokens).toBe(50);
+    // Every dimension, since a rejected budget must leave the whole configuration alone.
+    expect(fixture.service.getConfig().budget).toEqual({
+      maxRunTokens: 50,
+      maxRunUsd: 4,
+      maxTaskTokens: 25,
+      maxRunWallClockMinutes: 90,
+    });
     const runId = await fixture.createRun({});
     await callTimes(fixture, runId, 5);
     expect((await budgetErrorOf(fixture.call(runId))).details).toMatchObject({ limit: 50 });
@@ -294,14 +300,15 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
   it("reports a raised cap to C2 as raised, not clamped to the configured one", async () => {
     // The lowering case cannot tell replacement from clamping: both land on the same number.
+    // Both dimensions are raised, since a clamp confined to either one would otherwise pass.
     const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
-    const raised = await fixture.createRun({ budgetTokens: 100 });
+    const raised = await fixture.createRun({ budgetTokens: 100, budgetUsd: 9 });
 
     await driveToConvergence(fixture, raised);
 
     const budget = persistedSampleBudget(fixture, raised);
-    expect(budget.limits).toEqual({ maxRunTokens: 100, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
-    expect(budget.unusedCliMetadata).toEqual({ budgetTokens: 100, budgetUsd: null, applied: true });
+    expect(budget.limits).toEqual({ maxRunTokens: 100, maxRunUsd: 9, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
+    expect(budget.unusedCliMetadata).toEqual({ budgetTokens: 100, budgetUsd: 9, applied: true });
   });
 
   it("falls back to the daemon-wide limit when a run's persisted budget is corrupt", async () => {
