@@ -150,6 +150,20 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(fixture.call(raised))).details).toMatchObject({ limit: 100 });
   });
 
+  it("lets a USD override raise a finite configured USD cap", async () => {
+    // The token twin of this runs above. Against a `null` configured cap there is nothing to
+    // clamp against, so only a finite one can tell a raise from a clamp on this surface.
+    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 1, costUsd: 0.5 });
+    const raised = await fixture.createRun({ budgetUsd: 3 });
+    const plain = await fixture.createRun({});
+
+    // Past the configured cap and still running: a clamp would have stopped this at 1.
+    await callTimes(fixture, raised, 6);
+    await callTimes(fixture, plain, 2);
+    expect((await budgetErrorOf(fixture.call(plain))).details).toMatchObject({ budget: "run_usd", limit: 1 });
+    expect((await budgetErrorOf(fixture.call(raised))).details).toMatchObject({ budget: "run_usd", limit: 3 });
+  });
+
   it("keeps the configured USD cap for a run with no override and one that overrides tokens", async () => {
     // The dimension a token override does not name must survive it, and must survive the new
     // per-run resolution for a run that names nothing at all.
