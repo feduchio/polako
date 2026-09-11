@@ -424,6 +424,31 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(fixture.call(tokenOnly))).details).toMatchObject({ budget: "run_tokens", limit: tokenOnlyTokens });
   });
 
+  it("invents no limit on a dimension no override may touch", async () => {
+    // Every other fixture that reaches C2 configures the per-task and wall-clock caps finite, so
+    // "equals the loaded configuration's value" has only ever been observed where there was a
+    // value to equal. A merge that fills either of them in when the operator set none agrees with
+    // every one of those checks. The wall-clock half is a decision and not only a report: an
+    // invented deadline lands among the exhausted dimensions and stops a run on a cap nobody set,
+    // so this observation boundary sits two minutes after the run was created.
+    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    const overridden = await fixture.createRun({ budgetTokens: 30 });
+    const plain = await fixture.createRun({});
+
+    await driveToConvergence(fixture, overridden, 120_000);
+    await driveToConvergence(fixture, plain, 120_000);
+
+    const overriddenBudget = persistedSampleBudget(fixture, overridden);
+    expect(overriddenBudget.limits)
+      .toEqual({ maxRunTokens: 30, maxRunUsd: null, maxTaskTokens: null, maxRunWallClockMinutes: null });
+    expect(overriddenBudget.exhaustedDimensions).toEqual([]);
+
+    // The run that overrode nothing never reaches the merge at all, which separates "the merge
+    // invented a limit" from "the configuration default is wrong".
+    expect(persistedSampleBudget(fixture, plain).limits)
+      .toEqual({ maxRunTokens: 50, maxRunUsd: null, maxTaskTokens: null, maxRunWallClockMinutes: null });
+  });
+
   it("does not refuse a priced run below its own USD cap", async () => {
     // Every other USD check gives calls a cost that divides the cap, so observed spend only ever
     // lands exactly on the cap or exactly one call short of it, and a guard firing anywhere
@@ -633,7 +658,7 @@ interface Gate {
  * Puts a real daemon run into CONVERGENCE_CHECK with an observation boundary, then drives the
  * engine so the sample comes from the registered production driver rather than a hand-built one.
  */
-async function driveToConvergence(fixture: Fixture, runId: string): Promise<void> {
+async function driveToConvergence(fixture: Fixture, runId: string, observedAfterMs = 5): Promise<void> {
   const store = fixture.service.productionComposition().store;
   const now = fixture.service.productionComposition().clock.now();
   const run = store.repos.runs.get(runId)!;
@@ -652,11 +677,11 @@ async function driveToConvergence(fixture: Fixture, runId: string): Promise<void
       artifacts: [],
     },
     {
-      id: id("evt", now + 5),
+      id: id("evt", now + observedAfterMs),
       runId,
-      ts: now + 5,
+      ts: now + observedAfterMs,
       type: "budget.evaluated",
-      payload: { kind: "wall_clock", dueAt: now, observedAt: now + 5 },
+      payload: { kind: "wall_clock", dueAt: now, observedAt: now + observedAfterMs },
       causedBy: [],
       actor: system,
       artifacts: [],
