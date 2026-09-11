@@ -381,7 +381,7 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     // partial override with a fully finite configuration is unpriced, so the guard's USD
     // dimension cannot bind there at all.
     const fixture = await daemonFixture({ maxRunTokens: 500, maxRunUsd: 4, maxTaskTokens: 30, maxRunWallClockMinutes: 90, costUsd: 0.5 });
-    const usdOnly = await fixture.createRun({ budgetUsd: 2 });
+    const usdOnly = await fixture.createRun({ budgetUsd: 2.25 });
     const tokenOnly = await fixture.createRun({ budgetTokens: 60 });
     const plain = await fixture.createRun({});
 
@@ -390,6 +390,13 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     await driveToConvergence(fixture, plain);
 
     const usdOnlyLimits = persistedSampleBudget(fixture, usdOnly).limits;
+
+    // Agreement between the two surfaces cannot see a resolution that is wrong on both of them,
+    // because both read it from one place. So the number C2 reports is also pinned against what
+    // the run asked for. A fraction is what makes that pin load-bearing: every other override in
+    // this suite that meets a finite configured cap is an integer, and a resolver truncating one
+    // would agree with itself on the wrong number.
+    expect(usdOnlyLimits.maxRunUsd).toBe(2.25);
 
     // The per-task cap a partial override must leave alone, on the surface that enforces it and
     // not only on the one that reports it. The guard checks USD first and run tokens second, so
@@ -400,7 +407,7 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
     // The same run's USD cap, which its own override did replace: a fresh task has no per-task
     // spend, so the next refusal on it can only come from the dimension under test.
-    await callTimes(fixture, usdOnly, 1, "task_2");
+    await callTimes(fixture, usdOnly, 2, "task_2");
     expect((await budgetErrorOf(fixture.call(usdOnly, "task_2"))).details)
       .toMatchObject({ budget: "run_usd", limit: usdOnlyLimits.maxRunUsd });
 
@@ -447,6 +454,26 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
     await callTimes(restarted, subOne, 1);
     expect((await budgetErrorOf(restarted.call(subOne))).details).toMatchObject({ budget: "run_usd", limit: 0.5 });
+  });
+
+  it("carries a fractional USD budget across a restart against a finite configured cap", async () => {
+    // The restart above configures no USD cap at all, so it cannot see a truncation that only
+    // happens when there is a configured value to fall back to -- and the read-back path resolves
+    // a run's overrides separately from the path that created it, so closing this on the live
+    // surface alone leaves it open here. Both polarities: a fraction below the configured cap and
+    // one above it truncate to different wrong numbers.
+    const fixture = await daemonFixture({ maxRunUsd: 4, costUsd: 0.5 });
+    const lowered = await fixture.createRun({ budgetUsd: 1.25 });
+    const raised = await fixture.createRun({ budgetUsd: 4.5 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const restarted = fixture.restart();
+    await callTimes(restarted, lowered, 3);
+    expect((await budgetErrorOf(restarted.call(lowered))).details).toMatchObject({ budget: "run_usd", limit: 1.25 });
+
+    await callTimes(restarted, raised, 9);
+    expect((await budgetErrorOf(restarted.call(raised))).details).toMatchObject({ budget: "run_usd", limit: 4.5 });
   });
 
   it("reports a raised cap to C2 as raised, not clamped to the configured one", async () => {
