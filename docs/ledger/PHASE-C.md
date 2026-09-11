@@ -37,7 +37,7 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open items: **9, 11–15**, plus recorded **16, 17, 21–25**. Items **3–8** ACCEPTED.
+Open items: **9, 11–15**, plus **16, 17, 21–25**, all now scheduled into the items that already rework the same code. Items **3–8** ACCEPTED.
 
 Item 10 (`listModels()[0]` reviewer selection) was lifted into `B-bootstrap-cost-eligibility` (ACCEPTED). Full Phase-B self-host closure remains **DEFERRED_BY_USER**.
 
@@ -106,7 +106,22 @@ C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Task A
 
 C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Task ACCEPTED** at `311203830720a4d1e917785e577eaf868281bc8a`.
 
-**Pause (user-authorized, full remaining plan):** B-selfhost-3/4/5/6/7/8 ACCEPTED (`fd8a99c` / `84f2f7e` / `916f7f2` / `df49a5e` / `1dc1c5c` / `14beb80`). Next **9 + 19 → 18 → 11 → 12 → 13, 15 → 14 → 20** per *Prompt-path ordering constraints*, then remaining Fable C. Items 16, 17 and 21–25 recorded but not scheduled. Finding 25 — the duplicated budget merge — belongs to **item 12**, not to items 9 and 19. All three edit `src/daemon/composition.ts`, but sharing a file is not sharing a seam: item 12 is the one that reworks how a run's budget is resolved and restored, which is exactly where the second merge site lives. Taking it into 9 or 19 would be scope creep of the kind those contracts must forbid. Do not enter Phase D. Do not tag `phase-c-accepted`.
+**Pause (user-authorized, full remaining plan):** B-selfhost-3/4/5/6/7/8 ACCEPTED (`fd8a99c` / `84f2f7e` / `916f7f2` / `df49a5e` / `1dc1c5c` / `14beb80`). Remaining sequence, with the previously unscheduled findings attached to the items that already rewrite the same code:
+
+| # | Item | Absorbs | Shared seam |
+|---|---|---|---|
+| 1 | **9 + 19** | 23's reviewer-protocol half | `createWorkerFactory`; the `reviewer-*` role protocols that 19 is the first to compose, which is where the rule against an unbounded stopping criterion belongs |
+| 2 | **18** | — | `AgentRunner.runLoop` |
+| 3 | **11** | — | `PairwiseJudge`; needs 19's composed `judge` protocol first |
+| 4 | **12** | **17, 21, 22, 25** | `DaemonService.runConfig` and `withRuntimeValidationMode`: 12 restores run settings and runtime mode across a restart, 17 is the mode nobody reads, 21 is that resolution failing silently, 22 is the pin guarding it, 25 is the duplicated budget merge in the same function |
+| 5 | **13, 15** | **16** | Runtime evidence: 15 drives the `required` happy path, 16 is the missing `off` early return in `corpusRuntimeEvidenceAllowsDone` |
+| 6 | **23** (detector half) | — | `src/convergence/pathology/{types,sample,detectors}.ts`; needs a per-checkpoint production-versus-test classification on the sample, which no other item adds |
+| 7 | **14** | — | Real paid providers; must stay last, since 18 and 19 change the bytes every cassette hashes |
+| 8 | **20** | **24** | The probe path: 20 wires the audition producer, which is what issues probes, and 24 is those probes reaching the provider without passing the budget guard |
+
+Then the remaining Fable C: C1, C5, C6, C7, C9, C10, C11 in the dependency order above.
+
+The grouping rule is one seam, one rewrite. Five of the seven loose findings sat in code that a scheduled item already reopens; taking them separately would mean touching `DaemonService.runConfig` five times and re-freezing a contract for each. Only 23's detector half has no collision, so it keeps its own slot rather than being forced into one. Do not enter Phase D. Do not tag `phase-c-accepted`.
 
 Reviewer isolation: from item 8 onward each code reviewer gets its own worktree at the commit under review. Reviewers mutate sources to test assertion strength and restore them with `git checkout --`, so sharing one worktree lets them overwrite each other's probes. See the process note in `docs/ledger/B-selfhost-7-run.md`.
 
