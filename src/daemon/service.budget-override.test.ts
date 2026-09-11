@@ -357,6 +357,16 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(plainBudget.limits).toEqual({ maxRunTokens: 50, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
     expect(plainBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: null, applied: false });
 
+    // The same runs on the other surface, compared against what C2 reported rather than against
+    // literals repeated here: agreement is the invariant, so it has to be read from one side and
+    // checked on the other. `usdOnly` is the telling one -- its token cap is the dimension its
+    // own override never named, and only the guard can say whether it survived.
+    for (const [runId, calls] of [[overridden, 3], [plain, 5], [usdOnly, 5]] as const) {
+      const reported = persistedSampleBudget(fixture, runId).limits.maxRunTokens;
+      await callTimes(fixture, runId, calls);
+      expect((await budgetErrorOf(fixture.call(runId))).details).toMatchObject({ budget: "run_tokens", limit: reported });
+    }
+
     const usdOnlyBudget = persistedSampleBudget(fixture, usdOnly);
     expect(usdOnlyBudget.limits).toEqual({ maxRunUsd: 2, maxRunTokens: 50, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
     expect(usdOnlyBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: 2, applied: true });
