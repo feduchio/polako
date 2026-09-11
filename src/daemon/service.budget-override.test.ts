@@ -202,13 +202,24 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     // One `AgentRunner` per task means a single run's spend arrives under several task ids,
     // while council and review calls name none at all. A run cap that counted only one task's
     // share, or only the unnamed calls, would never bind on a real run.
-    const fixture = await daemonFixture({ maxRunTokens: null, maxTaskTokens: null });
+    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: null, maxTaskTokens: null, costUsd: 0.5 });
     const runId = await fixture.createRun({ budgetTokens: 30 });
 
     await callTimes(fixture, runId, 1, "task_a");
     await callTimes(fixture, runId, 1);
     await callTimes(fixture, runId, 1, "task_b");
-    expect((await budgetErrorOf(fixture.call(runId, "task_b"))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
+
+    // The cap is already reached, and a refusal records nothing, so every shape the next call
+    // could take must meet it: a task that has never spent -- which is what a new agent's first
+    // call looks like -- one that has, and a call naming no task at all.
+    for (const taskId of ["task_c", undefined, "task_a"]) {
+      expect((await budgetErrorOf(fixture.call(runId, taskId))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
+    }
+
+    const usdRun = await fixture.createRun({ budgetUsd: 1 });
+    await callTimes(fixture, usdRun, 1, "task_a");
+    await callTimes(fixture, usdRun, 1, "task_b");
+    expect((await budgetErrorOf(fixture.call(usdRun, "task_c"))).details).toMatchObject({ budget: "run_usd", limit: 1 });
   });
 
   it("keeps the configured per-task cap for a run that overrides run tokens", async () => {
