@@ -372,6 +372,65 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(usdOnlyBudget.unusedCliMetadata).toEqual({ budgetTokens: null, budgetUsd: 2, applied: true });
   });
 
+  it("compares every dimension C2 reports against the guard, not only the token one", async () => {
+    // The comparison above reads C2's token limit and requires the guard to refuse at exactly
+    // that value. The other two dimensions are matched against literals instead -- and against
+    // literals written in fixtures configured differently -- so a resolver that diverges on USD
+    // or on the per-task cap reports one number to C2 and enforces another. What hides such a
+    // resolver is the state of the dimensions it is not diverging on: the one fixture pairing a
+    // partial override with a fully finite configuration is unpriced, so the guard's USD
+    // dimension cannot bind there at all.
+    const fixture = await daemonFixture({ maxRunTokens: 500, maxRunUsd: 4, maxTaskTokens: 30, maxRunWallClockMinutes: 90, costUsd: 0.5 });
+    const usdOnly = await fixture.createRun({ budgetUsd: 2 });
+    const tokenOnly = await fixture.createRun({ budgetTokens: 60 });
+    const plain = await fixture.createRun({});
+
+    await driveToConvergence(fixture, usdOnly);
+    await driveToConvergence(fixture, tokenOnly);
+    await driveToConvergence(fixture, plain);
+
+    const usdOnlyLimits = persistedSampleBudget(fixture, usdOnly).limits;
+
+    // The per-task cap a partial override must leave alone, on the surface that enforces it and
+    // not only on the one that reports it. The guard checks USD first and run tokens second, so
+    // three task-named calls meet the 30-token task cap while staying inside this run's own $2.
+    await callTimes(fixture, usdOnly, 3, "task_1");
+    expect((await budgetErrorOf(fixture.call(usdOnly, "task_1"))).details)
+      .toMatchObject({ budget: "task_tokens", limit: usdOnlyLimits.maxTaskTokens });
+
+    // The same run's USD cap, which its own override did replace: a fresh task has no per-task
+    // spend, so the next refusal on it can only come from the dimension under test.
+    await callTimes(fixture, usdOnly, 1, "task_2");
+    expect((await budgetErrorOf(fixture.call(usdOnly, "task_2"))).details)
+      .toMatchObject({ budget: "run_usd", limit: usdOnlyLimits.maxRunUsd });
+
+    // USD on a run that kept the configured cap rather than replacing it, since a divergence
+    // could follow either polarity.
+    const plainUsd = persistedSampleBudget(fixture, plain).limits.maxRunUsd;
+    await callTimes(fixture, plain, 8);
+    expect((await budgetErrorOf(fixture.call(plain))).details).toMatchObject({ budget: "run_usd", limit: plainUsd });
+
+    // Tokens again, but on a priced run whose USD cap is finite and untouched: the token
+    // comparison above runs unpriced, where a USD-conditioned divergence cannot show itself.
+    const tokenOnlyTokens = persistedSampleBudget(fixture, tokenOnly).limits.maxRunTokens;
+    await callTimes(fixture, tokenOnly, 6);
+    expect((await budgetErrorOf(fixture.call(tokenOnly))).details).toMatchObject({ budget: "run_tokens", limit: tokenOnlyTokens });
+  });
+
+  it("does not refuse a priced run below its own USD cap", async () => {
+    // Every other USD check gives calls a cost that divides the cap, so observed spend only ever
+    // lands exactly on the cap or exactly one call short of it, and a guard firing anywhere
+    // inside that last interval is invisible. This cost does not divide this cap: the call made
+    // at $1.20 against a $1.25 cap has to be allowed, and only the spend that meets the cap may
+    // refuse. The token dimension cannot hide the same thing -- token spends are integers and a
+    // token budget is validated as one -- so this is the USD half of "it must not throw below N".
+    const fixture = await daemonFixture({ maxRunUsd: null, costUsd: 0.6 });
+    const runId = await fixture.createRun({ budgetUsd: 1.25 });
+
+    await callTimes(fixture, runId, 3);
+    expect((await budgetErrorOf(fixture.call(runId))).details).toMatchObject({ budget: "run_usd", limit: 1.25 });
+  });
+
   it("carries a fractional USD budget across a restart", async () => {
     // The persisted-budget guard must not demand an integer here: USD budgets are not, and
     // rejecting one downgrades a valid run to the daemon-wide limit without saying so. One
