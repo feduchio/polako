@@ -359,6 +359,45 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ limit: 50 });
   });
 
+  it("falls back to the daemon-wide USD limit when a run's persisted USD budget is corrupt", async () => {
+    // The token twin of this runs above. The guard treats the two dimensions differently on
+    // purpose -- a fractional USD budget is legal -- so each needs driving on its own.
+    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 4, costUsd: 0.5 });
+    const corrupt = await fixture.createRun({ budgetUsd: 1 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const facade = join(fixture.home, "runs", corrupt, "facade.json");
+    const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+    expect(metadata["budgetUsd"]).toBe(1);
+
+    for (const budgetUsd of ["lots", 0, -5, null]) {
+      writeFileSync(facade, JSON.stringify({ ...metadata, budgetUsd }));
+      const restarted = fixture.restart();
+      await callTimes(restarted, corrupt, 8);
+      expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ budget: "run_usd", limit: 4 });
+      await restarted.service.close();
+      services.splice(services.indexOf(restarted.service), 1);
+    }
+  });
+
+  it("keeps the sound half of a run's persisted budget when the other half is corrupt", async () => {
+    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 4, costUsd: 0.5 });
+    const mixed = await fixture.createRun({ budgetTokens: 30, budgetUsd: 1 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const facade = join(fixture.home, "runs", mixed, "facade.json");
+    const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+    writeFileSync(facade, JSON.stringify({ ...metadata, budgetUsd: "lots" }));
+
+    // Discarding the whole budget would leave this run on the daemon's `null` token cap, so
+    // the throw that arrives says which half survived.
+    const restarted = fixture.restart();
+    await callTimes(restarted, mixed, 3);
+    expect((await budgetErrorOf(restarted.call(mixed))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
+  });
+
   it("keeps a run's runtime mode when it also carries a budget override", async () => {
     // The two per-run settings compose on one config. Budget checks all run with the mode off
     // and mode checks all run without a budget, so only a run carrying both can see them meet.
