@@ -640,6 +640,33 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(budget.unusedCliMetadata).toEqual({ budgetTokens: 30, budgetUsd: null, applied: true });
   });
 
+  it("keeps a recovered run's override when its facade predates the runtime field", async () => {
+    // `runConfig` resolves a run's mode and its budget from the same file, and the budget merge
+    // sits just past the mode branch. A facade carrying a budget and no `runtime` makes
+    // `persistedRuntimeMode` return null, so that branch is skipped entirely -- and that is the
+    // shape of every facade written before the runtime mode was persisted, which is what an
+    // upgraded daemon finds when it restarts onto runs it did not create. Nothing else in this
+    // file reaches it: every other facade here was written by the current handler, which always
+    // stores a mode.
+    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    const runId = await fixture.createRun({ budgetTokens: 30 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const facade = join(fixture.home, "runs", runId, "facade.json");
+    const { runtime, ...legacy } = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+    expect(runtime).toBeDefined();
+    writeFileSync(facade, JSON.stringify(legacy));
+
+    const restarted = fixture.restart();
+    await driveToConvergence(restarted, runId);
+    expect(persistedSampleBudget(restarted, runId).limits.maxRunTokens).toBe(30);
+
+    await callTimes(restarted, runId, 3);
+    expect((await budgetErrorOf(restarted.call(runId))).details)
+      .toMatchObject({ budget: "run_tokens", limit: 30 });
+  });
+
   it("invents no limit for a recovered run either", async () => {
     // The live version of this runs above, but a recovered run resolves its own budget by a
     // different route -- read back from the facade rather than held in memory since creation --
