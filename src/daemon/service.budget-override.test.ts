@@ -207,6 +207,16 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     }
 
     await expect(fixture.service.handle("status", {})).resolves.toEqual([]);
+    // Infinity has to be refused before the budget check sees it: `Infinity > 0` is true, so
+    // that check would pass it through and the run would carry no cap at all. The guard on the
+    // persisted path is tested; this is the same hazard on the live one.
+    const infiniteTokens = await rejectionOf(fixture.createRun({ budgetTokens: Number.POSITIVE_INFINITY }));
+    expect(infiniteTokens.code).toBe("CONFIG_ERROR");
+    expect(infiniteTokens.message).toMatch(/budgetTokens must be a number/);
+    const infiniteUsd = await rejectionOf(fixture.createRun({ budgetUsd: Number.POSITIVE_INFINITY }));
+    expect(infiniteUsd.code).toBe("CONFIG_ERROR");
+    expect(infiniteUsd.message).toMatch(/budgetUsd must be a number/);
+
     // Every dimension, since a rejected budget must leave the whole configuration alone.
     expect(fixture.service.getConfig().budget).toEqual({
       maxRunTokens: 50,
@@ -306,15 +316,20 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
   it("carries a fractional USD budget across a restart", async () => {
     // The persisted-budget guard must not demand an integer here: USD budgets are not, and
-    // rejecting one downgrades a valid run to the daemon-wide limit without saying so.
+    // rejecting one downgrades a valid run to the daemon-wide limit without saying so. One
+    // budget sits below a dollar, because "positive" and "at least one" agree everywhere else.
     const fixture = await daemonFixture({ maxRunUsd: null, costUsd: 0.5 });
     const runId = await fixture.createRun({ budgetUsd: 1.25 });
+    const subOne = await fixture.createRun({ budgetUsd: 0.5 });
     await fixture.service.close();
     services.splice(services.indexOf(fixture.service), 1);
 
     const restarted = fixture.restart();
     await callTimes(restarted, runId, 3);
     expect((await budgetErrorOf(restarted.call(runId))).details).toMatchObject({ budget: "run_usd", limit: 1.25 });
+
+    await callTimes(restarted, subOne, 1);
+    expect((await budgetErrorOf(restarted.call(subOne))).details).toMatchObject({ budget: "run_usd", limit: 0.5 });
   });
 
   it("reports a raised cap to C2 as raised, not clamped to the configured one", async () => {
