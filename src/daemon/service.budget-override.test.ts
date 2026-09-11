@@ -207,6 +207,15 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     }
 
     await expect(fixture.service.handle("status", {})).resolves.toEqual([]);
+    // Both flags present with exactly one ill-formed: each check has to fire on its own
+    // dimension, not merely when the other dimension is absent.
+    const mixedTokens = await rejectionOf(fixture.createRun({ budgetTokens: 1.5, budgetUsd: 1 }));
+    expect(mixedTokens.code).toBe("CONFIG_ERROR");
+    expect(mixedTokens.message).toMatch(/budgetTokens must be a positive integer/);
+    const mixedUsd = await rejectionOf(fixture.createRun({ budgetTokens: 30, budgetUsd: -1 }));
+    expect(mixedUsd.code).toBe("CONFIG_ERROR");
+    expect(mixedUsd.message).toMatch(/budgetUsd must be a positive number/);
+
     // Infinity has to be refused before the budget check sees it: `Infinity > 0` is true, so
     // that check would pass it through and the run would carry no cap at all. The guard on the
     // persisted path is tested; this is the same hazard on the live one.
