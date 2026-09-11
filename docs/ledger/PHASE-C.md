@@ -109,6 +109,23 @@ C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Task A
 
 Reviewer isolation: from item 8 onward each code reviewer gets its own worktree at the commit under review. Reviewers mutate sources to test assertion strength and restore them with `git checkout --`, so sharing one worktree lets them overwrite each other's probes. See the process note in `docs/ledger/B-selfhost-7-run.md`.
 
+## Stopping rule for review rounds (revised 2026-09-11, after B-selfhost-8 reached 24 rounds)
+
+B-selfhost-8 changed production code in three commits, all within its first three rounds: `+109/−20` lines. It then ran twenty-four more rounds and twenty-four more commits, none of which touched a non-test file, and neither reviewer reported a production defect in any of them. The task did not fail to converge by accident; the rule it was run under has no fixed point.
+
+**Why.** "A survivable mutant is blocking" is unsatisfiable for any finite suite. For any set of checks there exists an incorrect implementation conditioned on some combination of ambient state the fixtures do not vary — the configured polarity of a dimension the mutant does not touch, the runtime mode a helper defaults to, whether the provider is priced, whether the run was created or recovered. Each round closes one such combination and creates the next. The coordinator's own round instruction — *"name an axis none of these covers and sweep it; do not claim the space is closed unless you can defend that claim"* — makes a finding mandatory, since there is always another axis and a reviewer returning PASS under that instruction looks like it did not try.
+
+**What the findings drifted into.** Rounds 1–3 found production defects. Rounds 4–8 found genuine vacuity — assertions comparing `null` to `null`, which proved nothing. Rounds 9–19 found real coverage gaps of decreasing severity. Rounds 20–23 found mutants that must read state they have no reason to read in order to be wrong: truncate a USD override *only when the token cap is finite*; skip the merge *only when the runtime mode is* `auto`; answer every recovered run with the first budget resolved. No implementer writes those while trying to do the right thing. They are tests of the tests.
+
+**The revised rule.** Acceptance is judged against the frozen contract, which is finite and therefore terminates.
+
+- A round is **clean** when both reviewers confirm every MC and AC holds with cited evidence, report no class-(a) production behaviour defect, and report no class-(c) contract clause that no check observes.
+- A class-(b) survivable mutant is **blocking only if it is plausible**: an omission or a simplification a competent implementer could write while trying to satisfy the contract — a forgotten dimension, the shared object used instead of the per-run one, a cache keyed globally. A mutant that must branch on state unrelated to what it changes is recorded as a test-strength note and does **not** reopen the round.
+- Reviewers are **not** asked to name a new axis. They are asked to verify the contract, to look for production defects, and to name clauses no check observes.
+- Two clean rounds accept the item. A round yielding only implausible class-(b) mutants still counts as clean.
+
+Test volume is a cost, not only reviewer time: B-selfhost-8's budget test file reached 955 lines against a 109-line production change, and several of its checks pin the same clause more than once. Future work on that seam has to carry all of it.
+
 **Machine load (user decision 2026-09-11, after a stall).** Reviewers run **one at a time**, not two in parallel, and the coordinator runs **no gate of its own while a reviewer is working** — the reviewers already reproduce the gates independently, so a third concurrent suite is redundant as well as costly. `vitest.config.ts` sets `pool: "forks"`, which defaults to one fork per core, so every gate run is capped: use `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2` instead of `pnpm check`, and pass `--maxWorkers=2` to single-file mutation probes too. Three uncapped suites at once made the machine unusable.
 
 **Shell hygiene, same incident.** Never pipe a heredoc into a command's stdin (`git commit -F -` holds the session's stdin open and every later command queues behind it); write the message to a file and add `< /dev/null`. Never `kill -9` a PID reported by the tooling — it can be the shell session leader. Never leave `set -x` on in a persistent session.
