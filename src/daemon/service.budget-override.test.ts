@@ -198,6 +198,19 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(fixture.call(usdBound, "task_1"))).details).toMatchObject({ budget: "run_usd", limit: 1 });
   });
 
+  it("sums a run's spend across its tasks, and across calls that name none", async () => {
+    // One `AgentRunner` per task means a single run's spend arrives under several task ids,
+    // while council and review calls name none at all. A run cap that counted only one task's
+    // share, or only the unnamed calls, would never bind on a real run.
+    const fixture = await daemonFixture({ maxRunTokens: null, maxTaskTokens: null });
+    const runId = await fixture.createRun({ budgetTokens: 30 });
+
+    await callTimes(fixture, runId, 1, "task_a");
+    await callTimes(fixture, runId, 1);
+    await callTimes(fixture, runId, 1, "task_b");
+    expect((await budgetErrorOf(fixture.call(runId, "task_b"))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
+  });
+
   it("keeps the configured per-task cap for a run that overrides run tokens", async () => {
     const fixture = await daemonFixture({ maxRunTokens: null, maxTaskTokens: 30 });
     const runId = await fixture.createRun({ budgetTokens: 1_000_000 });
