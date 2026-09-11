@@ -660,6 +660,57 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(budget.exhaustedDimensions).toEqual([]);
   });
 
+  it("keeps recovered runs' limits apart at C2, not only at the broker", async () => {
+    // The broker half of this is pinned with two runs and both touch orders. C2's half has only
+    // ever sampled a single recovered run, so a resolution answering every recovered run with
+    // the first one it saw -- or with the most recent -- handed a run its sibling's cap.
+    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    const tight = await fixture.createRun({ budgetTokens: 30 });
+    const loose = await fixture.createRun({ budgetTokens: 80 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const restarted = fixture.restart();
+    await driveToConvergence(restarted, loose);
+    await driveToConvergence(restarted, tight);
+    expect(persistedSampleBudget(restarted, loose).limits.maxRunTokens).toBe(80);
+    expect(persistedSampleBudget(restarted, tight).limits.maxRunTokens).toBe(30);
+
+    // Sampled once more after its sibling, so answering with the most recent resolution is
+    // caught as well as answering with the first.
+    await driveToConvergence(restarted, loose);
+    expect(persistedSampleBudget(restarted, loose).limits.maxRunTokens).toBe(80);
+  });
+
+  it("reports an override that matches the configured cap as applied", async () => {
+    // Enforcement cannot tell this run from one that overrode nothing -- both refuse at 50 -- so
+    // the report is the only surface where the difference exists. Treating an equal override as
+    // no override says `applied: false` about a flag the operator did pass, which is this task's
+    // original defect one field over.
+    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    const equal = await fixture.createRun({ budgetTokens: 50 });
+
+    await driveToConvergence(fixture, equal);
+
+    const sample = persistedSampleBudget(fixture, equal);
+    expect(sample.limits.maxRunTokens).toBe(50);
+    expect(sample.unusedCliMetadata).toEqual({ budgetTokens: 50, budgetUsd: null, applied: true });
+  });
+
+  it("lets a run's own cap exhaust C2, not only the configured one", async () => {
+    // Every other check of the exhausted set requires it empty, which a resolution that never
+    // counts an overridden run as exhausted satisfies everywhere. Stopping a run is what the
+    // sample is for: such a run would refuse its own calls at the guard and still never reach
+    // BUDGET_STOP. Nothing is configured, so only the run's own cap can produce this.
+    const fixture = await daemonFixture({ maxRunTokens: null });
+    const runId = await fixture.createRun({ budgetTokens: 30 });
+
+    await callTimes(fixture, runId, 3);
+    await driveToConvergence(fixture, runId);
+
+    expect(persistedSampleBudget(fixture, runId).exhaustedDimensions).toEqual(["run_tokens"]);
+  });
+
   it("keeps a run's runtime mode when it also carries a budget override", async () => {
     // The two per-run settings compose on one config. Budget checks all run with the mode off
     // and mode checks all run without a budget, so only a run carrying both can see them meet.
