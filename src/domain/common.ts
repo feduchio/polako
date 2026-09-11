@@ -26,7 +26,9 @@ export const ActorKindSchema = z.enum([
   "reviewer",
   "verifier",
   "evidence_agent",
+  "prosecutor",
   "defender",
+  "judge",
   "scout",
 ]);
 export type ActorKind = z.infer<typeof ActorKindSchema>;

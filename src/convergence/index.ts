@@ -1,4 +1,16 @@
-export { assertCodeChangeMissionMayComplete, missionRequiresCodeChange, type MissionCompletionEvidence, type MissionMayCompleteResult } from "./antiFakeDone.js";
+export {
+  assertCodeChangeMissionMayComplete,
+  hasContinuableCodingWork,
+  incompleteCodingWorkTerminal,
+  isAcceptableTerminalForDone,
+  isCodingTask,
+  isContinuableCodingWork,
+  isExhaustedCodingTask,
+  isIncompleteCodingTask,
+  missionRequiresCodeChange,
+  type MissionCompletionEvidence,
+  type MissionMayCompleteResult,
+} from "./antiFakeDone.js";
 export { ConvergenceController, type ConvergenceDecision, type ConvergenceState } from "./controller.js";
 export { rollbackIfDominated, rollbackTarget } from "./dominance.js";
 export {
@@ -12,3 +24,4 @@ export {
 } from "./record.js";
 export { createRollbackCheckpoint, type RollbackCheckpointInput, type RollbackCheckpointResult, type RunHead } from "./rollback.js";
 export { CleanRoundTracker, preferRotatedEnsemble, type CleanRoundDraft, type EnsembleOption } from "./tracker.js";
+export * from "./pathology/index.js";

@@ -9,7 +9,12 @@ import {
   type MissionInterpretation,
   type Requirement,
 } from "../domain/mission.js";
-import { createTaskFromRequirement, type Task, type TaskKind } from "../domain/task.js";
+import {
+  createTaskFromRequirement,
+  workClassDraftFields,
+  type Task,
+  type TaskKind,
+} from "../domain/task.js";
 import { profileCacheKey } from "../project/discovery.js";
 import { buildBaselineEvidenceView, type CheckOutputReader } from "../project/baselineEvidence.js";
 import type { ProjectProfile } from "../project/profile.js";
@@ -58,6 +63,10 @@ interface TaskProposal {
   acceptance?: unknown;
   complexity?: unknown;
   dependsOn?: unknown;
+  workClass?: unknown;
+  classifiedBy?: unknown;
+  sourceRef?: unknown;
+  classificationEventId?: unknown;
 }
 
 /** Three independent supervisor perspectives with explicit, evented aggregation. */
@@ -182,6 +191,7 @@ export class SupervisorCouncil {
       return { tasks: [], roots: [], droppedRequirementRefs: dropped, decision };
     }
     const taskIds = drafts.map(() => id("task", this.now()));
+    const classificationEventId = id("evt", this.now());
     const refToTask = new Map<string, string>();
     drafts.forEach((draft, index) => {
       if (typeof draft.requirementRef === "string" && taskIds[index] !== undefined) {
@@ -194,6 +204,8 @@ export class SupervisorCouncil {
       const taskId = taskIds[index];
       if (taskId === undefined) throw new PolishError("INVARIANT_VIOLATION", "task id allocation failed");
       const dependencies = stringArray(draft.dependsOn).map((dependency) => refToTask.get(dependency) ?? dependency);
+      const kind = taskKind(draft.kind);
+      const structured = structuredWorkClass(draft, scopeCall.proposal, requirement.ref, plannerCall.modelEventId, scopeCall.modelEventId);
       return createTaskFromRequirement(interpretation.id, requirement.ref, {
         id: taskId,
         runId,
@@ -202,12 +214,21 @@ export class SupervisorCouncil {
           draft.description,
           `WHAT: ${requirement.statement}\nWHY: mission requirement ${requirement.ref}\nCONSTRAINTS: ${interpretation.constraints.join("; ") || "none"}\nEVIDENCE: mission interpretation`,
         ),
-        kind: taskKind(draft.kind),
+        kind,
         acceptance: nonEmptyStrings(draft.acceptance, requirement.acceptance),
         complexity: complexity(draft.complexity),
         baseCheckpointHash,
         dependsOn: dependencies,
         now: this.now(),
+        ...workClassDraftFields({
+          kind,
+          originKind: "mission_requirement",
+          originRef: requirement.ref,
+          workClass: structured.workClass,
+          classifiedBy: structured.classifiedBy,
+          sourceRef: structured.sourceRef,
+          classificationEventId: structured.classificationEventId ?? classificationEventId,
+        }),
       });
     });
     assertDag(tasks);
@@ -218,6 +239,7 @@ export class SupervisorCouncil {
       opinions,
       causedBy,
       { interpretationId: interpretation.id, taskIds: tasks.map((task) => task.id), droppedRequirementRefs: dropped },
+      classificationEventId,
     );
     return {
       tasks,
@@ -234,10 +256,11 @@ export class SupervisorCouncil {
     opinions: RoleOpinion[],
     causedBy: string[],
     extra: Record<string, unknown>,
+    eventId?: string,
   ): CouncilDecision {
     const rationale = opinions.map((opinion) => `${opinion.role}: ${opinion.rationale}`).join(" | ");
     const event: NewEvent = {
-      id: id("evt", this.now()),
+      id: eventId ?? id("evt", this.now()),
       runId,
       ts: this.now(),
       type: "supervisor.decision",
@@ -338,6 +361,68 @@ function taskProposals(raw: unknown, interpretation: MissionInterpretation): Tas
     complexity: "normal",
     dependsOn: [],
   }));
+}
+
+function structuredWorkClass(
+  draft: TaskProposal,
+  scopeProposal: unknown,
+  requirementRef: string,
+  plannerEventId: string | undefined,
+  scopeEventId: string | undefined,
+): { workClass?: unknown; classifiedBy?: unknown; sourceRef?: unknown; classificationEventId?: unknown } {
+  const fromScope = scopeStructuredWorkClass(scopeProposal, requirementRef);
+  if (fromScope !== null) {
+    return {
+      workClass: fromScope.workClass,
+      classifiedBy: fromScope.classifiedBy,
+      sourceRef: fromScope.sourceRef,
+      classificationEventId: existingEventId(fromScope.classificationEventId, scopeEventId),
+    };
+  }
+  if (draft.workClass === undefined && draft.classifiedBy === undefined && draft.sourceRef === undefined) {
+    return {};
+  }
+  return {
+    workClass: draft.workClass,
+    classifiedBy: draft.classifiedBy,
+    sourceRef: draft.sourceRef,
+    classificationEventId: existingEventId(draft.classificationEventId, plannerEventId),
+  };
+}
+
+function scopeStructuredWorkClass(
+  scopeProposal: unknown,
+  requirementRef: string,
+): { workClass?: unknown; classifiedBy?: unknown; sourceRef?: unknown; classificationEventId?: unknown } | null {
+  const classifications = extractProposal(scopeProposal, "classifications");
+  if (Array.isArray(classifications)) {
+    const match = classifications.filter(isRecord).find((item) => item["requirementRef"] === requirementRef && item["workClass"] !== undefined);
+    if (match !== undefined) {
+      return {
+        workClass: match["workClass"],
+        classifiedBy: match["classifiedBy"],
+        sourceRef: match["sourceRef"],
+        classificationEventId: match["classificationEventId"],
+      };
+    }
+  }
+  const workClasses = extractProposal(scopeProposal, "workClasses");
+  if (isRecord(workClasses)) {
+    const match = workClasses[requirementRef];
+    if (isRecord(match) && match["workClass"] !== undefined) {
+      return {
+        workClass: match["workClass"],
+        classifiedBy: match["classifiedBy"],
+        sourceRef: match["sourceRef"],
+        classificationEventId: match["classificationEventId"],
+      };
+    }
+  }
+  return null;
+}
+
+function existingEventId(candidate: unknown, fallback: string | undefined): string | undefined {
+  return typeof candidate === "string" && candidate === fallback ? candidate : fallback;
 }
 
 function applyScopeFilter(

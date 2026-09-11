@@ -183,7 +183,7 @@ minQualityForRotation = 0
 [convergence]
 requiredCleanRounds = 1
 maxInvestigationRoundsPerFinding = 0
-noProgressAttempts = 1
+noProgressAttempts = 2
 
 [retry]
 maxAttempts = 5

@@ -5,6 +5,7 @@ import type {
   PairwiseContext,
   PairwiseVerdict,
   TournamentCandidate,
+  VerifierClientKind,
   VerifierStrategy,
 } from "./strategy.js";
 
@@ -42,7 +43,7 @@ export interface TournamentSourceCandidate extends VerifiableCandidate {
   status: string;
 }
 
-export type TournamentSelectionMethod = "none" | "deterministic" | "pairwise";
+export type TournamentSelectionMethod = "none" | "deterministic" | "pairwise" | "ppt";
 
 export interface TournamentSelection {
   winnerId: string | null;
@@ -50,6 +51,12 @@ export interface TournamentSelection {
   evidence: MatchEvidence[];
   method: TournamentSelectionMethod;
   frontier: string[];
+  backend?: "sidecar" | "ts";
+  fallback?: boolean;
+  logprobScheme?: "direct" | "two_stage";
+  criteria?: string[];
+  nComparisons?: number;
+  client?: VerifierClientKind;
 }
 
 /** Candidates that passed independent gates and are not dominated on the evidence vector. */
@@ -74,7 +81,12 @@ export function deterministicFrontier(
  * non-dominated survivors remain.
  */
 export async function selectTournamentWinner(
-  input: RunTournamentInput & { pivotFrom?: number },
+  input: RunTournamentInput & {
+    pivotFrom?: number;
+    pivots?: number;
+    repeats?: number;
+    granularity?: number;
+  },
 ): Promise<TournamentSelection> {
   const eligible = filterEligible(input.candidates);
   if (eligible.length === 0) {
@@ -107,6 +119,53 @@ export async function selectTournamentWinner(
     };
   }
 
+  if (input.strategy.selectFrontier !== undefined) {
+    const tournamentCandidates = frontier.map((candidate) => toTournamentCandidate(candidate, input.baseline));
+    const frontierOptions: {
+      pivots: number;
+      repeats?: number;
+      granularity?: number;
+    } = { pivots: input.pivots ?? 2 };
+    if (input.repeats !== undefined) frontierOptions.repeats = input.repeats;
+    if (input.granularity !== undefined) frontierOptions.granularity = input.granularity;
+    const selection = await input.strategy.selectFrontier(tournamentCandidates, input.context, frontierOptions);
+    const byId = new Map(frontier.map((candidate) => [candidate.id, candidate]));
+    const ordered = selection.ranking
+      .map((id) => byId.get(id))
+      .filter((candidate): candidate is TournamentSourceCandidate => candidate !== undefined);
+    const ranking: RankedCandidate[] = ordered.map((candidate, index) => ({
+      candidate,
+      metrics: candidateMetrics(candidate, input.baseline),
+      points: selection.scores[candidate.id] ?? 0,
+      wins: 0,
+      ties: 0,
+      losses: 0,
+      rank: index + 1,
+    }));
+    const evidence: MatchEvidence[] = [{
+      a: ordered[0]?.id ?? "ppt",
+      b: ordered[1]?.id ?? ordered[0]?.id ?? "ppt",
+      verdict: {
+        winner: selection.winnerId,
+        rationale: selection.rationale,
+        scores: selection.scores,
+      },
+    }];
+    return {
+      winnerId: selection.winnerId,
+      ranking,
+      evidence,
+      method: selection.method === "ppt" ? "ppt" : "pairwise",
+      frontier: frontierIds,
+      backend: "sidecar",
+      fallback: selection.fallback,
+      criteria: selection.criteria,
+      nComparisons: selection.nComparisons,
+      client: selection.client,
+      ...(selection.logprobScheme === undefined ? {} : { logprobScheme: selection.logprobScheme }),
+    };
+  }
+
   const format = frontier.length >= (input.pivotFrom ?? 4) ? "swiss" : "round-robin";
   const result = await runTournament({ ...input, candidates: frontier, format });
   return {
@@ -115,6 +174,9 @@ export async function selectTournamentWinner(
     evidence: result.evidence,
     method: "pairwise",
     frontier: frontierIds,
+    backend: "ts",
+    fallback: false,
+    client: "none",
   };
 }
 

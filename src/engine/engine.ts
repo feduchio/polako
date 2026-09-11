@@ -18,6 +18,11 @@ import type { Clock } from "../shared/clock.js";
 import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import type { Store } from "../store/index.js";
+import {
+  appendDueBudgetEvaluationBoundaries,
+  enqueueBudgetDeadlineJob,
+  registerBudgetEvaluateHandler,
+} from "../convergence/pathology/deadline.js";
 import { installStubDrivers } from "./stubs.js";
 import type { EngineOptions, PhaseDriver } from "./types.js";
 
@@ -38,6 +43,7 @@ export class RunEngine {
   private readonly clock: Clock;
   private readonly scheduler: Scheduler;
   private readonly config: EngineOptions["config"];
+  private readonly resolveRunConfig: (run: Run) => EngineOptions["config"];
   private readonly assertProjectClean: (projectPath: string, policy?: RepositoryStartPolicy) => void;
   private readonly drivers = new Map<RunPhase, PhaseDriver>();
   private readonly driving = new Set<string>();
@@ -47,7 +53,9 @@ export class RunEngine {
     this.clock = options.clock;
     this.scheduler = options.scheduler;
     this.config = options.config;
+    this.resolveRunConfig = options.resolveRunConfig ?? (() => this.config);
     this.assertProjectClean = options.assertProjectClean ?? assertRepositoryClean;
+    registerBudgetEvaluateHandler(this.scheduler, this.store);
     if (installStubs) {
       installStubDrivers((phase, driver) => {
         this.registerPhase(phase, driver);
@@ -91,6 +99,7 @@ export class RunEngine {
       terminalReason: null,
     };
     this.append(run.id, "run.created", { run }, SYSTEM_ACTOR);
+    enqueueBudgetDeadlineJob({ scheduler: this.scheduler, store: this.store, run, config: this.config });
     return run;
   }
 
@@ -133,6 +142,7 @@ export class RunEngine {
   /** Reclaim orphaned scheduler jobs; active runs continue from projections on the next tick. */
   recover(): void {
     this.scheduler.recover();
+    appendDueBudgetEvaluationBoundaries({ store: this.store, clock: this.clock, config: this.config });
   }
 
   /**
@@ -191,7 +201,7 @@ export class RunEngine {
         store: this.store,
         scheduler: this.scheduler,
         clock: this.clock,
-        config: this.config,
+        config: this.resolveRunConfig(run),
       });
     } catch (err) {
       const phase = this.requireRun(runId).phase;
@@ -210,17 +220,23 @@ export class RunEngine {
     this.scheduler.tick();
     if (result.status === "waiting") return;
     // Persist the advance immediately (event-sourced); leftover jobs may still finish.
-    this.applyPhaseAdvance(runId, result.nextPhase);
+    this.applyPhaseAdvance(runId, result.nextPhase, result.terminalReason);
   }
 
-  private applyPhaseAdvance(runId: string, nextPhase: RunPhase): void {
+  private applyPhaseAdvance(runId: string, nextPhase: RunPhase, terminalReason?: TerminalReason): void {
     const run = this.requireRun(runId);
     if (isTerminal(RUN_CONTROL_TABLE, run.control) || run.control !== "RUNNING") return;
     if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
-    const next = transitionPhase(run, nextPhase, this.clock.now());
+    const next = {
+      ...transitionPhase(run, nextPhase, this.clock.now()),
+      ...(terminalReason === undefined ? {} : { terminalReason }),
+    };
     this.append(runId, "run.phase_changed", { run: next }, SYSTEM_ACTOR);
     if (nextPhase === "DONE") {
       this.terminate(next, { code: "converged", summary: "required clean rounds reached" });
+    }
+    if (nextPhase === "FAILED" && terminalReason !== undefined) {
+      this.terminate(next, terminalReason);
     }
   }
 

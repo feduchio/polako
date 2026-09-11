@@ -11,8 +11,13 @@ import { MissionAcceptanceService, openStore } from "../store/index.js";
 import { discoverProjectRuntime } from "./projectDiscovery.js";
 import { discoverRuntimeValidator } from "./discovery.js";
 import { FixtureRuntimeValidator } from "./fixtureRunner.js";
-import { rerunRuntimeScenarios, templatesFromCorpus } from "./corpus.js";
-import { RuntimeUnavailableError, type RuntimeScenario } from "./types.js";
+import {
+  resolveProductionRuntimeTemplates,
+  rerunRuntimeScenarios,
+  templatesFromCorpus,
+  templatesFromDiscoveredPayload,
+} from "./corpus.js";
+import { RuntimeUnavailableError, type DiscoveredRuntimeTemplate, type RuntimeScenario } from "./types.js";
 
 const HASH_A = "a".repeat(40);
 const HASH_B = "b".repeat(40);
@@ -294,5 +299,66 @@ describe("runtime validation v1", () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe("production runtime template precedence", () => {
+  function template(id: string): DiscoveredRuntimeTemplate {
+    return { id, kind: "node_script", relativeScript: `runtime/${id}.mjs`, sideEffectPolicy: "safe" };
+  }
+
+  it("keeps only well-formed entries from a project.discovered payload", () => {
+    const parsed = templatesFromDiscoveredPayload({
+      runtimeTemplates: [
+        { id: "ok", kind: "node_script", relativeScript: "runtime/ok.mjs", sideEffectPolicy: "safe" },
+        { id: "wrong-kind", kind: "http_smoke", relativeScript: "runtime/x.mjs", sideEffectPolicy: "safe" },
+        { id: "no-script", kind: "node_script", sideEffectPolicy: "safe" },
+        null,
+      ],
+    });
+    expect(parsed.map((entry) => entry.id)).toEqual(["ok"]);
+    expect(templatesFromDiscoveredPayload(null)).toEqual([]);
+    expect(templatesFromDiscoveredPayload({ runtimeTemplates: "nope" })).toEqual([]);
+  });
+
+  it("prefers checkout discovery over run-start discovery", () => {
+    const resolved = resolveProductionRuntimeTemplates({
+      checkoutTemplates: [template("checkout")],
+      discoveredTemplates: [template("discovered")],
+      corpusTemplates: [template("corpus")],
+    });
+    expect(resolved.map((entry) => entry.id)).toEqual(["checkout", "corpus"]);
+  });
+
+  it("falls back to run-start discovery when the checkout has no runtime scenarios", () => {
+    const resolved = resolveProductionRuntimeTemplates({
+      checkoutTemplates: [],
+      discoveredTemplates: [template("discovered")],
+      corpusTemplates: [template("corpus")],
+    });
+    expect(resolved.map((entry) => entry.id)).toEqual(["discovered", "corpus"]);
+  });
+
+  it("uses corpus alone only when neither discovery source has templates", () => {
+    expect(
+      resolveProductionRuntimeTemplates({
+        checkoutTemplates: [],
+        discoveredTemplates: [],
+        corpusTemplates: [template("corpus")],
+      }).map((entry) => entry.id),
+    ).toEqual(["corpus"]);
+    expect(
+      resolveProductionRuntimeTemplates({ checkoutTemplates: [], discoveredTemplates: [] }),
+    ).toEqual([]);
+  });
+
+  it("does not duplicate a corpus template that repeats a discovered script", () => {
+    const resolved = resolveProductionRuntimeTemplates({
+      checkoutTemplates: [template("check")],
+      discoveredTemplates: [],
+      corpusTemplates: [{ ...template("check"), id: "corpus-alias" }],
+    });
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.id).toBe("check");
   });
 });

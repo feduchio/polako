@@ -22,6 +22,7 @@ import {
   createInvestigationTask,
   createTaskFromRequirement,
   createTaskFromValidFinding,
+  resolveWorkClassProvenance,
   type TaskDraft,
 } from "./task.js";
 
@@ -127,6 +128,48 @@ describe("task origin invariant", () => {
     expect(TaskStrictSchema.safeParse({ ...t, kind: "bugfix" }).success).toBe(false);
     const req = createTaskFromRequirement(id("mint"), "R1", draft("feature"));
     expect(TaskStrictSchema.safeParse({ ...req, kind: "investigation" }).success).toBe(false);
+  });
+
+  it("style_only requires structured provenance on legal simplify/refactor work; investigation fails safe", () => {
+    const eventId = id("evt");
+    const style = createTaskFromRequirement(id("mint"), "R1", {
+      ...draft("simplify"),
+      workClass: "style_only",
+      classifiedBy: "planner",
+      sourceRef: "R1",
+      classificationEventId: eventId,
+    });
+    expect(style.workClass).toBe("style_only");
+    expect(style.sourceRef).toBe("R1");
+
+    const keyword = createTaskFromRequirement(id("mint"), "R1", {
+      ...draft("simplify"),
+      title: "style_only simplify comments",
+      description: "style_only refactor",
+    });
+    expect(keyword.workClass).toBeUndefined();
+
+    const investigation = createInvestigationTask(finding({ status: "UNCERTAIN" }), 2, {
+      ...draft(),
+      workClass: "style_only",
+      classifiedBy: "planner",
+      sourceRef: finding().id,
+      classificationEventId: eventId,
+    });
+    expect(investigation.workClass).toBe("functional");
+    expect(investigation.classifiedBy).toBeUndefined();
+
+    expect(
+      resolveWorkClassProvenance({
+        kind: "feature",
+        originKind: "mission_requirement",
+        originRef: "R1",
+        workClass: "style_only",
+        classifiedBy: "planner",
+        sourceRef: "R1",
+        classificationEventId: eventId,
+      }),
+    ).toEqual({ workClass: "functional" });
   });
 
   it("a VALID validation without evidence artifacts is invalid and cannot create a task", () => {

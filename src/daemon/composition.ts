@@ -1,18 +1,23 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { AgentRunner } from "../agents/runner.js";
+import {
+  createAuditionStrategyFromConfig,
+  ModelAuditioner,
+} from "../broker/audition.js";
 import { ModelBroker } from "../broker/broker.js";
 import { probeModelCapabilities } from "../broker/capabilityProbe.js";
 import { ModelCatalog } from "../broker/catalog.js";
-import { costEligibilityFromConfig } from "../broker/costEligibility.js";
-import { DEFAULT_ROUTER_POLICY, ModelRouter } from "../broker/router.js";
+import { costEligibilityFromConfig, isCostEligible } from "../broker/costEligibility.js";
+import { ModelObservationRepository } from "../broker/observations.js";
+import { DEFAULT_ROUTER_POLICY, ModelRouter, type Ranked } from "../broker/router.js";
+import type { EnsembleOption } from "../convergence/tracker.js";
 import { BudgetTracker, QuotaTracker } from "../broker/quota.js";
 import { SecretStore } from "../broker/secrets.js";
 import type { ProviderAdapter } from "../broker/types.js";
 import { createResilientCouncilClient } from "../council/fallback.js";
 import { createStructuredCouncilClient } from "../council/structuredOutput.js";
 import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } from "../council/types.js";
-import type { RuntimeEvidence } from "../domain/acceptance.js";
 import type { PolishConfig } from "../domain/config.js";
 import { supervisorModelChain } from "../domain/config.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
@@ -32,8 +37,10 @@ import {
   createReviewingDriver,
   recentlyRateLimitedReviewModels,
   createValidatingDriver,
+  type DebateCompletionRequest,
   type RunEngine,
 } from "../engine/index.js";
+import { threeDistinctDebateRoles, type DebateRoles } from "../findings/index.js";
 import type { PhaseContext, PhaseDriver } from "../engine/types.js";
 import { createProviderFromConfig } from "../providers/factory.js";
 import type { ReviewProvider } from "../review/swarm.js";
@@ -46,7 +53,6 @@ import {
 } from "../project/index.js";
 import type { FinalReportInput } from "../report/reports.js";
 import {
-  discoverRuntimeValidator,
   discoverProjectRuntime,
   FixtureRuntimeValidator,
   type RuntimeCapabilityMode,
@@ -56,7 +62,7 @@ import { WorktreeSandbox, type Sandbox } from "../sandbox/worktree.js";
 import type { Clock } from "../shared/clock.js";
 import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
-import { MissionAcceptanceService, type Store } from "../store/index.js";
+import type { Store } from "../store/index.js";
 import type { FacadeRunMetadata } from "./types.js";
 import { parseModelRefString } from "./configLoad.js";
 
@@ -92,6 +98,8 @@ export interface ProductionDeps {
   router: ModelRouter;
   providers: ProviderAdapter[];
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
+  /** A run's own `--budget-tokens` / `--budget-usd`, empty when it has none. */
+  resolveRunBudget?: (runId: string) => RunBudgetLimits;
 }
 
 export interface BuildProductionDepsOptions {
@@ -101,6 +109,12 @@ export interface BuildProductionDepsOptions {
   home: string;
   providers?: ProviderAdapter[];
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
+  resolveRunBudget?: (runId: string) => RunBudgetLimits;
+}
+
+/** True when a run carries neither budget flag, so it uses the daemon-wide limits. */
+export function hasNoRunBudget(limits: RunBudgetLimits): boolean {
+  return limits.budgetTokens === undefined && limits.budgetUsd === undefined;
 }
 
 /** Merge CLI/daemon per-run budget overrides into engine config. */
@@ -125,13 +139,23 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
   const catalog = new ModelCatalog();
   const providers = options.providers ?? loadConfiguredProviders(options.config, secrets, options.home);
   for (const provider of providers) catalog.register(provider);
+  const observations = new ModelObservationRepository(options.store, {
+    minScoresForRouting: options.config.audition.minScoresForRouting,
+  });
   const broker = new ModelBroker({
     store: options.store,
     clock: options.clock,
     catalog,
     quota: new QuotaTracker(options.clock, { concurrency: options.config.lanes["llm.default"], rpm: null }),
-    budget: new BudgetTracker(options.config.budget),
+    // One resolution of a run's overrides feeds both enforcement surfaces: the tracker here
+    // and C2's view through `ctx.config`, which `DaemonService.runConfig` derives the same way.
+    budget: new BudgetTracker(options.config.budget, (runId) => {
+      const overrides = options.resolveRunBudget?.(runId) ?? {};
+      if (hasNoRunBudget(overrides)) return null;
+      return applyRunBudgetOverrides(options.config, overrides).budget;
+    }),
     secrets,
+    observations,
   });
   const sandbox = options.resolveSandbox ?? ((ctx) => new WorktreeSandbox(
     ctx.run.projectPath,
@@ -145,6 +169,7 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     home: options.home,
     catalog,
     broker,
+    ...(options.resolveRunBudget === undefined ? {} : { resolveRunBudget: options.resolveRunBudget }),
     router: new ModelRouter(catalog, {
       ...DEFAULT_ROUTER_POLICY,
       costEligibility: costEligibilityFromConfig(options.config.routing),
@@ -152,57 +177,6 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     providers,
     resolveSandbox: sandbox,
   };
-}
-
-/**
- * Resolve and optionally execute a project runtime scenario under the requested mode.
- * `required` fails closed when no validator is available.
- */
-export async function resolveRuntimeEvidence(input: {
-  projectPath: string;
-  runId: string;
-  mode: RuntimeCapabilityMode;
-  missionId: string;
-  store: Store;
-  clock: Clock;
-}): Promise<{ selectionReason: string; evidence: RuntimeEvidence | null }> {
-  const discovery = discoverProjectRuntime(input.projectPath);
-  if (discovery.templates.length === 0) {
-    if (input.mode === "required") {
-      throw new PolishError(
-        "CONFIG_ERROR",
-        "runtime=required but no project runtime scenario was found under runtime/",
-        { projectPath: input.projectPath },
-      );
-    }
-    return { selectionReason: discovery.reason, evidence: null };
-  }
-
-  const template = discovery.templates[0];
-  if (template === undefined) {
-    return { selectionReason: discovery.reason, evidence: null };
-  }
-  const scenario = {
-    id: template.id,
-    runId: input.runId,
-    kind: template.kind,
-    fixtureRoot: resolve(input.projectPath),
-    script: template.relativeScript,
-    checkpointHash: "0".repeat(40),
-  };
-  const selection = await discoverRuntimeValidator(input.mode, scenario, [new FixtureRuntimeValidator()]);
-  if (selection.validator === null) {
-    return { selectionReason: selection.reason, evidence: null };
-  }
-  const evidence = await selection.validator.validate(scenario);
-  const corpus = new MissionAcceptanceService(input.store, input.clock);
-  corpus.recordRuntimeEvidence({
-    missionId: input.missionId,
-    requirementRef: "runtime.required_scenario",
-    evidence,
-    summary: evidence.summary,
-  });
-  return { selectionReason: selection.reason, evidence };
 }
 
 /** Production DISCOVERING_PROJECT: manifest profile + runtime capability recording. */
@@ -356,13 +330,66 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
   engine.registerPhase("GATING", createGatingDriver(candidateOptions));
   engine.registerPhase("COMPARING", createComparingDriver());
   engine.registerPhase("INTEGRATING", createIntegratingDriver(candidateOptions));
-  engine.registerPhase("REVIEWING", createReviewingDriver({ resolveReviewers: (ctx) => selectReviewProviders(deps, ctx) }));
-  engine.registerPhase("VALIDATING", withReadyPromotion(createValidatingDriver()));
+  const sandboxFor = (ctx: PhaseContext) => resolveSandbox(deps, ctx);
+  engine.registerPhase(
+    "REVIEWING",
+    createReviewingDriver({
+      resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
+      sandbox: sandboxFor,
+    }),
+  );
+  engine.registerPhase(
+    "VALIDATING",
+    withReadyPromotion(
+      createValidatingDriver({
+        resolveDebateRoles: (ctx) => selectDebateRoles(deps, ctx),
+        completeDebate: async (ctx, request) => completeDebateRole(deps, ctx, request),
+        sandbox: sandboxFor,
+      }),
+    ),
+  );
   engine.registerPhase("SIMPLIFYING", createSimplifyingDriver());
-  engine.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver());
+  engine.registerPhase(
+    "CONVERGENCE_CHECK",
+    createConvergenceDriver({
+      resolveEnsembleAlternatives: (ctx) => resolveEnsembleAlternatives(deps, ctx),
+      resolveCliBudget: (ctx) => deps.resolveRunBudget?.(ctx.run.id),
+    }),
+  );
 }
 
-function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
+function expectedReviewerQuality(row: Ranked): number {
+  return row.entry.stats.quality ?? DEFAULT_ROUTER_POLICY.priorByTier[row.entry.info.capabilities.tier];
+}
+
+/**
+ * Distinct cost/quality-eligible review ensembles from the same catalog/router REVIEWING uses.
+ * Fewer than two ensembles fail closed so CHANGE_ENSEMBLE becomes NEEDS_HUMAN.
+ */
+export function resolveEnsembleAlternatives(deps: ProductionDeps, ctx?: PhaseContext): EnsembleOption[] {
+  const size = deps.config.review.reviewersPerRound;
+  const minQuality = deps.config.review.minQualityForRotation;
+  const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
+  const ranked = deps.router.select({
+    role: "reviewer",
+    count: Math.max(size * 2, 8),
+    requireJson: true,
+    ...(exclude.length > 0 ? { exclude } : {}),
+  });
+  const eligible = ranked.filter((row) => expectedReviewerQuality(row) >= minQuality);
+  const options: EnsembleOption[] = [];
+  for (let offset = 0; offset + size <= eligible.length; offset += size) {
+    const slice = eligible.slice(offset, offset + size);
+    const qualities = slice.map(expectedReviewerQuality);
+    options.push({
+      ensemble: slice.map((row) => row.entry.info.ref),
+      quality: Math.min(...qualities),
+    });
+  }
+  return options.length >= 2 ? options : [];
+}
+
+export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
   const pinnedModels = deps.config.supervisors.flatMap((entry) =>
     supervisorModelChain(entry).map((value) => parseModelRefString(value)),
   );
@@ -395,9 +422,93 @@ function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDr
       artifacts: [],
     }));
     if (probeEvents.length > 0) ctx.store.events.append(probeEvents);
+    await runConfiguredAudition(deps, ctx);
     const models = deps.catalog.list().map((entry) => entry.info);
     return createDiscoveringModelsDriver(models)(ctx);
   };
+}
+
+function brokerAuditionTransport(broker: ModelBroker) {
+  return {
+    complete: async (request: Parameters<ModelBroker["complete"]>[0]) => (await broker.complete(request)).response,
+  };
+}
+
+async function runConfiguredAudition(deps: ProductionDeps, ctx: PhaseContext): Promise<void> {
+  const audition = deps.config.audition;
+  const strategy = createAuditionStrategyFromConfig(
+    audition,
+    brokerAuditionTransport(deps.broker),
+    ctx.run.id,
+  );
+  if (!audition.enabled || audition.strategy !== "micro-tasks") return;
+  const observations = new ModelObservationRepository(deps.store, {
+    minScoresForRouting: audition.minScoresForRouting,
+  });
+  const policy = costEligibilityFromConfig(deps.config.routing);
+  const models = deps.catalog
+    .list()
+    .filter((entry) => isCostEligible(entry.info.capabilities, policy))
+    .map((entry) => entry.info.ref)
+    .slice(0, audition.maxModels);
+  const tasks = audition.tasks.slice(0, audition.maxTasks).map((task) => ({
+    id: task.id,
+    prompt: task.prompt,
+    ...(task.expected === undefined ? {} : { expected: task.expected }),
+  }));
+  await new ModelAuditioner(observations, () => ctx.clock.now(), { enabled: audition.enabled }).run(
+    models,
+    tasks,
+    strategy,
+  );
+  observations.restoreCatalog(deps.catalog);
+}
+
+/** Three distinct cost-eligible debate models, or null to skip without inventing a verdict. */
+export function selectDebateRoles(deps: ProductionDeps, ctx?: PhaseContext): DebateRoles | null {
+  if (deps.catalog.list().length === 0) return null;
+  const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
+  const ranked = deps.router.select({
+    role: "reviewer",
+    count: 3,
+    requireJson: true,
+    ...(exclude.length > 0 ? { exclude } : {}),
+  });
+  if (ranked.length < 3) return null;
+  const prosecutor = ranked[0]?.entry.info.ref;
+  const defender = ranked[1]?.entry.info.ref;
+  const judge = ranked[2]?.entry.info.ref;
+  if (prosecutor === undefined || defender === undefined || judge === undefined) return null;
+  const roles = { prosecutor, defender, judge };
+  return threeDistinctDebateRoles(roles) ? roles : null;
+}
+
+async function completeDebateRole(
+  deps: ProductionDeps,
+  ctx: PhaseContext,
+  request: DebateCompletionRequest,
+): Promise<string> {
+  const record = await deps.broker.complete({
+    model: request.model,
+    messages: [
+      {
+        role: "system",
+        content:
+          request.role === "judge"
+            ? 'Judge an evidence-bound finding debate. Return JSON only: {"verdict":"VALID|REJECTED|UNCERTAIN","rationale":"non-empty explanation"}.'
+            : `${request.role} in an evidence-bound finding debate. Cite only supplied evidence. Do not invent facts.`,
+      },
+      { role: "user", content: request.prompt },
+    ],
+    responseFormat: request.role === "judge" ? "json" : "text",
+    temperature: 0,
+    metadata: {
+      runId: ctx.run.id,
+      purpose: "finding_debate",
+      role: request.role,
+    },
+  });
+  return record.response.message.content;
 }
 
 /** Router-selected reviewers with exact ModelRef; never listModels()[0]. */

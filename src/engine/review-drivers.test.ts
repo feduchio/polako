@@ -9,12 +9,13 @@ import { assertExecutionCheckpoint, isReviewRoundComplete } from "../domain/revi
 import { ProviderError } from "../broker/types.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import { Git } from "../sandbox/git.js";
+import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
-import { createReviewingDriver } from "./reviewDrivers.js";
+import { createReviewingDriver, type ReviewDriverOptions } from "./reviewDrivers.js";
 import { stubDriverFor } from "./stubs.js";
 
 const cleanup: string[] = [];
@@ -41,9 +42,9 @@ describe("B4 production REVIEWING driver", () => {
     for (const phase of ["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "PLANNING", "EXECUTING", "GATING", "COMPARING", "INTEGRATING", "VALIDATING", "CONVERGENCE_CHECK"] as const) {
       engine.registerPhase(phase, stubDriverFor(phase));
     }
-    engine.registerPhase("REVIEWING", createReviewingDriver({
-      resolveReviewers: () => [{ provider, model: { provider: "reviews", model: "reviewer" } }],
-    }));
+    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, () => [
+      { provider, model: { provider: "reviews", model: "reviewer" } },
+    ])));
   });
 
   afterEach(() => {
@@ -145,12 +146,10 @@ describe("B4 production REVIEWING driver", () => {
       { kind: "reply", content: reviewJson("regression", "b.ts") },
       { kind: "reply", content: reviewJson("adversarial", "c.ts") },
     ]);
-    engine.registerPhase("REVIEWING", createReviewingDriver({
-      resolveReviewers: () => [
-        { provider: fallback, model: { provider: "reviews", model: "reviewer" } },
-        { provider: fallback, model: { provider: "reviews", model: "other" } },
-      ],
-    }));
+    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, () => [
+      { provider: fallback, model: { provider: "reviews", model: "reviewer" } },
+      { provider: fallback, model: { provider: "reviews", model: "other" } },
+    ])));
     const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
     await engine.tickRun(runId);
     const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
@@ -173,12 +172,10 @@ describe("B4 production REVIEWING driver", () => {
       { kind: "reply", content: reviewJson("regression", "b.ts") },
       { kind: "reply", content: reviewJson("adversarial", "c.ts") },
     ]);
-    engine.registerPhase("REVIEWING", createReviewingDriver({
-      resolveReviewers: () => [
-        { provider: fallback, model: { provider: "reviews", model: "lyria" } },
-        { provider: fallback, model: { provider: "reviews", model: "ok" } },
-      ],
-    }));
+    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, () => [
+      { provider: fallback, model: { provider: "reviews", model: "lyria" } },
+      { provider: fallback, model: { provider: "reviews", model: "ok" } },
+    ])));
     const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
     await engine.tickRun(runId);
     const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
@@ -188,6 +185,16 @@ describe("B4 production REVIEWING driver", () => {
     expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
   });
 });
+
+function reviewingOptions(
+  fixture: Fixture,
+  resolveReviewers: NonNullable<ReviewDriverOptions["resolveReviewers"]>,
+): ReviewDriverOptions {
+  return {
+    resolveReviewers,
+    sandbox: () => new WorktreeSandbox(fixture.repoDir, join(fixture.root, "worktrees"), defaultConfig().sandbox),
+  };
+}
 
 interface Fixture {
   root: string;

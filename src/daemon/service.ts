@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { type PolishConfig } from "../domain/config.js";
+import { withRuntimeValidationMode, type PolishConfig } from "../domain/config.js";
 import { createMission } from "../domain/mission.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
@@ -12,6 +12,7 @@ import {
   renderFinalReport,
   renderNeedsHumanReport,
 } from "../report/index.js";
+import type { RuntimeCapabilityMode } from "../runtime/index.js";
 import { Git } from "../sandbox/git.js";
 import { Scheduler } from "../scheduler/index.js";
 import { systemClock, type Clock } from "../shared/clock.js";
@@ -21,7 +22,10 @@ import { openStore, type Store } from "../store/index.js";
 import { applyRunBranch } from "./apply.js";
 import { loadPolishConfig } from "./configLoad.js";
 import {
+  applyRunBudgetOverrides,
   buildProductionDeps,
+  hasNoRunBudget,
+  type RunBudgetLimits,
   installProductionDrivers,
   parseRuntimeMode,
   type ProductionDeps,
@@ -56,6 +60,10 @@ export class DaemonService implements RpcHandler {
   private readonly tickMs: number;
   private readonly config: PolishConfig;
   private readonly productionDeps: ProductionDeps;
+  /** Requested runtime mode per run; facade metadata is the durable source. */
+  private readonly runtimeModes = new Map<string, RuntimeCapabilityMode>();
+  /** Requested budget overrides per run; facade metadata is the durable source. */
+  private readonly runBudgets = new Map<string, RunBudgetLimits>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
 
@@ -79,6 +87,7 @@ export class DaemonService implements RpcHandler {
       clock: this.clock,
       config: this.config,
       home: this.home,
+      resolveRunBudget: (runId) => this.runBudget(runId),
       ...(options.providers === undefined ? {} : { providers: options.providers }),
     });
     this.engine = new RunEngine({
@@ -86,6 +95,7 @@ export class DaemonService implements RpcHandler {
       clock: this.clock,
       scheduler: this.scheduler,
       config: this.config,
+      resolveRunConfig: (run) => this.runConfig(run.id),
     }, false);
     installProductionDrivers(this.engine, this.productionDeps);
     this.engine.recover();
@@ -170,7 +180,6 @@ export class DaemonService implements RpcHandler {
     budgetUsd: number | undefined;
   }): Promise<Run> {
     const runtime = parseRuntimeMode(input.runtime);
-    this.config.runtimeValidation.mode = runtime;
     if (input.budgetTokens !== undefined && (!Number.isInteger(input.budgetTokens) || input.budgetTokens < 1)) {
       throw new PolishError("CONFIG_ERROR", "budgetTokens must be a positive integer");
     }
@@ -187,6 +196,13 @@ export class DaemonService implements RpcHandler {
     if (targetBranch === "") throw new PolishError("CONFLICT", "cannot start a run from detached HEAD");
 
     const run = this.engine.createRun({ projectPath: project.path });
+    // Registered before anything can await: `createRun` makes the run tickable, and a timer
+    // tick or model call landing before `writeMetadata` must still see this run's own settings.
+    this.runtimeModes.set(run.id, runtime);
+    this.runBudgets.set(run.id, {
+      ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+      ...(input.budgetUsd === undefined ? {} : { budgetUsd: input.budgetUsd }),
+    });
     const mission = createMission({
       id: run.missionId,
       projectPath: project.path,
@@ -304,7 +320,7 @@ export class DaemonService implements RpcHandler {
       return;
     }
 
-    const ctx = { run, store: this.store, clock: this.clock, config: this.config };
+    const ctx = { run, store: this.store, clock: this.clock, config: this.runConfig(run.id) };
     if (run.phase === "NEEDS_HUMAN") {
       const reason = run.terminalReason ?? {
         code: "product_decision_required" as const,
@@ -341,12 +357,74 @@ export class DaemonService implements RpcHandler {
     return join(this.home, "projects.json");
   }
 
+  /**
+   * Per-run configuration for `resolveRunConfig`. The requested runtime mode is already
+   * persisted in the run's facade metadata, so a run recovered after a daemon restart
+   * still resolves its own mode instead of whatever the last run asked for.
+   */
+  private runConfig(runId: string): PolishConfig {
+    let config = this.config;
+    const mode = this.runtimeModes.get(runId) ?? this.persistedRuntimeMode(runId);
+    if (mode !== null) {
+      this.runtimeModes.set(runId, mode);
+      config = withRuntimeValidationMode(config, mode);
+    }
+    const budget = this.runBudget(runId);
+    if (!hasNoRunBudget(budget)) config = applyRunBudgetOverrides(config, budget);
+    return config;
+  }
+
+  /** A run's own budget overrides, so C2 and the broker's tracker resolve the same numbers. */
+  private runBudget(runId: string): RunBudgetLimits {
+    const cached = this.runBudgets.get(runId);
+    if (cached !== undefined) return cached;
+    const persisted = this.persistedRunBudget(runId);
+    if (persisted === null) return {};
+    this.runBudgets.set(runId, persisted);
+    return persisted;
+  }
+
+  private persistedRunBudget(runId: string): RunBudgetLimits | null {
+    if (!existsSync(this.metadataPath(runId))) return null;
+    try {
+      const metadata = this.readMetadata(runId);
+      const tokens = DaemonService.budgetOrUndefined(metadata.budgetTokens, true);
+      const usd = DaemonService.budgetOrUndefined(metadata.budgetUsd, false);
+      return {
+        ...(tokens === undefined ? {} : { budgetTokens: tokens }),
+        ...(usd === undefined ? {} : { budgetUsd: usd }),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private persistedRuntimeMode(runId: string): RuntimeCapabilityMode | null {
+    if (!existsSync(this.metadataPath(runId))) return null;
+    try {
+      const runtime = this.readMetadata(runId).runtime;
+      return runtime === undefined ? null : parseRuntimeMode(runtime);
+    } catch {
+      return null;
+    }
+  }
+
   private runDir(runId: string): string {
     return join(this.home, "runs", runId);
   }
 
   private metadataPath(runId: string): string {
     return join(this.runDir(runId), "facade.json");
+  }
+
+  /**
+   * Facade metadata is read back with an unchecked cast, so a corrupt budget must fall back to
+   * the daemon-wide limit. Left as-is it would reach `assertWithin` as a NaN comparison, which
+   * is always false: the run would end up with no cap at all.
+   */
+  private static budgetOrUndefined(value: unknown, integral: boolean): number | undefined {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+    return integral && !Number.isInteger(value) ? undefined : value;
   }
 
   private readMetadata(runId: string): FacadeRunMetadata {

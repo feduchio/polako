@@ -11,7 +11,7 @@ import type { BaselineSnapshot } from "../domain/checks.js";
 import { compareToBaseline } from "../domain/checks.js";
 import type { GateResult } from "../project/checkRunner.js";
 import { createCheckOutputPersister } from "../project/checkRunner.js";
-import { PairwiseJudge } from "../verify/pairwise.js";
+import { createVerifierStrategy, VerifierAdapter } from "../verify/sidecar.js";
 import {
   selectTournamentWinner,
   type TournamentSourceCandidate,
@@ -19,13 +19,22 @@ import {
 import type { VerifierStrategy } from "../verify/strategy.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { discoverRuntimeValidator } from "../runtime/discovery.js";
-import { bindNodeScenario, rerunRuntimeScenarios, templatesFromCorpus } from "../runtime/corpus.js";
-import type { RuntimeValidator } from "../runtime/types.js";
+import { discoverProjectRuntime } from "../runtime/projectDiscovery.js";
+import {
+  bindNodeScenario,
+  resolveProductionRuntimeTemplates,
+  rerunRuntimeScenarios,
+  templatesFromCorpus,
+  templatesFromDiscoveredPayload,
+} from "../runtime/corpus.js";
+import { RuntimeUnavailableError, type RuntimeValidator } from "../runtime/types.js";
+import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { Sandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
 import type { Task } from "../domain/task.js";
+import { incompleteCodingWorkTerminal } from "../convergence/antiFakeDone.js";
 import {
   runCandidatesParallel,
   runGates,
@@ -202,76 +211,110 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
 
     const sources = eligible.map((candidate) => toTournamentSource(candidate, baseline));
     const strategy = await resolveVerifierStrategy(ctx, task, options);
-    const selection = await selectTournamentWinner({
-      candidates: sources,
-      baseline,
-      strategy,
-      context: { runId: ctx.run.id, task: task.description, acceptance: task.acceptance },
-      pivotFrom: ctx.config.verifier.pivotTournamentFrom,
-    });
+    try {
+      return await finishComparing(ctx, task, eligible, sources, baseline, strategy);
+    } finally {
+      strategy.close?.();
+    }
+  };
+}
 
-    const rationaleRef = ctx.store.artifacts.put(
-      JSON.stringify({
-        taskId: task.id,
-        method: selection.method,
-        frontier: selection.frontier,
-        winnerId: selection.winnerId,
-        ranking: selection.ranking.map((entry) => ({
-          candidateId: entry.candidate.id,
-          rank: entry.rank,
-          points: entry.points,
-          metrics: entry.metrics,
-        })),
-        evidence: selection.evidence.map((match) => ({
-          a: match.a,
-          b: match.b,
-          winner: match.verdict.winner,
-          rationale: match.verdict.rationale,
-          scores: match.verdict.scores,
-        })),
-      }, null, 2),
-      "comparison_rationale",
-      `task-${task.id}`,
-      ctx.clock.now(),
-    );
+async function finishComparing(
+  ctx: PhaseContext,
+  task: Task,
+  eligible: Candidate[],
+  sources: TournamentSourceCandidate[],
+  baseline: BaselineSnapshot,
+  strategy: VerifierStrategy,
+): Promise<{ status: "complete"; nextPhase: "INTEGRATING" | "PLANNING" | "NEEDS_HUMAN" | "FAILED" }> {
+  const selection = await selectTournamentWinner({
+    candidates: sources,
+    baseline,
+    strategy,
+    context: { runId: ctx.run.id, task: task.description, acceptance: task.acceptance },
+    pivotFrom: ctx.config.verifier.pivotTournamentFrom,
+    pivots: 2,
+    repeats: ctx.config.verifier.repeats,
+    granularity: ctx.config.verifier.granularity,
+  });
+  const backend = selection.backend ?? (strategy instanceof VerifierAdapter ? "sidecar" : ctx.config.verifier.backend);
+  const fallback = selection.fallback ?? (strategy instanceof VerifierAdapter && strategy.usedFallback);
+  const client = selection.client
+    ?? (strategy instanceof VerifierAdapter ? strategy.lastProvenance.client : "none");
 
-    const comparedEventId = appendComparedEvent(ctx, {
+  const rationaleRef = ctx.store.artifacts.put(
+    JSON.stringify({
       taskId: task.id,
-      winner: selection.winnerId,
       method: selection.method,
-      eligible: eligible.map((candidate) => candidate.id),
+      backend,
+      fallback,
+      client,
+      logprobScheme: selection.logprobScheme ?? null,
+      criteria: selection.criteria ?? [],
+      nComparisons: selection.nComparisons ?? selection.evidence.length,
       frontier: selection.frontier,
-      metrics: Object.fromEntries(selection.ranking.map((entry) => [entry.candidate.id, entry.metrics])),
+      winnerId: selection.winnerId,
+      ranking: selection.ranking.map((entry) => ({
+        candidateId: entry.candidate.id,
+        rank: entry.rank,
+        points: entry.points,
+        metrics: entry.metrics,
+      })),
       evidence: selection.evidence.map((match) => ({
         a: match.a,
         b: match.b,
         winner: match.verdict.winner,
         rationale: match.verdict.rationale,
+        scores: match.verdict.scores,
       })),
-      rationaleRef,
-    });
+    }, null, 2),
+    "comparison_rationale",
+    `task-${task.id}`,
+    ctx.clock.now(),
+  );
 
-    if (selection.winnerId === null) {
-      return handleNoComparisonWinner(ctx, task, comparedEventId);
-    }
+  const comparedEventId = appendComparedEvent(ctx, {
+    taskId: task.id,
+    winner: selection.winnerId,
+    method: selection.method,
+    backend,
+    fallback,
+    client,
+    logprobScheme: selection.logprobScheme ?? null,
+    criteria: selection.criteria ?? [],
+    nComparisons: selection.nComparisons ?? selection.evidence.length,
+    eligible: eligible.map((candidate) => candidate.id),
+    frontier: selection.frontier,
+    metrics: Object.fromEntries(selection.ranking.map((entry) => [entry.candidate.id, entry.metrics])),
+    evidence: selection.evidence.map((match) => ({
+      a: match.a,
+      b: match.b,
+      winner: match.verdict.winner,
+      rationale: match.verdict.rationale,
+    })),
+    rationaleRef,
+  });
 
-    const now = ctx.clock.now();
-    const updated = eligible.map((candidate) => ({
-      ...candidate,
-      state: candidate.id === selection.winnerId ? "WINNER" as const : "LOSER" as const,
-      updatedAt: now,
-    }));
-    appendCandidateEvents(ctx, updated, "candidate.state_changed");
+  if (selection.winnerId === null) {
+    return handleNoComparisonWinner(ctx, task, comparedEventId);
+  }
 
-    const selected: Task = {
-      ...task,
-      state: "SELECTED",
-      selectedCandidateId: selection.winnerId,
-      updatedAt: now,
-    };
-    appendTaskEvent(ctx, selected, [comparedEventId]);
-    return { status: "complete", nextPhase: "INTEGRATING" };
+  const now = ctx.clock.now();
+  const updated = eligible.map((candidate) => ({
+    ...candidate,
+    state: candidate.id === selection.winnerId ? "WINNER" as const : "LOSER" as const,
+    updatedAt: now,
+  }));
+  appendCandidateEvents(ctx, updated, "candidate.state_changed");
+
+  const selected: Task = {
+    ...task,
+    state: "SELECTED",
+    selectedCandidateId: selection.winnerId,
+    updatedAt: now,
   };
+  appendTaskEvent(ctx, selected, [comparedEventId]);
+  return { status: "complete", nextPhase: "INTEGRATING" };
 }
 
 /** Production INTEGRATING driver: serial temporary workspace, gates, checkpoint CAS. */
@@ -324,7 +367,11 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
         updatedAt: ctx.clock.now(),
       });
       const retry = failed.attempts < ctx.config.retry.maxAttempts;
-      return { status: "complete", nextPhase: retry ? "PLANNING" : "FAILED" };
+      if (retry) {
+        patchTask(ctx, { ...failed, state: "READY", updatedAt: ctx.clock.now() });
+        return { status: "complete", nextPhase: "PLANNING" };
+      }
+      return { status: "complete", nextPhase: "FAILED" };
     }
 
     const integratedCommit = result.integratedCommit;
@@ -342,7 +389,11 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       baseCheckpointHash: checkpoint.commitHash,
       updatedAt: ctx.clock.now(),
     });
-    return { status: "complete", nextPhase: "REVIEWING" };
+    const remaining = incompleteCodingWorkTerminal(
+      ctx.store.repos.tasks.listByRun(ctx.run.id),
+      ctx.config.retry.maxAttempts,
+    );
+    return { status: "complete", nextPhase: remaining ?? "REVIEWING" };
   };
 }
 
@@ -437,7 +488,7 @@ async function resolveVerifierStrategy(
   options: ComparingDriverOptions,
 ): Promise<VerifierStrategy> {
   if (options.resolveVerifierStrategy !== undefined) return options.resolveVerifierStrategy(ctx, task);
-  return new PairwiseJudge();
+  return createVerifierStrategy(ctx.config.verifier);
 }
 
 function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult, index: number): Candidate {
@@ -616,9 +667,14 @@ async function validateRuntimeIfNeeded(
   const mode = ctx.config.runtimeValidation.mode;
   if (mode === "off") return true;
   const validators = await resolveValue(options.runtimeValidators ?? [], ctx);
-  if (validators.length === 0) return mode !== "required";
-  const templates = templatesFromCorpus(ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId));
-  if (templates.length === 0) return mode !== "required";
+  const templates = resolveProductionRuntimeTemplates({
+    checkoutTemplates: discoverProjectRuntime(checkoutDir).templates,
+    discoveredTemplates: templatesFromDiscoveredPayload(
+      ctx.store.events.list(ctx.run.id, { types: ["project.discovered"] }).at(-1)?.payload,
+    ),
+    corpusTemplates: templatesFromCorpus(ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId)),
+  });
+  if (validators.length === 0 || templates.length === 0) return mode !== "required";
   const first = templates[0];
   if (first === undefined) return mode !== "required";
   const scenario = bindNodeScenario({
@@ -627,7 +683,15 @@ async function validateRuntimeIfNeeded(
     runId: ctx.run.id,
     checkpointHash: integratedCommit,
   });
-  const selection = await discoverRuntimeValidator(mode, scenario, validators);
+  let selection;
+  try {
+    selection = await discoverRuntimeValidator(mode, scenario, validators);
+  } catch (error) {
+    // Only `required` turns an unusable validator into a clean fail-closed result; any other
+    // throw must keep propagating so integration reports an error rather than advancing.
+    if (mode === "required" && error instanceof RuntimeUnavailableError) return false;
+    throw error;
+  }
   if (selection.validator === null) return mode !== "required";
   const evidences = await rerunRuntimeScenarios({
     templates,
@@ -637,6 +701,15 @@ async function validateRuntimeIfNeeded(
     validator: selection.validator,
     level: ctx.config.runtimeValidation.level,
   });
+  const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
+  for (const evidence of evidences) {
+    corpus.recordRuntimeEvidence({
+      missionId: ctx.run.missionId,
+      requirementRef: `runtime.${evidence.scenarioId}`,
+      evidence,
+      expectedCheckpointHash: integratedCommit,
+    });
+  }
   return evidences.every((evidence) => runtimeAllowsDone(mode, evidence, integratedCommit));
 }
 

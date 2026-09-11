@@ -141,7 +141,7 @@ describe("ModelBroker", () => {
     const fresh = new BudgetTracker({ maxRunUsd: null, maxRunTokens: null, maxTaskTokens: null });
     const fresh2 = new ModelBroker({ store, clock, catalog, quota: new QuotaTracker(clock, { concurrency: 1, rpm: null }), budget: fresh, secrets: SecretStore.fromValues({}) });
     fresh2.restore(runId);
-    expect(fresh.snapshot(runId)).toEqual({ runUsd: 0.2, runTokens: 400, perTask: { task_x: 400 } });
+    expect(fresh.snapshot(runId)).toEqual({ runUsd: 0.2, runTokens: 400, perTask: { task_x: 400 }, unknownCostCalls: [] });
     expect(catalog.get({ provider: "p1", model: "big" })!.stats.quality).toBe(historicalQuality);
   });
 

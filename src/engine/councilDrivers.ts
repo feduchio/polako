@@ -7,9 +7,10 @@ import { id } from "../shared/ids.js";
 import { SupervisorCouncil, type CouncilEventSink, type CouncilRoleConfigs } from "../council/index.js";
 import { emitNeedsHumanReport } from "../report/emit.js";
 import type { TerminalReason } from "../domain/run.js";
+import type { Task } from "../domain/task.js";
 import type { TaskDag } from "../council/types.js";
 import type { IntakeResult } from "../council/types.js";
-import type { PhaseContext, PhaseDriver } from "./types.js";
+import type { PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
 
 export interface CouncilDriverOptions {
   roles: CouncilRoleConfigs | ((ctx: PhaseContext) => CouncilRoleConfigs);
@@ -126,13 +127,19 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
   };
 }
 
-/** Production PLANNING driver: council decomposition and task.created events. */
+/** Production PLANNING driver: first-plan decompose only; re-entry restores and continues. */
 export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver {
   return async (ctx) => {
     const interpretationId = ctx.run.interpretationId;
     if (interpretationId === null) return { status: "waiting" };
     const interpretation = ctx.store.repos.interpretations.get(interpretationId);
     if (interpretation === null) return { status: "waiting" };
+
+    const existing = ctx.store.repos.tasks.listByRun(ctx.run.id);
+    if (existing.length >= 1) {
+      restoreIntegrationFailedForRetry(ctx, existing);
+      return nextPhaseForPlanningReentry(ctx);
+    }
 
     const council = createCouncil(ctx, options);
     let dag: TaskDag;
@@ -161,10 +168,89 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
     }));
     if (taskEvents.length > 0) ctx.store.events.append(taskEvents);
 
-    const codingTasks = dag.tasks.filter((task) => task.touchesProductCode && task.kind !== "investigation");
+    const codingTasks = dag.tasks.filter((task) => isCodingTask(task));
     if (codingTasks.length > 0) return { status: "complete", nextPhase: "EXECUTING" };
     return { status: "complete", nextPhase: "REVIEWING" };
   };
+}
+
+const TERMINAL_TASK_STATES = new Set<Task["state"]>(["INTEGRATED", "REJECTED", "CANCELLED"]);
+
+function isCodingTask(task: Task): boolean {
+  return task.touchesProductCode && task.kind !== "investigation";
+}
+
+function isTerminalTask(task: Task): boolean {
+  return TERMINAL_TASK_STATES.has(task.state);
+}
+
+function planningDependenciesMet(ctx: PhaseContext, task: Task): boolean {
+  if (task.dependsOn.length === 0) return true;
+  return task.dependsOn.every((dependencyId) => ctx.store.repos.tasks.get(dependencyId)?.state === "INTEGRATED");
+}
+
+function isExhaustedCodingTask(task: Task, maxAttempts: number): boolean {
+  return isCodingTask(task) && (
+    task.state === "BLOCKED" ||
+    (task.state === "INTEGRATION_FAILED" && task.attempts >= maxAttempts)
+  );
+}
+
+function restoreIntegrationFailedForRetry(ctx: PhaseContext, tasks: readonly Task[]): void {
+  const maxAttempts = ctx.config.retry.maxAttempts;
+  for (const task of tasks) {
+    if (!isCodingTask(task) || task.state !== "INTEGRATION_FAILED" || task.attempts >= maxAttempts) continue;
+    ctx.store.events.append([{
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "task.state_changed",
+      payload: { task: { ...task, state: "READY", updatedAt: ctx.clock.now() } },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [],
+    }]);
+  }
+}
+
+function nextPhaseForPlanningReentry(ctx: PhaseContext): PhaseDriverResult {
+  const tasks = ctx.store.repos.tasks.listByRun(ctx.run.id);
+  const maxAttempts = ctx.config.retry.maxAttempts;
+  const coding = tasks.filter(isCodingTask);
+  const liveCoding = coding.filter((task) => !isTerminalTask(task) && !isExhaustedCodingTask(task, maxAttempts));
+  const readyNow = liveCoding.some((task) =>
+    task.state === "READY" ||
+    task.state === "RUNNING" ||
+    (task.state === "PENDING" && planningDependenciesMet(ctx, task)),
+  );
+  if (readyNow || liveCoding.length > 0) {
+    return { status: "complete", nextPhase: "EXECUTING" };
+  }
+
+  const pendingInvestigation = tasks.some((task) => task.kind === "investigation" && !isTerminalTask(task));
+  if (pendingInvestigation) {
+    const reason: TerminalReason = {
+      code: "product_decision_required",
+      summary: "Investigation work is pending and is not EXECUTING-schedulable at this base.",
+      question: "Investigation tasks remain open. How should the run proceed?",
+      options: ["Provide investigation evidence", "Stop the run"],
+    };
+    emitNeedsHumanReport(ctx, reason, []);
+    appendRunSnapshot(ctx, { terminalReason: reason });
+    return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+  }
+
+  const exhausted = coding.filter((task) => isExhaustedCodingTask(task, maxAttempts));
+  const findingWork = tasks.filter((task) =>
+    (task.origin.kind === "valid_finding" || task.origin.kind === "investigation") &&
+    !isTerminalTask(task) &&
+    !isExhaustedCodingTask(task, maxAttempts),
+  );
+  if (exhausted.length > 0 && findingWork.length === 0) {
+    if (ctx.run.terminalReason !== null) return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+    return { status: "complete", nextPhase: "FAILED" };
+  }
+  return { status: "complete", nextPhase: "REVIEWING" };
 }
 
 function recordCouncilUnavailable(ctx: PhaseContext, error: unknown): void {

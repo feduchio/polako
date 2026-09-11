@@ -2,13 +2,22 @@ export { candidateMetrics, type CandidateMetrics, type VerifiableCandidate } fro
 export { PairwiseJudge, heuristicVerdict, type PairwiseJudgeOptions } from "./pairwise.js";
 export {
   VerifierAdapter,
+  createVerifierStrategy,
   decomposeCriteria,
+  defaultPython,
+  sidecarScriptPath,
+  type VerifierProvenance,
   type VerifierSidecarOptions,
 } from "./sidecar.js";
 export type {
+  FrontierSelectOptions,
+  FrontierSelection,
+  LogprobScheme,
   PairwiseContext,
   PairwiseVerdict,
   TournamentCandidate,
+  VerifierBackend,
+  VerifierClientKind,
   VerifierStrategy,
 } from "./strategy.js";
 export {

@@ -46,6 +46,8 @@ export const JobSchema = z.object({
   error: z.string().nullable(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
+  /** when set, the scheduler must not dispatch before this persisted instant */
+  dueAt: TimestampSchema.nullable().default(null),
 });
 export type Job = z.infer<typeof JobSchema>;
 

@@ -3,9 +3,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { BaselineSnapshot } from "../domain/checks.js";
+import { defaultConfig } from "../domain/config.js";
+import { createInvestigationTask } from "../domain/task.js";
 import { createMission, missionHash } from "../domain/mission.js";
+import type { Finding } from "../domain/finding.js";
+import { findingFingerprint } from "../domain/finding.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { FakeClock } from "../shared/clock.js";
+import { id } from "../shared/ids.js";
+import { buildPathologySample, detectStyleOnlyGrowth } from "../convergence/pathology/index.js";
 import { aggregateCouncilDecision } from "./judge.js";
 import { SupervisorCouncil } from "./council.js";
 import type { RoleOpinion } from "./types.js";
@@ -116,6 +123,258 @@ describe("SupervisorCouncil", () => {
     const dag = await council.decompose(intake.interpretation);
     expect(dag.tasks).toHaveLength(0);
     expect(dag.decision.decision).toBe("NEEDS_HUMAN");
+  });
+
+  it("persists structured style_only provenance on legal simplify tasks and fails safe otherwise", async () => {
+    const styleProvider = scriptedCouncil(false, {
+      decomposeTasks: [
+        {
+          title: "style_only simplify formatting",
+          description: "style_only refactor of comments",
+          requirementRef: "R1",
+          acceptance: ["Formatting only"],
+          kind: "simplify",
+          workClass: "style_only",
+          classifiedBy: "planner",
+          sourceRef: "R1",
+          dependsOn: [],
+        },
+      ],
+      dropRefs: ["R2"],
+    });
+    const styleCouncil = new SupervisorCouncil({ roles: councilRoles(styleProvider), now: () => 10 });
+    const styleIntake = await styleCouncil.intake(BUGFIX_MISSION, PROFILE, BASELINE);
+    expect(styleIntake.status).toBe("READY");
+    if (styleIntake.status !== "READY") return;
+    const styleDag = await styleCouncil.decompose(styleIntake.interpretation);
+    expect(styleDag.tasks).toHaveLength(1);
+    expect(styleDag.tasks[0]).toMatchObject({
+      kind: "simplify",
+      workClass: "style_only",
+      classifiedBy: "planner",
+      sourceRef: "R1",
+    });
+    expect(styleDag.tasks[0]?.classificationEventId).toEqual(styleDag.decision.events[0]?.id);
+    const plannerPrompt = styleProvider.calls.find((call) => call.metadata.purpose === "council_decompose_planner")?.messages[0]?.content;
+    const scopePrompt = styleProvider.calls.find((call) => call.metadata.purpose === "council_decompose_scope")?.messages[0]?.content;
+    expect(plannerPrompt).toMatch(/workClass/);
+    expect(plannerPrompt).toMatch(/classifiedBy/);
+    expect(plannerPrompt).toMatch(/sourceRef/);
+    expect(scopePrompt).toMatch(/classifications|workClasses/);
+    expect(scopePrompt).toMatch(/workClass/);
+
+    const keywordProvider = scriptedCouncil(false, {
+      decomposeTasks: [
+        {
+          title: "style_only simplify formatting",
+          description: "style_only refactor of comments",
+          requirementRef: "R1",
+          acceptance: ["Formatting only"],
+          kind: "simplify",
+          dependsOn: [],
+        },
+      ],
+      dropRefs: ["R2"],
+    });
+    const keywordCouncil = new SupervisorCouncil({ roles: councilRoles(keywordProvider), now: () => 10 });
+    const keywordIntake = await keywordCouncil.intake(BUGFIX_MISSION, PROFILE, BASELINE);
+    expect(keywordIntake.status).toBe("READY");
+    if (keywordIntake.status !== "READY") return;
+    const keywordDag = await keywordCouncil.decompose(keywordIntake.interpretation);
+    expect(keywordDag.tasks[0]?.workClass).toBe("functional");
+    expect(keywordDag.tasks[0]?.classifiedBy).toBeUndefined();
+  });
+
+  it("structured style_only simplify tasks can fire the growth detector; keyword-only and investigation cannot", async () => {
+    const clock = new FakeClock(1_700_000_000_000);
+    const runId = BASELINE.runId;
+    const priorTask = {
+      id: id("task", clock.now()),
+      runId,
+      title: "existing work",
+      description: "WHAT: prior",
+      kind: "feature" as const,
+      origin: { kind: "mission_requirement" as const, interpretationId: id("mint", clock.now()), requirementRef: "R1" },
+      acceptance: ["done"],
+      complexity: "normal" as const,
+      baseCheckpointHash: BASELINE.commitHash,
+      dependsOn: [] as string[],
+      state: "INTEGRATED" as const,
+      attempts: 0,
+      touchesProductCode: true,
+      selectedCandidateId: null,
+      createdAt: clock.now(),
+      updatedAt: clock.now(),
+      workClass: "functional" as const,
+    };
+    const styleProvider = scriptedCouncil(false, {
+      decomposeTasks: [
+        {
+          title: "style_only simplify formatting",
+          requirementRef: "R1",
+          acceptance: ["Formatting only"],
+          kind: "simplify",
+          workClass: "style_only",
+          classifiedBy: "planner",
+          sourceRef: "R1",
+          dependsOn: [],
+        },
+      ],
+      dropRefs: ["R2"],
+    });
+    const council = new SupervisorCouncil({ roles: councilRoles(styleProvider), now: () => clock.now() });
+    const intake = await council.intake(BUGFIX_MISSION, PROFILE, BASELINE);
+    expect(intake.status).toBe("READY");
+    if (intake.status !== "READY") return;
+    const styleTask = (await council.decompose(intake.interpretation)).tasks[0]!;
+    expect(styleTask.workClass).toBe("style_only");
+
+    const keywordProvider = scriptedCouncil(false, {
+      decomposeTasks: [
+        {
+          title: "style_only simplify formatting",
+          description: "style_only refactor",
+          requirementRef: "R1",
+          acceptance: ["Formatting only"],
+          kind: "simplify",
+          dependsOn: [],
+        },
+      ],
+      dropRefs: ["R2"],
+    });
+    const keywordCouncil = new SupervisorCouncil({ roles: councilRoles(keywordProvider), now: () => clock.now() });
+    const keywordIntake = await keywordCouncil.intake(BUGFIX_MISSION, PROFILE, BASELINE);
+    expect(keywordIntake.status).toBe("READY");
+    if (keywordIntake.status !== "READY") return;
+    const keywordTask = (await keywordCouncil.decompose(keywordIntake.interpretation)).tasks[0]!;
+    expect(keywordTask.workClass).toBe("functional");
+
+    const uncertain: Finding = {
+      id: id("find", clock.now()),
+      runId,
+      checkpointHash: "a".repeat(40),
+      axis: "correctness",
+      reportedBy: { kind: "reviewer", model: { provider: "p", model: "m" } },
+      status: "UNCERTAIN",
+      duplicateOf: null,
+      fingerprint: findingFingerprint({ criterion: "x", claim: "unclear", evidence: [] }),
+      investigationRounds: 0,
+      criterion: "x",
+      severity: "high",
+      blocking: true,
+      claim: "unclear",
+      evidence: [],
+      reproduction: ["x"],
+      createdAt: clock.now(),
+      updatedAt: clock.now(),
+    };
+    const investigation = createInvestigationTask(uncertain, 3, {
+      id: id("task", clock.now() + 1),
+      runId,
+      title: "style_only investigate",
+      description: "style_only investigation",
+      acceptance: ["clarify"],
+      complexity: "normal",
+      baseCheckpointHash: BASELINE.commitHash,
+      now: clock.now(),
+      workClass: "style_only",
+      classifiedBy: "planner",
+      sourceRef: uncertain.id,
+      classificationEventId: id("evt", clock.now()),
+    });
+    expect(investigation.workClass).toBe("functional");
+
+    const detectAdded = (added: typeof styleTask) => {
+      const evidence = {
+        gates: { test: "pass" as const },
+        testsPassed: 1,
+        testsFailed: 0,
+        testsTotal: 1,
+        openValidatedFindings: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+        diffLinesFromBaseline: 1,
+      };
+      const checkpoint = (seq: number, hash: string) => ({
+        id: id("cp", clock.now() + seq),
+        runId,
+        seq,
+        commitHash: hash,
+        parentId: null,
+        source: "integration" as const,
+        taskId: priorTask.id,
+        evidence,
+        createdAt: clock.now() + seq,
+      });
+      const events = [
+        {
+          id: id("evt", clock.now()),
+          runId,
+          ts: clock.now(),
+          schemaVersion: 1 as const,
+          seq: 1,
+          type: "task.created",
+          payload: { task: priorTask },
+          causedBy: [],
+          actor: { kind: "system" as const },
+          artifacts: [],
+        },
+        {
+          id: id("evt", clock.now() + 2),
+          runId,
+          ts: clock.now() + 2,
+          schemaVersion: 1 as const,
+          seq: 2,
+          type: "checkpoint.created",
+          payload: { checkpoint: checkpoint(1, "a".repeat(40)) },
+          causedBy: [],
+          actor: { kind: "system" as const },
+          artifacts: [],
+        },
+        {
+          id: id("evt", clock.now() + 3),
+          runId,
+          ts: clock.now() + 3,
+          schemaVersion: 1 as const,
+          seq: 3,
+          type: "checkpoint.created",
+          payload: { checkpoint: checkpoint(2, "b".repeat(40)) },
+          causedBy: [],
+          actor: { kind: "system" as const },
+          artifacts: [],
+        },
+        {
+          id: id("evt", clock.now() + 4),
+          runId,
+          ts: clock.now() + 4,
+          schemaVersion: 1 as const,
+          seq: 4,
+          type: "task.created",
+          payload: { task: added },
+          causedBy: [],
+          actor: { kind: "system" as const },
+          artifacts: [],
+        },
+        {
+          id: id("evt", clock.now() + 5),
+          runId,
+          ts: clock.now() + 5,
+          schemaVersion: 1 as const,
+          seq: 5,
+          type: "checkpoint.created",
+          payload: { checkpoint: checkpoint(3, "c".repeat(40)) },
+          causedBy: [],
+          actor: { kind: "system" as const },
+          artifacts: [],
+        },
+      ];
+      const samples = events
+        .filter((event) => event.type === "checkpoint.created")
+        .map((boundary) => buildPathologySample({ events, boundary, config: defaultConfig() }));
+      return detectStyleOnlyGrowth(samples, 3);
+    };
+
+    expect(detectAdded(styleTask)).not.toBeNull();
+    expect(detectAdded(keywordTask)).toBeNull();
+    expect(detectAdded(investigation)).toBeNull();
   });
 
   it("does not mutate the raw mission hash during interpretation", async () => {
@@ -230,7 +489,12 @@ function councilRoles(provider: ScriptedProvider) {
 
 function scriptedCouncil(
   blocking: boolean,
-  opts: { dropRefs?: string[]; emptyRequirements?: boolean; decomposeNeedsHuman?: boolean } = {},
+  opts: {
+    dropRefs?: string[];
+    emptyRequirements?: boolean;
+    decomposeNeedsHuman?: boolean;
+    decomposeTasks?: Record<string, unknown>[];
+  } = {},
 ): ScriptedProvider {
   const provider = new ScriptedProvider("council", [
     { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
@@ -268,7 +532,7 @@ function scriptedCouncil(
         rationale: "The DAG covers every requirement.",
         concerns: [],
         proposal: {
-          tasks: [
+          tasks: opts.decomposeTasks ?? [
             { title: "Fix login", requirementRef: "R1", acceptance: ["Login works"], kind: "bugfix", dependsOn: [] },
             { title: "Social login", requirementRef: "R2", acceptance: ["OAuth"], kind: "feature", dependsOn: [] },
           ],

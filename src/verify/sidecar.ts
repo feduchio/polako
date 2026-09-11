@@ -1,19 +1,48 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { PairwiseJudge } from "./pairwise.js";
 import type {
+  FrontierSelectOptions,
+  FrontierSelection,
   PairwiseContext,
   PairwiseVerdict,
   TournamentCandidate,
+  VerifierClientKind,
   VerifierStrategy,
 } from "./strategy.js";
+
+const DEFAULT_SCRIPT = fileURLToPath(new URL("../../sidecars/llm_verifier/main.py", import.meta.url));
+
+const SECRET_ENV = /(_API_KEY$|TOKEN|SECRET|PASSWORD|CREDENTIAL|^AWS_|^GH_|^GITHUB_|^OPENAI|^GEMINI|^GOOGLE|^GROQ|^OPENROUTER|^VERTEX|^ANTHROPIC|^DEEPSEEK)/i;
+
+const SIDECAR_TEST_HOOKS = new Set([
+  "POLISH_VERIFIER_PREFER",
+  "POLISH_VERIFIER_CRASH_FILE",
+  "POLISH_VERIFIER_SLEEP_MS",
+  "POLISH_VERIFIER_FORCE_ERROR",
+  "POLISH_VERIFIER_SCRIPTED_MODE",
+  "POLISH_VERIFIER_ALLOW_LIVE",
+  "POLISH_VERIFIER_CLIENT",
+  "POLISH_VERIFIER_ENV_PROBE",
+]);
+
+const NON_DISCRIMINATING_RATIONALE =
+  "Sidecar returned a non-discriminating PPT result; TypeScript pairwise fallback ranked the frontier.";
 
 export interface VerifierSidecarOptions {
   command?: string;
   scriptPath?: string;
   requestTimeoutMs?: number;
   fallback?: VerifierStrategy;
+  env?: NodeJS.ProcessEnv;
+  repeats?: number;
+  granularity?: number;
+  pivots?: number;
+  configuredCriteria?: string[];
 }
 
 interface PendingRequest {
@@ -22,9 +51,18 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+export interface VerifierProvenance {
+  backend: "sidecar" | "ts";
+  fallback: boolean;
+  client: VerifierClientKind;
+  logprobScheme?: "direct" | "two_stage";
+  criteria: string[];
+  nComparisons: number;
+}
+
 /**
- * JSON-lines verifier transport. A failed request gets one clean restart; if that also
- * fails, comparison falls back to the deterministic TypeScript pairwise judge.
+ * JSON-lines verifier transport over a persistent Python child.
+ * Crash, timeout, protocol error, unhealthy restart, or missing package ⇒ TS fallback.
  */
 export class VerifierAdapter implements VerifierStrategy {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -34,14 +72,34 @@ export class VerifierAdapter implements VerifierStrategy {
   private readonly command: string;
   private readonly scriptPath: string;
   private readonly timeoutMs: number;
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly repeats: number;
+  private readonly granularity: number;
+  private readonly pivots: number;
+  private readonly configuredCriteria: string[];
+  private readonly childCwd: string;
+  usedFallback = false;
+  lastEnvProbe: Record<string, boolean> | null = null;
+  lastProvenance: VerifierProvenance = {
+    backend: "sidecar",
+    fallback: false,
+    client: "none",
+    criteria: [],
+    nComparisons: 0,
+  };
 
   constructor(options: VerifierSidecarOptions = {}) {
-    this.command = options.command ?? "python3";
-    this.scriptPath =
-      options.scriptPath ??
-      fileURLToPath(new URL("../../sidecars/llm_verifier/main.py", import.meta.url));
-    this.timeoutMs = options.requestTimeoutMs ?? 2_000;
+    this.scriptPath = options.scriptPath ?? DEFAULT_SCRIPT;
+    this.command = options.command ?? defaultPython(this.scriptPath);
+    this.timeoutMs = options.requestTimeoutMs ?? 3_000;
     this.fallback = options.fallback ?? new PairwiseJudge();
+    this.env = scrubSidecarEnv(options.env);
+    this.childCwd = emptyVerifierCwd();
+    this.repeats = options.repeats ?? 2;
+    this.granularity = options.granularity ?? 20;
+    this.pivots = options.pivots ?? 2;
+    this.configuredCriteria = options.configuredCriteria ?? [];
+    this.lastProvenance = { ...this.lastProvenance, client: this.clientKind() };
   }
 
   async comparePair(
@@ -49,20 +107,65 @@ export class VerifierAdapter implements VerifierStrategy {
     b: TournamentCandidate,
     context: PairwiseContext,
   ): Promise<PairwiseVerdict> {
+    this.usedFallback = false;
+    const criteria = this.criteriaFor(context);
     const request = {
-      op: "score_pair",
+      op: "compare",
       candidates: [a, b],
       context,
-      criteria: decomposeCriteria(context.task),
+      criteria,
+      n_evaluations: this.repeats,
+      granularity: this.granularity,
+      ...this.protocolClient(),
     };
     try {
-      return parseVerdict(await this.request(request), a.id, b.id);
+      const response = await this.request(request);
+      if (this.isDiscriminatingPair(response, a.id, b.id)) {
+        this.lastProvenance = provenanceFrom(false, responseMeta(response, criteria), criteria, this.clientKind());
+        return parseVerdict(response, a.id, b.id);
+      }
+      return await this.fallbackPair(a, b, context, criteria);
     } catch {
       try {
         await this.restart();
-        return parseVerdict(await this.request(request), a.id, b.id);
+        const response = await this.request(request);
+        if (this.isDiscriminatingPair(response, a.id, b.id)) {
+          this.lastProvenance = provenanceFrom(false, responseMeta(response, criteria), criteria, this.clientKind());
+          return parseVerdict(response, a.id, b.id);
+        }
+        return await this.fallbackPair(a, b, context, criteria);
       } catch {
-        return this.fallback.comparePair(a, b, context);
+        return await this.fallbackPair(a, b, context, criteria);
+      }
+    }
+  }
+
+  async selectFrontier(
+    candidates: readonly TournamentCandidate[],
+    context: PairwiseContext,
+    options: FrontierSelectOptions = {},
+  ): Promise<FrontierSelection> {
+    this.usedFallback = false;
+    const criteria = options.criteria ?? this.criteriaFor(context);
+    const request = {
+      op: "select",
+      candidates: [...candidates],
+      context,
+      criteria,
+      n_evaluations: options.repeats ?? this.repeats,
+      pivots: options.pivots ?? this.pivots,
+      granularity: options.granularity ?? this.granularity,
+      on_error: options.onError ?? "raise",
+      ...this.protocolClient(),
+    };
+    try {
+      return await this.selectionOrFallback(await this.request(request), candidates, context, criteria);
+    } catch {
+      try {
+        await this.restart();
+        return await this.selectionOrFallback(await this.request(request), candidates, context, criteria);
+      } catch {
+        return await this.fallbackFrontier(candidates, context, criteria);
       }
     }
   }
@@ -89,11 +192,191 @@ export class VerifierAdapter implements VerifierStrategy {
     this.stop(new Error("verifier sidecar closed"));
   }
 
+  /** Live sidecar child PID, if this adapter still holds a process. */
+  get childPid(): number | undefined {
+    const pid = this.child?.pid;
+    return pid === undefined || pid <= 0 ? undefined : pid;
+  }
+
+  private criteriaFor(context: PairwiseContext): string[] {
+    return decomposeCriteria(context.task, context.acceptance, this.configuredCriteria);
+  }
+
+  private selectionOrFallback(
+    value: unknown,
+    candidates: readonly TournamentCandidate[],
+    context: PairwiseContext,
+    criteria: string[],
+  ): Promise<FrontierSelection> {
+    const selection = this.selectionFrom(value, candidates, criteria, false);
+    if (this.isDiscriminatingSelection(selection)) return Promise.resolve(selection);
+    return this.fallbackFrontier(candidates, context, criteria, NON_DISCRIMINATING_RATIONALE);
+  }
+
+  private selectionFrom(
+    value: unknown,
+    candidates: readonly TournamentCandidate[],
+    criteria: string[],
+    fallback: boolean,
+  ): FrontierSelection {
+    if (!isRecord(value) || typeof value["rationale"] !== "string" || !isRecord(value["scores"])) {
+      throw new TypeError("invalid verifier sidecar select response");
+    }
+    const ids = new Set(candidates.map((candidate) => candidate.id));
+    const winner = value["winner"];
+    if (winner !== null && (typeof winner !== "string" || !ids.has(winner))) {
+      throw new TypeError("sidecar selected an unknown candidate");
+    }
+    const ranking = Array.isArray(value["ranking"])
+      ? value["ranking"].filter((id): id is string => typeof id === "string" && ids.has(id))
+      : [];
+    const scores: Record<string, number> = {};
+    for (const candidate of candidates) {
+      const score = value["scores"][candidate.id];
+      if (typeof score !== "number" || !Number.isFinite(score)) {
+        throw new TypeError("sidecar scores must be finite numbers");
+      }
+      scores[candidate.id] = score;
+    }
+    const nComparisons = typeof value["n_comparisons"] === "number" ? value["n_comparisons"] : 0;
+    const logprobScheme = value["logprobScheme"] === "two_stage" || value["logprobScheme"] === "direct"
+      ? value["logprobScheme"]
+      : undefined;
+    const resolvedCriteria = Array.isArray(value["criteria"])
+      ? value["criteria"].filter((item): item is string => typeof item === "string")
+      : criteria;
+    const selection: FrontierSelection = {
+      winnerId: typeof winner === "string" ? winner : null,
+      ranking: ranking.length > 0 ? ranking : rankedIds(scores),
+      scores,
+      rationale: value["rationale"],
+      method: "ppt",
+      fallback,
+      criteria: resolvedCriteria,
+      nComparisons,
+      client: this.clientKind(),
+    };
+    if (logprobScheme !== undefined) selection.logprobScheme = logprobScheme;
+    this.lastProvenance = {
+      backend: "sidecar",
+      fallback,
+      client: this.clientKind(),
+      criteria: resolvedCriteria,
+      nComparisons,
+      ...(logprobScheme === undefined ? {} : { logprobScheme }),
+    };
+    return selection;
+  }
+
+  private async fallbackPair(
+    a: TournamentCandidate,
+    b: TournamentCandidate,
+    context: PairwiseContext,
+    criteria: string[],
+  ): Promise<PairwiseVerdict> {
+    this.usedFallback = true;
+    this.lastProvenance = {
+      backend: "sidecar",
+      fallback: true,
+      client: this.clientKind(),
+      criteria,
+      nComparisons: 1,
+    };
+    return this.fallback.comparePair(a, b, context);
+  }
+
+  private async fallbackFrontier(
+    candidates: readonly TournamentCandidate[],
+    context: PairwiseContext,
+    criteria: string[],
+    rationale = "Sidecar unavailable; TypeScript pairwise fallback ranked the frontier.",
+  ): Promise<FrontierSelection> {
+    this.usedFallback = true;
+    const scores: Record<string, number> = Object.fromEntries(candidates.map((candidate) => [candidate.id, 0]));
+    let comparisons = 0;
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const left = candidates[i];
+        const right = candidates[j];
+        if (left === undefined || right === undefined) continue;
+        const verdict = await this.fallback.comparePair(left, right, context);
+        comparisons++;
+        if (verdict.winner === left.id) scores[left.id] = (scores[left.id] ?? 0) + 2;
+        else if (verdict.winner === right.id) scores[right.id] = (scores[right.id] ?? 0) + 2;
+        else {
+          scores[left.id] = (scores[left.id] ?? 0) + 1;
+          scores[right.id] = (scores[right.id] ?? 0) + 1;
+        }
+      }
+    }
+    const ranking = rankedIds(scores);
+    this.lastProvenance = {
+      backend: "sidecar",
+      fallback: true,
+      client: this.clientKind(),
+      criteria,
+      nComparisons: comparisons,
+    };
+    return {
+      winnerId: ranking[0] ?? null,
+      ranking,
+      scores,
+      rationale,
+      method: "pairwise",
+      fallback: true,
+      criteria,
+      nComparisons: comparisons,
+      client: this.clientKind(),
+    };
+  }
+
+  private clientKind(): VerifierClientKind {
+    const configured = this.env["POLISH_VERIFIER_CLIENT"]?.trim();
+    if (configured === "scripted") return "scripted";
+    if (configured !== undefined && configured.length > 0) return "live";
+    if (this.env["POLISH_VERIFIER_ALLOW_LIVE"] === "1") return "live";
+    return "none";
+  }
+
+  private scriptedWithoutPreference(): boolean {
+    return this.clientKind() === "scripted" && (this.env["POLISH_VERIFIER_PREFER"] ?? "").trim() === "";
+  }
+
+  private isDiscriminatingPair(value: unknown, aId: string, bId: string): boolean {
+    if (this.scriptedWithoutPreference()) return false;
+    if (!isRecord(value) || !isRecord(value["scores"])) return false;
+    const aScore = value["scores"][aId];
+    const bScore = value["scores"][bId];
+    if (typeof aScore !== "number" || !Number.isFinite(aScore) || typeof bScore !== "number" || !Number.isFinite(bScore)) {
+      return false;
+    }
+    if (aScore === bScore) return false;
+    return value["winner"] === aId || value["winner"] === bId;
+  }
+
+  private isDiscriminatingSelection(selection: FrontierSelection): boolean {
+    if (this.scriptedWithoutPreference()) return false;
+    const values = Object.values(selection.scores);
+    if (values.length === 0) return false;
+    if (new Set(values).size <= 1) return false;
+    if (selection.winnerId === null) return false;
+    const max = Math.max(...values);
+    const winners = Object.entries(selection.scores)
+      .filter(([, score]) => score === max)
+      .map(([id]) => id);
+    return winners.length === 1 && winners[0] === selection.winnerId;
+  }
+
+  private protocolClient(): { client: "scripted" } | Record<string, never> {
+    return this.env["POLISH_VERIFIER_CLIENT"] === "scripted" ? { client: "scripted" } : {};
+  }
+
   private start(): void {
     if (this.child !== null) return;
     const child = spawn(this.command, [this.scriptPath], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      env: this.env,
+      cwd: this.childCwd,
     });
     this.child = child;
     createInterface({ input: child.stdout }).on("line", (line) => {
@@ -139,6 +422,7 @@ export class VerifierAdapter implements VerifierStrategy {
       if (pending === undefined) return;
       clearTimeout(pending.timer);
       this.pending.delete(response["id"]);
+      this.captureEnvProbe(response);
       if (response["error"] !== undefined) {
         pending.reject(new Error(protocolError(response["error"])));
       } else {
@@ -159,10 +443,23 @@ export class VerifierAdapter implements VerifierStrategy {
     this.pending.clear();
   }
 
+  private captureEnvProbe(response: Record<string, unknown>): void {
+    const probe = response["env_probe"];
+    if (!isRecord(probe)) return;
+    const keys: Record<string, boolean> = {};
+    for (const [key, value] of Object.entries(probe)) {
+      if (typeof value === "boolean") keys[key] = value;
+    }
+    this.lastEnvProbe = keys;
+  }
+
   private stop(error: Error): void {
     const child = this.child;
     this.child = null;
-    if (child !== null && !child.killed) child.kill();
+    if (child !== null) {
+      if (!child.stdin.destroyed) child.stdin.end();
+      if (!child.killed) child.kill();
+    }
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -171,16 +468,59 @@ export class VerifierAdapter implements VerifierStrategy {
   }
 }
 
-export function decomposeCriteria(task: string | undefined): string[] {
-  if (task === undefined || task.trim() === "") {
-    return ["correctness", "regression safety", "simplicity"];
-  }
-  const criteria = task
+export function createVerifierStrategy(
+  verifier: {
+    backend: "ts" | "sidecar";
+    repeats: number;
+    granularity: number;
+    criteria: string[];
+    pivotTournamentFrom: number;
+  },
+  options: VerifierSidecarOptions = {},
+): VerifierStrategy {
+  const fallback = options.fallback ?? new PairwiseJudge();
+  if (verifier.backend === "ts") return fallback;
+  return new VerifierAdapter({
+    ...options,
+    fallback,
+    repeats: options.repeats ?? verifier.repeats,
+    granularity: options.granularity ?? verifier.granularity,
+    configuredCriteria: options.configuredCriteria ?? verifier.criteria,
+    pivots: options.pivots ?? 2,
+  });
+}
+
+export function decomposeCriteria(
+  task: string | undefined,
+  acceptance?: readonly string[],
+  configured?: readonly string[],
+): string[] {
+  const fromTask = splitCriteria(task);
+  const fromAcceptance = (acceptance ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  const merged = [...fromTask, ...fromAcceptance].slice(0, 8);
+  if (merged.length > 0) return merged;
+  const defaults = (configured ?? []).map((item) => item.trim()).filter((item) => item.length > 0).slice(0, 8);
+  return defaults.length > 0 ? defaults : ["correctness", "regression safety", "simplicity"];
+}
+
+export function defaultPython(scriptPath: string): string {
+  const venvPython = join(dirname(scriptPath), ".venv", "bin", "python");
+  return existsSync(venvPython) ? venvPython : "python3";
+}
+
+export function sidecarScriptPath(): string {
+  return DEFAULT_SCRIPT;
+}
+
+function splitCriteria(task: string | undefined): string[] {
+  if (task === undefined || task.trim() === "") return [];
+  return task
     .split(/\n|[.;]\s+/)
     .map((criterion) => criterion.trim())
     .filter((criterion) => criterion.length > 0)
     .slice(0, 8);
-  return criteria.length > 0 ? criteria : ["correctness", "regression safety", "simplicity"];
 }
 
 function parseVerdict(value: unknown, aId: string, bId: string): PairwiseVerdict {
@@ -201,6 +541,77 @@ function parseVerdict(value: unknown, aId: string, bId: string): PairwiseVerdict
     rationale: value["rationale"],
     scores: { [aId]: aScore, [bId]: bScore },
   };
+}
+
+function responseMeta(value: unknown, criteria: string[]): Pick<VerifierProvenance, "logprobScheme" | "nComparisons" | "criteria"> {
+  if (!isRecord(value)) return { criteria, nComparisons: 1 };
+  const logprobScheme = value["logprobScheme"] === "two_stage" || value["logprobScheme"] === "direct"
+    ? value["logprobScheme"]
+    : undefined;
+  const resolved = Array.isArray(value["criteria"])
+    ? value["criteria"].filter((item): item is string => typeof item === "string")
+    : criteria;
+  return {
+    criteria: resolved,
+    nComparisons: typeof value["n_comparisons"] === "number" ? value["n_comparisons"] : 1,
+    ...(logprobScheme === undefined ? {} : { logprobScheme }),
+  };
+}
+
+function provenanceFrom(
+  fallback: boolean,
+  meta: Pick<VerifierProvenance, "logprobScheme" | "nComparisons" | "criteria">,
+  criteria: string[],
+  client: VerifierClientKind,
+): VerifierProvenance {
+  return {
+    backend: "sidecar",
+    fallback,
+    client,
+    criteria: meta.criteria.length > 0 ? meta.criteria : criteria,
+    nComparisons: meta.nComparisons,
+    ...(meta.logprobScheme === undefined ? {} : { logprobScheme: meta.logprobScheme }),
+  };
+}
+
+function rankedIds(scores: Record<string, number>): string[] {
+  return Object.keys(scores).sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0) || a.localeCompare(b));
+}
+
+let emptyVerifierDir: string | undefined;
+
+function emptyVerifierCwd(): string {
+  emptyVerifierDir ??= mkdtempSync(join(tmpdir(), "polish-verifier-cwd-"));
+  return emptyVerifierDir;
+}
+
+function isSecretEnvKey(key: string): boolean {
+  return SECRET_ENV.test(key) || key === "OPENAI_BASE_URL";
+}
+
+function scrubSidecarEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { PYTHONUNBUFFERED: "1" };
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (isSecretEnvKey(key)) continue;
+    if (SIDECAR_TEST_HOOKS.has(key)) continue;
+    env[key] = value;
+  }
+  if (extra !== undefined) {
+    for (const [key, value] of Object.entries(extra)) {
+      if (value === undefined || isSecretEnvKey(key)) continue;
+      env[key] = value;
+    }
+  }
+  return injectDefaultVerifierClient(env);
+}
+
+function injectDefaultVerifierClient(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const configured = env["POLISH_VERIFIER_CLIENT"]?.trim();
+  if (configured !== undefined && configured.length > 0) return env;
+  if (env["POLISH_VERIFIER_ALLOW_LIVE"] === "1") return env;
+  env["POLISH_VERIFIER_CLIENT"] = "scripted";
+  return env;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

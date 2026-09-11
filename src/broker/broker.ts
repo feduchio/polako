@@ -5,6 +5,7 @@ import type { Clock } from "../shared/clock.js";
 import { PolishError, errorToString, isAbortError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import type { ModelCatalog } from "./catalog.js";
+import { foldModelCallUsage, budgetSnapshotFromUsage } from "../convergence/pathology/budget.js";
 import type { BudgetTracker, QuotaTracker } from "./quota.js";
 import type { SecretStore } from "./secrets.js";
 import { ProviderError, type CompletionRequest, type CompletionResponse } from "./types.js";
@@ -114,7 +115,7 @@ export class ModelBroker {
         outcomes.push(outcome);
         catalog.recordCall(tagged.model, outcome);
         this.observations.recordCall(tagged.model, outcome, tagged.metadata.runId);
-        const snapshot = budget.record(tagged.metadata.runId, response.usage, tagged.metadata.taskId);
+        const snapshot = budget.record(tagged.metadata.runId, response.usage, tagged.metadata.taskId, callId);
         const eventId = this.recordEvent(tagged, response, attempt, outcomes, null, snapshot.runUsd, callId);
         return { eventId, response, attempts: attempt, callId };
       } catch (err) {
@@ -274,36 +275,19 @@ export class ModelBroker {
     const { store, budget, catalog } = this.deps;
     // Global observations must be replayed before catalog registration/refresh can safely consume them.
     this.observations.restoreCatalog(catalog);
-    const snapshot = { runUsd: 0, runTokens: 0, perTask: {} as Record<string, number> };
-    for (const e of store.events.list(runId, { types: ["model.call"] })) {
-      const p = e.payload as {
-        model?: { provider: string; model: string };
-        ok?: boolean;
-        usage?: { inputTokens: number; outputTokens: number; costUsd: number | null } | null;
-        latencyMs?: number | null;
-        taskId?: string | null;
-        error?: string | null;
-        attemptOutcomes?: AttemptOutcome[];
-        attempts?: number;
-      };
-      if (p.usage) {
-        const tokens = p.usage.inputTokens + p.usage.outputTokens;
-        snapshot.runTokens += tokens;
-        snapshot.runUsd += p.usage.costUsd ?? 0;
-        if (p.taskId) snapshot.perTask[p.taskId] = (snapshot.perTask[p.taskId] ?? 0) + tokens;
-      }
-    }
-    budget.restore(runId, snapshot);
+    const usage = foldModelCallUsage(store.events.list(runId, { types: ["model.call"] }));
+    budget.restore(runId, budgetSnapshotFromUsage(usage));
   }
 }
 
-function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "verifier" | "evidence_agent" | "scout" | "system" {
+function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "verifier" | "evidence_agent" | "prosecutor" | "defender" | "judge" | "scout" | "system" {
   switch (role) {
     case "supervisor":
     case "planner":
     case "scope_guardian":
-    case "judge":
       return "supervisor";
+    case "judge":
+      return "judge";
     case "worker":
       return "worker";
     case "reviewer":
@@ -312,6 +296,10 @@ function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "
       return "verifier";
     case "evidence":
       return "evidence_agent";
+    case "prosecutor":
+      return "prosecutor";
+    case "defender":
+      return "defender";
     case "scout":
       return "scout";
     default:

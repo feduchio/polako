@@ -4,7 +4,9 @@ export const ProtocolAppliesToSchema = z.enum([
   "worker",
   "reviewer",
   "evidence",
+  "prosecutor",
   "defender",
+  "judge",
   "supervisor",
 ]);
 export type ProtocolAppliesTo = z.infer<typeof ProtocolAppliesToSchema>;

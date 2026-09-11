@@ -48,12 +48,31 @@ export const ConvergenceStrategySchema = z.object({
   requiredCleanRounds: z.number().int().min(1).default(3),
   /** bounded investigation rounds for a single UNCERTAIN finding before NEEDS_HUMAN */
   maxInvestigationRoundsPerFinding: z.number().int().min(0).default(2),
+  /** bounded Prosecutor/Defender/Judge rounds for a single UNCERTAIN finding */
+  maxDebateRounds: z.number().int().min(1).default(2),
   /** consecutive attempts without evidence improvement before strategy change */
-  noProgressAttempts: z.number().int().min(1).default(3),
+  noProgressAttempts: z.number().int().min(2).default(3),
+  /** sliding-window sizes; a detector is silent until its full window exists */
+  findingOscillationWindow: evenWindowSize(4).default(4),
+  checkpointOscillationWindow: evenWindowSize(4).default(4),
+  disagreementWindow: z.number().int().min(2).default(2),
+  taskGrowthWindow: z.number().int().min(2).default(3),
+  /** persisted CHANGE_ENSEMBLE cap per pathology kind */
+  maxEnsembleChangesPerPathology: z.number().int().min(1).default(1),
 });
+export type ConvergenceStrategy = z.infer<typeof ConvergenceStrategySchema>;
+
+/** Oscillation windows must be even so A,B,A,B can fire; odd sizes would stay silent. */
+function evenWindowSize(min: number) {
+  return z
+    .number()
+    .int()
+    .min(min)
+    .refine((value) => value % 2 === 0, { message: `must be an even integer >= ${min}` });
+}
 
 export const VerifierStrategySchema = z.object({
-  backend: z.enum(["ts", "sidecar"]).default("ts"),
+  backend: z.enum(["ts", "sidecar"]).default("sidecar"),
   /** score granularity (letter tokens); default follows LLM-as-a-Verifier findings */
   granularity: z.number().int().min(2).max(26).default(20),
   /** repeated evaluations per pair */
@@ -105,6 +124,30 @@ export const RoutingConfigSchema = z.object({
   maxOutputCostPerM: z.number().nonnegative().default(0),
 });
 export type RoutingConfig = z.infer<typeof RoutingConfigSchema>;
+
+export const AuditionTaskConfigSchema = z.object({
+  id: z.string().min(1),
+  prompt: z.string().min(1),
+  expected: z.string().optional(),
+});
+export type AuditionTaskConfig = z.infer<typeof AuditionTaskConfigSchema>;
+
+/** Small explicit default micro-tasks. Used only when audition is enabled with micro-tasks. */
+export const DEFAULT_AUDITION_TASKS: AuditionTaskConfig[] = [
+  { id: "echo-ok", prompt: "Reply with exactly: ok", expected: "ok" },
+  { id: "add-two", prompt: "Reply with exactly: 2", expected: "2" },
+  { id: "say-yes", prompt: "Reply with exactly: yes", expected: "yes" },
+];
+
+export const AuditionConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  strategy: z.enum(["noop", "micro-tasks"]).default("noop"),
+  minScoresForRouting: z.number().int().min(1).default(3),
+  maxModels: z.number().int().min(1).default(4),
+  maxTasks: z.number().int().min(1).default(4),
+  tasks: z.array(AuditionTaskConfigSchema).default(DEFAULT_AUDITION_TASKS),
+});
+export type AuditionConfig = z.infer<typeof AuditionConfigSchema>;
 
 export const RuntimeValidationConfigSchema = z.object({
   mode: z.enum(["auto", "required", "off"]).default("auto"),
@@ -191,6 +234,7 @@ export const PolishConfigSchema = z.object({
   agent: AgentConfigSchema.prefault({}),
   discovery: DiscoveryConfigSchema.prefault({}),
   routing: RoutingConfigSchema.prefault({}),
+  audition: AuditionConfigSchema.prefault({}),
   retry: RetryPolicySchema.prefault({}),
   candidates: CandidateStrategySchema.prefault({}),
   review: ReviewStrategySchema.prefault({}),
@@ -208,4 +252,17 @@ export type PolishConfig = z.infer<typeof PolishConfigSchema>;
 
 export function defaultConfig(): PolishConfig {
   return PolishConfigSchema.parse({});
+}
+
+/**
+ * Run-scoped view of `base` that differs only in `runtimeValidation.mode`.
+ * Never assigns into `base`: concurrent runs share one loaded config object and a
+ * per-run mode must not leak between them.
+ */
+export function withRuntimeValidationMode(
+  base: PolishConfig,
+  mode: RuntimeValidationConfig["mode"],
+): PolishConfig {
+  if (base.runtimeValidation.mode === mode) return base;
+  return { ...base, runtimeValidation: { ...base.runtimeValidation, mode } };
 }
