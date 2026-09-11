@@ -23,7 +23,8 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | B-selfhost-3 accepted | `fd8a99c402656f7fe3aa6dc02377cc76713ab411` on `task/B-selfhost-3-integration` | Bounded B finding 3 only. |
 | B-selfhost-5 accepted | `916f7f26df1b7490d35289781a4e799d7cd8e7ed` on `task/B-selfhost-5-integration` | Bounded B finding 5 only. |
 | B-selfhost-6 accepted | `df49a5ef75996da5ee17c51b4f66e974d8952fc0` on `task/B-selfhost-6-integration` | Bounded B finding 6 only. |
-| B-selfhost-7 accepted (next HOST) | `1dc1c5cfbb2f92efb2fa8f58f15e92f02a3c80b2` on `task/B-selfhost-7-integration` | Bounded B finding 7 only. Phase B not fully closed. Phase C not accepted. |
+| B-selfhost-7 accepted | `1dc1c5cfbb2f92efb2fa8f58f15e92f02a3c80b2` on `task/B-selfhost-7-integration` | Bounded B finding 7 only. |
+| B-selfhost-8 accepted (next HOST) | `14beb802857fde8a5251404dc518301cb5b1a0a4` on `task/B-selfhost-8-integration` | Bounded B finding 8 only. Phase B not fully closed. Phase C not accepted. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -36,7 +37,7 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open items: **8, 9, 11–15**, plus recorded **16, 17, 21, 22**. Items **3–7** ACCEPTED.
+Open items: **9, 11–15**, plus recorded **16, 17, 21–25**. Items **3–8** ACCEPTED.
 
 Item 10 (`listModels()[0]` reviewer selection) was lifted into `B-bootstrap-cost-eligibility` (ACCEPTED). Full Phase-B self-host closure remains **DEFERRED_BY_USER**.
 
@@ -105,7 +106,7 @@ C4. Contract: `docs/ledger/C4.md`. Provenance: `docs/ledger/C4-run.md`. **Task A
 
 C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Task ACCEPTED** at `311203830720a4d1e917785e577eaf868281bc8a`.
 
-**Pause (user-authorized, full remaining plan):** B-selfhost-3/4/5/6/7 ACCEPTED (`fd8a99c` / `84f2f7e` / `916f7f2` / `df49a5e` / `1dc1c5c`). Next **8 → 9 + 19 → 18 → 11 → 12 → 13, 15 → 14 → 20** per *Prompt-path ordering constraints*, then remaining Fable C. Items 16, 17, 21 and 22 recorded but not scheduled. Do not enter Phase D. Do not tag `phase-c-accepted`.
+**Pause (user-authorized, full remaining plan):** B-selfhost-3/4/5/6/7/8 ACCEPTED (`fd8a99c` / `84f2f7e` / `916f7f2` / `df49a5e` / `1dc1c5c` / `14beb80`). Next **9 + 19 → 18 → 11 → 12 → 13, 15 → 14 → 20** per *Prompt-path ordering constraints*, then remaining Fable C. Items 16, 17 and 21–25 recorded but not scheduled. Finding 25 — the duplicated budget merge — is a production simplification that items 9 and 19 are positioned to take, since all three edit `src/daemon/composition.ts`. Do not enter Phase D. Do not tag `phase-c-accepted`.
 
 Reviewer isolation: from item 8 onward each code reviewer gets its own worktree at the commit under review. Reviewers mutate sources to test assertion strength and restore them with `git checkout --`, so sharing one worktree lets them overwrite each other's probes. See the process note in `docs/ledger/B-selfhost-7-run.md`.
 

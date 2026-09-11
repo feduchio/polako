@@ -1,7 +1,10 @@
 # B-selfhost-8 — run record
 
-**Status:** IMPLEMENTATION COMPLETE — awaiting two consecutive clean rounds. Round 24 is running
-on `164fc45`, one reviewer at a time. **Not accepted.**
+**Status:** TASK ACCEPTED at `14beb80`, after two consecutive clean rounds on the unchanged commit
+under the revised stopping rule in `docs/ledger/PHASE-C.md`. Both reviewers passed both rounds
+with no blocking findings, re-derived the whole MC/AC table independently in the confirming
+round, killed the contract's named cheapest fake, and each stated there is nothing in the
+production code they would refuse to ship.
 
 An earlier revision of this file declared the task ACCEPTED at `d1cd7e9` after rounds 14 and 15.
 That was wrong twice over: it was written while Claude's round 14 was still in flight, and round
@@ -18,7 +21,7 @@ evidence of exhaustion.
 | Exact base | `1dc1c5cfbb2f92efb2fa8f58f15e92f02a3c80b2` (B-selfhost-7, the accepted HOST) |
 | Frozen contract | `docs/ledger/B-selfhost-8.md` at `50a5c65`, sha256 `97beacbe698fae20c0b4c01e04bf441c6604d8f7d33dbb886910cd1ae5cbd8b7` |
 | Candidate branch | `task/B-selfhost-8-candidate-grok` |
-| Head under review | `164fc45` (27 implementation commits since base) |
+| Accepted commit | `14beb802857fde8a5251404dc518301cb5b1a0a4` (28 commits since base) |
 | Lanes | Grok and Claude for review; coordinator implemented |
 
 ## What the defect actually was
@@ -51,7 +54,7 @@ what catch it. Every reviewer since has confirmed that pair fires and that AC6 d
 | --- | --- |
 | `2ef215b` | Per-run limits in the tracker; one resolution feeding broker and C2; `cliBudget` chain closed |
 | `df24e83` | Validated a run's persisted budget on read, so a corrupt value cannot leave a run uncapped |
-| Twenty-five further commits | Test-only, each closing a survivable mutant or an unobserved clause a reviewer named |
+| Twenty-six further commits | Test-only, each closing a survivable mutant or an unobserved clause a reviewer named |
 
 Only two commits changed behaviour. Everything after `df24e83` closed gaps between what the
 implementation did and what the checks could see — the full list is in the review-round section.
@@ -93,12 +96,14 @@ Each reviewer worked in its own worktree. Rounds are on the commit named.
 | 21 | `0d85a92` | **FAIL** | **FAIL** | A fractional USD override never met a finite configured cap, so truncation agreed with itself; and the two dimensions no override may touch were never observed unset |
 | 22 | `73712b4` | **FAIL** | running | C2's copy of the merge was never observed where the configuration set nothing, nor for a run in the default runtime mode |
 | 23 | `a09624e` | **FAIL** | not run | Two recovered runs at C2, an override equal to the configured cap, and C2 exhaustion for an overridden run |
-| 24 | `164fc45` | pending | running | — |
+| 24 | `164fc45` | **FAIL** | **FAIL** | Both, independently: a facade carrying a budget and no `runtime` field skips `runConfig`'s mode branch, and the budget merge sits just past it |
+| 25 | `14beb80` | PASS | PASS | Clean — first clean round under the revised rule |
+| 26 | `14beb80` | PASS | PASS | Clean — accepted, no change between rounds 25 and 26 |
 
 Twenty-two rounds were reopened rather than banked, and rounds 21 and 22 by both reviewers independently. Every reopening met the stopping rule: a
 production behaviour defect, a survivable mutant, or a literal clause no check observed.
 
-**Two commits changed behaviour; twenty-five changed only what the tests could see.** The pattern is
+**Two commits changed behaviour; twenty-six changed only what the tests could see.** The pattern is
 the finding of this task. After round 2 the implementation was correct and stayed correct, and
 every subsequent round closed a gap between what was true and what was demonstrated.
 
@@ -255,6 +260,8 @@ tests, with `--no-cache`:
 | C2 answers every recovered run with the first budget it resolved | two recovered runs sampled, then the first again |
 | An override equal to the configured cap registered as no override | equal override reported as applied |
 | An overridden run never counted as exhausted by C2 | a run exhausted by its own cap only |
+| Budget merge nested inside `runConfig`'s runtime-mode branch | a recovered facade with no `runtime` field |
+| Persisted budget discarded when the facade has no `runtime` | the same check, on both surfaces |
 
 Reviewers independently planted the resolve-and-assign fake the contract names as cheapest; it
 fires AC7 and AC8 every time, and passes AC6, exactly as the frozen contract predicts.
@@ -267,7 +274,7 @@ taken as a weak test.
 ## Gates
 
 `pnpm check` (tsc, eslint, dependency-cruiser, vitest) and `pnpm build` on Node 24.20.0:
-679 tests across 73 files, build clean. Reproduced independently by both reviewers.
+680 tests across 73 files, build clean. Reproduced independently by both reviewers.
 
 `src/verify/sidecar.test.ts` and `src/engine/candidate-comparing.test.ts` seed the same python
 venv and collide on a cold worktree. Environmental; reseeding the venv clears it.
