@@ -371,8 +371,12 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
     expect(metadata["budgetUsd"]).toBe(1);
 
-    for (const budgetUsd of ["lots", 0, -5, null]) {
-      writeFileSync(facade, JSON.stringify({ ...metadata, budgetUsd }));
+    // Written as raw JSON text, because `1e999` overflows to Infinity on parse and cannot be
+    // produced by stringifying a value. For tokens the integer check rejects it; for USD, where
+    // fractions are legal, the finiteness check is the only thing standing between an
+    // overflowing literal and a run with no USD cap at all.
+    for (const literal of ['"lots"', "0", "-5", "null", "1e999"]) {
+      writeFileSync(facade, JSON.stringify({ ...metadata, budgetUsd: "PLACEHOLDER" }).replace('"PLACEHOLDER"', literal));
       const restarted = fixture.restart();
       await callTimes(restarted, corrupt, 8);
       expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ budget: "run_usd", limit: 4 });
@@ -396,6 +400,31 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     const restarted = fixture.restart();
     await callTimes(restarted, mixed, 3);
     expect((await budgetErrorOf(restarted.call(mixed))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
+    await restarted.service.close();
+    services.splice(services.indexOf(restarted.service), 1);
+
+    // The other polarity, since dropping the sound half is a per-dimension decision and either
+    // side of it can be got wrong on its own.
+    writeFileSync(facade, JSON.stringify({ ...metadata, budgetTokens: "lots" }));
+    const reversed = fixture.restart();
+    await callTimes(reversed, mixed, 2);
+    expect((await budgetErrorOf(reversed.call(mixed))).details).toMatchObject({ budget: "run_usd", limit: 1 });
+  });
+
+  it("reports a recovered run's own limits to C2, not only to the broker", async () => {
+    // Everything C2 sees is otherwise sampled in the process that created the run, so a config
+    // resolved from memory alone would satisfy the rest of the suite.
+    const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
+    const recovered = await fixture.createRun({ budgetTokens: 30 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const restarted = fixture.restart();
+    await driveToConvergence(restarted, recovered);
+
+    const budget = persistedSampleBudget(restarted, recovered);
+    expect(budget.limits).toEqual({ maxRunTokens: 30, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
+    expect(budget.unusedCliMetadata).toEqual({ budgetTokens: 30, budgetUsd: null, applied: true });
   });
 
   it("keeps a run's runtime mode when it also carries a budget override", async () => {
