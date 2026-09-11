@@ -83,7 +83,7 @@ Findings 18–20 in `docs/ledger/B-selfhost-remaining.md` are scheduled into the
 
 **Soft constraints.**
 
-- **19 before 11.** Item 11 injects a provider into `PairwiseJudge`; finding 19 composes the `judge` role protocol. Reversed, the judge prompt is authored twice.
+- **19 before 11.** Superseded in detail, kept in order (2026-09-12): finding 19 does *not* compose the `judge` role — `compose()` requires a role and none of the eleven role protocols applies to a worker, so the worker seam attaches no role at all, and item 11 composes `judge` itself. The ordering still holds for a weaker reason: 11 should not author a judge prompt from scratch while 19 establishes how protocols are loaded and mapped.
 - **19 alongside 9.** Both edit `createWorkerFactory` (`src/daemon/composition.ts:441-459`).
 - **C7 is not purely additive over finding 19** (recorded 2026-09-11). The existing ordering already puts C7 after 19 because a `scout` role needs composed protocols, but there is no `scout` protocol under `protocols/` and, more to the point, `ProtocolAppliesToSchema` has no `scout` member (`src/protocols/types.ts:3-9`: `worker | reviewer | evidence | defender | supervisor`). Authoring one therefore widens the frontmatter schema and everything validating against it, which is C7's cost to carry rather than finding 19's. Finding 19 should not widen the enum speculatively.
 - **18 before 13 and 15.** `ScriptedProvider` is a FIFO queue per model (`src/providers/scripted.ts:38-57`), insensitive to prompt text but sensitive to call count and order, and finding 18 changes the worker loop's turn profile.
