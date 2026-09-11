@@ -183,6 +183,21 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(fixture.call(tokenOnly))).details).toMatchObject({ budget: "run_usd", limit: 1 });
   });
 
+  it("binds a run's own caps on calls that name a task, which is the shape production sends", async () => {
+    // `AgentRunner` passes `taskId` on every call it makes, and every other check here omits it,
+    // so a guard that skipped the run-level caps whenever a task was named would go unseen.
+    // Both per-task caps are left unset, so only the run-level ones can produce these throws.
+    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: null, maxTaskTokens: null, costUsd: 0.5 });
+    const tokenBound = await fixture.createRun({ budgetTokens: 30 });
+    const usdBound = await fixture.createRun({ budgetUsd: 1 });
+
+    await callTimes(fixture, tokenBound, 3, "task_1");
+    expect((await budgetErrorOf(fixture.call(tokenBound, "task_1"))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
+
+    await callTimes(fixture, usdBound, 2, "task_1");
+    expect((await budgetErrorOf(fixture.call(usdBound, "task_1"))).details).toMatchObject({ budget: "run_usd", limit: 1 });
+  });
+
   it("keeps the configured per-task cap for a run that overrides run tokens", async () => {
     const fixture = await daemonFixture({ maxRunTokens: null, maxTaskTokens: 30 });
     const runId = await fixture.createRun({ budgetTokens: 1_000_000 });
