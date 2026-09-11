@@ -457,21 +457,23 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     // was taken for a run created with `runtime: "off"`, while `auto` is what the RPC handler and
     // the CLI default to, so a merge skipped for the default mode was invisible.
     const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: null, costUsd: 0.5 });
-    const runId = await fixture.createRun({ budgetTokens: 1_000, budgetUsd: 2, runtime: "auto" });
+    const runId = await fixture.createRun({ budgetTokens: 1_000, budgetUsd: 2.5, runtime: "auto" });
 
     await driveToConvergence(fixture, runId);
 
     const sample = persistedSampleBudget(fixture, runId);
     const limits = sample.limits;
-    expect(limits).toEqual({ maxRunTokens: 1_000, maxRunUsd: 2, maxTaskTokens: null, maxRunWallClockMinutes: null });
+    expect(limits).toEqual({ maxRunTokens: 1_000, maxRunUsd: 2.5, maxTaskTokens: null, maxRunWallClockMinutes: null });
     // The two fields of one snapshot are resolved at different sites from different objects, and
     // `applied` is inferred from the flags being present rather than from the limits that were
     // merged -- so a merge that dropped the override would still report itself as applied here.
-    expect(sample.unusedCliMetadata).toEqual({ budgetTokens: 1_000, budgetUsd: 2, applied: true });
+    expect(sample.unusedCliMetadata).toEqual({ budgetTokens: 1_000, budgetUsd: 2.5, applied: true });
 
     // Still a comparison and not only a report: the guard has to refuse at the number C2 gave.
-    // The token cap is far out of reach, so USD is the only dimension that can produce this.
-    await callTimes(fixture, runId, 4);
+    // The token cap is far out of reach, so USD is the only dimension that can produce this. The
+    // override is fractional because C2's own copy of the merge had only ever been observed with
+    // an integer where the configuration set nothing, so a truncation there was invisible too.
+    await callTimes(fixture, runId, 5);
     expect((await budgetErrorOf(fixture.call(runId))).details)
       .toMatchObject({ budget: "run_usd", limit: limits.maxRunUsd });
   });
