@@ -91,6 +91,57 @@ describe("B2 production candidate drivers", () => {
     expect(await fixture.sandbox.list()).toHaveLength(0);
   });
 
+  it("records the model that ran each candidate, everywhere the run reports one", async () => {
+    // B-selfhost-9. The router-selected ref already reached AgentRunner and the transcript; the
+    // Candidate record and every event actor carried `worker/candidate-N` instead. Nothing in the
+    // suite observed it, which is why replacing it broke no expectation.
+    const models = [
+      { provider: "openrouter", model: "alpha-1" },
+      { provider: "openrouter", model: "beta-2" },
+    ];
+    let next = 0;
+    const options = buildDriverOptions(fixture, () => {
+      const model = models[next++ % models.length]!;
+      return new ScriptedCandidateWorker((_task, worktree) => {
+        writeFileSync(join(worktree.path, "outcome.txt"), model.model);
+        return { status: "completed" };
+      }, model);
+    });
+    const own = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    for (const phase of ["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "PLANNING", "REVIEWING", "VALIDATING", "CONVERGENCE_CHECK"] as const) {
+      own.registerPhase(phase, stubDriverFor(phase));
+    }
+    own.registerPhase("EXECUTING", createExecutingDriver(options));
+
+    const { runId, taskId } = seedRun(store, clock, fixture);
+    await own.tickRun(runId);
+
+    // The record the tournament, the report and the observer all read.
+    const recorded = store.repos.candidates.listByTask(taskId).map((candidate) => candidate.model);
+    expect(recorded).toHaveLength(2);
+    expect([...recorded].sort((a, b) => a.model.localeCompare(b.model))).toEqual(models);
+
+    // And the event log, which is the surface `displayModel` renders from. Match on the model
+    // field: `actor.kind` is legitimately "worker" and must not be confused for the defect.
+    const events = store.events.list(runId, {});
+    const started = events.filter((event) => event.type === "worker.started");
+    expect(started).toHaveLength(2);
+    for (const event of started) {
+      const payload = event.payload as { model: { provider: string; model: string } };
+      expect(models).toContainEqual(payload.model);
+      expect(event.actor.model).toEqual(payload.model);
+    }
+    const created = events.filter((event) => event.type === "candidate.created");
+    expect(created).toHaveLength(2);
+    for (const event of created) expect(models).toContainEqual(event.actor.model);
+
+    const synthetic = events.filter((event) => JSON.stringify(event).includes('"provider":"worker"'));
+    expect(synthetic).toEqual([]);
+  });
+
   it("GATING records candidate.gated and separates passing from failing candidates", async () => {
     const { runId, taskId } = seedRun(store, clock, fixture);
     await engine.tickRun(runId);
