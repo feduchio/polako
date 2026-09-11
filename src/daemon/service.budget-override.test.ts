@@ -449,6 +449,28 @@ describe("B-selfhost-8 per-run budget overrides", () => {
       .toEqual({ maxRunTokens: 50, maxRunUsd: null, maxTaskTokens: null, maxRunWallClockMinutes: null });
   });
 
+  it("reports a run's own limits to C2 where the configuration set none, in the default runtime mode", async () => {
+    // Two gaps meet here, both on C2's side of the merge, which is applied separately from the
+    // tracker's. Every fixture reaching C2 configured the dimension the run then overrode, so a
+    // merge overlaying a dimension only where there is already a finite value to replace reported
+    // the configuration's `null` while the guard bound the run's own number. And every C2 sample
+    // was taken for a run created with `runtime: "off"`, while `auto` is what the RPC handler and
+    // the CLI default to, so a merge skipped for the default mode was invisible.
+    const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: null, costUsd: 0.5 });
+    const runId = await fixture.createRun({ budgetTokens: 1_000, budgetUsd: 2, runtime: "auto" });
+
+    await driveToConvergence(fixture, runId);
+
+    const limits = persistedSampleBudget(fixture, runId).limits;
+    expect(limits).toEqual({ maxRunTokens: 1_000, maxRunUsd: 2, maxTaskTokens: null, maxRunWallClockMinutes: null });
+
+    // Still a comparison and not only a report: the guard has to refuse at the number C2 gave.
+    // The token cap is far out of reach, so USD is the only dimension that can produce this.
+    await callTimes(fixture, runId, 4);
+    expect((await budgetErrorOf(fixture.call(runId))).details)
+      .toMatchObject({ budget: "run_usd", limit: limits.maxRunUsd });
+  });
+
   it("does not refuse a priced run below its own USD cap", async () => {
     // Every other USD check gives calls a cost that divides the cap, so observed spend only ever
     // lands exactly on the cap or exactly one call short of it, and a guard firing anywhere
