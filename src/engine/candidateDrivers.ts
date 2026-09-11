@@ -124,16 +124,16 @@ export function createExecutingDriver(options: CandidateDriverOptions): PhaseDri
       policy,
       skipGates: true,
       gates,
-      onWorkerStart: ({ candidateId, index }) => {
+      onWorkerStart: ({ candidateId, index, model }) => {
         ctx.store.events.append([
           {
             id: id("evt", ctx.clock.now()),
             runId: ctx.run.id,
             ts: ctx.clock.now(),
             type: "worker.started",
-            payload: { candidateId, index, taskId: running.id, model: { provider: "worker", model: `candidate-${index}` } },
+            payload: { candidateId, index, taskId: running.id, model },
             causedBy: [],
-            actor: { kind: "worker", model: { provider: "worker", model: `candidate-${index}` } },
+            actor: { kind: "worker", model },
             artifacts: [],
           },
         ]);
@@ -141,7 +141,7 @@ export function createExecutingDriver(options: CandidateDriverOptions): PhaseDri
       ...(corpus === undefined ? {} : { corpus }),
     });
 
-    const candidates = results.map((result, index) => toCandidate(ctx, running, result, index));
+    const candidates = results.map((result) => toCandidate(ctx, running, result));
     appendCandidateEvents(ctx, candidates, "candidate.created");
     for (const candidate of candidates) {
       appendCandidateEvents(ctx, [candidate], "candidate.state_changed");
@@ -491,7 +491,7 @@ async function resolveVerifierStrategy(
   return createVerifierStrategy(ctx.config.verifier);
 }
 
-function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult, index: number): Candidate {
+function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult): Candidate {
   const now = ctx.clock.now();
   const state = resultStatusToCandidateState(result);
   const gateReport =
@@ -505,7 +505,7 @@ function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult, ind
     runId: ctx.run.id,
     taskId: task.id,
     attempt: task.attempts,
-    model: { provider: "worker", model: `candidate-${index}` },
+    model: result.model,
     baseCheckpointHash: result.baseCheckpoint,
     branch: result.branch,
     worktreePath: null,

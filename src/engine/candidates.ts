@@ -1,6 +1,6 @@
 import type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../agents/types.js";
 import type { AcceptanceArtifact, MissionAcceptanceCorpus } from "../domain/acceptance.js";
-import type { ArtifactRef } from "../domain/common.js";
+import type { ArtifactRef, ModelRef } from "../domain/common.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { ProtectedChangeScope, ProtectedChangeWaiver } from "../domain/protectedChangeWaiver.js";
 import type { Task } from "../domain/task.js";
@@ -17,9 +17,14 @@ export type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../
 
 /** Small deterministic worker useful to callers and tests before an AgentRunner is wired. */
 export class ScriptedCandidateWorker<TTask = Task> implements CandidateWorker<TTask> {
+  readonly model: ModelRef;
+
   constructor(
     private readonly script: (task: TTask, worktree: SandboxHandle) => WorkerOutcome | Promise<WorkerOutcome>,
-  ) {}
+    model: ModelRef = { provider: "scripted", model: "scripted-worker" },
+  ) {
+    this.model = model;
+  }
 
   run(task: TTask, worktree: SandboxHandle): Promise<WorkerOutcome> {
     return Promise.resolve(this.script(task, worktree));
@@ -59,6 +64,7 @@ export type CandidateResultStatus =
 export interface CandidateResult {
   id: string;
   index: number;
+  model: ModelRef;
   branch: string;
   baseCheckpoint: string;
   headCommit: string | null;
@@ -90,7 +96,7 @@ export interface RunCandidatesParallelInput<TTask = Task> {
   signal?: AbortSignal;
   /** When true, stop after commit; gating runs in a later phase. */
   skipGates?: boolean;
-  onWorkerStart?: (info: { candidateId: string; index: number }) => void;
+  onWorkerStart?: (info: { candidateId: string; index: number; model: ModelRef }) => void;
 }
 
 /**
@@ -121,6 +127,14 @@ async function runOneCandidate<TTask>(
   let headCommit: string | null = null;
   let diffSummary = emptyDiffStat();
 
+  // Resolved before the sandbox: a sandbox failure must still name the model that would have
+  // run this candidate, and `Candidate.model` has no nullable form to fall back to.
+  const worker = input.workerFactory?.(index) ?? input.worker;
+  if (worker === undefined) {
+    throw new RangeError("either workerFactory or worker must be provided");
+  }
+  const model = worker.model;
+
   try {
     candidate = await input.sandbox.create({
       id: candidateId,
@@ -129,16 +143,13 @@ async function runOneCandidate<TTask>(
       policy: input.policy,
       ...(input.projectEnv === undefined ? {} : { projectEnv: input.projectEnv }),
     });
-    const worker = input.workerFactory?.(index) ?? input.worker;
-    if (worker === undefined) {
-      throw new RangeError("either workerFactory or worker must be provided");
-    }
-    input.onWorkerStart?.({ candidateId, index });
+    input.onWorkerStart?.({ candidateId, index, model });
     workerOutcome = await worker.run(input.task, candidate);
     if (workerOutcome.status !== "completed") {
       return result({
         candidateId,
         index,
+        model,
         branch,
         baseCheckpoint: input.baseCheckpoint,
         status: workerOutcome.status === "interrupted" ? "interrupted" : "worker_failed",
@@ -153,6 +164,7 @@ async function runOneCandidate<TTask>(
       return result({
         candidateId,
         index,
+        model,
         branch,
         baseCheckpoint: input.baseCheckpoint,
         status: "no_changes",
@@ -165,6 +177,7 @@ async function runOneCandidate<TTask>(
       return {
         id: candidateId,
         index,
+        model,
         branch,
         baseCheckpoint: input.baseCheckpoint,
         headCommit,
@@ -193,6 +206,7 @@ async function runOneCandidate<TTask>(
     return {
       id: candidateId,
       index,
+      model,
       branch,
       baseCheckpoint: input.baseCheckpoint,
       headCommit,
@@ -207,6 +221,7 @@ async function runOneCandidate<TTask>(
     return {
       id: candidateId,
       index,
+      model,
       branch,
       baseCheckpoint: input.baseCheckpoint,
       headCommit,
@@ -259,6 +274,7 @@ export async function runGates(input: {
 function result(input: {
   candidateId: string;
   index: number;
+  model: ModelRef;
   branch: string;
   baseCheckpoint: string;
   status: CandidateResultStatus;
@@ -268,6 +284,7 @@ function result(input: {
   return {
     id: input.candidateId,
     index: input.index,
+    model: input.model,
     branch: input.branch,
     baseCheckpoint: input.baseCheckpoint,
     headCommit: null,

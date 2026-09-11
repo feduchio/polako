@@ -24,6 +24,9 @@ export type WorkerOutcome =
  * contract ensures all worker commands and writes remain inside the candidate sandbox.
  */
 export interface CandidateWorker<TTask = Task> {
+  /** The model this worker runs on. Recorded as the candidate's provenance, so it must be the
+   *  same ref the worker actually sends, not a label derived from the candidate's index. */
+  readonly model: ModelRef;
   run(task: TTask, worktree: SandboxHandle): Promise<WorkerOutcome>;
 }
 

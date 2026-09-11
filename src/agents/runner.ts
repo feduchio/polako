@@ -1,3 +1,4 @@
+import type { ModelRef } from "../domain/common.js";
 import type { ChatMessage } from "../broker/types.js";
 import { isBudgetError } from "../broker/quota.js";
 import { BasicIntel } from "../intel/basic.js";
@@ -23,6 +24,10 @@ import type {
 } from "./types.js";
 
 export class AgentRunner implements CandidateWorker {
+  get model(): ModelRef {
+    return this.deps.model;
+  }
+
   private readonly redact: (text: string) => string;
   private readonly now: () => number;
 
