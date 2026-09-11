@@ -461,8 +461,13 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
     await driveToConvergence(fixture, runId);
 
-    const limits = persistedSampleBudget(fixture, runId).limits;
+    const sample = persistedSampleBudget(fixture, runId);
+    const limits = sample.limits;
     expect(limits).toEqual({ maxRunTokens: 1_000, maxRunUsd: 2, maxTaskTokens: null, maxRunWallClockMinutes: null });
+    // The two fields of one snapshot are resolved at different sites from different objects, and
+    // `applied` is inferred from the flags being present rather than from the limits that were
+    // merged -- so a merge that dropped the override would still report itself as applied here.
+    expect(sample.unusedCliMetadata).toEqual({ budgetTokens: 1_000, budgetUsd: 2, applied: true });
 
     // Still a comparison and not only a report: the guard has to refuse at the number C2 gave.
     // The token cap is far out of reach, so USD is the only dimension that can produce this.
@@ -631,6 +636,26 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     const budget = persistedSampleBudget(restarted, recovered);
     expect(budget.limits).toEqual({ maxRunTokens: 30, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
     expect(budget.unusedCliMetadata).toEqual({ budgetTokens: 30, budgetUsd: null, applied: true });
+  });
+
+  it("invents no limit for a recovered run either", async () => {
+    // The live version of this runs above, but a recovered run resolves its own budget by a
+    // different route -- read back from the facade rather than held in memory since creation --
+    // and the only recovered C2 fixture configures all four dimensions finite, so the crossing
+    // was empty. The consequence is the same decision rather than a report: an invented deadline
+    // lands among the exhausted dimensions and stops a run nobody capped.
+    const fixture = await daemonFixture({ maxRunTokens: 50 });
+    const recovered = await fixture.createRun({ budgetTokens: 30 });
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    const restarted = fixture.restart();
+    await driveToConvergence(restarted, recovered, 120_000);
+
+    const budget = persistedSampleBudget(restarted, recovered);
+    expect(budget.limits)
+      .toEqual({ maxRunTokens: 30, maxRunUsd: null, maxTaskTokens: null, maxRunWallClockMinutes: null });
+    expect(budget.exhaustedDimensions).toEqual([]);
   });
 
   it("keeps a run's runtime mode when it also carries a budget override", async () => {
