@@ -1,13 +1,19 @@
 #!/usr/bin/env node
 import type { Event } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
+import { projectRunEconomics, renderRunEconomics } from "../observe/economics.js";
 import { projectRunStatus } from "../observe/project.js";
 import { renderActivityFeed, renderRunStatus } from "../observe/render.js";
 import { isMainModule } from "../shared/cliEntry.js";
 import { callDaemon } from "./client.js";
 import { runWatch } from "./watch.js";
 
-export async function runCli(argv = process.argv.slice(2)): Promise<void> {
+export type CliDaemonCall = <T>(method: string, params?: Record<string, unknown>) => Promise<T>;
+
+export async function runCli(
+  argv = process.argv.slice(2),
+  deps: { callDaemon?: CliDaemonCall } = {},
+): Promise<void> {
   const [command, ...args] = argv;
   switch (command) {
     case "project":
@@ -64,6 +70,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     case "diff":
       process.stdout.write(`${await callDaemon<string>("diff", runId(withoutBooleanFlags(args)))}\n`);
       return;
+    case "cost":
+      await costCommand(args, deps.callDaemon ?? callDaemon);
+      return;
     case "pause":
     case "resume":
     case "stop":
@@ -88,6 +97,19 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     default:
       throw new Error(`unknown command ${command}\n${usage}`);
   }
+}
+
+async function costCommand(args: string[], daemonCall: CliDaemonCall): Promise<void> {
+  const json = args.includes("--json");
+  const id = required(args.find((arg) => !arg.startsWith("-")), "run id");
+  const run = await daemonCall<Run>("status", { runId: id });
+  const events = await daemonCall<Event[]>("log", { runId: id, afterSeq: -1 });
+  const report = projectRunEconomics(run, events);
+  if (json) {
+    print(report);
+    return;
+  }
+  process.stdout.write(renderRunEconomics(report));
 }
 
 async function projectCommand(args: string[]): Promise<void> {
@@ -225,6 +247,7 @@ const usage = `Usage:
   polish status [run-id] [--json]
   polish watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   polish log <run-id> [--follow] [--json]
+  polish cost <run-id> [--json]
   polish diff <run-id>
   polish pause|resume|stop|kill <run-id>
   polish answer <run-id> <answer>
