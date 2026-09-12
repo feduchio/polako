@@ -1,6 +1,8 @@
 # B-selfhost-18 — bounded worker context window
 
-**Status:** DRAFT, revision 3. Not frozen. Base `f4d47c4`.
+**Status:** **FROZEN**, revision 3, at the commit this file is committed in. Base `f4d47c4`.
+Frozen after a third contract review returned FREEZE with no blocking defects; its three
+non-blocking observations are folded in above.
 Revisions 1 and 2 were both rejected in contract review, by two different reviewers, and both
 rejections were correct. See *Revision history*.
 **Finding:** item 18 in `docs/ledger/B-selfhost-remaining.md`.
@@ -189,7 +191,15 @@ rendered as at most its last 80 characters, prefixed with `…` when shortened, 
 output tail at most 200 characters. Bounding the *rendering* rather than exempting any field is what
 lets the cap hold against a single pathological input while keeping every surviving entry whole.
 Priority order is: changed paths, then the most recent failing command, then remaining commands,
-then other tool calls, then assistant text.
+then other tool calls, then assistant text. **This order governs eviction**, and where it differs
+from the reading order of the digest-contents list above — which puts the failing command among the
+commands — this clause is the one an implementation must satisfy. Rendering commands most-recent
+first and evicting successful and older ones before the failing one satisfies both.
+
+Not every argument has a stated render bound: a 50,000-character `run_command` argv or `search`
+query has no shortened form specified, so the only legal move is to evict that entry whole. That is
+intended and is what keeps MC4 and MC6 jointly satisfiable for every input — at the limit the
+digest may carry no commands at all.
 
 **MC7.** Token accounting and stopping conditions keep their present semantics:
 `totalTokens += inputTokens + outputTokens`, the `while` guard, the mid-loop `BUDGET_EXCEEDED`
@@ -233,15 +243,18 @@ longer on the wire. Pins MC2.
 run of `tool` messages is preceded by an assistant message, and the run's `toolCallId`s equal that
 assistant's executed `toolCalls` ids, in order.
 
-**The loop must contain at least one turn whose assistant message makes two tool calls.** AC1's
+**The loop must contain at least one turn whose assistant message makes two tool calls, and it may
+not be the last turn** — a later request must actually carry it, or a window that keeps only the
+first result of each turn still passes. AC1's
 one-read-per-turn loop can only ever produce `[assistant, tool]`, under which a window that keeps
 only the first tool result of each turn passes — and that window loses evidence in production.
 Neither `ScriptedProvider` nor any existing fixture validates pairing, and no fixture in the tree
 scripts two `toolCalls` in one assistant message, so nothing else in the suite can see this.
 
 **AC4.** Four adversarial renderings, each no larger than the cap: 300 read paths; a
-50,000-character command output; a 5,000-character error; and — the case revision 2 could not see
-— **300 changed paths together with one changed path longer than the cap by itself**. Assert in that
+50,000-character command output; a 5,000-character error; **a 50,000-character command argv**, whose
+entry has no shortened form and must therefore be evicted whole; and — the case revision 2 could
+not see — **300 changed paths together with one changed path longer than the cap by itself**. Assert in that
 last case both that the cap holds and that whatever entries remain are whole, so neither MC4 nor
 MC6 can be satisfied at the other's expense. Pins MC4 and MC6 together.
 
