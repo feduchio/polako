@@ -218,6 +218,19 @@ describe("the worker's context window", () => {
     expect(capped.status).toBe("BUDGET_EXCEEDED");
     expect(capped.turns).toBe(2);
 
+    // The outcomes above survive an accounting that drops either term, because exhaustion still
+    // happens eventually. The sum itself has to be asserted: 10 in and 5 out per scripted call.
+    const counted = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 32_000 });
+    counted.provider.script("worker", [
+      reply([call("read", { path: "big-0.txt" })]),
+      reply([call("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" })]),
+      reply([call("finish", { summary: "done" })]),
+    ]);
+    const finished = await new AgentRunner(counted.deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(finished.status).toBe("FINISHED");
+    expect(finished.turns).toBe(3);
+    expect(finished.totalTokens).toBe(3 * (10 + 5));
+
     store.close();
     await handle.destroy();
   });
