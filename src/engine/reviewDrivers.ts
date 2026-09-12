@@ -43,6 +43,7 @@ import {
   reviewAxesForRound,
   type ReviewExecution,
 } from "../domain/review.js";
+import type { TerminalReason } from "../domain/run.js";
 import { PolishError } from "../shared/errors.js";
 import { buildCheckpointReviewArtifact, type CheckpointReviewArtifact } from "../review/artifact.js";
 import { runAxisReview, type ReviewProvider, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
@@ -120,7 +121,11 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
     const override = pendingEnsembleOverride(ctx.store.events.list(ctx.run.id), hash, roundIndex);
     const resolved = await resolveReviewers(ctx, options);
     const reviewers = override === null ? resolved : orderReviewersByEnsemble(resolved, override);
+    const exhausted = exhaustedAxes(axes, roundExecutions, required, ctx.config.review.maxAxisAttemptsPerRound);
+    if (exhausted.length > 0) return stopForExhaustedAxes(ctx, hash, roundIndex, exhausted);
     if (reviewers.length === 0) {
+      // Checked after exhaustion: sticky failures exclude every model, and waiting on an exclusion
+      // that will never lift is the unbounded loop in a quieter form.
       if (recentlyRateLimitedReviewModels(ctx).length > 0) return { status: "waiting" };
       throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
     }
@@ -151,23 +156,6 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
       }
 
       const rateLimited = new Set<string>();
-      const exhausted = exhaustedAxes(axes, roundExecutions, required, ctx.config.review.maxAxisAttemptsPerRound);
-      if (exhausted.length > 0) {
-        // The provider is refusing this axis and retrying cannot change that. Stop and say so
-        // rather than re-queueing it on every scheduler tick.
-        recordAxisExhausted(ctx, hash, roundIndex, exhausted, ctx.config.review.maxAxisAttemptsPerRound);
-        // FAILED, not NEEDS_HUMAN: `RUN_PHASE_TABLE` admits only VALIDATING or FAILED out of
-        // REVIEWING, so returning NEEDS_HUMAN threw INVALID_TRANSITION on every tick and traded an
-        // unbounded retry loop for an unbounded crash loop.
-        return {
-          status: "complete",
-          nextPhase: EXHAUSTED_NEXT_PHASE,
-          terminalReason: {
-            code: "providers_unavailable",
-            summary: `review axis ${exhausted.join(", ")} failed ${String(ctx.config.review.maxAxisAttemptsPerRound)} times in round ${String(roundIndex)}`,
-          },
-        };
-      }
       for (const axis of missingAxes(axes, roundExecutions, required)) {
         const outcome = await reviewAxisWithFallback(ctx, {
           hash,
@@ -903,10 +891,32 @@ export function exhaustedAxes(
   const out: ReviewAxis[] = [];
   for (const axis of missingAxes(axes, roundExecutions, required)) {
     if (out.includes(axis)) continue;
-    const failed = roundExecutions.filter((execution) => execution.axis === axis && !execution.completed).length;
+    const failed = roundExecutions.filter(
+      (execution) => execution.axis === axis && !execution.completed && isStickyReviewSkip(undefined, execution.error ?? ""),
+    ).length;
     if (failed >= cap) out.push(axis);
   }
   return out;
+}
+
+function stopForExhaustedAxes(
+  ctx: PhaseContext,
+  hash: string,
+  roundIndex: number,
+  exhausted: readonly ReviewAxis[],
+): { status: "complete"; nextPhase: typeof EXHAUSTED_NEXT_PHASE; terminalReason: TerminalReason } {
+  const cap = ctx.config.review.maxAxisAttemptsPerRound;
+  recordAxisExhausted(ctx, hash, roundIndex, exhausted, cap);
+  // Terminal, not "proceed with the round marked unverified": VALIDATING would admit a checkpoint
+  // that no reviewer ever saw, which is a worse failure than stopping.
+  return {
+    status: "complete",
+    nextPhase: EXHAUSTED_NEXT_PHASE,
+    terminalReason: {
+      code: "providers_unavailable",
+      summary: `review axis ${exhausted.join(", ")} failed ${String(cap)} times in round ${String(roundIndex)} with non-retryable provider errors`,
+    },
+  };
 }
 
 function recordAxisExhausted(
