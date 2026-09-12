@@ -1,7 +1,7 @@
 # B-selfhost-42 — blinded reviewer-quality benchmark
 
-**Status:** DRAFT, revision 3. Not frozen. Base `f782310`.
-Revisions 1 and 2 were rejected independently by Grok and Claude; both rejections were correct.
+**Status:** DRAFT, revision 4. Not frozen. Base `f782310`.
+Revisions 1–3 were reviewed independently by Grok and Claude; all rejections were correct.
 **Finding:** 42, informed by 43–45 in `docs/ledger/B-selfhost-remaining.md`.
 
 ## Mission
@@ -49,6 +49,10 @@ outside this leakage scan: it is identical across the pair and legitimately cont
 Missing line never overlaps. The same rule applied to a clean control is a false positive.
 The clean oracle path/range is its matched mutant's path/range. Existential matching is used when
 several findings are returned. No model scores another model.
+
+The mutant oracle interval is exactly the line span touched by its one substitution, with no
+tolerance or whole-file widening. AC2 derives and asserts that interval for all eight pairs. The
+criterion comment sits outside it, so citing only the comment is a miss.
 
 Report a second **strict-id recall** metric requiring the primary rule plus criterion matching
 `/(^|[^A-Za-z0-9])INV-XX([^A-Za-z0-9]|$)/i` for that case id. It accepts `INV-01:` and rejects
@@ -125,7 +129,8 @@ the report for coding runs.
 
 ## Acceptance checks
 
-**AC1 — blindness.** Capture exact `complete()` messages. In the user message's serialized pack,
+**AC1 — blindness.** Capture exact `complete()` messages. The system message is byte-identical
+across each pair. In the user message's serialized pack,
 outside the `diff` value, clean and mutant bytes are identical, including every
 checkpoint/evidence field. Those non-diff pack bytes contain no oracle label, mutation name or
 `clean|mutant|defect|injected`. The diff contains the criterion property but no oracle annotation.
@@ -133,7 +138,8 @@ Opaque `cellId` is absent from both system and user messages.
 
 **AC2 — eight single-defect pairs.** Each pair has at least three invariant tests over its own
 module. All clean controls pass their whole suite. Each mutant differs by one substitution and
-fails only its named invariant within that suite.
+fails only its named invariant within that suite. For all eight, derive the changed line span from
+the substitution and assert it equals the hidden oracle interval exactly.
 
 **AC3 — scorer truth table.** Hand-written outputs cover: primary hit with paraphrased criterion;
 strict `INV-01:` hit; strict `inv-01` hit; strict `INV-010` and `xINV-01` misses;
@@ -143,7 +149,8 @@ several findings with one match; clean false positive; completed empty; schema f
 failure. Assert classifications literally.
 
 **AC4 — denominators.** A fixture with two hits, one completed miss, one schema failure and one
-transport failure asserts recall `2/3`, completion `3/5`, and failures excluded from recall.
+transport failure asserts primary recall `2/3`, strict-id recall `1/3`, completion `3/5`, clean-site
+false-positive denominator from completed clean cells, and failures excluded from quality metrics.
 
 **AC5 — matched pair discrimination.** Assert per-model key `(pairId, model, repetition)` and team
 key `(pairId, repetition)`. Hit plus clean false positive is not discriminated; hit plus clean empty
@@ -166,13 +173,17 @@ through `runAxisReview`. Assert logical request count, families, repetitions, ex
 normaliser and strong evidence from the materialised root. One schema failure remains a schema
 failure with captured usage.
 
+Two negative catalogs are mandatory: one missing `nvidia` aborts before cell 1 with zero requests;
+one has two eligible `nex-agi` refs and asserts the lexicographically first ref is selected.
+
 **AC9 — finite failure.** With live abort disabled, a provider that fails every cell receives
 exactly 96 logical requests and records 96 transport failures. With it enabled, five transport
 failures among the first 20 persist a partial report at exactly 20 and issue no 21st request.
 
 **AC10 — artifacts and rescore.** Export packets and oracle separately, hash both, import a response
 JSONL and reproduce byte-identical metrics without provider access. Swapping oracle and packet files
-must fail schema/hash checks.
+must fail schema/hash checks. Rebuilding the schedule from the recorded seed reproduces the exact
+cell order.
 
 **AC11 — CLI/daemon seam.** RPC `benchmark.review` and CLI `polish benchmark-review` print a dry
 summary containing requested/completed counts, primary/strict recall, false-positive and
@@ -221,6 +232,12 @@ No threshold is declared success in advance. This task measures; the result deci
 | Benchmark creates a coding Run or project worktree | AC11 |
 
 ## Revision history
+
+**Revision 3 → 4**, after Grok returned FREEZE and Claude found two remaining blockers:
+
+- oracle ranges are exactly the single-substitution spans and asserted for all eight pairs;
+- missing-family abort and lexicographic family tie-break now have acceptance checks;
+- system-message identity, primary/strict denominators and shuffle reproducibility are explicit.
 
 **Revision 2 → 3**, after both reviewers rejected the same commit:
 
