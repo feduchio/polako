@@ -138,7 +138,19 @@ on silently, and one of them is about an item that is already accepted.
     70.2% -> **73.3%**. That is "better than one flagship model at lower cost", demonstrated, and
     Polish is on the wrong side of the architecture that produces it.
 
-33. **The tournament is the wrong algorithm, and it is also unwired.** Item 11 already records that
+33. ~~**The tournament is the wrong algorithm, and it is also unwired.**~~ **CORRECTED 2026-09-12,
+    the same day it was written: the algorithm is not wrong, and saying so was my error from reading
+    `PairwiseJudge` without reading `tournament.ts`.** `TournamentSelectionMethod` already includes
+    `"ppt"`; `selectTournamentWinner` already takes `pivotFrom`, `pivots`, `repeats` and
+    `granularity` -- the reference's exact dials; `createVerifierStrategy`
+    (`src/verify/sidecar.ts:471`) already takes `{backend, repeats, granularity, criteria,
+    pivotTournamentFrom}`; and `VerifierAdapter.selectFrontier` (`:143`) is the delegation seam that
+    records `logprobScheme`, `nComparisons`, `criteria`, `client` and `fallback`. The intended
+    production path is `backend: "sidecar"` -- an **external** verifier process -- and the natural
+    implementation of that sidecar is the `llm-verifier` package itself. The design already is the
+    reference architecture; what is missing is an implementation behind the seam. The original text
+    of this finding, which stands only as to the wiring, follows.
+    Original: **the tournament is unwired.** Item 11 already records that
     production constructs `new PairwiseJudge()` with no provider, so `comparePair` returns
     `heuristicVerdict` (`src/verify/pairwise.ts:25`) and nothing in `src/daemon/composition.ts`
     wires a verifier strategy at all. The reference algorithm is a **Probabilistic Pivot
@@ -225,4 +237,37 @@ Findings 36 and 37 come next, ahead of items 11-15: a review swarm that spends 7
 and returns nothing is a larger defect than anything remaining on the finding list, and finding 37
 is a small, local fix. Findings 32 and 33 -- verifier scoring and the pivot tournament -- are the
 architectural answer and follow them.
+
+39. **`PairwiseJudge` swallows every provider and parse failure, silently and unrecorded, so wiring
+    a provider into it would buy a silent heuristic.** `comparePair` ends in
+    `catch { return heuristicVerdict(a, b); }` (`src/verify/pairwise.ts:44-46`), which catches the
+    provider error, the `responseFormat: "json"` parse, and every `TypeError` that `parseVerdict`
+    throws for a missing rationale, an out-of-pair winner, or non-finite scores. The call is paid
+    for and the verdict is thrown away. Nothing records it: `TournamentSelection.fallback` is only
+    populated on the `VerifierAdapter` path, and the in-tree path hard-codes `fallback: false`
+    (`src/verify/tournament.ts:178`).
+    Its output contract is `{"winner","rationale","scores"}` as generated JSON -- the same
+    structured-output demand that failed 105 review executions in finding 36. So attaching a free
+    model to `PairwiseJudge` today most likely produces: tokens spent, JSON rejected, heuristic
+    returned, `fallback: false` recorded. That is strictly worse than the present honest heuristic,
+    because it looks wired. **Make the discarded verdict observable before wiring anything**; it is a
+    small local change and without it the wiring cannot be measured, which is item 29's whole
+    lesson.
+
+40. **The broker cannot ask for or read logprobs, but six free models offer them, so the
+    reference's scoring is reachable at zero marginal cost.** `CompletionRequest`
+    (`src/broker/types.ts:50`) has no logprobs field and `openaiCompat` neither sends
+    `logprobs`/`top_logprobs` nor parses `choices[].logprobs`, so Polish cannot compute
+    LLM-as-a-Verifier's `R(x,τ) = (1/CK) Σ p(v_g|x,c,τ)·φ(v_g)` itself -- which is why finding 34
+    found `logprobScheme` to be provenance only.
+    **Measured 2026-09-12** against OpenRouter's public `/api/v1/models` (no key required): of 445
+    models, 155 advertise `logprobs` and `top_logprobs`, and **6 of the 19 free models do** --
+    `nex-agi/nex-n2.5-mini:free`, `nex-agi/nex-n2.5-pro:free`, `inclusionai/ling-3.0-flash-vl:free`,
+    `inclusionai/ling-3.0-flash-sante:free`, `inclusionai/ling-3.0-flash-fin:free`,
+    `liquid/lfm-2.5-2.6b:free`. The routing gate already defaults to `costEligibility: "free_only"`
+    (`src/domain/config.ts:121`), so these are inside policy.
+    The blocker is therefore one bounded broker-layer change -- two request fields, one response
+    field -- and not an architectural one. It should be verified with a live probe against one of
+    those six before anything is built on it, because advertising a parameter is not the same as
+    returning useful score-token distributions.
 
