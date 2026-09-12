@@ -1,6 +1,7 @@
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { dominates, emptyFindingCounts, type EvidenceVector } from "../domain/checkpoint.js";
 import { candidateMetrics, type CandidateMetrics, type VerifiableCandidate } from "./metrics.js";
+import { PairwiseJudge } from "./pairwise.js";
 import type {
   PairwiseContext,
   PairwiseVerdict,
@@ -175,7 +176,9 @@ export async function selectTournamentWinner(
     method: "pairwise",
     frontier: frontierIds,
     backend: "ts",
-    fallback: false,
+    // Read from the strategy rather than assumed: a judge that fell back silently used to be
+    // recorded as a judge that did not.
+    fallback: input.strategy instanceof PairwiseJudge && input.strategy.usedFallback,
     client: "none",
   };
 }

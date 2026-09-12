@@ -14,7 +14,22 @@ export interface PairwiseJudgeOptions {
 
 /** Pairwise judge backed by a provider, with a deterministic heuristic fallback. */
 export class PairwiseJudge implements VerifierStrategy {
+  /**
+   * Why the last comparison fell back, or null if it did not. A provider verdict discarded in
+   * silence is a paid call thrown away with no record that it happened, which made the whole
+   * provider path unmeasurable: the tournament used to report `fallback: false` regardless.
+   */
+  private lastFallbackReason: string | null = null;
+
   constructor(private readonly options: PairwiseJudgeOptions = {}) {}
+
+  get usedFallback(): boolean {
+    return this.lastFallbackReason !== null;
+  }
+
+  get fallbackReason(): string | null {
+    return this.lastFallbackReason;
+  }
 
   async comparePair(
     a: TournamentCandidate,
@@ -22,9 +37,9 @@ export class PairwiseJudge implements VerifierStrategy {
     context: PairwiseContext,
   ): Promise<PairwiseVerdict> {
     const provider = this.options.provider;
-    if (provider === undefined) return heuristicVerdict(a, b);
+    if (provider === undefined) return this.fallBack(a, b, "no provider configured");
     const model = this.options.model ?? (await provider.listModels())[0]?.ref;
-    if (model === undefined) return heuristicVerdict(a, b);
+    if (model === undefined) return this.fallBack(a, b, "provider advertises no model");
 
     try {
       const response = await provider.complete({
@@ -40,10 +55,18 @@ export class PairwiseJudge implements VerifierStrategy {
         temperature: 0,
         metadata: { runId: context.runId, purpose: "pairwise_verification", role: "verifier" },
       });
-      return parseVerdict(response.message.content, a.id, b.id);
-    } catch {
-      return heuristicVerdict(a, b);
+      const verdict = parseVerdict(response.message.content, a.id, b.id);
+      this.lastFallbackReason = null;
+      return verdict;
+    } catch (error) {
+      return this.fallBack(a, b, error instanceof Error ? `${error.name}: ${error.message}` : String(error));
     }
+  }
+
+  private fallBack(a: TournamentCandidate, b: TournamentCandidate, reason: string): PairwiseVerdict {
+    this.lastFallbackReason = reason;
+    const verdict = heuristicVerdict(a, b);
+    return { ...verdict, rationale: `${verdict.rationale} [fell back: ${reason}]` };
   }
 }
 

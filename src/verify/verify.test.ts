@@ -117,6 +117,48 @@ describe("pairwise tournament", () => {
     expect(user).not.toContain("transcript");
   });
 
+  it("records why it fell back, instead of returning the heuristic in silence", async () => {
+    const a = { id: "a", metrics: candidateMetrics(makeCandidate("a", 1, 2), BASELINE) };
+    const b = { id: "b", metrics: candidateMetrics(makeCandidate("b", 2, 5), BASELINE) };
+    const ctx = { runId: BASELINE.runId };
+
+    const unwired = new PairwiseJudge();
+    const noProvider = await unwired.comparePair(a, b, ctx);
+    expect(unwired.usedFallback).toBe(true);
+    expect(unwired.fallbackReason).toBe("no provider configured");
+    expect(noProvider.rationale).toContain("fell back: no provider configured");
+
+    // A paid call whose JSON the parser rejects is the likely case on a free model, and it used
+    // to be indistinguishable from never having called a provider at all.
+    const broken = new ScriptedProvider("judge", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }])
+      .script("m", [{ kind: "reply", content: JSON.stringify({ winner: "a", scores: { a: 1, b: 0 } }) }]);
+    const judge = new PairwiseJudge({ provider: broken, model: { provider: "judge", model: "m" } });
+    const rejected = await judge.comparePair(a, b, ctx);
+    expect(broken.calls).toHaveLength(1);
+    expect(judge.usedFallback).toBe(true);
+    expect(judge.fallbackReason).toContain("rationale");
+    expect(rejected.rationale).toContain("fell back:");
+
+    const good = new ScriptedProvider("judge", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }])
+      .script("m", [{ kind: "reply", content: JSON.stringify({ winner: "a", rationale: "A is tighter.", scores: { a: 9, b: 7 } }) }]);
+    const working = new PairwiseJudge({ provider: good, model: { provider: "judge", model: "m" } });
+    const verdict = await working.comparePair(a, b, ctx);
+    expect(working.usedFallback).toBe(false);
+    expect(working.fallbackReason).toBeNull();
+    expect(verdict.rationale).not.toContain("fell back");
+  });
+
+  it("reports the fallback in the tournament selection rather than hard-coding false", async () => {
+    const selection = await selectTournamentWinner({
+      candidates: [makeCandidate("a", 1, 2), makeCandidate("b", 2, 5)],
+      baseline: BASELINE,
+      strategy: new PairwiseJudge(),
+      context: { runId: BASELINE.runId },
+    });
+    expect(selection.method).toBe("pairwise");
+    expect(selection.fallback).toBe(true);
+  });
+
   it("round-robins only candidates that passed gates and ranks from recorded outcomes", async () => {
     const outcomes = new Map([
       ["a:b", "a"],
