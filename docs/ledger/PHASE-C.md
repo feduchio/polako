@@ -24,7 +24,8 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | B-selfhost-5 accepted | `916f7f26df1b7490d35289781a4e799d7cd8e7ed` on `task/B-selfhost-5-integration` | Bounded B finding 5 only. |
 | B-selfhost-6 accepted | `df49a5ef75996da5ee17c51b4f66e974d8952fc0` on `task/B-selfhost-6-integration` | Bounded B finding 6 only. |
 | B-selfhost-7 accepted | `1dc1c5cfbb2f92efb2fa8f58f15e92f02a3c80b2` on `task/B-selfhost-7-integration` | Bounded B finding 7 only. |
-| B-selfhost-8 accepted (next HOST) | `14beb802857fde8a5251404dc518301cb5b1a0a4` on `task/B-selfhost-8-integration` | Bounded B finding 8 only. Phase B not fully closed. Phase C not accepted. |
+| B-selfhost-8 accepted | `14beb802857fde8a5251404dc518301cb5b1a0a4` on `task/B-selfhost-8-integration` | Bounded B finding 8 only. |
+| B-selfhost-9+19 accepted (next HOST) | `9e157e1a0a5d7369f2be905d8c36121789e09087` on `task/B-selfhost-9-19-integration` | Bounded B findings 9 and 19, plus finding 23's reviewer half. Phase B not fully closed. Phase C not accepted. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -37,7 +38,7 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open items: **9, 11–15**, plus **16, 17, 21–25**, all now scheduled into the items that already rework the same code. Items **3–8** ACCEPTED.
+Open items: **11–15**, plus **16, 17, 21, 22, 24, 25** scheduled into the items that rework the same code, **23**'s detector half in its own slot, and **26, 27** recorded. Items **3–9** and **19** ACCEPTED.
 
 Item 10 (`listModels()[0]` reviewer selection) was lifted into `B-bootstrap-cost-eligibility` (ACCEPTED). Full Phase-B self-host closure remains **DEFERRED_BY_USER**.
 
@@ -110,7 +111,7 @@ C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Task A
 
 | # | Item | Absorbs | Shared seam |
 |---|---|---|---|
-| 1 | **9 + 19** | 23's reviewer-protocol half | `createWorkerFactory`; the `reviewer-*` role protocols that 19 is the first to compose, which is where the rule against an unbounded stopping criterion belongs |
+| ~~1~~ | ~~**9 + 19**~~ | ~~23's reviewer-protocol half~~ | **ACCEPTED** at `9e157e1`, run record `docs/ledger/B-selfhost-9-19-run.md` |
 | 2 | **18** | — | `AgentRunner.runLoop` |
 | 3 | **11** | — | `PairwiseJudge`; needs 19's composed `judge` protocol first |
 | 4 | **12** | **17, 21, 22, 25** | `DaemonService.runConfig` and `withRuntimeValidationMode`: 12 restores run settings and runtime mode across a restart, 17 is the mode nobody reads, 21 is that resolution failing silently, 22 is the pin guarding it, 25 is the duplicated budget merge in the same function |
