@@ -330,6 +330,7 @@ function passedCandidate(
     branch: candidateId,
     worktreePath: null,
     headCommit: commitHash,
+    error: null,
     state: "PASSED_GATES",
     gateReport: {
       gatedCommit: commitHash,

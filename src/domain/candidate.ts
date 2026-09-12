@@ -77,6 +77,9 @@ export const CandidateSchema = z.object({
   headCommit: GitHashSchema.nullable(),
   state: CandidateStateSchema,
   gateReport: GateReportSchema.nullable(),
+  /** Why this candidate ended where it did. Present for DISCARDED candidates; a run whose
+   *  candidates all fail identically is otherwise indistinguishable from infrastructure noise. */
+  error: z.string().nullable().default(null),
   transcriptRef: ArtifactRefSchema.nullable(),
   diffRef: ArtifactRefSchema.nullable(),
   createdAt: TimestampSchema,

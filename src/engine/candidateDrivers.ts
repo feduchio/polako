@@ -512,6 +512,7 @@ function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult): Ca
     headCommit: result.headCommit,
     state: result.status === "no_changes" ? "FAILED_GATES" : state,
     gateReport,
+    error: result.error,
     transcriptRef: result.workerOutcome?.transcriptRef ?? null,
     diffRef: null,
     createdAt: now,

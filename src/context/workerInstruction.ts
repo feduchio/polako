@@ -19,11 +19,6 @@ export const TASK_KIND_PROTOCOL = {
   investigation: "investigate",
 } as const satisfies Record<TaskKind, TaskProtocolName>;
 
-/** Domain protocols that exist in the tree, keyed by the profile framework that implies them. */
-const FRAMEWORK_DOMAIN: Readonly<Record<string, string>> = {
-  "react-native": "react-native",
-};
-
 /**
  * The pack is resent on every turn, so its size is paid `pack x turns` and it displaces worker
  * turns rather than overrunning the task budget. Derived from the budget rather than fixed:
@@ -52,11 +47,11 @@ export interface ComposeWorkerInstructionInput {
 export function composeWorkerInstruction(
   input: ComposeWorkerInstructionInput,
 ): { text: string; protocolHash: string | null } {
-  const domain = input.profile === null ? undefined : FRAMEWORK_DOMAIN[input.profile.framework];
-  const protocol = composeForWorker(input.registry, {
-    task: TASK_KIND_PROTOCOL[input.task.kind],
-    ...(domain === undefined ? {} : { domains: [domain] }),
-  });
+  // No domains. `ProjectProfile` carries a test-runner hint (`vitest | jest | node-test |
+  // unknown`), not a stack signal, so nothing in it can select `typescript` or `react-native`.
+  // Selecting a domain would need a discovery signal this contract does not add; recorded as a
+  // finding rather than guessed at here.
+  const protocol = composeForWorker(input.registry, { task: TASK_KIND_PROTOCOL[input.task.kind] });
 
   const pack = buildWorkerContextPack({
     task: input.task,

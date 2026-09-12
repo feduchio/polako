@@ -123,6 +123,7 @@ function baseEvidence(overrides: Partial<MissionCompletionEvidence> = {}): Missi
         branch: "cand/1",
         worktreePath: "/tmp/wt",
         headCommit: integrated,
+        error: null,
         state: "PASSED_GATES",
         gateReport: {
           gatedCommit: integrated,

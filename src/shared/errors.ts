@@ -35,6 +35,9 @@ export function isAbortError(err: unknown): boolean {
 }
 
 export function errorToString(err: unknown): string {
+  // The code is the part a caller can branch on and an operator can search for; `name` is always
+  // "PolishError" and carries nothing.
+  if (err instanceof PolishError) return `${err.name}[${err.code}]: ${err.message}`;
   if (err instanceof Error) return `${err.name}: ${err.message}`;
   return String(err);
 }

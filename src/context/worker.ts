@@ -104,14 +104,10 @@ export function buildWorkerContextPack(input: BuildWorkerInput): WorkerContextPa
     sections["invariants"] = invariants.map(formatFactForPrompt).join("\n");
   }
 
-  const taskFiles = new Set(input.fileFragments.map((f) => f.path));
+  // Only this task's own finding. Matching evidence paths against the description would hand a
+  // worker a sibling's claims whenever a planner happened to name the same file.
   const originFindingId = input.task.origin.kind === "valid_finding" ? input.task.origin.findingId : null;
-  const findings = input.findings.filter(
-    (f) =>
-      f.status === "VALID" &&
-      (f.id === originFindingId ||
-        f.evidence.some((e) => taskFiles.has(e.path) || input.task.description.includes(e.path))),
-  );
+  const findings = input.findings.filter((f) => f.status === "VALID" && f.id === originFindingId);
   if (findings.length > 0) {
     sections["findings"] = fenceUntrusted(
       "MODEL FINDINGS EVIDENCE",

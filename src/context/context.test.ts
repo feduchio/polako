@@ -486,7 +486,12 @@ describe("context builders + FactsService", () => {
       updatedAt: NOW,
     };
     const pack = buildWorkerContextPack({
-      task: sampleTask(runId),
+      // A worker sees its own task's finding, so the task must originate from it: selection is
+      // by `origin.findingId`, not by an evidence path appearing in the description.
+      task: {
+        ...sampleTask(runId),
+        origin: { kind: "valid_finding", findingId: finding.id, validationId: id("fval", NOW), verdict: "VALID" },
+      },
       facts: [],
       findings: [finding],
       fileFragments: [{ path: "src/math.ts", startLine: 1, endLine: 1, text: heading }],
