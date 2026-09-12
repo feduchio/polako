@@ -1,3 +1,4 @@
+import { workerPackCap } from "./workerInstruction.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -462,6 +463,17 @@ describe("context builders + FactsService", () => {
     expect(pack.included.indexOf("instructionHierarchy")).toBeLessThan(
       pack.included.indexOf("fileFragments"),
     );
+  });
+
+  it("derives the pack cap from the task budget rather than adopting the configured ceiling", () => {
+    // The ceiling exists and defaults to 60_000, which never binds. The cap has to come from the
+    // budget the pack is actually spending against, and it is paid once per turn.
+    expect(workerPackCap(32_000, 60_000)).toBe(1_333);
+    // Scales with an operator who raises the budget, up to the ceiling.
+    expect(workerPackCap(32_000, 900)).toBe(900);
+    expect(workerPackCap(2_400_000, 60_000)).toBe(60_000);
+    // Floors, so a tiny budget still admits the protected sections rather than throwing at once.
+    expect(workerPackCap(1_000, 60_000)).toBe(1_000);
   });
 
   it("fences findings and failedAttempts so injections cannot create prompt headings", () => {

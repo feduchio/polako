@@ -1,5 +1,5 @@
 import { ReviewAxisSchema } from "../domain/finding.js";
-import { REVIEW_AXIS_ROLE, assertReviewerRolesResolvable, reviewerSystemPrompt } from "./reviewerProtocol.js";
+import { REVIEW_AXIS_ROLE, assertReviewerRolesResolvable } from "./reviewerProtocol.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,7 +9,7 @@ import type { Checkpoint } from "../domain/checkpoint.js";
 import { FindingSchema } from "../domain/finding.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
-import { runReviewSwarm } from "./swarm.js";
+import { runAxisReview, runReviewSwarm } from "./swarm.js";
 
 const roots: string[] = [];
 
@@ -21,38 +21,40 @@ const PROTOCOLS = ProtocolRegistry.load(defaultProtocolsRoot());
 const REVIEW_AXIS_SCHEMA_VALUES = ReviewAxisSchema.options;
 
 describe("B-selfhost-19 composed reviewer instruction", () => {
-  it("maps every review axis to a role protocol that resolves", () => {
-    // Eight axes, five `reviewer-*` protocols. The map's values are strings, so nothing but this
-    // check can tell that the three without one of their own point somewhere real.
+  it("sends every axis a system message built from its own role protocol", async () => {
+    // Captured at the provider, not read off `reviewerSystemPrompt`: the finding this closes is
+    // that a composition layer existed and only the tests called it.
+    for (const axis of REVIEW_AXIS_SCHEMA_VALUES) {
+      const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+      provider.script("reviewer", [{ kind: "reply", content: "[]" }]);
+      await runAxisReview({
+        checkpoint: CHECKPOINT,
+        axis,
+        artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "bbbbbbb", diff: "d", checkpoint: CHECKPOINT },
+        provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+        protocols: PROTOCOLS,
+      });
+      const call = provider.calls[0]!;
+      const system = call.messages[0]!.content;
+      // Two messages, so a prepended policy goes inside the system message rather than becoming
+      // a third and breaking the shape reviewers already rely on.
+      expect(call.messages).toHaveLength(2);
+      expect(system).toContain(PROTOCOLS.get(REVIEW_AXIS_ROLE[axis]).body.trim().split("\n")[0]!);
+      // The machine-readable contract no reviewer body carries. Losing it would leave every
+      // response failing `RawFindingSchema` while a "the inline literal is gone" check passed.
+      for (const field of ["criterion", "severity", "blocking", "claim", "evidence", "reproduction", "suggestedCheck"]) {
+        expect(system).toContain(field);
+      }
+      expect(system).toContain("Return JSON only");
+      // Finding 23's rule, reaching a provider because it lives in the role bodies.
+      expect(system).toContain("blocking only when it is a plausible omission");
+    }
+  });
+
+  it("resolves every mapped role once, before any review runs", () => {
     expect(() => {
       assertReviewerRolesResolvable(PROTOCOLS);
     }).not.toThrow();
-    for (const axis of REVIEW_AXIS_SCHEMA_VALUES) {
-      const prompt = reviewerSystemPrompt(PROTOCOLS, axis);
-      const role = PROTOCOLS.get(REVIEW_AXIS_ROLE[axis]);
-      expect(prompt).toContain(role.body.trim().split("\n")[0]!);
-    }
-  });
-
-  it("keeps the machine-readable output contract that the role bodies do not carry", () => {
-    // The inline literal carried the whole parse contract. No `reviewer-*` body describes an
-    // output format, so composing a role body *instead of* it would leave every reviewer response
-    // failing `RawFindingSchema` while a check that the literal is gone still passed.
-    for (const axis of REVIEW_AXIS_SCHEMA_VALUES) {
-      const prompt = reviewerSystemPrompt(PROTOCOLS, axis);
-      for (const field of ["criterion", "severity", "blocking", "claim", "evidence", "reproduction", "suggestedCheck"]) {
-        expect(prompt).toContain(field);
-      }
-      expect(prompt).toContain("Return JSON only");
-    }
-    const bodies = REVIEW_AXIS_SCHEMA_VALUES.map((axis) => PROTOCOLS.get(REVIEW_AXIS_ROLE[axis]).body);
-    expect(bodies.some((body) => body.includes("Return JSON only"))).toBe(false);
-  });
-
-  it("carries the bounded-acceptance rule into the reviewer's system message", () => {
-    for (const axis of REVIEW_AXIS_SCHEMA_VALUES) {
-      expect(reviewerSystemPrompt(PROTOCOLS, axis)).toContain("blocking only when it is a plausible omission");
-    }
   });
 });
 

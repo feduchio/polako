@@ -1,3 +1,5 @@
+import { composeWorkerInstruction } from "../context/workerInstruction.js";
+import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -140,6 +142,53 @@ describe("B2 production candidate drivers", () => {
 
     const synthetic = events.filter((event) => JSON.stringify(event).includes('"provider":"worker"'));
     expect(synthetic).toEqual([]);
+  });
+
+  it("names the budget when a pack overflow kills every candidate", async () => {
+    // The cap and the task are the same for all N, so overflow fails them identically. Without
+    // the code and the counts on the candidate, that is indistinguishable from a sandbox fault,
+    // and the task burns its retries reproducing it.
+    const registry = ProtocolRegistry.load(defaultProtocolsRoot());
+    const options = buildDriverOptions(fixture, () =>
+      new ScriptedCandidateWorker((task) => {
+        // The real throw from the real seam, not a hand-made error.
+        composeWorkerInstruction({
+          registry,
+          task: task as unknown as Parameters<typeof composeWorkerInstruction>[0]["task"],
+          findings: [],
+          profile: null,
+          tools: [],
+          maxPackTokens: 1,
+        });
+        return { status: "completed" };
+      }),
+    );
+    const own = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    for (const phase of ["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "PLANNING", "REVIEWING", "VALIDATING", "CONVERGENCE_CHECK"] as const) {
+      own.registerPhase(phase, stubDriverFor(phase));
+    }
+    own.registerPhase("EXECUTING", createExecutingDriver(options));
+
+    const { runId, taskId } = seedRun(store, clock, fixture);
+    await own.tickRun(runId);
+
+    const candidates = store.repos.candidates.listByTask(taskId);
+    expect(candidates).toHaveLength(2);
+    for (const candidate of candidates) {
+      expect(candidate.state).toBe("DISCARDED");
+      expect(candidate.error).toContain("BUDGET_EXCEEDED");
+      expect(candidate.error).toMatch(/require ~\d+ tokens > max 1/);
+    }
+    // And the run-visible event carries it, so an operator reading the log sees the budget.
+    const created = store.events.list(runId, { types: ["candidate.created"] });
+    expect(created).toHaveLength(2);
+    for (const event of created) {
+      const payload = event.payload as { candidate: { error: string | null } };
+      expect(payload.candidate.error).toContain("BUDGET_EXCEEDED");
+    }
   });
 
   it("GATING records candidate.gated and separates passing from failing candidates", async () => {
