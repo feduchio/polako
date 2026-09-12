@@ -37,8 +37,11 @@ type Section = keyof typeof PRIORITY;
 interface DigestEntry {
   readonly section: Section;
   readonly priority: number;
-  /** Turn number, used to evict the oldest entry of a priority first. */
-  readonly turn: number;
+  /**
+   * Position of the call in the loop, counted across turns rather than by turn. A turn can make
+   * several calls, so a turn number cannot say which of two failures in one turn came last.
+   */
+  readonly seq: number;
   readonly text: string;
 }
 
@@ -65,7 +68,7 @@ export function buildLoopDigest(history: readonly AgentTurn[], cap: number): str
   // argv or a search query have no shortened form, unlike paths and output tails.
   const survivable = entries.filter((entry) => estimateTokens(entry.text) <= cap);
   const ordered = [...survivable].sort(
-    (a, b) => a.priority - b.priority || b.turn - a.turn || a.text.localeCompare(b.text),
+    (a, b) => a.priority - b.priority || b.seq - a.seq || a.text.localeCompare(b.text),
   );
 
   for (let kept = ordered.length; kept > 0; kept -= 1) {
@@ -87,17 +90,19 @@ function render(entries: readonly DigestEntry[], turns: number): string {
 
 function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
   const entries: DigestEntry[] = [];
-  const errorCounts = new Map<string, { turn: number; count: number }>();
+  const errorCounts = new Map<string, { seq: number; count: number }>();
   const seenChanged = new Set<string>();
   const seenToolCall = new Set<string>();
-  let failedCommandTurn = -1;
+  let failedCommandSeq = -1;
+  let seq = 0;
 
   for (const turn of history) {
     if (turn.assistant.content.trim() !== "") {
-      entries.push({ section: "note", priority: PRIORITY.note, turn: turn.turn, text: head(turn.assistant.content.trim()) });
+      entries.push({ section: "note", priority: PRIORITY.note, seq: seq += 1, text: head(turn.assistant.content.trim()) });
     }
     const args = new Map((turn.assistant.toolCalls ?? []).map((call) => [call.id, call.arguments]));
     for (const result of turn.toolResults) {
+      seq += 1;
       const parsed = parseArgs(args.get(result.toolCallId));
       if (!result.ok) {
         // A failure carries its target too: "read failed" tells a worker nothing about which path
@@ -107,7 +112,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
         const label = identity === "" ? result.name : `${result.name} ${identity}`;
         const key = `${label}: ${tail(result.error ?? "failed")}`;
         const prior = errorCounts.get(key);
-        errorCounts.set(key, { turn: turn.turn, count: (prior?.count ?? 0) + 1 });
+        errorCounts.set(key, { seq, count: (prior?.count ?? 0) + 1 });
         continue;
       }
       if (result.name === "write" || result.name === "apply_patch") {
@@ -115,7 +120,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
         const key = `${shortPath(pathOf(result.output, parsed))} (${tag})`;
         if (!seenChanged.has(key)) {
           seenChanged.add(key);
-          entries.push({ section: "changed", priority: PRIORITY.changed, turn: turn.turn, text: key });
+          entries.push({ section: "changed", priority: PRIORITY.changed, seq, text: key });
         }
         continue;
       }
@@ -123,11 +128,11 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
         const argv = stringField(parsed, "argv") ?? "run_command";
         const exitCode = numberField(result.output, "exitCode");
         const failed = exitCode !== null && exitCode !== 0;
-        if (failed && turn.turn > failedCommandTurn) failedCommandTurn = turn.turn;
+        if (failed && seq > failedCommandSeq) failedCommandSeq = seq;
         entries.push({
           section: failed ? "failedCommand" : "command",
           priority: failed ? PRIORITY.failedCommand : PRIORITY.command,
-          turn: turn.turn,
+          seq,
           text: failed
             ? `${argv} -> exit ${String(exitCode)}: ${tail(outputOf(result.output))}`
             : `${argv} -> exit ${exitCode === null ? "?" : String(exitCode)}`,
@@ -138,7 +143,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
       const key = `${result.name} ${identity}`;
       if (!seenToolCall.has(key)) {
         seenToolCall.add(key);
-        entries.push({ section: "toolCall", priority: PRIORITY.toolCall, turn: turn.turn, text: key });
+        entries.push({ section: "toolCall", priority: PRIORITY.toolCall, seq, text: key });
       }
     }
   }
@@ -148,16 +153,16 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
   // Annotated rather than asserted: the annotation types the literal below, which tsc needs and
   // which lint does not flag as a redundant assertion.
   const demoted: DigestEntry[] = entries.map((entry) =>
-    entry.section === "failedCommand" && entry.turn !== failedCommandTurn
+    entry.section === "failedCommand" && entry.seq !== failedCommandSeq
       ? { ...entry, section: "command", priority: PRIORITY.command, text: entry.text.replace(/: [\s\S]*$/, "") }
       : entry,
   );
 
-  for (const [key, { turn, count }] of errorCounts) {
+  for (const [key, { seq: at, count }] of errorCounts) {
     demoted.push({
       section: "error",
       priority: PRIORITY.error,
-      turn,
+      seq: at,
       text: count > 1 ? `${key} (x${String(count)})` : key,
     });
   }

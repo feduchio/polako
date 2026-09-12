@@ -22,6 +22,8 @@ const FAILING_EARLIER = ["node", "fail-early.js"];
 /** Deliberately absent from the argv: an assertion that matched the argv would pass with no tail. */
 const LATE_MARKER = "zeta-teardown-exploded";
 const EARLIER_MARKER = "alpha-setup-exploded";
+/** Sits at the start of an output longer than the bound, so only a tail rendering drops it. */
+const LATE_HEAD_MARKER = "omega-head-of-the-failure";
 const cleanup: string[] = [];
 const LONG_DIR = "deeply/nested/directory/of/the/project";
 /** Long enough that twenty of them want more than a 200-token digest and less than a 400 one. */
@@ -150,12 +152,15 @@ describe("the worker's context window", () => {
       'request_context "why is add wrong"',
       "exit 3",
       LATE_MARKER,
+      "fail-late.js",
     ]) {
       expect(digest!).toContain(expected);
     }
     // Only the newest failure keeps its output, so a run of failures cannot crowd out the rest.
     expect(digest!).toContain("fail-early.js -> exit 4");
     expect(digest!).not.toContain(EARLIER_MARKER);
+    // The output outran the bound, so its head is gone and its end is what the worker sees.
+    expect(digest!).not.toContain(LATE_HEAD_MARKER);
 
     store.close();
     await handle.destroy();
@@ -340,7 +345,7 @@ async function repositoryFixture(): Promise<{
   for (const path of LONG_PATHS) writeFileSync(join(repoDir, path), "short\n");
   writeFileSync(
     join(repoDir, "fail-late.js"),
-    `process.stderr.write(${JSON.stringify(`${LATE_MARKER}: the teardown hook threw`)});process.exit(3);\n`,
+    `process.stderr.write(${JSON.stringify(`${LATE_HEAD_MARKER} ${"detail ".repeat(60)} ${LATE_MARKER}`)});process.exit(3);\n`,
   );
   writeFileSync(
     join(repoDir, "fail-early.js"),

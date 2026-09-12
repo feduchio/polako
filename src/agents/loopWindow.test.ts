@@ -132,7 +132,63 @@ describe("buildLoopDigest", () => {
       expect(entry).toMatch(/^\u2026?[^;]+ \((write|patch)\)$/);
       expect(entry.length).toBeLessThanOrEqual(81 + " (write)".length);
     }
-    expect(changedLine).toContain("leaf.ts (write)");
+    const shortened = changedLine!.slice("Changed: ".length).split("; ").find((entry) => entry.includes("leaf.ts"));
+    expect(shortened).toBeDefined();
+    // MC6 requires the marker, so a reader can tell a shortened path from a real one.
+    expect(shortened!.startsWith("\u2026")).toBe(true);
+    expect(shortened!.length).toBeLessThanOrEqual(1 + 80 + " (write)".length);
+
+    // An entry with no shortened form is dropped alone, not at the cost of everything else.
+    const argvAmongOthers = buildLoopDigest(
+      [
+        turn(1, [ok("write", { path: "src/kept.ts" }, { path: "src/kept.ts" })]),
+        turn(2, [ok("run_command", { argv: ["node", "b".repeat(50_000)] }, { exitCode: 0, stdout: "" })]),
+        turn(3, [ok("read", { path: "src/also-kept.ts" }, { path: "src/also-kept.ts" })]),
+      ],
+      cap,
+    );
+    expect(estimateTokens(argvAmongOthers)).toBeLessThanOrEqual(cap);
+    expect(argvAmongOthers).not.toContain("bbbb");
+    expect(argvAmongOthers).toContain("src/kept.ts (write)");
+    expect(argvAmongOthers).toContain("src/also-kept.ts");
+  });
+
+  it("keeps the output of the last failure only, even when both are in one turn", () => {
+    const digest = buildLoopDigest(
+      [
+        turn(1, [
+          ok("run_command", { argv: ["node", "first.js"] }, { exitCode: 5, stderr: "EARLIER-FAILURE-OUTPUT" }),
+          ok("run_command", { argv: ["node", "second.js"] }, { exitCode: 6, stderr: "LATEST-FAILURE-OUTPUT" }),
+        ]),
+      ],
+      400,
+    );
+    expect(digest).toContain("node second.js -> exit 6: LATEST-FAILURE-OUTPUT");
+    expect(digest).toContain("node first.js -> exit 5");
+    // A turn number cannot order two calls inside one turn; the call position can.
+    expect(digest).not.toContain("EARLIER-FAILURE-OUTPUT");
+  });
+
+  it("renders a failure from the end of its output, bounded, and says when it shortened", () => {
+    const long = `HEAD-OF-THE-OUTPUT ${"m".repeat(400)} TAIL-OF-THE-OUTPUT`;
+    const digest = buildLoopDigest(
+      [turn(1, [ok("run_command", { argv: ["node", "x.js"] }, { exitCode: 1, stderr: long })])],
+      400,
+    );
+    // A stack trace is diagnosed from its end, so the end is what survives.
+    expect(digest).toContain("TAIL-OF-THE-OUTPUT");
+    expect(digest).not.toContain("HEAD-OF-THE-OUTPUT");
+    const rendered = digest.split("exit 1: ")[1] ?? "";
+    expect(rendered.length).toBeLessThanOrEqual(201);
+    expect(rendered.startsWith("\u2026")).toBe(true);
+
+    const longError = buildLoopDigest(
+      [turn(1, [failed("read", { path: "src/x.ts" }, `HEAD-OF-THE-ERROR ${"e".repeat(400)} TAIL-OF-THE-ERROR`)])],
+      400,
+    );
+    expect(longError).toContain("TAIL-OF-THE-ERROR");
+    expect(longError).not.toContain("HEAD-OF-THE-ERROR");
+    expect((longError.split("src/x.ts: ")[1] ?? "").length).toBeLessThanOrEqual(201);
   });
 
   it("names what a failed call was aimed at, not merely that it failed", () => {
