@@ -156,7 +156,17 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
         // The provider is refusing this axis and retrying cannot change that. Stop and say so
         // rather than re-queueing it on every scheduler tick.
         recordAxisExhausted(ctx, hash, roundIndex, exhausted, ctx.config.review.maxAxisAttemptsPerRound);
-        return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+        // FAILED, not NEEDS_HUMAN: `RUN_PHASE_TABLE` admits only VALIDATING or FAILED out of
+        // REVIEWING, so returning NEEDS_HUMAN threw INVALID_TRANSITION on every tick and traded an
+        // unbounded retry loop for an unbounded crash loop.
+        return {
+          status: "complete",
+          nextPhase: EXHAUSTED_NEXT_PHASE,
+          terminalReason: {
+            code: "providers_unavailable",
+            summary: `review axis ${exhausted.join(", ")} failed ${String(ctx.config.review.maxAxisAttemptsPerRound)} times in round ${String(roundIndex)}`,
+          },
+        };
       }
       for (const axis of missingAxes(axes, roundExecutions, required)) {
         const outcome = await reviewAxisWithFallback(ctx, {
@@ -873,6 +883,12 @@ function recordCheckoutCreateFailure(
   const started = startExecution(ctx, hash, roundIndex, axis, reviewer);
   failExecution(ctx, started, err instanceof Error ? err.message : String(err));
 }
+
+/**
+ * Where a run goes when an axis cannot be reviewed. Named so a test can assert it against the gate
+ * the engine uses rather than against a copy of the table.
+ */
+export const EXHAUSTED_NEXT_PHASE = "FAILED" as const;
 
 /**
  * Axes that have already failed `cap` times in this round and are still not complete. Counted from

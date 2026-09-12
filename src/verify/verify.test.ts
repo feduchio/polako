@@ -139,6 +139,12 @@ describe("pairwise tournament", () => {
     expect(judge.fallbackReason).toContain("rationale");
     expect(rejected.rationale).toContain("fell back:");
 
+    // The empty-catalog path: a provider that advertises no model at all.
+    const empty = new ScriptedProvider("judge", []);
+    const emptyJudge = new PairwiseJudge({ provider: empty });
+    await emptyJudge.comparePair(a, b, ctx);
+    expect(emptyJudge.fallbackReason).toBe("provider advertises no model");
+
     const good = new ScriptedProvider("judge", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }])
       .script("m", [{ kind: "reply", content: JSON.stringify({ winner: "a", rationale: "A is tighter.", scores: { a: 9, b: 7 } }) }]);
     const working = new PairwiseJudge({ provider: good, model: { provider: "judge", model: "m" } });

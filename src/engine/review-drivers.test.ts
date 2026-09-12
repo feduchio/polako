@@ -15,7 +15,8 @@ import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
-import { createReviewingDriver, exhaustedAxes, type ReviewDriverOptions } from "./reviewDrivers.js";
+import { createReviewingDriver, exhaustedAxes, EXHAUSTED_NEXT_PHASE, type ReviewDriverOptions } from "./reviewDrivers.js";
+import { canTransitionPhase, RUN_PHASE_TABLE } from "../domain/run.js";
 import { stubDriverFor } from "./stubs.js";
 
 const cleanup: string[] = [];
@@ -54,6 +55,16 @@ describe("review attempt cap", () => {
 
   it("defaults to a cap that the recorded 2,402-execution round would have tripped", () => {
     expect(defaultConfig().review.maxAxisAttemptsPerRound).toBe(6);
+  });
+
+  it("stops through a phase REVIEWING is allowed to reach", () => {
+    // The first version of this returned NEEDS_HUMAN, which RUN_PHASE_TABLE forbids out of
+    // REVIEWING: the engine would have thrown INVALID_TRANSITION on every tick, trading an
+    // unbounded retry loop for an unbounded crash loop. Nothing observed it.
+    // Asserted through the gate the engine itself uses, not a copy of the table.
+    expect(canTransitionPhase("REVIEWING", EXHAUSTED_NEXT_PHASE)).toBe(true);
+    expect(canTransitionPhase("REVIEWING", "NEEDS_HUMAN")).toBe(false);
+    expect(RUN_PHASE_TABLE.terminal).toContain(EXHAUSTED_NEXT_PHASE);
   });
 });
 

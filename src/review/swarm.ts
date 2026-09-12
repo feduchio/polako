@@ -188,6 +188,10 @@ function normalizeFinding(value: unknown): unknown {
   if (isRecord(evidence)) out["evidence"] = [evidence];
   const reproduction = out["reproduction"];
   if (typeof reproduction === "string") out["reproduction"] = [reproduction];
+  // A live probe returned `severity: "High"`. The enum is lower-case, so the case alone would have
+  // discarded an otherwise valid finding.
+  const severity = out["severity"];
+  if (typeof severity === "string") out["severity"] = severity.trim().toLowerCase();
   return out;
 }
 
