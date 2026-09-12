@@ -270,4 +270,48 @@ architectural answer and follow them.
     field -- and not an architectural one. It should be verified with a live probe against one of
     those six before anything is built on it, because advertising a parameter is not the same as
     returning useful score-token distributions.
+    **PROBED 2026-09-12 and the caution was right: advertised is not returned.** All of
+    `nex-n2.5-pro`, `nex-n2.5-mini`, `ling-3.0-flash-vl`, `lfm-2.5-2.6b` and
+    `nemotron-3-super-120b` answered `http=200` with **`logprobs: null`**, under both
+    `{logprobs, top_logprobs: 5}` and `{logprobs}` alone, at `max_tokens` 4 and 64. So
+    LLM-as-a-Verifier's logprob-expectation scoring is **not reachable on the free tier**, and the
+    broker change this finding sized would buy nothing today. The tree already anticipates this:
+    `logprobScheme` admits `"two_stage"` beside `"direct"`, and a two-stage discrete score needs no
+    logprobs. That is the reachable form of fine-grained reward here.
+
+41. **The review swarm has never produced a finding because the request demands a JSON object while
+    the parser demands an array. The reviewers work; the plumbing discards their answers.**
+    `runAxisReview` sends `responseFormat: "json"` (`src/review/swarm.ts:73`), which `openaiCompat`
+    turns into `response_format: {type: "json_object"}` (`src/providers/openaiCompat.ts:66`). A JSON
+    **object** cannot be a top-level array. But `REVIEWER_OUTPUT_CONTRACT` says "Return JSON only as
+    an array of findings" (`src/review/reviewerProtocol.ts:15`) and `parseRawFindings`
+    (`src/review/swarm.ts:154-163`) accepts only a top-level array or `{findings: [...]}`, throwing
+    "review response must contain a findings array" otherwise. **A model that honours
+    structured-output mode cannot satisfy the contract it was given.**
+    **Measured 2026-09-12** with a live probe reproducing `runAxisReview`'s exact request -- the real
+    `reviewerSystemPrompt(registry, "correctness")`, the real context-pack user message,
+    `response_format: json_object`, `temperature: 0` -- against a diff carrying one planted defect,
+    a budget guard changed from `spent < cap` to `spent <= cap`. Of five free models two got past the
+    rate limiter, and **both found the defect correctly**:
+      - `nex-agi/nex-n2.5-pro:free`, 691 output tokens: `{"criterion": "The budget guard must not
+        admit a spend equal to the cap when the cap is exclusive elsewhere.", "severity": "High",
+        "blocking": true, ...}`
+      - `nvidia/nemotron-3-super-120b-a12b:free`, 662 output tokens: `{"criterion": "withinBudget
+        must not admit a spend equal to the cap when the cap is exclusive elsewhere", "severity":
+        "high", "blocking": true, ...}`
+    Both returned the finding as a **single object** -- the natural shape under `json_object` mode --
+    and `parseRawFindings` threw both away. The two `gemma-4*:free` models returned `429`
+    immediately; `thinkingmachines/inkling:free` returned `403`, harness-only.
+    This explains the corpus exactly and completely. The 105 schema failures are compliant models
+    returning an object. The 18 "completed" executions that parsed to an empty array are models that
+    found nothing and emitted `{"findings": []}` -- the one object shape the parser accepts.
+    **Zero findings was never evidence about the code under review, or about the models. It was
+    this.**
+    The fix is two lines and no new dependency: accept a bare finding object as a one-element array
+    in `parseRawFindings`, and reword `REVIEWER_OUTPUT_CONTRACT` to ask for `{"findings": [...]}`,
+    which is what `json_object` mode can return. **This supersedes finding 36's diagnosis** -- the
+    models are not failing at structured output; our two halves ask for incompatible structures --
+    and it takes precedence over every other open item, including 29. It is the difference between a
+    review swarm that costs 78.7% of the budget and returns nothing, and one that returns what it
+    already knows.
 
