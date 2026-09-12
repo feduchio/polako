@@ -311,6 +311,10 @@ describe("buildWireWindow", () => {
     });
     expect(window.map((message) => message.role)).toEqual(["system", "user"]);
     expect(window.at(-1)?.content).toBe(pack.content);
+
+    // The contract says "the system message, if any, plus the pack", so the no-system branch is
+    // a named case and not an implicit one.
+    expect(buildWireWindow({ archive: [pack], turns: [], digestCap: 400 })).toEqual([pack]);
   });
 
   it("summarises only what precedes the turn it sends verbatim", () => {

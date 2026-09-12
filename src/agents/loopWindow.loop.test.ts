@@ -54,7 +54,8 @@ describe("the worker's context window", () => {
       reply([call("finish", { summary: "done" })]),
     ]);
 
-    const result = await new AgentRunner(deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    const task = codingTask(fixture.runId, fixture.base);
+    const result = await new AgentRunner(deps).runLoop(task, handle);
     expect(result.status).toBe("FINISHED");
     expect(provider.calls.length).toBeGreaterThanOrEqual(20);
 
@@ -88,6 +89,31 @@ describe("the worker's context window", () => {
     expect(transcript.messages).toHaveLength(1 + transcript.turns.length + toolMessages);
     expect(transcript.messages.map((m) => m.content).join("\n")).toContain("marker-big-0");
     expect(bodyOf(provider.calls.at(-1)!)).not.toContain("marker-big-0");
+
+    // A count and one sampled body leave the other two thirds of MC2 unwatched: a reversed
+    // archive, or one message's content replaced, satisfies both. Walk it positionally instead.
+    expect(transcript.messages[0]).toEqual({ role: "user", content: task.description });
+    let at = 1;
+    for (const t of transcript.turns) {
+      const assistant = transcript.messages[at];
+      expect(assistant?.role).toBe("assistant");
+      expect(assistant?.content).toBe(t.assistant.content);
+      expect((assistant as Extract<ChatMessage, { role: "assistant" }>).toolCalls?.map((c) => c.id))
+        .toEqual(t.assistant.toolCalls?.map((c) => c.id));
+      at += 1;
+      for (const outcome of t.toolResults) {
+        const message = transcript.messages[at];
+        expect(message?.role).toBe("tool");
+        expect((message as Extract<ChatMessage, { role: "tool" }>).toolCallId).toBe(outcome.toolCallId);
+        expect(message?.content).toBe(
+          outcome.name === "finish"
+            ? JSON.stringify({ ok: true, accepted: true })
+            : JSON.stringify({ ok: true, output: outcome.output }),
+        );
+        at += 1;
+      }
+    }
+    expect(at).toBe(transcript.messages.length);
 
     store.close();
     await handle.destroy();
