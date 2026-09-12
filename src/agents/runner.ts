@@ -4,6 +4,7 @@ import { isBudgetError } from "../broker/quota.js";
 import { BasicIntel } from "../intel/basic.js";
 import type { Task } from "../domain/task.js";
 import { PolishError, errorToString } from "../shared/errors.js";
+import { buildWireWindow, loopDigestCap } from "./loopWindow.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import {
   createAgentTools,
@@ -47,7 +48,10 @@ export class AgentRunner implements CandidateWorker {
     const intelligence = (this.deps.createIntelligence ?? ((path) => new BasicIntel(path)))(worktree.path);
     await intelligence.prepare();
 
+    // One array, two jobs, and they are no longer the same array's problem: `messages` is the
+    // archive and may never shrink, while each request carries a window built from it.
     const messages: ChatMessage[] = [];
+    const digestCap = loopDigestCap(this.deps.maxTokens);
     if (this.deps.systemPrompt !== undefined) messages.push({ role: "system", content: this.deps.systemPrompt });
     const composed = this.deps.prompt?.(task) ?? null;
     messages.push({ role: "user", content: composed?.text ?? task.description });
@@ -74,7 +78,7 @@ export class AgentRunner implements CandidateWorker {
       try {
         call = await this.deps.complete({
           model: this.deps.model,
-          messages: [...messages],
+          messages: buildWireWindow({ archive: messages, turns, digestCap }),
           tools: tools.definitions,
           maxTokens: remainingTokens,
           metadata: {

@@ -1,0 +1,287 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import type { ChatMessage, CompletionRequest, ToolCall } from "../broker/types.js";
+import { estimateTokens } from "../context/types.js";
+import { defaultConfig } from "../domain/config.js";
+import type { Task } from "../domain/task.js";
+import { BasicIntel } from "../intel/basic.js";
+import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { CommandPolicy } from "../sandbox/allowlist.js";
+import { Git } from "../sandbox/git.js";
+import { WorktreeSandbox } from "../sandbox/worktree.js";
+import { id } from "../shared/ids.js";
+import { openStore, type Store } from "../store/index.js";
+import { expectPairing } from "./loopWindow.test.js";
+import { AgentRunner } from "./runner.js";
+import type { AgentRunnerDeps, AgentTranscript } from "./types.js";
+
+const NOW = 1_700_000_000_000;
+const FAILING = ["node", "-e", "process.stderr.write('boom: assertion failed at line 42');process.exit(3)"];
+const cleanup: string[] = [];
+
+afterEach(() => {
+  for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+describe("the worker's context window", () => {
+  it("stops growing with the turn index, and keeps the whole loop in the archive", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 24, maxTokens: 32_000 });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+
+    // Twenty reads of ~2,000 characters each, with one mid-loop turn asking for two at once.
+    provider.script("worker", [
+      reply([call("read", { path: "big-0.txt" })]),
+      reply([call("read", { path: "big-1.txt" })]),
+      reply([call("read", { path: "big-2.txt" }), call("read", { path: "big-3.txt" })]),
+      ...Array.from({ length: 16 }, (_, i) => reply([call("read", { path: `big-${String(i + 4)}.txt` })])),
+      reply([call("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" })]),
+      reply([call("finish", { summary: "done" })]),
+    ]);
+
+    const result = await new AgentRunner(deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("FINISHED");
+    expect(provider.calls.length).toBeGreaterThanOrEqual(20);
+
+    // AC1. Measured over the message bodies actually sent. `ScriptedProvider` reports a fixed
+    // usage of 10 input tokens, so a check reading `usage.inputTokens` would be green either way.
+    const sizes = provider.calls.map(requestTokens);
+    expect(sizes[19]! - sizes[4]!).toBeLessThanOrEqual(400);
+
+    // MC1 bounds the *historical* footprint, which is everything the request carries besides the
+    // most recent turn. Total size is not bounded and must not be asserted to be: the turn that
+    // asked for two reads at once makes the next request legitimately larger, and MC5 requires
+    // exactly that. Measured across the whole loop the footprint is the pack plus at most one
+    // digest, where on the unmodified tree it grows with every turn.
+    const footprints = provider.calls.map(historicalTokens);
+    const pack = footprints[0]!;
+    expect(Math.max(...footprints)).toBeLessThanOrEqual(pack + 400);
+    expect(footprints.at(-1)!).toBeLessThanOrEqual(footprints[4]! + 400);
+
+    // AC3. Every request, including the one carrying the two-call turn.
+    for (const request of provider.calls) expectPairing(request.messages);
+    const twoCall = provider.calls.find((request) =>
+      (request.messages.at(-3) as Extract<ChatMessage, { role: "assistant" }> | undefined)?.toolCalls?.length === 2,
+    );
+    expect(twoCall).toBeDefined();
+    expect(twoCall!.messages.filter((message) => message.role === "tool")).toHaveLength(2);
+
+    // AC2. The archive keeps every message, including the first turn's output, which by the end
+    // is no longer on the wire.
+    const transcript = JSON.parse(store.artifacts.getText(result.transcriptRef.sha256)) as AgentTranscript;
+    const toolMessages = transcript.turns.reduce((sum, t) => sum + t.toolResults.length, 0);
+    expect(transcript.messages).toHaveLength(1 + transcript.turns.length + toolMessages);
+    expect(transcript.messages.map((m) => m.content).join("\n")).toContain("marker-big-0");
+    expect(bodyOf(provider.calls.at(-1)!)).not.toContain("marker-big-0");
+
+    store.close();
+    await handle.destroy();
+  });
+
+  it("sends the most recent turn's output in full, however large", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 6, maxTokens: 32_000 });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+
+    provider.script("worker", [
+      reply([call("read", { path: "wide.txt" })]),
+      reply([call("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" })]),
+      reply([call("finish", { summary: "done" })]),
+    ]);
+
+    const result = await new AgentRunner(deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("FINISHED");
+    // AC5. Eviction is for history; the turn the worker is reasoning about arrives untouched.
+    expect(bodyOf(provider.calls[1]!)).toContain(fixture.wide);
+
+    store.close();
+    await handle.destroy();
+  });
+
+  it("inventories every tool the worker used, and why the last command failed", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 12, maxTokens: 32_000 });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+
+    provider.script("worker", [
+      reply([call("read", { path: "src/math.ts" })]),
+      reply([call("list", { path: "src" })]),
+      reply([call("search", { query: "add", path: "src" })]),
+      reply([call("repo_intel", { action: "symbol", query: "add" })]),
+      reply([call("write", { path: "src/created.ts", content: "export const one = 1;\n" })]),
+      reply([call("apply_patch", { path: "src/math.ts", oldText: "a + b", newText: "a + b + 0" })]),
+      reply([call("run_command", { argv: FAILING })]),
+      reply([call("request_context", { query: "why is add wrong" })]),
+      reply([call("read", { path: "big-0.txt" })]),
+      reply([call("finish", { summary: "done" })]),
+    ]);
+
+    const result = await new AgentRunner(deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("FINISHED");
+
+    // AC6. The digest of the request after all eight non-terminal tools have run.
+    const digest = digestOf(provider.calls[9]!);
+    expect(digest).toBeDefined();
+    for (const expected of [
+      "src/math.ts",
+      "list src",
+      'search "add"',
+      'symbol "add"',
+      "src/created.ts (write)",
+      "src/math.ts (patch)",
+      'request_context "why is add wrong"',
+      "exit 3",
+      "boom: assertion failed at line 42",
+    ]) {
+      expect(digest!).toContain(expected);
+    }
+
+    store.close();
+    await handle.destroy();
+  });
+
+  it("keeps the budget and turn stopping conditions it had before", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+
+    const tokens = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 20 });
+    tokens.provider.script("worker", [
+      reply([call("read", { path: "big-0.txt" })]),
+      reply([call("read", { path: "big-1.txt" })]),
+    ]);
+    const budget = await new AgentRunner(tokens.deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(budget.status).toBe("BUDGET_EXCEEDED");
+
+    const turns = harness(store, fixture.policy, { maxTurns: 2, maxTokens: 32_000 });
+    turns.provider.script("worker", [
+      reply([call("read", { path: "big-0.txt" })]),
+      reply([call("read", { path: "big-1.txt" })]),
+      reply([call("finish", { summary: "never reached" })]),
+    ]);
+    const capped = await new AgentRunner(turns.deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(capped.status).toBe("BUDGET_EXCEEDED");
+    expect(capped.turns).toBe(2);
+
+    store.close();
+    await handle.destroy();
+  });
+});
+
+function bodyOf(request: CompletionRequest): string {
+  return request.messages.map((message) => message.content).join("\n");
+}
+
+function requestTokens(request: CompletionRequest): number {
+  return estimateTokens(bodyOf(request));
+}
+
+/** Everything the request carries except the most recent turn. */
+function historicalTokens(request: CompletionRequest): number {
+  const messages = request.messages;
+  let lastAssistant = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "assistant") {
+      lastAssistant = i;
+      break;
+    }
+  }
+  const history = lastAssistant === -1 ? messages : messages.slice(0, lastAssistant);
+  return estimateTokens(history.map((message) => message.content).join("\n"));
+}
+
+function digestOf(request: CompletionRequest): string | undefined {
+  return request.messages.find((message) => message.content.startsWith("## Earlier in this loop"))?.content;
+}
+
+let nextCall = 0;
+
+function call(name: string, args: unknown): ToolCall {
+  return { id: `tc-${String(nextCall += 1)}`, name, arguments: JSON.stringify(args) };
+}
+
+function reply(toolCalls: ToolCall[]) {
+  return { kind: "reply" as const, content: "", toolCalls };
+}
+
+function harness(
+  store: Store,
+  policy: CommandPolicy,
+  overrides: Partial<AgentRunnerDeps>,
+): { provider: ScriptedProvider; deps: AgentRunnerDeps } {
+  const provider = new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.strong }]);
+  return {
+    provider,
+    deps: {
+      complete: (request) => provider.complete(request),
+      artifacts: store.artifacts,
+      model: { provider: "scripted", model: "worker" },
+      commandPolicy: policy,
+      maxTurns: 8,
+      maxTokens: 32_000,
+      createIntelligence: (path) => new BasicIntel(path),
+      ...overrides,
+    },
+  };
+}
+
+function codingTask(runId: string, baseCheckpointHash: string): Task {
+  return {
+    id: id("task", NOW),
+    runId,
+    title: "Fix add",
+    description: "Fix add in src/math.ts",
+    kind: "bugfix",
+    origin: { kind: "mission_requirement", interpretationId: id("mint", NOW), requirementRef: "R1" },
+    acceptance: ["add(1,1)===2"],
+    complexity: "trivial",
+    baseCheckpointHash,
+    dependsOn: [],
+    state: "READY",
+    attempts: 0,
+    touchesProductCode: true,
+    selectedCandidateId: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+async function repositoryFixture(): Promise<{
+  root: string;
+  base: string;
+  runId: string;
+  wide: string;
+  sandbox: WorktreeSandbox;
+  policy: CommandPolicy;
+}> {
+  const root = mkdtempSync(join(tmpdir(), "polish-window-"));
+  const repoDir = join(root, "repo");
+  mkdirSync(repoDir);
+  const git = await Git.init(repoDir);
+  mkdirSync(join(repoDir, "src"));
+  writeFileSync(join(repoDir, "src/math.ts"), "export const add = (a: number, b: number) => a + b;\n");
+  for (let i = 0; i < 20; i += 1) {
+    writeFileSync(join(repoDir, `big-${String(i)}.txt`), `marker-big-${String(i)} ${"q".repeat(1_980)}\n`);
+  }
+  const wide = `wide-marker ${"w".repeat(3_990)}`;
+  writeFileSync(join(repoDir, "wide.txt"), `${wide}\n`);
+  const base = await git.commitAll("base");
+  if (base === null) throw new Error("fixture base commit missing");
+  return {
+    root,
+    base,
+    runId: id("run"),
+    wide,
+    sandbox: new WorktreeSandbox(repoDir, join(root, "worktrees"), defaultConfig().sandbox),
+    policy: CommandPolicy.forProject([FAILING], null, false, { search: true }),
+  };
+}
