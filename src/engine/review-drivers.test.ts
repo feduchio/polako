@@ -15,13 +15,46 @@ import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
-import { createReviewingDriver, type ReviewDriverOptions } from "./reviewDrivers.js";
+import { createReviewingDriver, exhaustedAxes, type ReviewDriverOptions } from "./reviewDrivers.js";
 import { stubDriverFor } from "./stubs.js";
 
 const cleanup: string[] = [];
 
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+describe("review attempt cap", () => {
+  const execution = (axis: "correctness" | "regression", completed: boolean) => ({
+    id: id("rvex", 1),
+    runId: "run_x",
+    checkpointHash: "h",
+    roundIndex: 1,
+    axis,
+    requestedModel: { provider: "p", model: "m" },
+    completed,
+    findings: [],
+    startedAt: 1,
+    finishedAt: 1,
+    ...(completed ? {} : { error: 'rate limited: 429' }),
+  });
+
+  it("names an axis only once it has failed the cap and is still incomplete", () => {
+    const axes = ["correctness", "regression", "correctness"] as const;
+    const below = Array.from({ length: 5 }, () => execution("correctness", false));
+    expect(exhaustedAxes(axes, below, 3, 6)).toEqual([]);
+
+    const atCap = Array.from({ length: 6 }, () => execution("correctness", false));
+    expect(exhaustedAxes(axes, atCap, 3, 6)).toEqual(["correctness"]);
+
+    // Failures do not matter once the axis has the completions the round needs.
+    const done = [...atCap, execution("correctness", true), execution("correctness", true)];
+    expect(exhaustedAxes(axes, done, 3, 6)).toEqual([]);
+  });
+
+  it("defaults to a cap that the recorded 2,402-execution round would have tripped", () => {
+    expect(defaultConfig().review.maxAxisAttemptsPerRound).toBe(6);
+  });
 });
 
 describe("B4 production REVIEWING driver", () => {

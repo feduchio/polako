@@ -166,9 +166,10 @@ function parseRawFindings(content: string): RawFinding[] {
  * ever produced.
  */
 function findingValues(parsed: unknown): unknown[] | null {
-  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed)) return parsed as unknown[];
   if (!isRecord(parsed)) return null;
-  if (Array.isArray(parsed["findings"])) return parsed["findings"];
+  const nested = parsed["findings"];
+  if (Array.isArray(nested)) return nested as unknown[];
   return RawFindingSchema.safeParse(parsed).success ? [parsed] : null;
 }
 

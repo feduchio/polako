@@ -42,6 +42,13 @@ export const ReviewStrategySchema = z.object({
   rotateEnsembles: z.boolean().default(true),
   /** models below this observed-quality threshold are never picked just for novelty */
   minQualityForRotation: z.number().min(0).max(1).default(0.6),
+  /**
+   * Failed executions one axis may accumulate in one round before the run stops and asks for a
+   * human. Without a bound the driver returns `waiting` after every provider failure and the
+   * scheduler calls it again: one recorded run burned 2,402 executions on one axis in one round,
+   * 2,300 of them rate-limited.
+   */
+  maxAxisAttemptsPerRound: z.number().int().min(1).default(6),
 });
 
 export const ConvergenceStrategySchema = z.object({

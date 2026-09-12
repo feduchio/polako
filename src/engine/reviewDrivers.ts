@@ -151,6 +151,13 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
       }
 
       const rateLimited = new Set<string>();
+      const exhausted = exhaustedAxes(axes, roundExecutions, required, ctx.config.review.maxAxisAttemptsPerRound);
+      if (exhausted.length > 0) {
+        // The provider is refusing this axis and retrying cannot change that. Stop and say so
+        // rather than re-queueing it on every scheduler tick.
+        recordAxisExhausted(ctx, hash, roundIndex, exhausted, ctx.config.review.maxAxisAttemptsPerRound);
+        return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+      }
       for (const axis of missingAxes(axes, roundExecutions, required)) {
         const outcome = await reviewAxisWithFallback(ctx, {
           hash,
@@ -865,6 +872,45 @@ function recordCheckoutCreateFailure(
   if (reviewer === undefined) return;
   const started = startExecution(ctx, hash, roundIndex, axis, reviewer);
   failExecution(ctx, started, err instanceof Error ? err.message : String(err));
+}
+
+/**
+ * Axes that have already failed `cap` times in this round and are still not complete. Counted from
+ * the persisted executions, so the bound holds across scheduler ticks rather than within one.
+ */
+export function exhaustedAxes(
+  axes: readonly ReviewAxis[],
+  roundExecutions: readonly ReviewExecution[],
+  required: number,
+  cap: number,
+): ReviewAxis[] {
+  const out: ReviewAxis[] = [];
+  for (const axis of missingAxes(axes, roundExecutions, required)) {
+    if (out.includes(axis)) continue;
+    const failed = roundExecutions.filter((execution) => execution.axis === axis && !execution.completed).length;
+    if (failed >= cap) out.push(axis);
+  }
+  return out;
+}
+
+function recordAxisExhausted(
+  ctx: PhaseContext,
+  hash: string,
+  roundIndex: number,
+  axes: readonly ReviewAxis[],
+  cap: number,
+): void {
+  const event: NewEvent = {
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: "review.axis_exhausted",
+    payload: { checkpointHash: hash, roundIndex, axes: [...axes], attemptCap: cap },
+    causedBy: [],
+    actor: SYSTEM_ACTOR,
+    artifacts: [],
+  };
+  ctx.store.events.append([event]);
 }
 
 function resolveRequirementRef(ctx: PhaseContext): string {
