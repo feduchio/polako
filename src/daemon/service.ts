@@ -19,6 +19,11 @@ import { systemClock, type Clock } from "../shared/clock.js";
 import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
+import {
+  renderReviewerBenchmark,
+  runReviewerBenchmark,
+  selectBenchmarkReviewers,
+} from "../review/benchmarkRunner.js";
 import { applyRunBranch } from "./apply.js";
 import { loadPolishConfig } from "./configLoad.js";
 import {
@@ -155,9 +160,53 @@ export class DaemonService implements RpcHandler {
         return this.answer(requiredString(params, "runId"), requiredString(params, "answer"));
       case "apply":
         return this.apply(requiredString(params, "runId"));
+      case "benchmark.review":
+        return this.runReviewBenchmark(
+          optionalNumber(params, "seed") ?? 42,
+          params["liveAbort"] === true,
+        );
       default:
         throw new PolishError("NOT_FOUND", `unknown RPC method ${method}`);
     }
+  }
+
+  private async runReviewBenchmark(seed: number, liveAbort: boolean): Promise<unknown> {
+    if (!Number.isInteger(seed)) throw new PolishError("INVALID_ARGUMENT", "benchmark seed must be an integer");
+    const catalogs = await Promise.all(this.productionDeps.providers.map(async (provider) => ({
+      provider,
+      models: await provider.listModels(),
+    })));
+    const reviewers = selectBenchmarkReviewers(catalogs);
+    const report = await runReviewerBenchmark({
+      protocols: this.productionDeps.protocols,
+      reviewers,
+      seed,
+      liveAbort,
+    });
+    const packet = this.store.artifacts.put(
+      report.packetJsonl,
+      "review_benchmark_packets",
+      `review-benchmark:${String(seed)}:packets`,
+      this.clock.now(),
+    );
+    const oracle = this.store.artifacts.put(
+      report.oracleJsonl,
+      "review_benchmark_oracle",
+      `review-benchmark:${String(seed)}:oracle`,
+      this.clock.now(),
+    );
+    const result = {
+      summary: renderReviewerBenchmark(report),
+      report,
+      artifacts: { packet, oracle },
+    };
+    this.store.artifacts.put(
+      JSON.stringify(result),
+      "review_benchmark_report",
+      `review-benchmark:${String(seed)}:report`,
+      this.clock.now(),
+    );
+    return result;
   }
 
   private async addProject(path: string, requestedName: string | undefined): Promise<ProjectRecord> {

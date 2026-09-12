@@ -73,6 +73,9 @@ export async function runCli(
     case "cost":
       await costCommand(args, deps.callDaemon ?? callDaemon);
       return;
+    case "benchmark-review":
+      await benchmarkReviewCommand(args, deps.callDaemon ?? callDaemon);
+      return;
     case "pause":
     case "resume":
     case "stop":
@@ -110,6 +113,23 @@ async function costCommand(args: string[], daemonCall: CliDaemonCall): Promise<v
     return;
   }
   process.stdout.write(renderRunEconomics(report));
+}
+
+async function benchmarkReviewCommand(args: string[], daemonCall: CliDaemonCall): Promise<void> {
+  const json = args.includes("--json");
+  const liveAbort = args.includes("--live-abort");
+  const seedValue = flag(args, "--seed");
+  const seed = seedValue === undefined ? 42 : positiveInteger(seedValue, "--seed");
+  const result = await daemonCall<{
+    summary: string;
+    report: unknown;
+    artifacts: unknown;
+  }>("benchmark.review", { seed, liveAbort });
+  if (json) {
+    print(result);
+    return;
+  }
+  process.stdout.write(result.summary);
 }
 
 async function projectCommand(args: string[]): Promise<void> {
@@ -248,6 +268,7 @@ const usage = `Usage:
   polish watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   polish log <run-id> [--follow] [--json]
   polish cost <run-id> [--json]
+  polish benchmark-review [--seed n] [--live-abort] [--json]
   polish diff <run-id>
   polish pause|resume|stop|kill <run-id>
   polish answer <run-id> <answer>

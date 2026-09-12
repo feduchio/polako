@@ -31,6 +31,7 @@ export const RPC_METHODS = [
   "kill",
   "answer",
   "apply",
+  "benchmark.review",
 ] as const;
 
 export type RpcMethod = (typeof RPC_METHODS)[number];

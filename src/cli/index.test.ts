@@ -32,6 +32,29 @@ describe("CLI parsing", () => {
     await expect(runCli(["answer", "run_test"])).rejects.toThrow(/answer is required/);
   });
 
+  it("renders the benchmark summary and forwards explicit options", async () => {
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const calls: { method: string; params: Record<string, unknown> | undefined }[] = [];
+    const daemonCall = <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
+      calls.push({ method, params });
+      return Promise.resolve({
+        summary: "Reviewer benchmark: 96/96 cells\n",
+        report: { requested: 96 },
+        artifacts: {},
+      } as T);
+    };
+
+    await runCli(["benchmark-review", "--seed", "7", "--live-abort"], { callDaemon: daemonCall });
+
+    expect(calls).toEqual([{
+      method: "benchmark.review",
+      params: { seed: 7, liveAbort: true },
+    }]);
+    expect(write.mock.calls.map((call) => String(call[0])).join(""))
+      .toBe("Reviewer benchmark: 96/96 cells\n");
+    write.mockRestore();
+  });
+
   it("attaches the observer only for interactive non-detached run", () => {
     expect(shouldAttachRunObserver({ detach: false, json: false, stdoutIsTTY: true })).toBe(true);
     expect(shouldAttachRunObserver({ detach: true, json: false, stdoutIsTTY: true })).toBe(false);

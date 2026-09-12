@@ -1,0 +1,454 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import type {
+  CompletionRequest,
+  CompletionResponse,
+  ModelInfo,
+  ProviderAdapter,
+} from "../broker/types.js";
+import type { ModelRef } from "../domain/common.js";
+import type { Checkpoint } from "../domain/checkpoint.js";
+import type { ProtocolRegistry } from "../protocols/loader.js";
+import { sha256Hex } from "../shared/hash.js";
+import { runAxisReview, type ReviewedFinding } from "./swarm.js";
+import {
+  canonicalJsonLine,
+  exportedPacket,
+  scorePerModelDiscrimination,
+  scoreQuality,
+  scoreTeamDiscrimination,
+  scoreTeamQuality,
+  type BenchmarkCellResult,
+  type BenchmarkLabel,
+  type BenchmarkOracle,
+  type BenchmarkOutcomeKind,
+  type PairDiscrimination,
+  type QualityMetrics,
+} from "./benchmark.js";
+import {
+  REVIEWER_BENCHMARK_PAIRS,
+  addedFileDiff,
+  changedLineSpan,
+  sourceFor,
+  type ReviewerBenchmarkPair,
+} from "./benchmarkCorpus.js";
+
+export interface BenchmarkReviewer {
+  provider: ProviderAdapter;
+  model: ModelRef;
+  family: string;
+}
+
+export interface ScheduledBenchmarkCell {
+  cellId: string;
+  pair: ReviewerBenchmarkPair;
+  label: BenchmarkLabel;
+  reviewer: BenchmarkReviewer;
+  repetition: number;
+}
+
+export interface RecordedBenchmarkCell extends BenchmarkCellResult {
+  request: CompletionRequest | null;
+  rawContent: string | null;
+  error: string | null;
+}
+
+export interface ReviewerBenchmarkReport {
+  seed: number;
+  requested: number;
+  partial: boolean;
+  cells: RecordedBenchmarkCell[];
+  byModel: Record<string, QualityMetrics>;
+  team: QualityMetrics;
+  perModelDiscrimination: PairDiscrimination;
+  teamDiscrimination: PairDiscrimination;
+  packetJsonl: string;
+  oracleJsonl: string;
+  packetSha256: string;
+  oracleSha256: string;
+}
+
+export interface RunReviewerBenchmarkInput {
+  protocols: ProtocolRegistry;
+  reviewers: readonly [BenchmarkReviewer, BenchmarkReviewer];
+  seed: number;
+  liveAbort?: boolean;
+  pairs?: readonly ReviewerBenchmarkPair[];
+}
+
+export interface ImportedBenchmarkResponse {
+  cellId: string;
+  raw: string;
+  usage?: CompletionResponse["usage"];
+}
+
+export interface RescoreReviewerBenchmarkInput {
+  protocols: ProtocolRegistry;
+  packetJsonl: string;
+  oracleJsonl: string;
+  responseJsonl: string;
+  packetSha256: string;
+  oracleSha256: string;
+  model: ModelRef;
+  family: string;
+  seed: number;
+}
+
+interface Capture {
+  request: CompletionRequest | null;
+  response: CompletionResponse | null;
+  error: unknown;
+}
+
+export async function runReviewerBenchmark(
+  input: RunReviewerBenchmarkInput,
+): Promise<ReviewerBenchmarkReport> {
+  const schedule = buildBenchmarkSchedule(
+    input.reviewers,
+    input.seed,
+    input.pairs ?? REVIEWER_BENCHMARK_PAIRS,
+  );
+  const cells: RecordedBenchmarkCell[] = [];
+  let partial = false;
+
+  for (const scheduled of schedule) {
+    const result = await runCell(scheduled, input.protocols);
+    cells.push(result);
+    if (
+      input.liveAbort === true &&
+      cells.length === 20 &&
+      cells.filter((cell) => cell.outcome === "transport_failure").length > 4
+    ) {
+      partial = true;
+      break;
+    }
+  }
+
+  return buildReport(input.seed, schedule.length, partial, cells);
+}
+
+export function buildBenchmarkSchedule(
+  reviewers: readonly [BenchmarkReviewer, BenchmarkReviewer],
+  seed: number,
+  pairs: readonly ReviewerBenchmarkPair[] = REVIEWER_BENCHMARK_PAIRS,
+): ScheduledBenchmarkCell[] {
+  const cells: ScheduledBenchmarkCell[] = [];
+  for (const pair of pairs) {
+    for (const label of ["clean", "mutant"] as const) {
+      for (const reviewer of reviewers) {
+        for (let repetition = 1; repetition <= 3; repetition++) {
+          cells.push({
+            cellId: sha256Hex(`${seed}:${pair.pairId}:${label}:${reviewer.model.provider}:${reviewer.model.model}:${repetition}`).slice(0, 24),
+            pair,
+            label,
+            reviewer,
+            repetition,
+          });
+        }
+      }
+    }
+  }
+  return shuffled(cells, seed);
+}
+
+export function selectBenchmarkReviewers(
+  catalogs: readonly { provider: ProviderAdapter; models: readonly ModelInfo[] }[],
+): [BenchmarkReviewer, BenchmarkReviewer] {
+  const select = (family: "nex-agi" | "nvidia"): BenchmarkReviewer => {
+    const eligible = catalogs.flatMap(({ provider, models }) =>
+      models.filter((model) =>
+        model.capabilities.family === family &&
+        model.capabilities.supportsJson &&
+        model.capabilities.inputCostPerM === 0 &&
+        model.capabilities.outputCostPerM === 0)
+        .map((model) => ({ provider, model: model.ref, family })));
+    eligible.sort((a, b) =>
+      `${a.model.provider}:${a.model.model}`.localeCompare(`${b.model.provider}:${b.model.model}`));
+    const selected = eligible[0];
+    if (selected === undefined) throw new Error(`no free JSON benchmark reviewer in family ${family}`);
+    return selected;
+  };
+  return [select("nex-agi"), select("nvidia")];
+}
+
+export function renderReviewerBenchmark(report: ReviewerBenchmarkReport): string {
+  const lines = [
+    `Reviewer benchmark: ${String(report.cells.length)}/${String(report.requested)} cells${report.partial ? " (partial)" : ""}`,
+    ...Object.entries(report.byModel).map(([model, score]) =>
+      `${model}: ${formatRate(score.primaryRecall)} primary recall, ${formatRate(score.strictIdRecall)} strict-id recall, ${formatRate(score.falsePositiveRate)} false positives, ${String(score.outputTokens)} output tokens, ${formatNumber(score.outputTokensPerPrimaryHit)} output tokens/hit`),
+    `team: ${formatRate(report.team.primaryRecall)} primary recall, ${formatRate(report.team.falsePositiveRate)} false positives, ${formatRate(report.teamDiscrimination.rate)} pair discrimination`,
+    `failures: schema=${String(report.team.schemaFailures)}, transport=${String(report.team.transportFailures)}`,
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+export async function rescoreReviewerBenchmark(
+  input: RescoreReviewerBenchmarkInput,
+): Promise<ReviewerBenchmarkReport> {
+  if (sha256Hex(input.packetJsonl) !== input.packetSha256) throw new Error("benchmark packet hash mismatch");
+  if (sha256Hex(input.oracleJsonl) !== input.oracleSha256) throw new Error("benchmark oracle hash mismatch");
+  const packets = parseJsonl<ReturnType<typeof exportedPacket>>(input.packetJsonl, isPacket);
+  const oracles = parseJsonl<BenchmarkOracle>(input.oracleJsonl, isOracle);
+  const responses = parseJsonl<ImportedBenchmarkResponse>(input.responseJsonl, isImportedResponse);
+  const packetById = uniqueByCellId(packets);
+  const oracleById = uniqueByCellId(oracles);
+  const responseById = uniqueByCellId(responses);
+  if (
+    packetById.size !== oracleById.size ||
+    packetById.size !== responseById.size ||
+    [...packetById.keys()].some((cellId) => !oracleById.has(cellId) || !responseById.has(cellId))
+  ) {
+    throw new Error("benchmark packet/oracle/response cell ids differ");
+  }
+
+  const cells: RecordedBenchmarkCell[] = [];
+  for (const [cellId, packet] of packetById) {
+    const oracle = oracleById.get(cellId);
+    const imported = responseById.get(cellId);
+    if (oracle === undefined || imported === undefined) throw new Error(`missing imported cell ${cellId}`);
+    const pair = REVIEWER_BENCHMARK_PAIRS.find((candidate) => candidate.pairId === oracle.pairId);
+    if (pair === undefined) throw new Error(`unknown benchmark pair ${oracle.pairId}`);
+    const replay = replayProvider(input.model, imported);
+    const scheduled: ScheduledBenchmarkCell = {
+      cellId,
+      pair,
+      label: oracle.label,
+      reviewer: { provider: replay, model: input.model, family: input.family },
+      repetition: oracle.repetition,
+    };
+    const cell = await runCell(scheduled, input.protocols);
+    if (
+      cell.request?.messages[0]?.content !== packet.system ||
+      cell.request.messages[1]?.content !== packet.user
+    ) {
+      throw new Error(`benchmark packet messages differ for ${cellId}`);
+    }
+    cells.push({ ...cell, usage: imported.usage ?? null });
+  }
+  return buildReport(input.seed, cells.length, false, cells);
+}
+
+async function runCell(
+  scheduled: ScheduledBenchmarkCell,
+  protocols: ProtocolRegistry,
+): Promise<RecordedBenchmarkCell> {
+  const root = mkdtempSync(join(tmpdir(), "polish-review-benchmark-"));
+  const path = join(root, scheduled.pair.path);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, sourceFor(scheduled.pair, scheduled.label), "utf8");
+  const capture: Capture = { request: null, response: null, error: null };
+  const provider = recordingProvider(scheduled.reviewer.provider, capture);
+  const span = changedLineSpan(scheduled.pair);
+  const oracle: BenchmarkOracle = {
+    cellId: scheduled.cellId,
+    pairId: scheduled.pair.pairId,
+    label: scheduled.label,
+    criterionId: scheduled.pair.criterionId,
+    path: scheduled.pair.path,
+    line: span.line,
+    endLine: span.endLine,
+    repetition: scheduled.repetition,
+  };
+  let findings: ReviewedFinding[] = [];
+  let outcome: BenchmarkOutcomeKind;
+  let error: string | null = null;
+  try {
+    const result = await runAxisReview({
+      checkpoint: checkpoint(scheduled.pair.pairId, scheduled.repetition),
+      axis: "correctness",
+      artifact: {
+        commitHash: "a".repeat(40),
+        diffBase: "b".repeat(40),
+        diff: addedFileDiff(scheduled.pair, scheduled.label),
+        checkpoint: checkpoint(scheduled.pair.pairId, scheduled.repetition),
+      },
+      provider: { provider, model: scheduled.reviewer.model },
+      protocols,
+      repositoryRoot: root,
+      now: scheduled.repetition,
+    });
+    findings = result.findings;
+    outcome = findings.length === 0 ? "completed_empty" : "completed_with_findings";
+  } catch (caught) {
+    error = caught instanceof Error ? `${caught.name}: ${caught.message}` : String(caught);
+    outcome = capture.response === null ? "transport_failure" : "schema_failure";
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  return {
+    oracle,
+    model: scheduled.reviewer.model,
+    family: scheduled.reviewer.family,
+    outcome,
+    findings,
+    usage: capture.response?.usage ?? null,
+    request: capture.request,
+    rawContent: capture.response?.message.content ?? null,
+    error,
+  };
+}
+
+function buildReport(
+  seed: number,
+  requested: number,
+  partial: boolean,
+  cells: RecordedBenchmarkCell[],
+): ReviewerBenchmarkReport {
+  const byModel = Object.fromEntries(
+    [...new Set(cells.map((cell) => modelKey(cell.model)))].sort().map((key) => [
+      key,
+      scoreQuality(cells.filter((cell) => modelKey(cell.model) === key)),
+    ]),
+  );
+  const packetJsonl = cells.map((cell) =>
+    canonicalJsonLine(exportedPacket(cell.oracle.cellId, cell.request?.messages ?? []))).join("");
+  const oracleJsonl = cells.map((cell) => canonicalJsonLine(cell.oracle)).join("");
+  return {
+    seed,
+    requested,
+    partial,
+    cells,
+    byModel,
+    team: scoreTeamQuality(cells),
+    perModelDiscrimination: scorePerModelDiscrimination(cells),
+    teamDiscrimination: scoreTeamDiscrimination(cells),
+    packetJsonl,
+    oracleJsonl,
+    packetSha256: sha256Hex(packetJsonl),
+    oracleSha256: sha256Hex(oracleJsonl),
+  };
+}
+
+function recordingProvider(inner: ProviderAdapter, capture: Capture): ProviderAdapter {
+  return {
+    id: inner.id,
+    kind: inner.kind,
+    concurrency: inner.concurrency,
+    listModels: (signal) => inner.listModels(signal),
+    complete: async (request) => {
+      capture.request = structuredClone(request);
+      try {
+        const response = await inner.complete(request);
+        capture.response = structuredClone(response);
+        return response;
+      } catch (error) {
+        capture.error = error;
+        throw error;
+      }
+    },
+    health: (signal) => inner.health(signal),
+  };
+}
+
+function replayProvider(model: ModelRef, imported: ImportedBenchmarkResponse): ProviderAdapter {
+  return {
+    id: model.provider,
+    kind: "record-replay",
+    concurrency: 1,
+    listModels: () => Promise.resolve([]),
+    complete: () => Promise.resolve({
+      message: { role: "assistant", content: imported.raw },
+      usage: imported.usage ?? { inputTokens: 0, outputTokens: 0, costUsd: null },
+      finishReason: "stop",
+      latencyMs: 0,
+    }),
+    health: () => Promise.resolve({ ok: true, checkedAt: 0 }),
+  };
+}
+
+function checkpoint(pairId: string, repetition: number): Checkpoint {
+  return {
+    id: "cp_0000000000000000000000",
+    runId: "run_0000000000000000000000",
+    seq: repetition,
+    commitHash: "a".repeat(40),
+    parentId: null,
+    source: "integration",
+    taskId: "task_0000000000000000000000",
+    evidence: {
+      gates: {},
+      testsPassed: 3,
+      testsFailed: 0,
+      testsTotal: 3,
+      openValidatedFindings: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+      diffLinesFromBaseline: 1,
+    },
+    createdAt: repetition + pairId.length,
+  };
+}
+
+function shuffled<T>(values: readonly T[], seed: number): T[] {
+  const out = [...values];
+  let state = seed >>> 0;
+  const random = (): number => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 0x1_0000_0000;
+  };
+  for (let index = out.length - 1; index > 0; index--) {
+    const swap = Math.floor(random() * (index + 1));
+    [out[index], out[swap]] = [out[swap] as T, out[index] as T];
+  }
+  return out;
+}
+
+function modelKey(model: ModelRef): string {
+  return `${model.provider}:${model.model}`;
+}
+
+function formatRate(value: number | null): string {
+  return value === null ? "undefined" : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatNumber(value: number | null): string {
+  return value === null ? "undefined" : value.toFixed(2);
+}
+
+function parseJsonl<T>(text: string, accepts: (value: unknown) => value is T): T[] {
+  if (!text.endsWith("\n")) throw new Error("benchmark JSONL must end with a newline");
+  return text.slice(0, -1).split("\n").filter((line) => line !== "").map((line) => {
+    const value: unknown = JSON.parse(line);
+    if (!accepts(value)) throw new Error("benchmark JSONL schema mismatch");
+    return value;
+  });
+}
+
+function uniqueByCellId<T extends { cellId: string }>(values: readonly T[]): Map<string, T> {
+  const map = new Map<string, T>();
+  for (const value of values) {
+    if (map.has(value.cellId)) throw new Error(`duplicate benchmark cell ${value.cellId}`);
+    map.set(value.cellId, value);
+  }
+  return map;
+}
+
+function isPacket(value: unknown): value is ReturnType<typeof exportedPacket> {
+  if (!isRecord(value)) return false;
+  return typeof value["cellId"] === "string" &&
+    typeof value["system"] === "string" &&
+    typeof value["user"] === "string" &&
+    Object.keys(value).length === 3;
+}
+
+function isOracle(value: unknown): value is BenchmarkOracle {
+  if (!isRecord(value)) return false;
+  return typeof value["cellId"] === "string" &&
+    typeof value["pairId"] === "string" &&
+    (value["label"] === "clean" || value["label"] === "mutant") &&
+    typeof value["criterionId"] === "string" &&
+    typeof value["path"] === "string" &&
+    typeof value["line"] === "number" &&
+    typeof value["endLine"] === "number" &&
+    typeof value["repetition"] === "number";
+}
+
+function isImportedResponse(value: unknown): value is ImportedBenchmarkResponse {
+  if (!isRecord(value)) return false;
+  return typeof value["cellId"] === "string" && typeof value["raw"] === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

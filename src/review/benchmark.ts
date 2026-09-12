@@ -156,6 +156,40 @@ export function scoreTeamDiscrimination(cells: readonly BenchmarkCellResult[]): 
   return discrimination(groups);
 }
 
+export function scoreTeamQuality(cells: readonly BenchmarkCellResult[]): QualityMetrics {
+  const groups = groupCells(cells, (cell) =>
+    `${cell.oracle.pairId}\0${cell.oracle.label}\0${String(cell.oracle.repetition)}`);
+  const teamCells: BenchmarkCellResult[] = [];
+  for (const grouped of groups.values()) {
+    const first = grouped[0];
+    if (first === undefined) continue;
+    const completed = grouped.filter(isCompleted);
+    const usageValues = grouped.map((cell) => cell.usage).filter((usage): usage is Usage => usage !== null);
+    const usage = usageValues.length === 0 ? null : {
+      inputTokens: usageValues.reduce((sum, value) => sum + value.inputTokens, 0),
+      outputTokens: usageValues.reduce((sum, value) => sum + value.outputTokens, 0),
+      costUsd: usageValues.some((value) => value.costUsd === null)
+        ? null
+        : usageValues.reduce((sum, value) => sum + (value.costUsd ?? 0), 0),
+    };
+    teamCells.push({
+      oracle: first.oracle,
+      model: { provider: "team", model: "union" },
+      family: "team",
+      outcome: completed.length > 0
+        ? completed.some((cell) => cell.findings.length > 0)
+          ? "completed_with_findings"
+          : "completed_empty"
+        : grouped.some((cell) => cell.outcome === "schema_failure")
+          ? "schema_failure"
+          : "transport_failure",
+      findings: completed.flatMap((cell) => cell.findings),
+      usage,
+    });
+  }
+  return scoreQuality(teamCells);
+}
+
 export function wilson95(successes: number, total: number): WilsonInterval | null {
   if (total === 0) return null;
   const z = 1.96;
