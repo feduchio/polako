@@ -254,6 +254,36 @@ describe("the worker's context window", () => {
     await handle.destroy();
   });
 
+  it("puts a configured system prompt on the first request and every one after it", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    // Production composition does not set a system prompt today, so nothing else in the suite
+    // exercises this branch through a real loop; the builder test alone leaves the runner's own
+    // insertion unobserved.
+    const system = "the standing system message";
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 6, maxTokens: 32_000, systemPrompt: system });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+
+    provider.script("worker", [
+      reply([call("read", { path: "big-0.txt" })]),
+      reply([call("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" })]),
+      reply([call("finish", { summary: "done" })]),
+    ]);
+
+    const result = await new AgentRunner(deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("FINISHED");
+
+    expect(provider.calls[0]!.messages).toHaveLength(2);
+    expect(provider.calls[0]!.messages[0]).toEqual({ role: "system", content: system });
+    for (const request of provider.calls) {
+      expect(request.messages[0]).toEqual({ role: "system", content: system });
+    }
+
+    store.close();
+    await handle.destroy();
+  });
+
   it("keeps the budget and turn stopping conditions it had before", async () => {
     const fixture = await repositoryFixture();
     cleanup.push(fixture.root);
