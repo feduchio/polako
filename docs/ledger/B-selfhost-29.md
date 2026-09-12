@@ -1,8 +1,9 @@
 # B-selfhost-29 — run economics as a first-class record
 
-**Status:** DRAFT, revision 2. Not frozen. Base `89c99aa`.
-Revision 1 was rejected in contract review; the rejection was correct, and two of its three
-corrections were to my own factual claims about the corpus. See *Revision history*.
+**Status:** DRAFT, revision 3. Not frozen. Base `89c99aa`.
+Revisions 1 and 2 were both rejected in contract review, by two different reviewers, and both
+rejections were correct. Most of their findings were to my own factual claims about the corpus.
+See *Revision history*.
 **Finding:** item **29** in `docs/ledger/B-selfhost-remaining.md`.
 
 ## Why this is scheduled ahead of items 11–15
@@ -43,10 +44,13 @@ Verified against the store, and this is where a naive implementation fails:
   for everything**, which is exactly what the first attempt at finding 29's measurement did before
   it was corrected.
 - **`usage.costUsd` has three states, not one.** Of the 324 `model.call` events: **228 carry
-  `costUsd: 0`** (OpenRouter `:free` successes), **11 carry `costUsd: null`** (Gemini planner
-  calls), and **85 carry no `usage` object at all** (every one of them `ok: false` — rate limits,
-  400s, timeouts). Revision 1 claimed `costUsd` was null everywhere and built MC4's rationale on
-  it; that was wrong.
+  `costUsd: 0`** (OpenRouter `:free` successes), **11 carry `costUsd: null`** (Gemini — ten planner
+  calls and one judge call), and **85 carry `usage: null`** — the key is present and explicitly null, written that way by
+  `src/broker/broker.ts:260`, and every one of those calls is `ok: false` (rate limits, 400s,
+  timeouts). Revision 1 claimed `costUsd` was null everywhere; revision 2 then described these 85 as
+  having no `usage` key. Both were wrong, and an implementation branching on key *presence* would
+  pass a check written from either description and fail on every real failure. **96 of 324 calls
+  therefore have no price**: 11 null-priced successes and 85 failures.
 - **28 usage-bearing calls carry `taskId: null`** — 43,097 tokens, which is 100% of council spend.
   Four of the six runs have **no rows in `tasks` at all**, so for those runs a by-task breakdown
   keyed only on task ids is empty while the run total is not zero.
@@ -65,8 +69,15 @@ Verified against the store, and this is where a naive implementation fails:
 complete report for a run that finished before this change existed, because the six runs in the
 store are the only corpus there is and none of them was instrumented.
 
-**MC2.** Tokens are broken down by **role**, by **purpose**, and by **task**, and each breakdown
-sums exactly to the run total. No call carrying `usage` may be omitted from any breakdown, and no
+**MC2.** Tokens are broken down by **role**, by **purpose**, and by **task**, **each with input and
+output kept apart**, and each breakdown sums exactly to the run total.
+
+Input and output are not decoration. The measurement this item exists to serve is that the review
+swarm spends 138,414 input tokens against 696,221 output — **5.0× more generation than context** —
+while the worker's ratio is 0.08×. Those two facts point at opposite remedies, and a report carrying
+only combined totals cannot tell them apart, so it could not support the decision it is built for.
+Revision 2 specified combined totals only. On this corpus no usage-bearing call has a null `role` or
+`purpose`, so those two axes need no residual bucket; only `task` does. No call carrying `usage` may be omitted from any breakdown, and no
 call may be counted twice — a retried call, which appears as several events sharing one `callId`,
 counts once.
 
@@ -75,9 +86,11 @@ whose `taskId` is null. Without it the clause is unsatisfiable on the only corpu
 such calls carry 43,097 tokens, all of the council's spend, and four of six runs would report an
 empty by-task map against a non-zero total.
 
-**MC3.** Failure is visible. Two figures, because the corpus makes them different questions: the
-**count of `ok: false` calls** and the **count of calls carrying no `usage` object**, alongside the
-tokens of any failed call that does carry usage.
+**MC3.** Failure is visible. **Three counts**, because the corpus makes them three different
+questions: `ok: false` calls; calls whose `usage` is null; and successful calls whose `usage` is
+present but whose `costUsd` is null. The third is the one revision 2 had no home for, and it is the
+only reason this corpus's dollar figure is unknown rather than zero. Alongside them, the tokens of
+any failed call that does carry usage.
 
 All 85 failed calls in the corpus have no `usage`, so their token cost is genuinely unrecorded and
 no projection can recover it. What is recoverable, and what a retry storm actually shows up as, is
@@ -85,8 +98,10 @@ the count. Revision 1 asserted that failed calls "consumed tokens" as if the cor
 it does not.
 
 **MC4.** **A dollar figure is reported only when every contributing call has cost data** — a
-non-null `costUsd` on a present `usage` object. If any contributing call has a null `costUsd` or no
-`usage` at all, the amount is reported as **unknown**, with both counts from MC3 attached.
+non-null `costUsd` on a present `usage` object. If any contributing call has a null `costUsd` or a null
+`usage`, the amount is reported as **unknown**, with the **null-cost count and the null-usage count**
+from MC3 attached — 96 and 85 respectively on this corpus. Revision 2 attached "both counts from
+MC3" while MC3 counted neither of the two that matter here.
 
 A total of `$0.00` is legitimate when every contributing call priced itself at zero, which is what
 a free model does and what 228 of these calls did. The forbidden thing is narrower and is what the
@@ -94,12 +109,19 @@ tree does today: `usdUsage` (`src/observe/project.ts:468`) adds the 228 zeros, s
 11 nulls and the 85 missing, and returns `0` — a figure indistinguishable from "this run was free"
 when the truth is "96 of 324 calls have no price". On this corpus the honest answer is **unknown**.
 
-**MC5.** Spend is paired with **outcome**: the run's terminal phase, and each task's final state.
-Cost without outcome cannot answer cost-per-completed-task, which is the question finding 29 could
-not answer.
+**MC5.** Spend is paired with **outcome**: the run's **latest recorded phase together with whether
+that phase is terminal**, and each task's final state. Cost without outcome cannot answer
+cost-per-completed-task, which is the question finding 29 could not answer.
+
+"Terminal phase" alone is unsatisfiable: one of the six runs sits in `INTERPRETING_MISSION`, which is
+not terminal, and PR1 accepts any run id. A report that demands a terminal phase either fails on that
+run or invents one.
 
 **MC6.** Deterministic and pure. The same events produce the same report, independent of the order
-they are handed to the projection, ordered by `seq` internally. No clock.
+they are handed to the projection, ordered by `seq` internally, with `id` breaking a `seq` tie. No
+clock. Two events sharing a `callId` are one call: the **first by that ordering wins**, and a
+disagreement between them on tokens, cost, role, purpose or task is recorded as a conflict flag
+rather than silently resolved — `foldModelCallUsage` sets `usageConflict` for the same reason.
 
 **MC7.** The projection reads `payload.role`, `payload.purpose`, `payload.taskId` and
 `payload.usage` — the fields the events actually carry. It must not depend on `payload.metadata`,
@@ -133,7 +155,8 @@ role), two purposes within one role, **two task ids and one usage-bearing call w
 and one retried call appearing as two events sharing a `callId`. Assert the by-role, by-purpose and
 by-task breakdowns against hand-written expected numbers, assert the `unassigned` bucket holds the
 null-task call, assert the retried call is counted once, and assert each breakdown sums to the run
-total. The expectations must be written literally, not computed by the code under test.
+total. **Assert input and output separately in every breakdown**, with a role whose ratio is
+output-heavy and one whose ratio is input-heavy, so a report that folds them together fails. The expectations must be written literally, not computed by the code under test.
 
 Without the null-task call this check is the one revision 1 shipped: green on a fixture, and wrong
 on every real run.
@@ -146,17 +169,23 @@ four numbers.
 **AC3.** Three cost cases, which is what it takes to separate "free" from "unpriced":
   - every call `costUsd: 0` → the amount is **$0.00**, reported as known;
   - one `costUsd: null` among several priced → **unknown**, with a count of 1;
-  - one call with no `usage` among several priced → **unknown**, with a no-usage count of 1.
+  - one call with `usage: null` among several priced → **unknown**, with a null-usage count of 1.
+
+Assert the two counts as distinct fields: a null-priced success and a null-usage failure are
+different facts and revision 2 had a home for neither.
 
 The first case forbids treating zero as missing; the second and third forbid the partial sum that
 `usdUsage` performs today.
 
 **AC4.** With every `costUsd` present and non-zero, the dollar amount is their exact sum.
 
-**AC5.** Outcome pairing: the report carries the run's terminal phase and each task's final state,
+**AC5.** Outcome pairing: the report carries the run's latest phase, **whether it is terminal**, and
+each task's final state,
 asserted against a fixture whose run is `NEEDS_HUMAN` with one task integrated and one not, and
 whose `run.phase_changed` payload is shaped **as the store records it** — `{ run: { phase } }`, with
-**no `to` field**. A fold reading `payload.to` must fail this check.
+**no `to` field**. A fold reading `payload.to` must fail this check. A second fixture, a run still in
+`INTERPRETING_MISSION`, asserts the phase is reported with `terminal: false` rather than omitted or
+faked.
 
 **AC6.** Determinism: the same events in reverse insertion order produce an identical report.
 
@@ -167,14 +196,25 @@ nulling it, and all three fields must be covered, not only the role.
 **AC8.** The CLI subcommand prints the report for a run id, and exits non-zero with a diagnostic for
 an unknown run id.
 
-**AC9.** A `model.call` event with no `usage` at all contributes nothing to any token breakdown,
-does not appear as a zero-token row, and does not throw.
+**AC9.** A `model.call` event with **`usage: null`** — the key present and explicitly null, which is
+what the store writes — contributes nothing to any token breakdown, does not appear as a zero-token
+row, raises the null-usage count, and does not throw. A separate case with the `usage` key absent
+must behave identically, so neither key-presence branch can pass alone.
 
-**AC10.** Applied to a fixture built from the corpus's exact payload shapes — `metadata` absent,
-`costUsd` zero on some calls and null on others, `taskId` null on the council call, phase carried
-under `run` — the report's run total equals the hand-written sum, the dollar amount is unknown, and
-the by-task breakdown sums to the total via `unassigned`. One check that fails on every mistake this
-contract was rejected twice for.
+**AC10.** Applied to a fixture built from the corpus's exact payload shapes — `metadata` key absent,
+`costUsd` zero on some calls and null on others, `usage: null` on a failed call, `taskId` null on the
+council call, phase carried under `run` with no `to` — the report's run total equals the hand-written
+sum, input and output are separate, the dollar amount is unknown with both counts, and the by-task
+breakdown sums to the total via `unassigned`. One check that fails on every mistake this contract was
+rejected twice for.
+
+**AC11.** MC1, observed at the seam rather than asserted as a preference. A test loads a **completed**
+run's events into a store, constructs the production path that `cost` uses **without any live
+budget tracker or running daemon engine**, invokes the command, and asserts the rendered report. An
+implementation that consults live state renders nothing or throws. Revision 2 listed this as a named
+fake with no acceptance check behind it, which is the same class of gap this programme has found
+repeatedly: the fold's own tests and a mocked CLI test can both be green while production still
+reads live state.
 
 ## Named fakes — each must be planted and killed
 
@@ -194,6 +234,11 @@ contract was rejected twice for.
 | A retried call counted once per event rather than once per `callId` | AC1's retried-call clause |
 | Zero treated as missing, so a free run reports "unknown" | AC3's first case |
 | The outcome fold reading `payload.to` | AC5 |
+| Input and output folded into one number per row | AC1's separate assertions |
+| Branching on the absence of the `usage` key rather than its null value | AC9's two cases |
+| A null-priced success counted as a null-usage failure | AC3's distinct counts |
+| A non-terminal run given a faked terminal phase, or omitted | AC5's second fixture |
+| The report reading live budget state instead of the event log | AC11 |
 | Only the role read from the payload, purpose and task from `metadata` | AC7 |
 
 ## Out of scope
@@ -242,10 +287,57 @@ contract was rejected twice for.
 Also added on the reviewer's scope observation: the report may not print a cost-per-completed-task
 ratio, and why.
 
+## Revision history
+
+**Revision 2 → 3**, after a second contract review by a different reviewer, which found five blocking
+defects the first review missed. All five upheld:
+
+- **The report could not reproduce the finding it exists to serve.** Revision 2 carried combined
+  tokens only, so it could not distinguish the review swarm's 5.0× output-to-input ratio from a
+  context problem — and those two point at opposite remedies. Input and output are now separate in
+  every breakdown.
+- **The 85 failures carry `usage: null`, not an absent key.** My third consecutive mis-description of
+  this corpus. An implementation branching on key presence would have passed a check written from
+  either of my earlier descriptions and failed on every real failure.
+- **MC4's "unknown" attached counts that MC3 did not count.** A successful call with a null
+  `costUsd` — the only reason this corpus is unknown rather than zero — had no field. MC3 now has
+  three counts.
+- **"Terminal phase" was unsatisfiable.** One of the six runs is in `INTERPRETING_MISSION`, and PR1
+  accepts any run id, so the report must give the latest phase and say whether it is terminal.
+- **MC1 had no acceptance check.** "Derived from the event log, not accumulated live" was listed in
+  the named-fakes table with nothing behind it; AC11 now observes it at the production seam.
+
+Corrected in the same pass: the eleven null-priced calls are ten planner and one judge, not eleven
+planner; and `callId` conflict resolution is specified rather than left to the implementation.
+
+**Revision 1 → 2**, after the first contract review. Two blocking defects and six corrections, all
+upheld:
+
+- **`usage.costUsd` is not null everywhere.** It is zero on 228 calls, null on 11, and the whole
+  `usage` object is null on 85. MC4's rationale rested on the false claim, and as written it would
+  have forced an all-free run to report `$0.00` as the very number the clause exists to forbid. The
+  rule is now about *missing* price, not about zero, and `usdUsage`'s actual behaviour is quoted
+  instead of an invented one.
+- **MC2 was unsatisfiable on the only corpus.** 28 usage-bearing calls carry `taskId: null` — all
+  43,097 council tokens — and four of six runs have no task rows at all, so "each breakdown sums
+  exactly to the run total" could not hold. An `unassigned` bucket is now required, and AC1 must
+  contain such a call; without it AC1 was green on a fixture and wrong on every real run.
+- The `metadata` key is **absent**, not present-and-null.
+- Every failed call in the corpus lacks usable usage, so MC3's "failed calls consumed tokens" was
+  wrong about the data; the recoverable signal is the counts.
+- `run.phase_changed` carries **no `to` field**; an outcome fold written against the suite's other
+  fixtures would pass and return nothing on all six real runs.
+- Placement and reuse were unstated: the fold must be store-free under `src/observe/` because the
+  CLI may not import `store`, `broker` or `convergence`, which also rules out reusing
+  `foldModelCallUsage`. The command is named `cost`.
+
+Also added on the first reviewer's scope observation: the report may not print a
+cost-per-completed-task ratio, and why.
+
 ## Anti-fake notes for the reviewer
 
 The corpus's real shape is the trap, and revision 1 got it wrong twice over. The `metadata` key is
-absent; `costUsd` is zero far more often than it is null; failed calls carry no usage at all;
+absent; `costUsd` is zero far more often than it is null; failed calls carry `usage: null`;
 `taskId` is null on every council call; the phase lives under `run`. Five separate implementations
 that look correct return zeros, `$0.00`, an under-total, an empty by-task map, and no phase
 respectively — and each would pass a check built on an idealised fixture. **Verify that every
