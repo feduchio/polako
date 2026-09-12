@@ -1,7 +1,7 @@
 # B-selfhost-42 — blinded reviewer-quality benchmark
 
-**Status:** DRAFT, revision 2. Not frozen. Base `f782310`.
-Revision 1 was rejected independently by Grok and Claude; both rejections were correct.
+**Status:** DRAFT, revision 3. Not frozen. Base `f782310`.
+Revisions 1 and 2 were rejected independently by Grok and Claude; both rejections were correct.
 **Finding:** 42, informed by 43–45 in `docs/ledger/B-selfhost-remaining.md`.
 
 ## Mission
@@ -32,29 +32,37 @@ state-machine transition.
 
 ## MISSION_CRITICAL invariants
 
-**MC1 — blind production packet.** The exact five-key production pack is
+**MC1 — blind production packet.** The exact five-key production user pack is
 `{axis, checkpoint, commitHash, diffBase, diff}`. Every checkpoint field and every byte outside
 `diff` is identical across a pair. The diff contains no clean/mutant label, mutation name, expected
 claim or expected line. Opaque `cellId` exists only in the export wrapper and is never sent to the
-model. The oracle maps `cellId` to label/range separately.
+model. The oracle maps `cellId` to label/range separately. The fixed production system prompt is
+outside this leakage scan: it is identical across the pair and legitimately contains “defect”.
 
-**MC2 — deterministic scoring.** A finding is a hit iff:
+**MC2 — deterministic scoring.** A finding is a primary hit iff:
 
 - it is schema-valid and `blocking === true`;
-- its criterion contains the case's `INV-\d{2}` id as a whole token, case-insensitive;
-- an evidence path equals the oracle path after stripping leading `./`, `a/` or `b/`;
-- evidence has a `line`, and closed interval `[line, endLine ?? line]` overlaps the oracle interval.
+- one evidence ref both has a path equal to the oracle path after stripping leading `./`, `a/` or
+  `b/`, and has a `line` whose closed interval `[line, endLine ?? line]` overlaps the oracle interval
+  by `a <= d && c <= b`.
 
 Missing line never overlaps. The same rule applied to a clean control is a false positive.
-Existential matching is used when several findings are returned. No model scores another model.
+The clean oracle path/range is its matched mutant's path/range. Existential matching is used when
+several findings are returned. No model scores another model.
 
-**MC3 — failures stay separate.** Transport failure, schema rejection and completed-empty review are
-three outcomes. Failures do not enter recall, false-positive or discrimination denominators.
-Completion rate is reported beside quality.
+Report a second **strict-id recall** metric requiring the primary rule plus criterion matching
+`/(^|[^A-Za-z0-9])INV-XX([^A-Za-z0-9]|$)/i` for that case id. It accepts `INV-01:` and rejects
+`INV-010` or `xINV-01`. Strict-id recall measures citation discipline; primary recall measures
+defect detection. The primary metric governs false positives and discrimination.
+
+**MC3 — outcomes stay separate.** Transport failure, schema rejection, completed-empty and
+completed-with-findings are four outcomes. Failures do not enter recall, false-positive or
+discrimination denominators. Failure and completion rates use scheduled cells as denominator.
 
 **MC4 — exact metrics.** Per model and for the two-model team, report completed mutant/clean cells,
-recall, false-positive rate, pair discrimination, schema/transport failure rates, input/output
-tokens and output tokens per true hit. Zero denominators are `null`.
+primary recall, strict-id recall, primary false-positive rate, pair discrimination,
+schema/transport failure rates, input/output tokens and output tokens per primary true hit. Wilson
+intervals apply to primary recall and primary false-positive rate. Zero denominators are `null`.
 
 Per-model discrimination key is `(pairId, model, repetition)`; it is eligible only when both clean
 and mutant cells completed. Team key is `(pairId, repetition)`; it is eligible when each label has
@@ -83,9 +91,13 @@ A recording `ProviderAdapter` wrapper captures exact request, raw response and u
 Provider rejection is `transport_failure`; parsed `[]` is `completed_empty`. The benchmark never
 implements its own reviewer parser.
 
-**MC7 — two free families.** Live selection requires exactly one `nex-agi` and one `nvidia` catalog
-model, both `supportsJson`, `inputCostPerM === 0`, `outputCostPerM === 0`, and distinct
-`capabilities.family`. Missing either aborts before cell 1. No paid or one-family fallback.
+Broker routing/retry and coding-run events are deliberately outside this benchmark; the recording
+wrapper supplies exact usage and the benchmark scheduler supplies the finite request bound.
+
+**MC7 — two free families.** Live selection chooses one `nex-agi` and one `nvidia` catalog model,
+both `supportsJson`, `inputCostPerM === 0`, `outputCostPerM === 0`, and distinct
+`capabilities.family`. Within each family, eligible refs sort lexicographically and the first wins.
+Missing either aborts before cell 1. No paid or one-family fallback.
 
 **MC8 — auditable artifacts.** Report records corpus hash, exact system/user messages hash, model
 refs/families, seed, cells, captured usage and metrics. Blinded packet JSONL and oracle JSONL are
@@ -113,20 +125,22 @@ the report for coding runs.
 
 ## Acceptance checks
 
-**AC1 — blindness.** Capture exact `complete()` messages. Outside the `diff` value, clean and mutant
-five-key packs are byte-identical, including every checkpoint/evidence field. Non-diff bytes contain
-no oracle label, mutation name, expected claim, expected line or
-`clean|mutant|defect|injected`. The diff contains the criterion property but no oracle. Opaque
-`cellId` is absent from messages.
+**AC1 — blindness.** Capture exact `complete()` messages. In the user message's serialized pack,
+outside the `diff` value, clean and mutant bytes are identical, including every
+checkpoint/evidence field. Those non-diff pack bytes contain no oracle label, mutation name or
+`clean|mutant|defect|injected`. The diff contains the criterion property but no oracle annotation.
+Opaque `cellId` is absent from both system and user messages.
 
 **AC2 — eight single-defect pairs.** Each pair has at least three invariant tests over its own
 module. All clean controls pass their whole suite. Each mutant differs by one substitution and
 fails only its named invariant within that suite.
 
-**AC3 — scorer truth table.** Hand-written outputs cover: exact hit; criterion case-fold; wrong
-criterion; `a/`/`b/`/`./` path prefixes; wrong file; missing line; non-overlapping line; line with
-implicit `endLine`; nonblocking finding; several findings with one match; clean false positive;
-completed empty; schema failure; transport failure. Assert classifications literally.
+**AC3 — scorer truth table.** Hand-written outputs cover: primary hit with paraphrased criterion;
+strict `INV-01:` hit; strict `inv-01` hit; strict `INV-010` and `xINV-01` misses;
+`a/`/`b/`/`./` path prefixes; wrong file; missing line; non-overlapping line; implicit `endLine`;
+different refs separately satisfying path and range but no single matching ref; nonblocking finding;
+several findings with one match; clean false positive; completed empty; schema failure; transport
+failure. Assert classifications literally.
 
 **AC4 — denominators.** A fixture with two hits, one completed miss, one schema failure and one
 transport failure asserts recall `2/3`, completion `3/5`, and failures excluded from recall.
@@ -160,9 +174,11 @@ failures among the first 20 persist a partial report at exactly 20 and issue no 
 JSONL and reproduce byte-identical metrics without provider access. Swapping oracle and packet files
 must fail schema/hash checks.
 
-**AC11 — CLI/daemon seam.** RPC `benchmark.review` and CLI `polish benchmark-review` print the dry
-summary; `--json` prints the full report. Scripted providers run in-process. No coding Run, phase
-transition, project write or paid/live API occurs.
+**AC11 — CLI/daemon seam.** RPC `benchmark.review` and CLI `polish benchmark-review` print a dry
+summary containing requested/completed counts, primary/strict recall, false-positive and
+discrimination rates, both failure rates, input/output tokens and output tokens per primary hit;
+`--json` prints the full report. Scripted providers run in-process. No coding Run, phase transition,
+project write or paid/live API occurs.
 
 ## Live measurement after implementation
 
@@ -182,7 +198,7 @@ No threshold is declared success in advance. This task measures; the result deci
 
 | Fake | Killer |
 |---|---|
-| Acceptance text names the mutation | AC1 |
+| Criterion comment names the mutation | AC1 |
 | Clean and mutant paths differ | AC1 |
 | Checkpoint evidence or ids reveal the label | AC1 |
 | One pair contains two defects | AC2 |
@@ -205,6 +221,16 @@ No threshold is declared success in advance. This task measures; the result deci
 | Benchmark creates a coding Run or project worktree | AC11 |
 
 ## Revision history
+
+**Revision 2 → 3**, after both reviewers rejected the same commit:
+
+- primary recall now measures localisation, not whether free-text `criterion` repeats an id;
+- strict-id recall is a separate citation-discipline metric with an exact regex;
+- one evidence ref must satisfy path and range together;
+- clean controls use their matched mutant's oracle range;
+- blindness scans only variable user-pack metadata, not the fixed system prompt;
+- model selection has a deterministic family tie-break;
+- dry-summary fields and outcome-rate denominators are explicit.
 
 **Revision 1 → 2**, after independent Grok and Claude reviews:
 
