@@ -1,6 +1,8 @@
 # B-selfhost-42 — blinded reviewer-quality benchmark
 
-**Status:** DRAFT, revision 4. Not frozen. Base `f782310`.
+**Status:** **FROZEN**, revision 4. Base `f782310`.
+Frozen after independent Grok and Claude reviews on `0e678d2`; reviewed-file sha256
+`d74131812c38c6e15e3e2c0ad8c0f40fe699747eeedec3da4e96323754c910df`.
 Revisions 1–3 were reviewed independently by Grok and Claude; all rejections were correct.
 **Finding:** 42, informed by 43–45 in `docs/ledger/B-selfhost-remaining.md`.
 
