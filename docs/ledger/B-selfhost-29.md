@@ -1,8 +1,8 @@
 # B-selfhost-29 — run economics as a first-class record
 
-**Status:** DRAFT, revision 4. Not frozen. Implementation base `93bd7b6`.
-Revisions 1–3 were corrected by two contract reviews and the prompt/runtime audit. See *Revision
-history*. The contract now measures the complete communication funnel rather than token totals only.
+**Status:** DRAFT, revision 5. Not frozen. Implementation base `93bd7b6`.
+Revisions 1–4 were corrected by three contract reviews and the prompt/runtime audit. See *Revision
+history*. The contract now defines each event identity, payload shape, cause and denominator.
 **Finding:** item **29** in `docs/ledger/B-selfhost-remaining.md`.
 
 ## Why this is scheduled ahead of items 11–15
@@ -76,9 +76,14 @@ swarm spends 138,414 input tokens against 696,221 output — **5.0× more genera
 while the worker's ratio is 0.08×. Those two facts point at opposite remedies, and a report carrying
 only combined totals cannot tell them apart, so it could not support the decision it is built for.
 Revision 2 specified combined totals only. On this corpus no usage-bearing call has a null `role` or
-`purpose`, so those two axes need no residual bucket; only `task` does. No call carrying `usage` may be omitted from any breakdown, and no
-call may be counted twice — a retried call, which appears as several events sharing one `callId`,
-counts once.
+`purpose`, so those two axes need no residual bucket; only `task` does. No usage-bearing call may be
+omitted from any breakdown or counted twice.
+
+A usage-bearing `model.call` is identified by a non-empty `payload.callId`, falling back to
+`event.id` when `callId` is absent — two real events require that fallback. Among usage-bearing
+duplicates, the first by `(seq, id)` wins. A later disagreement on tokens, cost, role, purpose or
+task sets a conflict flag. A prior `usage: null` event sharing the same `callId` does not suppress a
+later usage-bearing event.
 
 The by-task breakdown therefore needs an explicit **`unassigned`** bucket for usage-bearing calls
 whose `taskId` is null. Without it the clause is unsatisfiable on the only corpus that exists: 28
@@ -108,14 +113,26 @@ tree does today: `usdUsage` (`src/observe/project.ts:468`) adds the 228 zeros, s
 11 nulls and the 85 missing, and returns `0` — a figure indistinguishable from "this run was free"
 when the truth is "96 of 324 calls have no price". On this corpus the honest answer is **unknown**.
 
-**MC5a — cycles and yield.** The report states **how many cycles ran and what they produced**:
-review executions per run, per round index and per axis, split into completed and not-completed;
-candidate attempts per task; raw findings raised; and validation outcomes for those findings.
-Without this the report cannot answer whether exchange between workers and reviewers was productive.
+**MC5a — cycles and yield.** The report states **how many cycles ran and what they produced**.
+One review execution is one unique `payload.execution.id` seen in `review.started` or
+`review.finished`; a later event for the same id replaces its earlier state. Requested executions
+are that set, including starts with no finish. Raw findings are unique
+`finding.raised.payload.finding.id` values. Validation outcomes come from
+`finding.validated.payload.validation.verdict`, joined through `payload.validation.findingId`; axis
+comes from `payload.finding.axis`. Candidate attempts come from `candidate.created.payload.candidate`.
 
 Every incomplete review is grouped mechanically into exactly one stable cause:
-`rate_limit`, `schema`, `bad_request`, `timeout`, or `other`. The classifier uses the persisted
-error text and must not call a model. This makes losses visible at each transition:
+`rate_limit`, `schema`, `bad_request`, `timeout`, or `other`. The classifier uses persisted error
+text and must not call a model. Predicates are ordered and exclusive:
+
+1. `rate.?limit|\b429\b` → `rate_limit`;
+2. `timeout|timed out` → `timeout`;
+3. `bad request|\b400\b` → `bad_request`;
+4. findings-array errors, JSON parse errors, or Zod `invalid_type|invalid_value` → `schema`;
+5. empty or unmatched text → `other`.
+
+Ordering matters: 357 real rate-limit errors contain `400` inside reset timestamps. This makes
+losses visible at each transition:
 
 `review requested → review completed → raw finding raised → finding validated`.
 
@@ -126,7 +143,7 @@ must present it as history, not infer current reviewer quality from it.
 **MC5b — productivity, as ratios the reader can check.** Per axis and per run:
 
 - completion rate = completed executions / requested executions;
-- raw yield = raw findings / completed executions;
+- raw yield = raw findings / completed executions; a completed clean axis is `0 / n = 0`;
 - validation yield = valid findings / raw findings;
 - reviewer output tokens per raw finding and per valid finding.
 
@@ -152,10 +169,17 @@ rather than silently resolved — `foldModelCallUsage` sets `usageConflict` for 
 `payload.usage` — the fields the events actually carry. It must not depend on `payload.metadata`,
 whose key is **absent** from every recorded payload.
 
+Reviewer token usage is attributed to an axis only from `payload.purpose === "review_<axis>"`.
+`model.call` carries no axis or review-execution id; task id is shared across axes. An unmatched
+reviewer purpose remains under an explicit `unassigned` axis bucket rather than disappearing.
+
 **MC8.** The outcome fold reads the snapshots as the store records them: the run's phase from
 `payload.run.phase` on `run.phase_changed`, and a task's state from the task snapshot on
 `task.created` and `task.state_changed`. It may not depend on a `payload.to` field, which other
 fixtures in the suite carry and no recorded event does.
+
+For both run and task fixtures, at least one state-change event contains only its snapshot and no
+`from` or `to`; 13 of 21 recorded task changes have exactly that shape.
 
 ## PHASE_REQUIRED
 
@@ -177,11 +201,15 @@ no engine behaviour and must not.
 
 **AC1.** A fixture event log with known usage across three roles (`worker`, `reviewer`, a council
 role), two purposes within one role, **two task ids and one usage-bearing call with `taskId: null`**,
-and one retried call appearing as two events sharing a `callId`. Assert the by-role, by-purpose and
-by-task breakdowns against hand-written expected numbers, assert the `unassigned` bucket holds the
-null-task call, assert the retried call is counted once, and assert each breakdown sums to the run
-total. **Assert input and output separately in every breakdown**, with a role whose ratio is
-output-heavy and one whose ratio is input-heavy, so a report that folds them together fails. The expectations must be written literally, not computed by the code under test.
+one retried call appearing as two disagreeing usage-bearing events sharing a `callId`, one earlier
+`usage: null` event sharing that id, and two usage-bearing events with no `callId`. Assert the
+by-role, by-purpose and by-task breakdowns against hand-written expected numbers, assert the
+`unassigned` bucket holds the null-task call, assert the first usage-bearing duplicate wins and
+raises the conflict flag, assert the null-usage event does not suppress it, assert the two
+missing-`callId` events remain separate, and assert each breakdown sums to the run total. **Assert
+input and output separately in every breakdown**, with a role whose ratio is output-heavy and one
+whose ratio is input-heavy, so a report that folds them together fails. The expectations must be
+written literally, not computed by the code under test.
 
 Without the null-task call this check is the one revision 1 shipped: green on a fixture, and wrong
 on every real run.
@@ -210,7 +238,8 @@ asserted against a fixture whose run is `NEEDS_HUMAN` with one task integrated a
 whose `run.phase_changed` payload is shaped **as the store records it** — `{ run: { phase } }`, with
 **no `to` field**. A fold reading `payload.to` must fail this check. A second fixture, a run still in
 `INTERPRETING_MISSION`, asserts the phase is reported with `terminal: false` rather than omitted or
-faked.
+faked. At least one `task.state_changed` is `{ task: { id, state, ... } }` with no `from` or `to`;
+its final state must still be reported.
 
 **AC6.** Determinism: the same events in reverse insertion order produce an identical report.
 
@@ -233,27 +262,35 @@ sum, input and output are separate, the dollar amount is unknown with both count
 breakdown sums to the total via `unassigned`. One check that fails on every mistake this contract was
 rejected twice for.
 
-**AC11a.** Cycles and yield: a fixture with two rounds and three axes. Include one completed review
-that raises two findings, one completed clean review, and five incomplete reviews whose persisted
-errors map one-to-one to `rate_limit`, `schema`, `bad_request`, `timeout`, and `other`. Validate one
-finding as `VALID` and reject the other. Assert:
+**AC11a.** Cycles and yield: use exact production envelopes:
+`review.started|finished.payload.execution`, `finding.raised.payload.finding`, and
+`finding.validated.payload.{validation,finding}`. A fixture has two rounds and three axes. Include
+one orphaned `review.started`, one completed review that raises two findings, one completed clean
+review, and incomplete reviews covering all five causes. The rate-limit error contains `400` inside
+a reset timestamp; schema errors include the recorded JSON-parse message and one Zod
+`invalid_value`; the `other` case has an empty error. Validate one finding as `VALID` and reject the
+other. Include one candidate creation with a literal attempt number. Assert:
 
 - per-round and per-axis execution totals;
 - completed/incomplete totals and all five cause buckets;
-- raw and validation yields;
+- requested counts include the orphaned start exactly once;
+- raw yield for the completed clean axis is exactly `0`, while only zero-denominator validation and
+  tokens-per-finding ratios are undefined;
+- raw and validation yields from unique finding ids, without also counting `execution.findings`;
 - output tokens per raw and per valid finding;
-- **undefined** ratios for the clean axis rather than zero or infinity.
+- candidate attempts per task.
 
 The expected figures and cause labels are hand-written literals. They may not be derived through the
 classifier or aggregation function under test.
 
-**AC11.** MC1, observed at the seam rather than asserted as a preference. A test loads a **completed**
-run's events into a store, constructs the production path that `cost` uses **without any live
-budget tracker or running daemon engine**, invokes the command, and asserts the rendered report. An
-implementation that consults live state renders nothing or throws. Revision 2 listed this as a named
-fake with no acceptance check behind it, which is the same class of gap this programme has found
-repeatedly: the fold's own tests and a mocked CLI test can both be green while production still
-reads live state.
+**AC11.** MC1, observed at the seam rather than asserted as a preference. A test persists a
+**completed Run row and its historical events**, constructs the production path that `cost` uses
+**without any live budget tracker or running daemon engine**, invokes `runCli(["cost", runId])`
+through an injected or in-process daemon transport, and asserts the rendered report. It must not
+call the process-autostart path. An implementation that consults live state renders nothing or
+throws. Revision 2 listed this as a named fake with no acceptance check behind it, which is the same
+class of gap this programme has found repeatedly: the fold's own tests and a mocked CLI test can
+both be green while production still reads live state.
 
 ## Named fakes — each must be planted and killed
 
@@ -283,6 +320,11 @@ reads live state.
 | Schema failures grouped with provider 400s | AC11a's separate `schema` and `bad_request` buckets |
 | Raw findings counted as valid without `finding.validated` | AC11a's one-valid/one-rejected fixture |
 | Zero-findings axis reports zero tokens-per-finding | AC11a's undefined-ratio assertions |
+| A rate-limit error containing `400` classified as `bad_request` | AC11a's real-shaped error |
+| `execution.findings` and `finding.raised` both counted as raw findings | AC11a's literal raw count |
+| Two missing-`callId` calls merged under one null key | AC1's two-event assertion |
+| An early `usage: null` suppresses a later usage-bearing duplicate | AC1's retry fixture |
+| Reviewer usage joined to an axis through task id | AC11a's shared-task multi-axis fixture |
 
 ## Out of scope
 
@@ -306,6 +348,19 @@ reads live state.
   is not — which is the defect class this programme has hit most often.
 
 ## Revision history
+
+**Revision 4 → 5**, after the Grok contract review:
+
+- resolved the clean-axis contradiction: raw yield is zero; only zero-denominator ratios are
+  undefined;
+- defined requested executions, orphaned starts, raw-finding identity, validation identity and
+  exact production payload envelopes;
+- made the five failure causes ordered and exclusive against real error collisions;
+- defined missing-`callId`, usage-bearing deduplication and conflict semantics;
+- required task snapshots without `payload.to`;
+- named the only valid reviewer-axis join, `model.call.payload.purpose`;
+- made candidate attempts observable;
+- specified the production CLI seam precisely.
 
 **Revision 3 → 4**, after the source sync and prompt/runtime audit:
 

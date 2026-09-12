@@ -51,7 +51,7 @@ C1 simplification pass, C2 pathology/adaptive budget, C3 Python llm-verifier sid
 
 29. **The worker loop is 17.2% of a run's tokens; the review swarm is 78.7%, and it is output-bound.**
     Measured 2026-09-12 over the **six real end-to-end runs** in `~/.polish/polish.db` (6,964 events,
-    1,060,632 tokens), by summing `usage` per `metadata.role` from the event log. Reviewers
+    1,060,632 tokens), by summing `usage` per `payload.role` from the event log. Reviewers
     834,635 (78.7%), worker loops 182,900 (17.2%), council 43,097 (4.1%). The reviewers' ratio is
     **5.0x output to input** (138,414 in, 696,221 out) and `review_adversarial` alone is 64.4% of
     all spend, so their cost is generation, not context: no prompt-window or packing work touches it.
@@ -196,8 +196,9 @@ Why the other 2,582 did not complete:
 | **Schema failure** -- `{"expected":"array"}` / "review response must contain a findings" | **105** |
 | `bad request (400)` | 6 |
 
-36. **The reviewer output contract is beyond the models it is given to.** 105 executions failed
-    validation because the response was not an array of findings, and the 18 that validated returned
+36. **The reviewer output contract is beyond the models it is given to.** 108 executions had
+    validation-like failures: 105 in the two narrow array/findings-array signatures, plus one JSON
+    parse error and `invalid_type` / `invalid_value` cases. The 18 that validated returned
     `[]` after 5,526 output tokens apiece. `REVIEWER_OUTPUT_CONTRACT`
     (`src/review/reviewerProtocol.ts:14`) demands "JSON only as an array of findings", each with
     criterion, severity, blocking, claim, evidence, reproduction and optional suggestedCheck -- from
@@ -210,13 +211,14 @@ Why the other 2,582 did not complete:
     scoring, where there is no JSON to get wrong because the output is a handful of score tokens.
     Finding 32 argued this from cost; this argues it from the reviews not working at all.
 
-37. **There is no circuit breaker on review retries.** One run executed **2,402 correctness reviews
-    in a single round**, 2,300 of them rate-limited, alongside 269 `model.retry_scheduled` events.
+37. **There is no circuit breaker on review retries.** One run executed **2,391 correctness reviews
+    in a single round**: 2,389 rate-limited, one schema failure and one completion, alongside 269
+    `model.retry_scheduled` events.
     The loop kept re-executing an axis that the provider was refusing. Nothing bounded it by
     consecutive failures, by wall clock, or by fraction of a round's executions failing. Finding 23
     named the verification treadmill from the *agent's* side; this is the same pathology in the
     *provider* dimension, and it is cheaper to fix because the rule is local: stop an axis after N
-    consecutive provider failures and record the round as unverified rather than retrying it 2,300
+    consecutive provider failures and record the round as unverified rather than retrying it 2,389
     times.
 
 38. **Zero findings is not yet proof the reviewers are useless, and saying otherwise would repeat
@@ -302,9 +304,10 @@ architectural answer and follow them.
     Both returned the finding as a **single object** -- the natural shape under `json_object` mode --
     and `parseRawFindings` threw both away. The two `gemma-4*:free` models returned `429`
     immediately; `thinkingmachines/inkling:free` returned `403`, harness-only.
-    This explains the corpus exactly and completely. The 105 schema failures are compliant models
-    returning an object. The 18 "completed" executions that parsed to an empty array are models that
-    found nothing and emitted `{"findings": []}` -- the one object shape the parser accepts.
+    This explains why semantically valid lone-object responses were discarded. Of the 108
+    validation-like failures, 105 have the two array/findings-array signatures this contradiction
+    produces; the other three are distinct JSON/Zod shape failures. The 18 "completed" executions
+    parsed to an empty array.
     **Zero findings was never evidence about the code under review, or about the models. It was
     this.**
     The fix is two lines and no new dependency: accept a bare finding object as a one-element array
@@ -352,7 +355,7 @@ serious:
     buys another tick.
 
 **Where the implementation departs from finding 37's wording, and why.** The finding said "record
-the round as unverified rather than retrying it 2,300 times". The implementation fails the run
+the round as unverified rather than retrying it 2,389 times". The implementation fails the run
 terminally instead. Advancing to `VALIDATING` with a round nobody reviewed would admit an unreviewed
 checkpoint into convergence, which is a worse failure than stopping; and `REVIEWING` has no third
 exit. Recorded as a deliberate departure rather than silently satisfied.
