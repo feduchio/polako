@@ -87,3 +87,81 @@ C1 simplification pass, C2 pathology/adaptive budget, C3 Python llm-verifier sid
     separate store-free fold because `src/cli/` may import neither. Worth a small task once item 29's
     report exists to compare them against.
 
+## Sync against the two reference sources, 2026-09-12
+
+Both were re-read in full: **SKILL.state**, arXiv 2608.26263 v3 (Badhe, Tiwari, Chung; Google /
+Purdue), and **LLM-as-a-Verifier**, github.com/llm-as-a-verifier/llm-as-a-verifier with its paper
+arXiv 2607.05391. The four findings below are the divergences. They are recorded rather than acted
+on silently, and one of them is about an item that is already accepted.
+
+31. **Item 18's design is the class of runtime the SKILL.state paper measured and found to
+    collapse.** The paper's Experiment 5 exists for exactly this question -- "whether SKILL.state's
+    performance gains stem merely from shorter prompts or from structured state representation" --
+    and answers it with budget-matched controls at T=100, all pinned to SKILL.state's ~1,800-token
+    footprint (Table 5): **SKILL.state 0.94, Summary-capped 0.52, Truncated sliding-window 0.18,
+    ReAct+LLMLingua 0.22, and unbounded full ReAct 0.84.** Item 18's digest is a mechanically
+    derived inventory plus a rolling assistant-text window plus one verbatim turn under a hard cap
+    -- a hybrid of the truncation and summary-capped controls, and **not** SKILL.state, which
+    requires the *model* to emit a validated `state_patch` merged by a deterministic `⊕` with
+    null-deletion semantics. On the paper's own evidence that class is not merely worse than
+    SKILL.state, it is **worse than the unbounded history it replaces**.
+    The contract rejected the paper's design on the grounds that "a model that fails to call a patch
+    tool loses all memory, and that failure mode is not testable without live models". The paper
+    answers both halves directly: schema ownership and validation live in the deterministic runtime,
+    so a malformed patch cannot corrupt state and triggers a **rollback-retry**, and its open-weight
+    error taxonomy (68% premature state overwrite, 20% schema/type coercion, 12% JSON syntax)
+    argues for **grammar-constrained decoding**, not for abandoning patches.
+    **The interaction is the dangerous part.** Table 11 shows the budget-matched controls are
+    comparable to each other at T=10 (0.88-1.00) and collapse from T>=25. Polish's measured loops
+    are 10-18 turns, mean 14.2 -- just below the collapse. Item 18's stated benefit is *more turns
+    per budget*, so its own success moves the loop into the region where its design fails. Any A/B
+    must therefore measure accuracy at a long horizon, not only tokens at the current one.
+    **Not a defect of item 18's acceptance**: it satisfies its frozen contract, which two reviewers
+    checked over fifteen rounds. It is a defect of the contract's design choice, made by me, and it
+    is what the A/B was scheduled to catch.
+
+32. **Our review swarm is LLM-as-a-Judge where the reference is a verifier, and that is the whole
+    of the 78.7%.** `REVIEWER_OUTPUT_CONTRACT` (`src/review/reviewerProtocol.ts:14`) asks each axis
+    for "JSON only as an array of findings", each with claim, evidence, reproduction -- generated
+    prose. Measured consequence (finding 29): reviewers spend 138,414 input against **696,221
+    output tokens, a 5.0x ratio**, and `review_adversarial` alone is 64.4% of every token the tool
+    spends.
+    LLM-as-a-Verifier's stated key idea is the opposite: "Rather than reducing each distribution
+    into a single discrete score (as in LLM-as-a-Judge)", it takes the **expectation over the full
+    logprob distribution of score tokens**, `R(x,τ) = (1/CK) Σ_c Σ_k Σ_g p(v_g | x,c,τ)·φ(v_g)`,
+    with C criteria, K repeats and G score tokens. The output is a handful of score tokens, so cost
+    moves to the input, which is then cacheable -- their 0.2.0 reports **~3.4x fewer uncached input
+    tokens** via prefix caching on trajectory-heavy benchmarks.
+    And it delivers the thing this tool exists for. Best-of-5 **self**-verification on
+    Terminal-Bench 2.1: Pass@1 78.7% -> **88.0%** with the same model as verifier (oracle 96.6%).
+    SWE-Bench Verified 76.1% -> **78.2%**; Terminal-Bench V2 83.1% -> **86.5%**; MedAgentBench
+    70.2% -> **73.3%**. That is "better than one flagship model at lower cost", demonstrated, and
+    Polish is on the wrong side of the architecture that produces it.
+
+33. **The tournament is the wrong algorithm, and it is also unwired.** Item 11 already records that
+    production constructs `new PairwiseJudge()` with no provider, so `comparePair` returns
+    `heuristicVerdict` (`src/verify/pairwise.ts:25`) and nothing in `src/daemon/composition.ts`
+    wires a verifier strategy at all. The reference algorithm is a **Probabilistic Pivot
+    Tournament**: a ring pass over a random Hamiltonian cycle that puts every candidate once in each
+    slot to cancel positional bias, top-k by ring score as pivots, then non-pivot-vs-pivot and
+    pivot-vs-pivot comparisons aggregated as `p(a ≻ b) = σ(R_a - R_b)` with win mass over count --
+    **O(Nk) instead of O(N²)**, with `pivots` as the explicit cost-accuracy dial. Item 11 as
+    scheduled ("wire a provider") is therefore too small: wiring a provider into an O(N²)
+    prose-judging tournament buys the expensive half of the reference and none of the cheap half.
+
+34. **`logprobScheme` is provenance we record and never compute.** `VerifierAdapter`
+    (`src/verify/sidecar.ts:67`) accepts `scores` and a `logprobScheme` of `"direct" | "two_stage"`
+    from an external sidecar and threads it into `VerifierProvenance`
+    (`src/engine/candidateDrivers.ts:252`). Nothing in the tree ever reads a logprob: the field
+    records what a sidecar *claims* about how it scored. This is item 19's defect class -- built,
+    typed, tested, no production computation behind it -- one level up, at the architecture.
+
+35. **There is no progress signal, so nothing can be abandoned early.** The reference ships
+    `ProgressTracker`: feed each step as it happens, get a live fine-grained score, "abandon a
+    hopeless rollout early or decide when to resample", with the explicit property that the verifier
+    only sees steps so far and cannot peek ahead. Polish has the negative of this in finding 23 --
+    a verification treadmill that `detectNoProgress` cannot see -- and paid for it directly: item 8
+    ran 26 review rounds and item 18 ran 15. A progress score is the principled form of that
+    detector, and abandoning a hopeless candidate is the largest single token saving available,
+    because it cuts whole rounds rather than trimming prompts.
+
