@@ -1,6 +1,8 @@
 # B-selfhost-29 — run economics as a first-class record
 
-**Status:** DRAFT, revision 7. Not frozen. Implementation base `93bd7b6`.
+**Status:** **FROZEN**, revision 7. Implementation base `93bd7b6`.
+Frozen after Grok and Claude independently returned FREEZE on `431def2`; reviewed-file sha256
+`1ecc4612285bc5d724eaba2f0e6ced193c5277fd244f3bc98da4bc1d60d2e345`.
 Revisions 1–6 were corrected by five contract reviews and the prompt/runtime audit. See *Revision
 history*. The contract now defines each logical call, finding outcome, payload shape and denominator.
 **Finding:** item **29** in `docs/ledger/B-selfhost-remaining.md`.
@@ -43,7 +45,7 @@ Verified against the store, and this is where a naive implementation fails:
   for everything**, which is exactly what the first attempt at finding 29's measurement did before
   it was corrected.
 - **`usage.costUsd` has three states, not one.** Of the 324 `model.call` events: **228 carry
-  `costUsd: 0`** (OpenRouter `:free` successes), **11 carry `costUsd: null`** (Gemini — ten planner
+  `costUsd: 0`** (226 `:free`-suffixed successes plus two routed as `openrouter/free`), **11 carry `costUsd: null`** (Gemini — ten planner
   calls and one judge call), and **85 carry `usage: null`** — the key is present and explicitly null, written that way by
   `src/broker/broker.ts:260`, and every one of those calls is `ok: false` (rate limits, 400s,
   timeouts). Revision 1 claimed `costUsd` was null everywhere; revision 2 then described these 85 as
@@ -305,9 +307,11 @@ Assert:
 
 - per-round and per-axis execution totals;
 - completed/incomplete totals and all five cause buckets;
+- completion rate per axis and per run as a literal ratio;
 - requested counts include the orphaned start exactly once;
-- raw yield for the completed clean axis is exactly `0`, while only zero-denominator validation and
-  tokens-per-finding ratios are undefined;
+- raw yield for the completed clean axis is exactly `0`; for that clean axis, the zero-denominator
+  validation and tokens-per-finding ratios are undefined. Every other zero denominator follows
+  MC5b and is undefined too;
 - raw and validation yields from unique finding ids and their latest validation verdict, without
   also counting `execution.findings`;
 - hand-written output tokens per raw and per valid finding for the productive axis;
@@ -334,7 +338,7 @@ both be green while production still reads live state.
 | Nulls summed as zero and labelled a total | AC3 |
 | Only `ok: true` calls counted | AC2 |
 | The by-role and by-task breakdowns computed from different call sets | AC1's sum-to-total clauses |
-| The report accumulated live rather than derived from events | MC1, via a fixture run with no live tracker |
+| The report accumulated live rather than derived from events | AC11 |
 | Outcome omitted, or taken from the newest event rather than the run record | AC5 |
 | Events sorted by insertion order rather than `seq` | AC6 |
 | A call counted once per breakdown but twice in the total | AC1's sums |
