@@ -142,7 +142,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
   // run of failures cannot crowd out everything else.
   const demoted = entries.map((entry) =>
     entry.section === "failedCommand" && entry.turn !== failedCommandTurn
-      ? { ...entry, section: "command" as Section, priority: PRIORITY.command, text: entry.text.replace(/: [\s\S]*$/, "") }
+      ? { ...entry, section: "command", priority: PRIORITY.command, text: entry.text.replace(/: [\s\S]*$/, "") }
       : entry,
   );
 
