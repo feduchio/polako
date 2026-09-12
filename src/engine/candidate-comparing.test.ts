@@ -187,7 +187,10 @@ describe("B3 production comparing driver", () => {
     await engine.tickRun(runId);
     const compared = store.events.list(runId, { types: ["candidate.compared"] })[0];
     expect(compared?.payload["backend"]).toBe("ts");
-    expect(compared?.payload["fallback"]).toBe(false);
+    // True, and it always was: `backend: "ts"` builds a `PairwiseJudge` with no provider, so
+    // every comparison is the deterministic heuristic. This read `false`, which is what the
+    // tournament hard-coded rather than what happened.
+    expect(compared?.payload["fallback"]).toBe(true);
     expect(compared?.payload["client"]).toBe("none");
     expect(compared?.payload["method"]).toBe("pairwise");
     expect(compared?.payload["winner"]).toBe(tieAId);
