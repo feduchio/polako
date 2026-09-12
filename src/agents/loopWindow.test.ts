@@ -215,6 +215,18 @@ describe("buildLoopDigest", () => {
     expect(overError).toContain("src/kept.ts (write)");
     expect(overError).not.toContain("newer-denied.ts");
 
+    // A failed ordinary call ranks with the other tool calls, below commands: raising errors is
+    // the plausible slip, since a failure looks more urgent than a command that succeeded.
+    const overFailedCall = buildLoopDigest(
+      [
+        turn(1, [ok("run_command", { argv: ["node", "earlier-ok.js"] }, { exitCode: 0, stdout: "" })]),
+        turn(2, [failed("read", { path: "src/newer-denied.ts" }, "path escapes sandbox")]),
+      ],
+      19,
+    );
+    expect(overFailedCall).toContain("node earlier-ok.js -> exit 0");
+    expect(overFailedCall).not.toContain("newer-denied.ts");
+
     const noted = buildLoopDigest(
       [
         turn(1, [ok("read", { path: "src/early-read.ts" }, { path: "src/early-read.ts" })]),

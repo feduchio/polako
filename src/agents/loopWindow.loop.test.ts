@@ -192,6 +192,40 @@ describe("the worker's context window", () => {
     await handle.destroy();
   });
 
+  it("carries turn one's reasoning into turn three's request and not into turn fifteen's", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 20, maxTokens: 32_000 });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+
+    // AC9 is worded about requests, so it is checked on requests. The prose must be long enough
+    // that fourteen turns of it overflow the cap, or the absence at turn fifteen proves nothing.
+    const prose = (n: number): string =>
+      n === 1 ? `DISTINCTIVE-ALPHA-MARKER ${"reasoning ".repeat(19)}` : `step ${String(n)} ${"reasoning ".repeat(19)}`;
+    provider.script("worker", [
+      ...Array.from({ length: 14 }, (_, i) => ({
+        kind: "reply" as const,
+        content: prose(i + 1),
+        toolCalls: [call("read", { path: `big-${String(i)}.txt` })],
+      })),
+      reply([call("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" })]),
+      reply([call("finish", { summary: "done" })]),
+    ]);
+
+    const result = await new AgentRunner(deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("FINISHED");
+
+    expect(digestOf(provider.calls[2]!)).toContain("DISTINCTIVE-ALPHA-MARKER");
+    const fifteenth = digestOf(provider.calls[14]!);
+    expect(fifteenth).toBeDefined();
+    expect(fifteenth!).not.toContain("DISTINCTIVE-ALPHA-MARKER");
+    expect(fifteenth!).toContain("step 13");
+
+    store.close();
+    await handle.destroy();
+  });
+
   it("gives the production seam the budget-derived allowance, not a smaller one", async () => {
     const fixture = await repositoryFixture();
     cleanup.push(fixture.root);
