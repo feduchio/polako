@@ -153,6 +153,72 @@ describe("buildLoopDigest", () => {
     expect(argvAmongOthers).toContain("src/also-kept.ts");
   });
 
+  it("keeps the higher-priority entry where age alone would have kept the other", () => {
+    const line = (digest: string, label: string): string =>
+      digest.split("\n").find((l) => l.startsWith(`${label}: `))?.slice(label.length + 2) ?? "";
+
+    // Changed paths outlive newer reads. Only the oldest entry here is a change, so recency
+    // cannot explain its survival.
+    const changed = buildLoopDigest(
+      [
+        turn(1, [ok("write", { path: "src/kept-change.ts" }, { path: "src/kept-change.ts" })]),
+        ...[2, 3, 4, 5, 6, 7].map((n) => turn(n, [ok("read", { path: `src/newer-read-${String(n)}.ts` }, { path: `src/newer-read-${String(n)}.ts` })])),
+      ],
+      18,
+    );
+    expect(line(changed, "Changed")).toBe("src/kept-change.ts (write)");
+    expect(changed).not.toContain("newer-read-7.ts");
+
+    // The failing command outlives newer successful ones.
+    const failing = buildLoopDigest(
+      [
+        turn(1, [ok("run_command", { argv: ["node", "broke.js"] }, { exitCode: 9, stderr: "why" })]),
+        turn(2, [ok("run_command", { argv: ["node", "fine-a.js"] }, { exitCode: 0, stdout: "" })]),
+        turn(3, [ok("run_command", { argv: ["node", "fine-b.js"] }, { exitCode: 0, stdout: "" })]),
+      ],
+      20,
+    );
+    expect(failing).toContain("node broke.js -> exit 9");
+    expect(failing).not.toContain("fine-b.js");
+
+    // A command outlives newer reads, and a read outlives newer prose.
+    const command = buildLoopDigest(
+      [
+        turn(1, [ok("run_command", { argv: ["node", "early.js"] }, { exitCode: 0, stdout: "" })]),
+        ...[2, 3, 4].map((n) => turn(n, [ok("read", { path: `src/after-${String(n)}.ts` }, { path: `src/after-${String(n)}.ts` })])),
+      ],
+      18,
+    );
+    expect(command).toContain("node early.js -> exit 0");
+    expect(command).not.toContain("after-4.ts");
+
+    const noted = buildLoopDigest(
+      [
+        turn(1, [ok("read", { path: "src/early-read.ts" }, { path: "src/early-read.ts" })]),
+        ...[2, 3].map((n) => ({ ...turn(n, []), assistant: { role: "assistant" as const, content: `later prose number ${String(n)}`, toolCalls: [] } })),
+      ],
+      18,
+    );
+    expect(noted).toContain("src/early-read.ts");
+    expect(noted).not.toContain("later prose number 3");
+  });
+
+  it("says whether a call succeeded by where it lands, not merely that it happened", () => {
+    const digest = buildLoopDigest(
+      [
+        turn(1, [ok("search", { query: "survivor" }, { exitCode: 0 })]),
+        turn(2, [failed("search", { query: "casualty" }, "rg exited 2")]),
+      ],
+      400,
+    );
+    const tools = digest.split("\n").find((l) => l.startsWith("Tools: ")) ?? "";
+    const errors = digest.split("\n").find((l) => l.startsWith("Errors: ")) ?? "";
+    expect(tools).toContain('search "survivor"');
+    expect(tools).not.toContain("casualty");
+    expect(errors).toContain('search "casualty": rg exited 2');
+    expect(errors).not.toContain("survivor");
+  });
+
   it("keeps the output of the last failure only, even when both are in one turn", () => {
     const digest = buildLoopDigest(
       [

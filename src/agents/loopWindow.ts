@@ -57,6 +57,12 @@ const SECTION_LABEL: Record<Section, string> = {
 const SECTION_ORDER: readonly Section[] = ["changed", "failedCommand", "command", "toolCall", "error", "note"];
 
 /**
+ * A call's outcome is carried by which section it lands in rather than by a word appended to every
+ * line: a successful call renders under `Tools`, a failed one under `Errors` with its message. The
+ * section label costs nothing per entry, which matters at a 400-token cap.
+ */
+
+/**
  * What happened before the most recent turn, as an inventory rather than a summary. The reasoning
  * trace is not reconstructed: `note` carries only the head of what the worker said, and the detail
  * it needs to act lives in the most recent turn, which the window sends verbatim.
