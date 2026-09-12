@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
-import { defaultConfig } from "../domain/config.js";
+import { defaultConfig, ReviewStrategySchema } from "../domain/config.js";
 import { assertExecutionCheckpoint, isReviewRoundComplete } from "../domain/review.js";
 import { ProviderError } from "../broker/types.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
@@ -55,6 +55,20 @@ describe("review attempt cap", () => {
 
   it("defaults to a cap that the recorded 2,402-execution round would have tripped", () => {
     expect(defaultConfig().review.maxAxisAttemptsPerRound).toBe(6);
+  });
+
+  it("counts only non-retryable failures toward the cap", () => {
+    const axes = ["correctness", "regression", "correctness"] as const;
+    const transient = Array.from({ length: 9 }, () => ({ ...execution("correctness", false), error: "upstream 503 service overloaded" }));
+    // A provider blip is worth another tick; a 429 or a schema rejection is not.
+    expect(exhaustedAxes(axes, transient, 3, 6)).toEqual([]);
+    const sticky = Array.from({ length: 6 }, () => execution("correctness", false));
+    expect(exhaustedAxes(axes, sticky, 3, 6)).toEqual(["correctness"]);
+  });
+
+  it("rejects a cap of zero at the schema", () => {
+    expect(() => ReviewStrategySchema.parse({ maxAxisAttemptsPerRound: 0 })).toThrow();
+    expect(ReviewStrategySchema.parse({ maxAxisAttemptsPerRound: 1 }).maxAxisAttemptsPerRound).toBe(1);
   });
 
   it("stops through a phase REVIEWING is allowed to reach", () => {

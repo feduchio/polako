@@ -216,6 +216,32 @@ describe("review swarm", () => {
     })).rejects.toThrow(/findings array|path/);
   });
 
+  it("accepts a severity that differs only in case", async () => {
+    const root = await mkdtemp(join(tmpdir(), "polish-review-sev-"));
+    roots.push(root);
+    await writeFile(join(root, "limits.ts"), "export const x = 1;\n");
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    // A live probe returned severity "High"; the enum is lower-case.
+    provider.script("reviewer", [{
+      kind: "reply",
+      content: JSON.stringify({
+        findings: [{
+          criterion: "c", severity: "High", blocking: true, claim: "claim",
+          evidence: [{ path: "limits.ts", line: 1 }], reproduction: ["step"],
+        }],
+      }),
+    }]);
+    const result = await runAxisReview({
+      protocols: PROTOCOLS,
+      checkpoint: CHECKPOINT,
+      axis: "correctness",
+      artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "bbbbbbb", diff: "d", checkpoint: CHECKPOINT },
+      provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+      repositoryRoot: root,
+    });
+    expect(result.findings[0]?.severity).toBe("high");
+  });
+
   it("still rejects an object that is not a finding", async () => {
     const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
     provider.script("reviewer", [{ kind: "reply", content: JSON.stringify({ summary: "looks fine to me" }) }]);

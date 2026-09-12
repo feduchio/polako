@@ -152,6 +152,15 @@ describe("pairwise tournament", () => {
     expect(working.usedFallback).toBe(false);
     expect(working.fallbackReason).toBeNull();
     expect(verdict.rationale).not.toContain("fell back");
+
+    // Sticky: one discarded verdict in a tournament is a fallback even if a later pair succeeds.
+    const mixed = new ScriptedProvider("judge", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }])
+      .script("m", [{ kind: "reply", content: "not json at all" },
+        { kind: "reply", content: JSON.stringify({ winner: "a", rationale: "ok", scores: { a: 2, b: 1 } }) }]);
+    const sticky = new PairwiseJudge({ provider: mixed, model: { provider: "judge", model: "m" } });
+    await sticky.comparePair(a, b, ctx);
+    await sticky.comparePair(a, b, ctx);
+    expect(sticky.usedFallback).toBe(true);
   });
 
   it("reports the fallback in the tournament selection rather than hard-coding false", async () => {
