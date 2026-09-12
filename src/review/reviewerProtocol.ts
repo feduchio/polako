@@ -12,7 +12,10 @@ import { PolishError } from "../shared/errors.js";
  * a check that the inline literal is gone still passed.
  */
 export const REVIEWER_OUTPUT_CONTRACT =
-  "Return JSON only as an array of findings. " +
+  // A top-level array is unrequestable: the call sets `response_format: {type: "json_object"}`,
+  // and an array is not an object. Asking for one made the contract unsatisfiable for any model
+  // that honours structured output, which is why no review ever produced a finding.
+  'Return JSON only as {"findings": [...]}, an object whose findings value is an array. ' +
   "Each finding must contain criterion, severity, blocking, claim, evidence " +
   "(path and optional line/endLine), reproduction, and optional suggestedCheck.";
 

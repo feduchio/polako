@@ -1,5 +1,5 @@
 import { ReviewAxisSchema } from "../domain/finding.js";
-import { assertReviewerRolesResolvable } from "./reviewerProtocol.js";
+import { assertReviewerRolesResolvable, REVIEWER_OUTPUT_CONTRACT } from "./reviewerProtocol.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -123,6 +123,62 @@ describe("review swarm", () => {
     expect(findings.map((finding) => finding.evidenceStrength)).toEqual(["strong", "weak", "weak"]);
     expect(findings[1]?.evidenceIssues[0]).toContain("file does not exist");
     expect(findings[2]?.evidenceIssues[0]).toContain("line does not exist");
+  });
+
+  it("accepts the three shapes a structured-output model actually returns", async () => {
+    const root = await mkdtemp(join(tmpdir(), "polish-review-shapes-"));
+    roots.push(root);
+    await writeFile(join(root, "valid.ts"), "export const value = 1;\n");
+
+    const one = {
+      criterion: "budget guard admits the equal case",
+      severity: "high",
+      blocking: true,
+      claim: "withinBudget must not admit a spend equal to an exclusive cap",
+      evidence: [{ path: "valid.ts", line: 1 }],
+      reproduction: ["Call withinBudget(cap, cap)"],
+    };
+
+    // The request sets response_format json_object, so a top-level array is unrequestable and a
+    // lone object is what a compliant model emits for a single finding. Both live free models
+    // probed on 2026-09-12 returned exactly this shape, and it used to be discarded.
+    for (const [label, content] of [
+      ["lone finding object", JSON.stringify(one)],
+      ["object with a findings array", JSON.stringify({ findings: [one] })],
+      ["bare array", JSON.stringify([one])],
+    ] as const) {
+      const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+      provider.script("reviewer", [{ kind: "reply", content }]);
+      const findings = await runAxisReview({
+        protocols: PROTOCOLS,
+        checkpoint: CHECKPOINT,
+        axis: "correctness",
+        artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "bbbbbbb", diff: "d", checkpoint: CHECKPOINT },
+        provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+        repositoryRoot: root,
+      });
+      expect(findings.findings, label).toHaveLength(1);
+      expect(findings.findings[0]?.claim, label).toContain("exclusive cap");
+    }
+  });
+
+  it("still rejects an object that is not a finding", async () => {
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("reviewer", [{ kind: "reply", content: JSON.stringify({ summary: "looks fine to me" }) }]);
+    await expect(runAxisReview({
+      protocols: PROTOCOLS,
+      checkpoint: CHECKPOINT,
+      axis: "correctness",
+      artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "bbbbbbb", diff: "d", checkpoint: CHECKPOINT },
+      provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+    })).rejects.toThrow(/findings array/);
+  });
+
+  it("asks for the shape the request mode can return", () => {
+    // Pinning both halves together: the contract may not ask for a top-level array while the call
+    // demands a JSON object, which is the contradiction that produced zero findings on every run.
+    expect(REVIEWER_OUTPUT_CONTRACT).toContain('{"findings": [...]}');
+    expect(REVIEWER_OUTPUT_CONTRACT).not.toContain("as an array of findings");
   });
 
   it("requires at least three independent axes", async () => {

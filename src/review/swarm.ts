@@ -153,13 +153,23 @@ function freshContextPack(artifact: CheckpointReviewArtifact, axis: ReviewAxis):
 
 function parseRawFindings(content: string): RawFinding[] {
   const parsed: unknown = JSON.parse(stripFence(content));
-  const values = Array.isArray(parsed)
-    ? parsed
-    : isRecord(parsed) && Array.isArray(parsed["findings"])
-      ? parsed["findings"]
-      : null;
+  const values = findingValues(parsed);
   if (values === null) throw new TypeError("review response must contain a findings array");
   return values.map((value) => RawFindingSchema.parse(value));
+}
+
+/**
+ * Three accepted shapes. The object form is what the contract asks for and what
+ * `response_format: {type: "json_object"}` can return; the bare array is accepted for models that
+ * ignore the mode; and a lone finding object is accepted because that is what a compliant model
+ * emits when it has exactly one thing to say, and discarding it threw away every review this tool
+ * ever produced.
+ */
+function findingValues(parsed: unknown): unknown[] | null {
+  if (Array.isArray(parsed)) return parsed;
+  if (!isRecord(parsed)) return null;
+  if (Array.isArray(parsed["findings"])) return parsed["findings"];
+  return RawFindingSchema.safeParse(parsed).success ? [parsed] : null;
 }
 
 async function checkEvidence(
