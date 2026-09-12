@@ -1,8 +1,8 @@
 # B-selfhost-29 — run economics as a first-class record
 
-**Status:** DRAFT, revision 5. Not frozen. Implementation base `93bd7b6`.
-Revisions 1–4 were corrected by three contract reviews and the prompt/runtime audit. See *Revision
-history*. The contract now defines each event identity, payload shape, cause and denominator.
+**Status:** DRAFT, revision 6. Not frozen. Implementation base `93bd7b6`.
+Revisions 1–5 were corrected by four contract reviews and the prompt/runtime audit. See *Revision
+history*. The contract now defines each logical call, finding outcome, payload shape and denominator.
 **Finding:** item **29** in `docs/ledger/B-selfhost-remaining.md`.
 
 ## Why this is scheduled ahead of items 11–15
@@ -79,11 +79,12 @@ Revision 2 specified combined totals only. On this corpus no usage-bearing call 
 `purpose`, so those two axes need no residual bucket; only `task` does. No usage-bearing call may be
 omitted from any breakdown or counted twice.
 
-A usage-bearing `model.call` is identified by a non-empty `payload.callId`, falling back to
-`event.id` when `callId` is absent — two real events require that fallback. Among usage-bearing
-duplicates, the first by `(seq, id)` wins. A later disagreement on tokens, cost, role, purpose or
-task sets a conflict flag. A prior `usage: null` event sharing the same `callId` does not suppress a
-later usage-bearing event.
+A logical `model.call` group is identified by a non-empty `payload.callId`, falling back to
+`event.id` when `callId` is absent. Two real events lack `callId`; one is usage-bearing and requires
+the fallback. Within a group ordered by `(seq, id)`, the first event carrying a usage object is the
+usage representative; if none carries usage, the first event is the null-usage representative.
+Thus an earlier `usage: null` duplicate cannot suppress later recorded spend. A disagreement among
+usage-bearing duplicates on tokens, cost, role, purpose or task sets a conflict flag.
 
 The by-task breakdown therefore needs an explicit **`unassigned`** bucket for usage-bearing calls
 whose `taskId` is null. Without it the clause is unsatisfiable on the only corpus that exists: 28
@@ -91,10 +92,12 @@ such calls carry 43,097 tokens, all of the council's spend, and four of six runs
 empty by-task map against a non-zero total.
 
 **MC3.** Failure is visible. **Three counts**, because the corpus makes them three different
-questions: `ok: false` calls; calls whose `usage` is null; and successful calls whose `usage` is
-present but whose `costUsd` is null. The third is the one revision 2 had no home for, and it is the
-only reason this corpus's dollar figure is unknown rather than zero. Alongside them, the tokens of
-any failed call that does carry usage.
+questions: logical calls represented by `ok: false`; logical calls whose representative `usage` is
+null; and successful logical calls whose representative usage is present but whose `costUsd` is
+null. The third is the one revision 2 had no home for, and it is the only reason this corpus's dollar
+figure is unknown rather than zero. Alongside them, the tokens of any failed call that does carry
+usage. A null-usage duplicate in a group that has a usage-bearing representative does not increment
+the null-usage count or make MC4's dollar amount unknown.
 
 All 85 failed calls in the corpus have `usage: null`, so their token cost is genuinely unrecorded
 and no projection can recover it. What is recoverable, and what a retry storm actually shows up as,
@@ -117,9 +120,16 @@ when the truth is "96 of 324 calls have no price". On this corpus the honest ans
 One review execution is one unique `payload.execution.id` seen in `review.started` or
 `review.finished`; a later event for the same id replaces its earlier state. Requested executions
 are that set, including starts with no finish. Raw findings are unique
-`finding.raised.payload.finding.id` values. Validation outcomes come from
-`finding.validated.payload.validation.verdict`, joined through `payload.validation.findingId`; axis
-comes from `payload.finding.axis`. Candidate attempts come from `candidate.created.payload.candidate`.
+`finding.raised.payload.finding.id` values. A finding's validation outcome is the latest
+`finding.validated.payload.validation.verdict` by `(seq, id)`, joined through
+`payload.validation.findingId`. Valid findings are distinct finding ids whose latest verdict is
+`VALID`; a later `REJECTED` verdict removes one from that count. A raw finding with no validation,
+including one later marked `DUPLICATE` or `NOTED`, is never valid. Axis comes from
+`payload.finding.axis`.
+
+Candidate activity per task is two explicit values derived from unique
+`candidate.created.payload.candidate.id` values: `candidateCount` and the maximum
+`payload.candidate.attempt`.
 
 Every incomplete review is grouped mechanically into exactly one stable cause:
 `rate_limit`, `schema`, `bad_request`, `timeout`, or `other`. The classifier uses persisted error
@@ -128,11 +138,14 @@ text and must not call a model. Predicates are ordered and exclusive:
 1. `rate.?limit|\b429\b` → `rate_limit`;
 2. `timeout|timed out` → `timeout`;
 3. `bad request|\b400\b` → `bad_request`;
-4. findings-array errors, JSON parse errors, or Zod `invalid_type|invalid_value` → `schema`;
-5. empty or unmatched text → `other`.
+4. `review response must contain a findings array`, `Expected ... after array element ... JSON`,
+   or Zod `invalid_type|invalid_value` → `schema`;
+5. an orphaned start with no finish/error, an empty error, or unmatched text → `other`.
 
-Ordering matters: 357 real rate-limit errors contain `400` inside reset timestamps. This makes
-losses visible at each transition:
+Ordering matters even though `\b400\b` correctly ignores digits inside real reset timestamps. The
+acceptance fixture deliberately combines a `429` rate-limit signal with a separate word-boundary
+provider code `400`, so swapping rules 1 and 3 is observable. This makes losses visible at each
+transition:
 
 `review requested → review completed → raw finding raised → finding validated`.
 
@@ -161,9 +174,9 @@ run or invents one.
 
 **MC6.** Deterministic and pure. The same events produce the same report, independent of the order
 they are handed to the projection, ordered by `seq` internally, with `id` breaking a `seq` tie. No
-clock. Two events sharing a `callId` are one call: the **first by that ordering wins**, and a
-disagreement between them on tokens, cost, role, purpose or task is recorded as a conflict flag
-rather than silently resolved — `foldModelCallUsage` sets `usageConflict` for the same reason.
+clock. Two usage-bearing events sharing a `callId` are one spend record: the first by that ordering
+wins, and a disagreement on tokens, cost, role, purpose or task sets a conflict flag rather than
+silently resolving it. Null-usage duplicates are handled by MC2's representative rule.
 
 **MC7.** The projection reads `payload.role`, `payload.purpose`, `payload.taskId` and
 `payload.usage` — the fields the events actually carry. It must not depend on `payload.metadata`,
@@ -209,7 +222,8 @@ raises the conflict flag, assert the null-usage event does not suppress it, asse
 missing-`callId` events remain separate, and assert each breakdown sums to the run total. **Assert
 input and output separately in every breakdown**, with a role whose ratio is output-heavy and one
 whose ratio is input-heavy, so a report that folds them together fails. The expectations must be
-written literally, not computed by the code under test.
+written literally, not computed by the code under test. Also assert that the earlier null-usage
+duplicate does not increment `nullUsageCalls` or make an otherwise fully priced report unknown.
 
 Without the null-task call this check is the one revision 1 shipped: green on a fixture, and wrong
 on every real run.
@@ -266,19 +280,28 @@ rejected twice for.
 `review.started|finished.payload.execution`, `finding.raised.payload.finding`, and
 `finding.validated.payload.{validation,finding}`. A fixture has two rounds and three axes. Include
 one orphaned `review.started`, one completed review that raises two findings, one completed clean
-review, and incomplete reviews covering all five causes. The rate-limit error contains `400` inside
-a reset timestamp; schema errors include the recorded JSON-parse message and one Zod
-`invalid_value`; the `other` case has an empty error. Validate one finding as `VALID` and reject the
-other. Include one candidate creation with a literal attempt number. Assert:
+review, and incomplete reviews covering all five causes. The rate-limit error deliberately contains
+both a `429` signal and a separate word-boundary provider code `400`, so classifier precedence is
+observable; schema errors include the recorded JSON-parse message and one Zod `invalid_value`; the
+`other` cases include an orphaned start and an empty error.
+
+The completed execution's `execution.findings` contains the same two raw finding bodies later
+persisted as `finding.raised`, so double-counting fails. One finding is validated `UNCERTAIN` then
+`VALID`; the other is validated `VALID` then `REJECTED`. Reviewer `model.call` events for all three
+axes carry the **same** task id and distinct `purpose: review_<axis>` values with different literal
+output-token counts. Include two candidate creations for one task with attempt values 1 and 2.
+Assert:
 
 - per-round and per-axis execution totals;
 - completed/incomplete totals and all five cause buckets;
 - requested counts include the orphaned start exactly once;
 - raw yield for the completed clean axis is exactly `0`, while only zero-denominator validation and
   tokens-per-finding ratios are undefined;
-- raw and validation yields from unique finding ids, without also counting `execution.findings`;
+- raw and validation yields from unique finding ids and their latest validation verdict, without
+  also counting `execution.findings`;
 - output tokens per raw and per valid finding;
-- candidate attempts per task.
+- per-axis reviewer output tokens attributed through purpose, not task id;
+- `candidateCount: 2` and `maxAttempt: 2` for the candidate task.
 
 The expected figures and cause labels are hand-written literals. They may not be derived through the
 classifier or aggregation function under test.
@@ -318,9 +341,9 @@ both be green while production still reads live state.
 | Only the role read from the payload, purpose and task from `metadata` | AC7 |
 | Every incomplete review grouped as `other` | AC11a's five literal cause buckets |
 | Schema failures grouped with provider 400s | AC11a's separate `schema` and `bad_request` buckets |
-| Raw findings counted as valid without `finding.validated` | AC11a's one-valid/one-rejected fixture |
+| Raw findings counted as valid without the latest `finding.validated` verdict | AC11a's validation sequences |
 | Zero-findings axis reports zero tokens-per-finding | AC11a's undefined-ratio assertions |
-| A rate-limit error containing `400` classified as `bad_request` | AC11a's real-shaped error |
+| A rate-limit error containing a separate code `400` classified as `bad_request` | AC11a's collision error |
 | `execution.findings` and `finding.raised` both counted as raw findings | AC11a's literal raw count |
 | Two missing-`callId` calls merged under one null key | AC1's two-event assertion |
 | An early `usage: null` suppresses a later usage-bearing duplicate | AC1's retry fixture |
@@ -348,6 +371,17 @@ both be green while production still reads live state.
   is not — which is the defect class this programme has hit most often.
 
 ## Revision history
+
+**Revision 5 → 6**, after the Claude contract review:
+
+- reconciled null-usage and usage-bearing duplicates through a logical-call representative rule;
+- defined valid findings by their latest validation verdict, including repeated debate validations;
+- made classifier precedence observable with a true word-boundary collision;
+- added same-task, different-purpose reviewer calls so axis attribution cannot use task id;
+- corrected the corpus fact: two events lack `callId`, but only one is usage-bearing;
+- defined candidate activity as candidate count plus maximum attempt;
+- required completed executions to carry the same findings as `finding.raised`, preventing
+  double-counting.
 
 **Revision 4 → 5**, after the Grok contract review:
 
