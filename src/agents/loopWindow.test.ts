@@ -173,7 +173,7 @@ describe("buildWireWindow", () => {
     });
 
     expect(window.map((message) => message.role)).toEqual(["user", "user", "assistant", "tool", "tool"]);
-    expectPairing(window);
+    expect(window.filter((m) => m.role === "tool").map((m) => m.toolCallId)).toEqual(calls.map((c) => c.id));
     expect(window.at(-2)?.content).toBe("alpha body");
     expect(window.at(-1)?.content).toBe("beta body");
     expect(window[1]?.content).toContain("## Earlier in this loop");
@@ -181,23 +181,6 @@ describe("buildWireWindow", () => {
     expect(window.map((m) => m.content).join("\n")).not.toContain("first turn output");
   });
 });
-
-export function expectPairing(messages: readonly ChatMessage[]): void {
-  for (let i = 0; i < messages.length; i += 1) {
-    if (messages[i]?.role !== "tool") continue;
-    let start = i;
-    while (start > 0 && messages[start - 1]?.role === "tool") start -= 1;
-    const owner = messages[start - 1];
-    expect(owner?.role).toBe("assistant");
-    const ids = (owner as Extract<ChatMessage, { role: "assistant" }>).toolCalls?.map((call) => call.id) ?? [];
-    const answered: string[] = [];
-    for (let j = start; j < messages.length && messages[j]?.role === "tool"; j += 1) {
-      answered.push((messages[j] as Extract<ChatMessage, { role: "tool" }>).toolCallId);
-    }
-    expect(answered).toEqual(ids.slice(0, answered.length));
-    i = start + answered.length - 1;
-  }
-}
 
 function turn(n: number, results: AgentToolResult[]): AgentTurn {
   return {

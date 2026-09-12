@@ -13,12 +13,15 @@ import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
-import { expectPairing } from "./loopWindow.test.js";
 import { AgentRunner } from "./runner.js";
 import type { AgentRunnerDeps, AgentTranscript } from "./types.js";
 
 const NOW = 1_700_000_000_000;
-const FAILING = ["node", "-e", "process.stderr.write('boom: assertion failed at line 42');process.exit(3)"];
+const FAILING = ["node", "fail-late.js"];
+const FAILING_EARLIER = ["node", "fail-early.js"];
+/** Deliberately absent from the argv: an assertion that matched the argv would pass with no tail. */
+const LATE_MARKER = "zeta-teardown-exploded";
+const EARLIER_MARKER = "alpha-setup-exploded";
 const cleanup: string[] = [];
 
 afterEach(() => {
@@ -108,7 +111,7 @@ describe("the worker's context window", () => {
     const fixture = await repositoryFixture();
     cleanup.push(fixture.root);
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
-    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 12, maxTokens: 32_000 });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 13, maxTokens: 32_000 });
     const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
 
     provider.script("worker", [
@@ -118,6 +121,7 @@ describe("the worker's context window", () => {
       reply([call("repo_intel", { action: "symbol", query: "add" })]),
       reply([call("write", { path: "src/created.ts", content: "export const one = 1;\n" })]),
       reply([call("apply_patch", { path: "src/math.ts", oldText: "a + b", newText: "a + b + 0" })]),
+      reply([call("run_command", { argv: FAILING_EARLIER })]),
       reply([call("run_command", { argv: FAILING })]),
       reply([call("request_context", { query: "why is add wrong" })]),
       reply([call("read", { path: "big-0.txt" })]),
@@ -128,7 +132,7 @@ describe("the worker's context window", () => {
     expect(result.status).toBe("FINISHED");
 
     // AC6. The digest of the request after all eight non-terminal tools have run.
-    const digest = digestOf(provider.calls[9]!);
+    const digest = digestOf(provider.calls[10]!);
     expect(digest).toBeDefined();
     for (const expected of [
       "src/math.ts",
@@ -139,10 +143,13 @@ describe("the worker's context window", () => {
       "src/math.ts (patch)",
       'request_context "why is add wrong"',
       "exit 3",
-      "boom: assertion failed at line 42",
+      LATE_MARKER,
     ]) {
       expect(digest!).toContain(expected);
     }
+    // Only the newest failure keeps its output, so a run of failures cannot crowd out the rest.
+    expect(digest!).toContain("fail-early.js -> exit 4");
+    expect(digest!).not.toContain(EARLIER_MARKER);
 
     store.close();
     await handle.destroy();
@@ -176,6 +183,27 @@ describe("the worker's context window", () => {
     await handle.destroy();
   });
 });
+
+/**
+ * Every tool message belongs to a contiguous run following the assistant that asked for it, and
+ * the run answers all of that assistant's calls. Completeness matters: a window keeping only the
+ * first result of a multi-call turn is a provider rejection, not a smaller prompt.
+ */
+function expectPairing(messages: readonly ChatMessage[]): void {
+  for (let i = 0; i < messages.length; i += 1) {
+    if (messages[i]?.role !== "tool") continue;
+    let start = i;
+    while (start > 0 && messages[start - 1]?.role === "tool") start -= 1;
+    const owner = messages[start - 1];
+    expect(owner?.role).toBe("assistant");
+    const answered: string[] = [];
+    for (let j = start; j < messages.length && messages[j]?.role === "tool"; j += 1) {
+      answered.push((messages[j] as Extract<ChatMessage, { role: "tool" }>).toolCallId);
+    }
+    expect(answered).toEqual((owner as Extract<ChatMessage, { role: "assistant" }>).toolCalls?.map((c) => c.id));
+    i = start + answered.length - 1;
+  }
+}
 
 function bodyOf(request: CompletionRequest): string {
   return request.messages.map((message) => message.content).join("\n");
@@ -272,6 +300,14 @@ async function repositoryFixture(): Promise<{
   for (let i = 0; i < 20; i += 1) {
     writeFileSync(join(repoDir, `big-${String(i)}.txt`), `marker-big-${String(i)} ${"q".repeat(1_980)}\n`);
   }
+  writeFileSync(
+    join(repoDir, "fail-late.js"),
+    `process.stderr.write(${JSON.stringify(`${LATE_MARKER}: the teardown hook threw`)});process.exit(3);\n`,
+  );
+  writeFileSync(
+    join(repoDir, "fail-early.js"),
+    `process.stderr.write(${JSON.stringify(`${EARLIER_MARKER}: the setup hook threw`)});process.exit(4);\n`,
+  );
   const wide = `wide-marker ${"w".repeat(3_990)}`;
   writeFileSync(join(repoDir, "wide.txt"), `${wide}\n`);
   const base = await git.commitAll("base");
@@ -282,6 +318,6 @@ async function repositoryFixture(): Promise<{
     runId: id("run"),
     wide,
     sandbox: new WorktreeSandbox(repoDir, join(root, "worktrees"), defaultConfig().sandbox),
-    policy: CommandPolicy.forProject([FAILING], null, false, { search: true }),
+    policy: CommandPolicy.forProject([FAILING, FAILING_EARLIER], null, false, { search: true }),
   };
 }
