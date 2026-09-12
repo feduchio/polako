@@ -39,7 +39,9 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open items: **11–15**, plus **16, 17, 21, 22, 24, 25** scheduled into the items that rework the same code, **23**'s detector half in its own slot, and **26, 27, 28** recorded. Items **3–9**, **18** and **19** ACCEPTED.
+Open items: **29 first**, then **11–15**, plus **16, 17, 21, 22, 24, 25** scheduled into the items that rework the same code, **23**'s detector half in its own slot, and **26, 27, 28** recorded. Items **3–9**, **18** and **19** ACCEPTED.
+
+**Order changed 2026-09-12 on measurement, not on preference.** Item 29 — run economics as a derived record — goes ahead of 11–15 because the remaining sequence was ordered by finding number while the tokens are somewhere else: over the six real runs in the store the review swarm is **78.7%** of spend at a 5:1 output-to-input ratio, the worker loop **17.2%**, the council **4.1%**. Item 18 was accepted on a turn-count model whose net is **5.8% of a run if an untested assumption holds**; its ceiling was 10.7%. Nothing in items 11–15 touches the 78.7%, and no claim about it can be checked until the spend is a record rather than a throwaway script. The A/B of the fixture corpus on the same two free models follows item 29 and tests item 18's assumption directly.
 
 Item 10 (`listModels()[0]` reviewer selection) was lifted into `B-bootstrap-cost-eligibility` (ACCEPTED). Full Phase-B self-host closure remains **DEFERRED_BY_USER**.
 

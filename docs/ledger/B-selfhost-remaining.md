@@ -65,7 +65,13 @@ C1 simplification pass, C2 pathology/adaptive budget, C3 Python llm-verifier sid
     two disagree by a factor of seven — 123,031 and 914,392 tokens, worker share 48.5% and 13.5% —
     on one fixture with two small free models. There is no corpus on production-grade models at all,
     and acquiring one is out of bounds while paid provider APIs are forbidden.
-    **Not a defect and not scheduled**: it is a measurement that should decide what gets scheduled
-    next. The candidate targets it implies are the reviewer axes' output volume and the number of
-    axes run per candidate, neither of which is an open finding today.
+    **Not a defect.** It is a measurement that decides what gets scheduled next, and it did:
+    **scheduled 2026-09-12** as `docs/ledger/B-selfhost-29.md`, ahead of items 11-15, on the
+    decision to make the economics measurable before optimising further rather than repeat at
+    larger scale the mistake of optimising against a model instead of a measurement. The A/B of the
+    existing fixture corpus on the same two free models, before and after item 18, follows that item
+    and tests item 18's one untested assumption: that a worker needs the same number of turns with
+    less context in front of it. The optimisation targets this finding implies -- the reviewer axes'
+    output volume and the number of axes run per candidate -- are deliberately left unscheduled
+    until the report exists to judge them by.
 
