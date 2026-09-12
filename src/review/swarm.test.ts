@@ -162,6 +162,60 @@ describe("review swarm", () => {
     }
   });
 
+  it("wraps the singular containers real models return", async () => {
+    const root = await mkdtemp(join(tmpdir(), "polish-review-singular-"));
+    roots.push(root);
+    await writeFile(join(root, "limits.ts"), "export const x = 1;\n");
+
+    // Exactly the two shapes the free models returned: evidence as one object, reproduction as
+    // one string. Both findings were semantically right and both were rejected.
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("reviewer", [{
+      kind: "reply",
+      content: JSON.stringify({
+        criterion: "guard admits the equal case",
+        severity: "high",
+        blocking: true,
+        claim: "withinBudget admits a spend equal to an exclusive cap",
+        evidence: { path: "limits.ts", line: 1 },
+        reproduction: "Call withinBudget(cap, cap) and observe true",
+      }),
+    }]);
+    const result = await runAxisReview({
+      protocols: PROTOCOLS,
+      checkpoint: CHECKPOINT,
+      axis: "correctness",
+      artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "bbbbbbb", diff: "d", checkpoint: CHECKPOINT },
+      provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+      repositoryRoot: root,
+    });
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.evidence).toEqual([{ path: "limits.ts", line: 1 }]);
+    expect(result.findings[0]?.reproduction).toEqual(["Call withinBudget(cap, cap) and observe true"]);
+  });
+
+  it("normalises the container without loosening the fields", async () => {
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("reviewer", [{
+      kind: "reply",
+      content: JSON.stringify({
+        criterion: "c",
+        severity: "high",
+        blocking: true,
+        claim: "claim",
+        evidence: { line: 1 },
+        reproduction: "step",
+      }),
+    }]);
+    await expect(runAxisReview({
+      protocols: PROTOCOLS,
+      checkpoint: CHECKPOINT,
+      axis: "correctness",
+      artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "bbbbbbb", diff: "d", checkpoint: CHECKPOINT },
+      provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+    })).rejects.toThrow(/findings array|path/);
+  });
+
   it("still rejects an object that is not a finding", async () => {
     const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
     provider.script("reviewer", [{ kind: "reply", content: JSON.stringify({ summary: "looks fine to me" }) }]);

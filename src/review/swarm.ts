@@ -166,11 +166,29 @@ function parseRawFindings(content: string): RawFinding[] {
  * ever produced.
  */
 function findingValues(parsed: unknown): unknown[] | null {
-  if (Array.isArray(parsed)) return parsed as unknown[];
+  if (Array.isArray(parsed)) return (parsed as unknown[]).map(normalizeFinding);
   if (!isRecord(parsed)) return null;
   const nested = parsed["findings"];
-  if (Array.isArray(nested)) return nested as unknown[];
-  return RawFindingSchema.safeParse(parsed).success ? [parsed] : null;
+  if (Array.isArray(nested)) return (nested as unknown[]).map(normalizeFinding);
+  const lone = normalizeFinding(parsed);
+  return RawFindingSchema.safeParse(lone).success ? [lone] : null;
+}
+
+/**
+ * Wrap the singular forms real models return. Both free models probed on 2026-09-12 produced a
+ * semantically correct finding in a slightly wrong shape -- one sent `evidence` as a single object,
+ * the other `reproduction` as one string -- and the schema rejected both. This normalises the
+ * container only; `RawFindingSchema` still validates every field, so a malformed evidence ref is
+ * still a rejection.
+ */
+function normalizeFinding(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const out = { ...value };
+  const evidence = out["evidence"];
+  if (isRecord(evidence)) out["evidence"] = [evidence];
+  const reproduction = out["reproduction"];
+  if (typeof reproduction === "string") out["reproduction"] = [reproduction];
+  return out;
 }
 
 async function checkEvidence(
