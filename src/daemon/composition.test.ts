@@ -151,7 +151,7 @@ describe("production composition", () => {
   async function firstWorkerRequest(
     kind: "bugfix" | "feature" | "refactor" | "simplify" | "investigation",
     tune?: (config: ReturnType<typeof defaultConfig>) => void,
-    seed?: { claim: string; siblingClaim?: string },
+    seed?: { claim: string; siblingClaim?: string; sharedPath?: string },
   ): Promise<{ request: CompletionRequest; result: Awaited<ReturnType<AgentRunner["runLoop"]>> }> {
     const provider = new ScriptedProvider("scripted", [
       { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 } },
@@ -214,13 +214,23 @@ describe("production composition", () => {
         ]);
       };
       raise(own);
-      if (seed?.siblingClaim !== undefined) raise(validFinding(runId, clock.now() + 1, seed.siblingClaim));
+      if (seed?.siblingClaim !== undefined) {
+        const sibling = validFinding(runId, clock.now() + 1, seed.siblingClaim);
+        raise(
+          seed.sharedPath === undefined
+            ? sibling
+            : { ...sibling, evidence: [{ path: seed.sharedPath, line: 1, endLine: 2 }] },
+        );
+      }
     }
     const draft = {
       id: id("task", clock.now()),
       runId,
       title: "repair the guard",
-      description: "WHAT: the guard reads the shared limits",
+      description:
+        seed?.sharedPath === undefined
+          ? "WHAT: the guard reads the shared limits"
+          : `WHAT: the guard in ${seed.sharedPath} reads the shared limits`,
       acceptance: ["the guard reads the run's own limits"],
       complexity: "trivial" as const,
       baseCheckpointHash: head,
@@ -391,6 +401,17 @@ describe("production composition", () => {
     expect(text).not.toContain("## tools");
   });
 
+  it("throws rather than dropping the task protocol when only it does not fit", async () => {
+    // Measured on this fixture: the protected sections are ~517 estimated tokens with the task
+    // protocol and ~386 without it. A cap between the two separates "protected" from "last in
+    // DROP_ORDER" -- if the protocol were droppable the pack would quietly fit at ~395 instead.
+    await expect(
+      firstWorkerRequest("bugfix", (config) => {
+        config.contextBudget.maxPackTokens = 450;
+      }),
+    ).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+  });
+
   it("throws rather than truncating when the protected sections alone exceed the cap", async () => {
     // `task` is LLM-authored and protected. A verbose planner must produce a diagnosable failure,
     // not an instruction quietly missing its acceptance criteria.
@@ -415,6 +436,10 @@ describe("production composition", () => {
     const { request } = await firstWorkerRequest("bugfix", undefined, {
       claim: injection,
       siblingClaim: "a different finding that belongs to another task",
+      // The sibling's evidence names a path this task's description mentions, which is the only
+      // way the old substring arm could ever have fired. Without it the absence assertion would
+      // also pass against a filter that kept that arm.
+      sharedPath: "src/broker/quota.ts",
     });
     const text = contentOf(request);
     expect(text).toContain("BEGIN UNTRUSTED");

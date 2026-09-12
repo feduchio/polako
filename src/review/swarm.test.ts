@@ -1,5 +1,5 @@
 import { ReviewAxisSchema } from "../domain/finding.js";
-import { REVIEW_AXIS_ROLE, assertReviewerRolesResolvable } from "./reviewerProtocol.js";
+import { assertReviewerRolesResolvable } from "./reviewerProtocol.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,6 +20,18 @@ afterEach(async () => {
 const PROTOCOLS = ProtocolRegistry.load(defaultProtocolsRoot());
 const REVIEW_AXIS_SCHEMA_VALUES = ReviewAxisSchema.options;
 
+/** Independent of `REVIEW_AXIS_ROLE`. If the two disagree, the production map is wrong. */
+const EXPECTED_ROLE: Record<(typeof REVIEW_AXIS_SCHEMA_VALUES)[number], string> = {
+  correctness: "reviewer-correctness",
+  regression: "reviewer-regression",
+  adversarial: "reviewer-adversarial",
+  architecture: "reviewer-architecture",
+  simplicity: "reviewer-simplicity",
+  spec_compliance: "reviewer-correctness",
+  security: "reviewer-adversarial",
+  performance: "reviewer-architecture",
+};
+
 describe("B-selfhost-19 composed reviewer instruction", () => {
   it("sends every axis a system message built from its own role protocol", async () => {
     // Captured at the provider, not read off `reviewerSystemPrompt`: the finding this closes is
@@ -39,7 +51,17 @@ describe("B-selfhost-19 composed reviewer instruction", () => {
       // Two messages, so a prepended policy goes inside the system message rather than becoming
       // a third and breaking the shape reviewers already rely on.
       expect(call.messages).toHaveLength(2);
-      expect(system).toContain(PROTOCOLS.get(REVIEW_AXIS_ROLE[axis]).body.trim().split("\n")[0]!);
+      // Written out here rather than read through REVIEW_AXIS_ROLE: deriving the expectation
+      // from the table under test makes any assignment of axes to roles pass identically.
+      const expected = EXPECTED_ROLE[axis];
+      expect(system).toContain(PROTOCOLS.get(expected).body.trim().split("\n")[0]!);
+      // And no other role's opening line, so a mis-pointed axis cannot hide behind a shared
+      // phrase.
+      for (const [other, name] of Object.entries(EXPECTED_ROLE)) {
+        if (name === expected) continue;
+        expect(system, `${axis} must not carry ${other}'s role`)
+          .not.toContain(PROTOCOLS.get(name).body.trim().split("\n")[0]!);
+      }
       // The machine-readable contract no reviewer body carries. Losing it would leave every
       // response failing `RawFindingSchema` while a "the inline literal is gone" check passed.
       for (const field of ["criterion", "severity", "blocking", "claim", "evidence", "reproduction", "suggestedCheck"]) {
