@@ -1,7 +1,8 @@
 # B-selfhost-18 — bounded worker context window
 
-**Status:** DRAFT, revision 2. Not frozen. Base `f4d47c4`.
-Revision 1 was rejected in contract review; the rejection was correct. See *Revision history*.
+**Status:** DRAFT, revision 3. Not frozen. Base `f4d47c4`.
+Revisions 1 and 2 were both rejected in contract review, by two different reviewers, and both
+rejections were correct. See *Revision history*.
 **Finding:** item 18 in `docs/ledger/B-selfhost-remaining.md`.
 
 ## The defect
@@ -40,15 +41,20 @@ their measured means and the budget at 32,000:
 | Pack | Today | digest 150 | 300 | 400 | 600 | 900 | Break-even digest |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 519 (small task) | 12 turns | 1.50× | 1.42× | 1.33× | 1.17× | 1.08× | 1,131 |
-| 879 (self-host scale) | 11 turns | 1.36× | 1.27× | 1.18× | 1.09× | 1.00× | 1,013 |
-| 1,333 (the derived cap) | 10 turns | 1.20× | 1.20× | 1.10× | 1.00× | 0.90× | **850** |
+| 879 (self-host scale) | 11 turns | 1.36× | 1.27× | 1.18× | 1.09× | 1.00× | 1,014 |
+| 1,333 (the derived cap) | 10 turns | 1.20× | 1.20× | 1.10× | 1.00× | 0.90× | **851** |
 
-**850 tokens is the number that governs this contract.** It is the worst case across every pack
+**851 tokens is the number that governs this contract.** It is the worst case across every pack
 size the accepted cap permits, and a digest above it is a regression rather than an improvement.
 
+Every figure above comes from `constant = 649 + pack`, `g = 203`, `O = 164`, `B = 32,000`, with
+`today` = the largest `T` such that `Σₜ₌₁..ₜ(constant + g(t-1) + O) ≤ B` and `bounded` = `floor(B / (constant +
+digest + g + O))`. A reviewer who reproduces different totals should check those formulas first.
+
 The structural gain is larger than the turn ratios. At a 400-token digest, reaching 32 turns costs
-61,931 tokens under the bounded window against 143,323 today at a 519-token pack — **2.3× cheaper**,
-and 2.1× at an 879-token pack — because capacity becomes linear in the budget. That, not the
+`32 × (649 + 519 + 400 + 203 + 164)` = 61,920 tokens under the bounded window against 143,312
+today at a 519-token pack — **2.31× cheaper**, and 2.11× at an 879-token pack — because capacity
+becomes linear in the budget. That, not the
 1.1–1.5×, is why this is worth doing: it makes `agent.maxTurns` a knob that can be reached by
 raising the budget proportionally rather than quadratically.
 
@@ -82,9 +88,16 @@ incomplete implementation of the paper.
 
 Mechanically derived, each part capped, oldest-first eviction, whole entries only:
 
-- paths changed, tagged `write` or `patch` — first, because it is the part a worker most needs and
-  the part that must never be evicted;
-- commands run with their exit codes, most recent first;
+- paths changed, tagged `write` or `patch` — **first in priority order**, because it is the part a
+  worker most needs, so it is evicted last. It is *not* exempt from eviction: revision 2 said it
+  "must never be evicted", which contradicted the cap. A single path longer than the cap, or more
+  changed paths than the cap can hold, would have forced an implementation to either exceed MC4 or
+  cut an entry in half against MC6;
+- commands run with their exit codes, most recent first, and for the **most recent non-zero exit
+  only**, a bounded tail of its output. Without that tail a worker that broke the build three turns
+  ago has only `exit 1` and must re-run the command to learn anything — which may be slow,
+  nondeterministic, or not idempotent. This was the sharpest unacknowledged loss the second contract
+  review named, and 200 characters of the failing tail is a cheap answer to it;
 - **every other tool call**, as name plus its identifying argument plus ok/error — not just `read`.
   Revision 1 listed only reads, writes and commands, which silently dropped `search`, `list`,
   `repo_intel` and `request_context`: a worker would lose the fact that it had already searched for
@@ -100,14 +113,15 @@ of what the worker was thinking.
 ### The cap
 
 `loopDigestCap(effectiveTaskBudget)` = `clamp(floor(budget / 80), 200, 400)` — **400 at the 32,000
-production default**. The ceiling of 400 is 2.1× below the 850-token worst-case break-even, so no
+production default**. The ceiling of 400 is 2.1× below the 851-token worst-case break-even, so no
 pack size the accepted cap allows can turn this change into a regression. The floor of 200 keeps a
 tiny budget from producing a digest too small to hold even the changed-paths list.
 
 500 would be more useful and was rejected on the sample's thinness. The break-even is itself
 derived from six fixture transcripts of two small free models, so `g = 203` carries real error. Held
 against ±50% on `g` at the worst-case pack, a 400-token cap never regresses — 1.09× at `g = 101`,
-1.00× at `g = 152`, 1.10× at 203, 1.22× above it. A 500-token cap reaches exactly 1.00× at both
+1.00× at `g = 152`, 1.10× at 203, 1.22× above it. `g = 152` is the one point in that range where a
+400-token cap merely breaks even; it never regresses. A 500-token cap reaches exactly 1.00× at both
 `g = 101` and `g = 152`, i.e. it buys nothing if the growth rate is overestimated by a third. The
 extra 100 tokens of digest are not worth a third of the plausible range delivering no gain.
 
@@ -122,8 +136,20 @@ carries the working detail.
 
 ## MISSION_CRITICAL invariants
 
-**MC1.** Per-request input size is bounded by a constant in the turn index. It is not O(t). This is
-the defect and it is what the change must fix.
+**MC1.** The **historical** footprint of a request is bounded by a constant, independent of the turn
+index: every request consists of the fixed prompt, at most one digest of cap size, and the single
+most recent turn. It is not O(t). This is the defect and it is what the change must fix.
+
+Revision 2 said "per-request input size is bounded by a constant", which **contradicted MC5**. The
+`read` tool returns whatever line range it was asked for and defaults to the whole file
+(`src/agents/tools.ts:69-72`); there is no output cap anywhere in the tool layer. One `read` of a
+large file makes the most recent turn arbitrarily large, so no implementation can bound the total
+request while also sending the newest results verbatim. The two clauses as written admitted only
+implementations that violated one of them.
+
+Bounding the newest turn as well would require an output cap on `read` and `run_command`. That is a
+separate change with its own risk — it changes what every worker sees, not merely what it
+remembers — and it is **out of scope** here.
 
 **MC2.** **Archive completeness does not regress.** The persisted `AgentTranscript.messages`
 contains every message of the loop, in order, with the same content as today. The finding's
@@ -155,14 +181,24 @@ hundreds of files, a 50,000-character command output, a single path longer than 
 **MC5.** The most recent turn's tool results reach the model **in full, untruncated**. Eviction
 targets history. A worker that just read a file must see what it read.
 
-**MC6.** Eviction is oldest-first and every part of the digest is bounded. No field may grow
-without limit.
+**MC6.** Eviction removes **whole rendered entries**, lowest-priority-and-oldest first, and every
+part of the digest is bounded. No field may grow without limit, and no entry is ever cut mid-render.
+
+For this to be jointly satisfiable with MC4, **each entry has a bounded rendering**: a path is
+rendered as at most its last 80 characters, prefixed with `…` when shortened, and an error or
+output tail at most 200 characters. Bounding the *rendering* rather than exempting any field is what
+lets the cap hold against a single pathological input while keeping every surviving entry whole.
+Priority order is: changed paths, then the most recent failing command, then remaining commands,
+then other tool calls, then assistant text.
 
 **MC7.** Token accounting and stopping conditions keep their present semantics:
 `totalTokens += inputTokens + outputTokens`, the `while` guard, the mid-loop `BUDGET_EXCEEDED`
 checks, and the post-loop reclassification all behave as they do today.
 
-**MC8.** The digest cap is strictly below 808 tokens at every budget the clamp permits.
+**MC8.** The digest cap is strictly below 851 tokens at **every** integer budget, not merely at
+sampled ones. `clamp(floor(b / 80), 200, 400)` is bounded above by its own ceiling, so this holds by
+construction — but it must be checked over the domain rather than at four points, because a
+piecewise implementation can hit four sampled values and exceed the bound between them.
 
 ## PHASE_REQUIRED
 
@@ -203,15 +239,25 @@ only the first tool result of each turn passes — and that window loses evidenc
 Neither `ScriptedProvider` nor any existing fixture validates pairing, and no fixture in the tree
 scripts two `toolCalls` in one assistant message, so nothing else in the suite can see this.
 
-**AC4.** A digest built from 300 read paths, a 50,000-character command output and a 5,000-character
-error renders to no more than the cap. Pins MC4.
+**AC4.** Four adversarial renderings, each no larger than the cap: 300 read paths; a
+50,000-character command output; a 5,000-character error; and — the case revision 2 could not see
+— **300 changed paths together with one changed path longer than the cap by itself**. Assert in that
+last case both that the cap holds and that whatever entries remain are whole, so neither MC4 nor
+MC6 can be satisfied at the other's expense. Pins MC4 and MC6 together.
 
 **AC5.** The four pre-existing assertions of PR3 pass untouched, and one new check reads a
 4,000-character file and asserts the **whole** content is present in the next request. Pins MC5.
 
-**AC6.** A loop that reads `alpha.ts`, writes `beta.ts` and runs a command exiting non-zero: the
-third request's digest names `alpha.ts`, names `beta.ts` as changed, and records the non-zero exit.
-Pins that the digest is derived from what happened rather than being a constant.
+**AC6.** One loop that exercises **every non-terminal tool** — all eight of `AGENT_TOOL_NAMES`
+except `finish`: `read`, `list`, `search`, `repo_intel`, `write`, `apply_patch`, `run_command`,
+`request_context` — with a later request's digest asserted to carry, for each, its name and its
+identifying argument, plus `write` and `apply_patch` distinguished by their tags, plus the non-zero
+exit code of a failing command, plus a distinctive substring of that failing command's output tail.
+
+Revision 2 named only read, write and command here, so an implementation that dropped `list`,
+`repo_intel` and `request_context` entirely passed every check while the design required them.
+Enumerate the tool names in the assertion; do not spot-check three. Pins that the digest is derived
+from what happened rather than being a constant.
 
 **AC7.** With a cap that binds, assert the newest command entry is present **with its exit code**
 and the oldest read path is absent. Two assertions, not one: a mid-entry string truncation would
@@ -230,6 +276,11 @@ survive to turn 15 legitimately, and the check would be asserting nothing.
 `(32_000, 400)`, `(16_000, 200)`, `(8_000, 200)`, `(80_000, 400)` — none of them computed by calling
 the function or by re-deriving the clamp. The previous item shipped a check that read its
 expectation through the map it was validating; that is the mistake this clause exists to prevent.
+
+Plus a check over the **domain**, not four points: for every budget in a dense sweep of the valid
+range, `loopDigestCap(b) ≤ 400` and `≥ 200`. Four sampled values cannot see a piecewise
+implementation that agrees at those four and exceeds the bound between them, and MC8 is stated over
+every budget.
 
 **AC11.** Budget and turn semantics unchanged: a loop whose usage exceeds `maxTokens` still ends
 `BUDGET_EXCEEDED`; a loop that reaches `maxTurns` without finishing still ends `BUDGET_EXCEEDED`; a
@@ -250,7 +301,11 @@ loop that calls `finish` with valid evidence still ends `FINISHED`.
 | Eviction is newest-first | AC7 |
 | The digest is a constant string that names no actual file | AC6 |
 | Only the first tool result of each turn is kept | AC3's two-call turn |
-| `search` / `list` / `repo_intel` results vanish with no trace in the digest | AC6, extended to a `search` call |
+| `search` / `list` / `repo_intel` / `request_context` leave no trace in the digest | AC6's tool enumeration |
+| The changed-paths list is exempted from the cap so it can never be evicted | AC4's over-cap changed path |
+| An over-cap entry is cut in half rather than shortened by its bounded rendering | AC4's wholeness assertion |
+| `loopDigestCap` is piecewise and agrees with the four sampled budgets | AC10's domain sweep |
+| The failing command's output tail is dropped, leaving only the exit code | AC6's output-tail substring |
 
 A fake that survives every check must be reported with the assertion that should have caught it,
 per the stopping rule in `docs/ledger/PHASE-C.md`.
@@ -265,6 +320,14 @@ per the stopping rule in `docs/ledger/PHASE-C.md`.
   side effect, but the finding records it as live and **not yet shown to truncate**, so no
   acceptance check may claim a fix for it.
 - Compressing the pack itself. It is a constant in both architectures and item 19 fixed its cap.
+- **An output cap on `read` and `run_command`.** MC1 bounds only the historical footprint precisely
+  because capping tool output is a different change: it alters what a worker sees, not what it
+  remembers, and it would need its own measurement of how often a truncated read costs a task.
+  Recorded as a follow-on, not done here.
+- Re-recording provider cassettes. `RecordReplayProvider.requestKey` hashes `messages`
+  (`src/providers/recordReplay.ts:32-40`), so any worker cassette recorded before this change misses
+  from the first altered request onward. No such cassette exists in this tree and `PHASE-C.md`
+  schedules recording after this item, so the cost is a sequencing constraint rather than work.
 
 ## Which checks carry PR2, and which are pins
 
@@ -279,8 +342,30 @@ and is unaffected; a new test that leans on the fallback will see the digest.
 
 ## Revision history
 
-**Revision 1 → 2**, after contract review. One blocking defect and five corrections, all from the
-review and all upheld:
+**Revision 2 → 3**, after a second contract review by a different reviewer, which found four
+blocking defects the first review missed. All four upheld:
+
+- **MC1 contradicted MC5.** No output cap exists in the tool layer, so "per-request input bounded by
+  a constant" and "the newest tool results verbatim and untruncated" could not both hold. MC1 now
+  bounds the historical footprint and an output cap is explicitly out of scope.
+- **"Changed paths must never be evicted" contradicted MC4 and MC6.** Introduced in revision 2 while
+  fixing something else. Resolved by bounding each entry's *rendering* and making the list
+  highest-priority rather than exempt.
+- **The all-tools requirement was unobserved.** Revision 2 broadened the design to nine tools and
+  left AC6 naming three, so an implementation could drop `list`, `repo_intel` and `request_context`
+  and pass everything.
+- **MC8 was stated over every budget and checked at four points.**
+
+One unacknowledged loss the same review named is now in the design: a failing command's output was
+being reduced to its exit code, so a worker that broke the build three turns ago had to re-run it.
+
+Arithmetic corrected in the same pass: the worst-case break-even is **851**, not 850, and the
+self-host-scale one **1,014**, not 1,013 — my binary search was inclusive by one. The 32-turn totals
+are now given as the formula that produces them, since revision 2's figures came from unrounded
+intermediates and could not be reproduced from the printed constants.
+
+**Revision 1 → 2**, after the first contract review. One blocking defect and five corrections, all
+from the review and all upheld:
 
 - MC3 specified a message ordering that `runLoop` cannot produce and that would have forced an
   implementation to break the provider contract. AC3 could not have caught it.
