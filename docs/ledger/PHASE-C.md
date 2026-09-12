@@ -25,7 +25,8 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | B-selfhost-6 accepted | `df49a5ef75996da5ee17c51b4f66e974d8952fc0` on `task/B-selfhost-6-integration` | Bounded B finding 6 only. |
 | B-selfhost-7 accepted | `1dc1c5cfbb2f92efb2fa8f58f15e92f02a3c80b2` on `task/B-selfhost-7-integration` | Bounded B finding 7 only. |
 | B-selfhost-8 accepted | `14beb802857fde8a5251404dc518301cb5b1a0a4` on `task/B-selfhost-8-integration` | Bounded B finding 8 only. |
-| B-selfhost-9+19 accepted (next HOST) | `9e157e1a0a5d7369f2be905d8c36121789e09087` on `task/B-selfhost-9-19-integration` | Bounded B findings 9 and 19, plus finding 23's reviewer half. Phase B not fully closed. Phase C not accepted. |
+| B-selfhost-9+19 accepted | `9e157e1a0a5d7369f2be905d8c36121789e09087` on `task/B-selfhost-9-19-integration` | Bounded B findings 9 and 19, plus finding 23's reviewer half. |
+| B-selfhost-18 accepted (next HOST) | `8ea156db5207c5b159869b6e8ea2620c628b932f` on `task/B-selfhost-18-integration` | Bounded B finding 18. Phase B not fully closed. Phase C not accepted. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -38,7 +39,7 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open items: **11–15**, plus **16, 17, 21, 22, 24, 25** scheduled into the items that rework the same code, **23**'s detector half in its own slot, and **26, 27** recorded. Items **3–9** and **19** ACCEPTED.
+Open items: **11–15**, plus **16, 17, 21, 22, 24, 25** scheduled into the items that rework the same code, **23**'s detector half in its own slot, and **26, 27, 28** recorded. Items **3–9**, **18** and **19** ACCEPTED.
 
 Item 10 (`listModels()[0]` reviewer selection) was lifted into `B-bootstrap-cost-eligibility` (ACCEPTED). Full Phase-B self-host closure remains **DEFERRED_BY_USER**.
 
@@ -112,7 +113,7 @@ C8. Contract: `docs/ledger/C8.md`. Provenance: `docs/ledger/C8-run.md`. **Task A
 | # | Item | Absorbs | Shared seam |
 |---|---|---|---|
 | ~~1~~ | ~~**9 + 19**~~ | ~~23's reviewer-protocol half~~ | **ACCEPTED** at `9e157e1`, run record `docs/ledger/B-selfhost-9-19-run.md` |
-| 2 | **18** | — | `AgentRunner.runLoop` |
+| ~~2~~ | **18** | — | `AgentRunner.runLoop` | **ACCEPTED** at `8ea156d` |
 | 3 | **11** | — | `PairwiseJudge`; needs 19's composed `judge` protocol first |
 | 4 | **12** | **17, 21, 22, 25** | `DaemonService.runConfig` and `withRuntimeValidationMode`: 12 restores run settings and runtime mode across a restart, 17 is the mode nobody reads, 21 is that resolution failing silently, 22 is the pin guarding it, 25 is the duplicated budget merge in the same function |
 | 5 | **13, 15** | **16** | Runtime evidence: 15 drives the `required` happy path, 16 is the missing `off` early return in `corpusRuntimeEvidenceAllowsDone` |
@@ -125,6 +126,8 @@ Then the remaining Fable C: C1, C5, C6, C7, C9, C10, C11 in the dependency order
 The grouping rule is one seam, one rewrite. Five of the seven loose findings sat in code that a scheduled item already reopens; taking them separately would mean touching `DaemonService.runConfig` five times and re-freezing a contract for each. Only 23's detector half has no collision, so it keeps its own slot rather than being forced into one. Do not enter Phase D. Do not tag `phase-c-accepted`.
 
 Reviewer isolation: from item 8 onward each code reviewer gets its own worktree at the commit under review. Reviewers mutate sources to test assertion strength and restore them with `git checkout --`, so sharing one worktree lets them overwrite each other's probes. See the process note in `docs/ledger/B-selfhost-7-run.md`.
+
+**Reviewer lanes changed 2026-09-12, from item 18 onward.** The coordinator is Claude, so the Claude reviewer lane used for items 3-19 was same-family and not an independent check. Review now runs on **Grok** and **GPT-5.6-sol**, neither of which shares the coordinator's family. Composer, Max, Ultra and paid provider APIs remain out of bounds. Item 18's fifteen rounds are the evidence this mattered: twelve of its last thirteen findings came from a single lane while the other passed, and a same-family reviewer would have been the one passing.
 
 ## Stopping rule for review rounds (revised 2026-09-11, after B-selfhost-8 reached 24 rounds)
 
