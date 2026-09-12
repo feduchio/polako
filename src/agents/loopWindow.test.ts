@@ -14,6 +14,11 @@ const EXPECTED_CAP: readonly (readonly [number, number])[] = [
   [8_000, 200],
   [80_000, 400],
   [16_001, 200],
+  // Both values above and below sit on a clamp plateau, where neither the divisor nor the
+  // rounding direction shows. These two are in the linear stretch: 24_000/80 is exactly 300, and
+  // 24_040/80 is 300.5, which floors to 300 and rounds to 301.
+  [24_000, 300],
+  [24_040, 300],
 ];
 
 describe("loopDigestCap", () => {
