@@ -342,6 +342,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
     createReviewingDriver({
       resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
       sandbox: sandboxFor,
+      protocols: deps.protocols,
     }),
   );
   engine.registerPhase(

@@ -1,3 +1,5 @@
+import { assertReviewerRolesResolvable } from "../review/reviewerProtocol.js";
+import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { SYSTEM_ACTOR, modelRefKey, type ModelRef } from "../domain/common.js";
 import type { CorpusEntry } from "../domain/acceptance.js";
 import type { Event, NewEvent } from "../domain/event.js";
@@ -70,6 +72,8 @@ export interface ReviewDriverOptions {
   sandbox?: Sandbox | ((ctx: PhaseContext) => Sandbox | Promise<Sandbox>);
   policy?: CommandPolicy | ((ctx: PhaseContext) => CommandPolicy | Promise<CommandPolicy>);
   runAxisReview?: (input: RunAxisReviewInput) => Promise<RunAxisReviewResult>;
+  /** Injected once; `ProtocolRegistry.load` is synchronous IO over every protocol directory. */
+  protocols?: ProtocolRegistry;
 }
 
 export interface DebateCompletionRequest {
@@ -91,6 +95,9 @@ export interface ValidatingDriverOptions {
 /** Production REVIEWING driver: fresh independent reviewers on the integrated checkpoint artifact. */
 export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseDriver {
   let checkoutSeq = 0;
+  // Once per driver, not once per axis per round: loading walks every protocol directory.
+  const protocols = options.protocols ?? ProtocolRegistry.load(defaultProtocolsRoot());
+  assertReviewerRolesResolvable(protocols);
   return async (ctx) => {
     const hash = ctx.run.currentCheckpointHash;
     if (hash === null) return { status: "waiting" };
@@ -155,6 +162,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
           artifact,
           repositoryRoot: handle.path,
           rateLimited,
+          protocols,
           review: options.runAxisReview ?? runAxisReview,
         });
         if (outcome === "waiting") return { status: "waiting" };
@@ -751,6 +759,7 @@ async function reviewAxisWithFallback(
         artifact: CheckpointReviewArtifact;
         repositoryRoot: string;
         rateLimited: Set<string>;
+        protocols: ProtocolRegistry;
         review: (input: RunAxisReviewInput) => Promise<RunAxisReviewResult>;
       },
 ): Promise<"ok" | "waiting"> {
@@ -767,6 +776,7 @@ async function reviewAxisWithFallback(
         axis: input.axis,
         artifact: input.artifact,
         provider: reviewer,
+        protocols: input.protocols,
         repositoryRoot: input.repositoryRoot,
         now: ctx.clock.now(),
       });

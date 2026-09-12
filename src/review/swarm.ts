@@ -1,3 +1,5 @@
+import type { ProtocolRegistry } from "../protocols/loader.js";
+import { reviewerSystemPrompt } from "./reviewerProtocol.js";
 import { realpath, readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ProviderAdapter } from "../broker/types.js";
@@ -31,6 +33,9 @@ export interface RunAxisReviewInput {
   axis: ReviewAxis;
   artifact: CheckpointReviewArtifact;
   provider: ReviewProvider;
+  /** Injected, not loaded here: `ProtocolRegistry.load` is synchronous IO over every protocol
+   *  directory and a reviewer runs once per axis per round. */
+  protocols: ProtocolRegistry;
   repositoryRoot?: string;
   now?: number;
 }
@@ -47,6 +52,7 @@ export interface RunReviewSwarmInput {
   axes: readonly ReviewAxis[];
   artifact: CheckpointReviewArtifact;
   providers: readonly ReviewProvider[];
+  protocols: ProtocolRegistry;
   repositoryRoot?: string;
   now?: number;
 }
@@ -61,13 +67,7 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
   const response = await selection.provider.complete({
     model,
     messages: [
-      {
-        role: "system",
-        content:
-          `You are an independent ${input.axis} reviewer. Return JSON only as an array of findings. ` +
-          "Each finding must contain criterion, severity, blocking, claim, evidence " +
-          "(path and optional line/endLine), reproduction, and optional suggestedCheck.",
-      },
+      { role: "system", content: reviewerSystemPrompt(input.protocols, input.axis) },
       { role: "user", content: userContent },
     ],
     responseFormat: "json",
@@ -130,6 +130,7 @@ export async function runReviewSwarm(input: RunReviewSwarmInput): Promise<Review
         axis,
         artifact: input.artifact,
         provider,
+        protocols: input.protocols,
         ...(input.repositoryRoot === undefined ? {} : { repositoryRoot: input.repositoryRoot }),
         ...(input.now === undefined ? {} : { now: input.now }),
       });

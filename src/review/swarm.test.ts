@@ -1,3 +1,6 @@
+import { ReviewAxisSchema } from "../domain/finding.js";
+import { REVIEW_AXIS_ROLE, assertReviewerRolesResolvable, reviewerSystemPrompt } from "./reviewerProtocol.js";
+import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +15,45 @@ const roots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+const PROTOCOLS = ProtocolRegistry.load(defaultProtocolsRoot());
+const REVIEW_AXIS_SCHEMA_VALUES = ReviewAxisSchema.options;
+
+describe("B-selfhost-19 composed reviewer instruction", () => {
+  it("maps every review axis to a role protocol that resolves", () => {
+    // Eight axes, five `reviewer-*` protocols. The map's values are strings, so nothing but this
+    // check can tell that the three without one of their own point somewhere real.
+    expect(() => {
+      assertReviewerRolesResolvable(PROTOCOLS);
+    }).not.toThrow();
+    for (const axis of REVIEW_AXIS_SCHEMA_VALUES) {
+      const prompt = reviewerSystemPrompt(PROTOCOLS, axis);
+      const role = PROTOCOLS.get(REVIEW_AXIS_ROLE[axis]);
+      expect(prompt).toContain(role.body.trim().split("\n")[0]!);
+    }
+  });
+
+  it("keeps the machine-readable output contract that the role bodies do not carry", () => {
+    // The inline literal carried the whole parse contract. No `reviewer-*` body describes an
+    // output format, so composing a role body *instead of* it would leave every reviewer response
+    // failing `RawFindingSchema` while a check that the literal is gone still passed.
+    for (const axis of REVIEW_AXIS_SCHEMA_VALUES) {
+      const prompt = reviewerSystemPrompt(PROTOCOLS, axis);
+      for (const field of ["criterion", "severity", "blocking", "claim", "evidence", "reproduction", "suggestedCheck"]) {
+        expect(prompt).toContain(field);
+      }
+      expect(prompt).toContain("Return JSON only");
+    }
+    const bodies = REVIEW_AXIS_SCHEMA_VALUES.map((axis) => PROTOCOLS.get(REVIEW_AXIS_ROLE[axis]).body);
+    expect(bodies.some((body) => body.includes("Return JSON only"))).toBe(false);
+  });
+
+  it("carries the bounded-acceptance rule into the reviewer's system message", () => {
+    for (const axis of REVIEW_AXIS_SCHEMA_VALUES) {
+      expect(reviewerSystemPrompt(PROTOCOLS, axis)).toContain("blocking only when it is a plausible omission");
+    }
+  });
 });
 
 describe("review swarm", () => {
@@ -35,6 +77,7 @@ describe("review swarm", () => {
 
     const reviewer = { provider, model: { provider: "reviews", model: "reviewer" } };
     const findings = await runReviewSwarm({
+      protocols: PROTOCOLS,
       checkpoint: CHECKPOINT,
       axes: ["correctness", "regression", "adversarial"],
       artifact,
@@ -68,6 +111,7 @@ describe("review swarm", () => {
     };
     const reviewer = { provider, model: { provider: "reviews", model: "reviewer" } };
     await expect(runReviewSwarm({
+      protocols: PROTOCOLS,
       checkpoint: CHECKPOINT,
       axes: ["correctness", "regression"],
       artifact,
@@ -91,6 +135,7 @@ describe("review swarm", () => {
 
     const reviewer = { provider, model: { provider: "reviews", model: "reviewer" } };
     await runReviewSwarm({
+      protocols: PROTOCOLS,
       checkpoint: CHECKPOINT,
       axes: ["correctness", "regression", "adversarial"],
       artifact,
