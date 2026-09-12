@@ -367,3 +367,55 @@ spend that *exceeds* the cap. So what is established is that the plumbing no lon
 reviews. **Whether the reviews are any good is open**, and the honest next measurement is a
 defect-injection corpus whose acceptance text does not name the defect.
 
+## Prompt audit, 2026-09-12
+
+Audited every prompt surface: the nineteen `protocols/*/SKILL.md`, `REVIEWER_OUTPUT_CONTRACT`,
+`src/verify/pairwise.ts`'s judge prompt, `src/council/roles.ts` and `src/findings/debate.ts`.
+
+**No flattery, no padding instruction, and no hedging language anywhere.** A case-insensitive
+sweep for `helpful|please|thank|hope|feel free|great|excellent|friendly|apolog|I think|maybe|
+perhaps|comprehensive|elaborate` returns exactly one hit, and it is an *anti*-pattern being
+forbidden: `"Out of scope but helpful" | Reject` in
+`protocols/base-engineering-policy/references/anti-rationalization.md`. The policy already reads
+"Terse prose, never terse code", "Do not claim success without fresh command output", "Prefer
+evidence over confidence", and each `reviewer-*` body opens with "Assume the author is
+overconfident. Cite file:line or command evidence."
+
+43. **The reviewers' token cost is reasoning, not prose, and an economy clause makes it worse.**
+    Measured against two free models at `temperature: 0` on one diff. The returned JSON is already
+    mechanically precise and compact -- a full finding renders to roughly 450 characters, about 115
+    tokens -- while `completion_tokens` is 435-1,107. The gap is the model's own reasoning, which no
+    instruction in the system prompt removes.
+    A/B on the same input with a clause appended demanding one-sentence claims, imperative
+    reproduction steps, no hedging, no adjectives and no prose outside the JSON: output went **up**,
+    315 -> 349 tokens on `nex-n2.5-pro` and 719 -> 895 on `nemotron-3-super-120b`. Telling a
+    reasoning model to be terse gives it more to reason about. Recorded so nobody re-adds the clause
+    on the assumption it helps. The lever that would work is not a prompt: it is a non-reasoning
+    verifier, a reasoning-effort parameter, or LLM-as-a-Verifier's scoring, where the output is a
+    handful of score tokens and there is no prose to economise.
+
+44. **Shape variance is the dominant reviewer failure mode, and patching observed variants does not
+    converge.** Four `evidence` shapes seen across four probes of the same two models on nearly the
+    same input: an array of refs (valid); a single ref object (fixed by `normalizeFinding`); a ref
+    using `startLine` instead of `line` (survives, Zod strips the extra key); and one whose `path`
+    was not a string at all, which `RawFindingSchema` rejected at `evidence.0.path`. Also two
+    `reproduction` shapes and two `severity` casings. Temperature is 0; the variance is between runs
+    and between models, not from sampling.
+    I was two patches into chasing this before noticing that each branch only covers the variant I
+    happened to observe. **Stop patching.** The structural answers are the ones both reference
+    sources already give: grammar-constrained decoding, which SKILL.state recommends precisely
+    because open-weight failures are "structured output adherence rather than reasoning capacity";
+    or scoring instead of generation, which removes the schema from the response entirely.
+    Meanwhile the cheap and honest move is to make rejections **countable**: `review_executions`
+    already persists `error`, so item 29's report must group failures by cause and show shape
+    rejections as their own class rather than burying them in a total.
+
+45. **Finding 42 partly answered, and positively: the reviewers do find real defects.** Given an
+    honest acceptance criterion -- "remaining must never report a negative amount", which states a
+    property without naming the defect -- both free models independently found that
+    `remaining(spent, cap) { return cap - spent }` returns a negative value when `spent > cap`, both
+    cited `limits.ts` with a line range, both supplied a runnable reproduction, and both proposed a
+    check. That is a genuine, mechanically checkable finding from a free model. What remains
+    unmeasured is the rate: one injected defect found twice is not a hit rate, and the corpus needed
+    for one is still the next measurement finding 42 names.
+
