@@ -42,6 +42,20 @@ not that ratio: reaching 32 turns costs 61,920 tokens under the bounded window a
 today, **2.3× cheaper**, because capacity becomes linear in the budget instead of quadratic. That is
 what makes the `agent.maxTurns` knob reachable at all.
 
+**What this does not establish, stated plainly because the first draft of this record blurred it.**
+Cost per task is **not** proven. Two things are proven, by tests: the historical footprint of a
+request is constant in the turn index, and the archive is intact. Everything quantitative above is a
+**turn-count model** whose load-bearing assumption is that a worker needs the same number of turns
+to do the same job with less context in front of it. That assumption is untested, and the contract
+forbids any acceptance check from asserting it either way.
+
+Measured afterwards against the six real end-to-end runs in `~/.polish/polish.db` (finding 29), the
+ceiling is smaller than the ratios suggest. The worker loop is **17.2%** of a run's 1,060,632
+tokens; resent history inside it is **10.7%**, which is the most this change could ever remove; the
+digest and verbatim turn that replace it cost **4.8%**. So the net is **5.8% of a run if turn counts
+hold, and zero if the bounded window costs the worker one extra turn in fourteen.** The review swarm
+is **78.7%** of spend at a 5:1 output-to-input ratio, which no prompt-window work reaches.
+
 ## Design
 
 Per request: the system message if configured, the instruction pack, a bounded digest of everything

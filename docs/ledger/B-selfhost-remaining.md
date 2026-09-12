@@ -48,3 +48,24 @@ Full Phase-B self-host closure is **DEFERRED_BY_USER** until operator observabil
 C1 simplification pass, C2 pathology/adaptive budget, C3 Python llm-verifier sidecar, C4 Prosecutor/Defender, C5 CodeGraph native, C6 interactive NEEDS_HUMAN answer, C7 scouts, C8 Model Audition, C9 GC/doctor beyond a B fix, C10 sandbox-exec, C11 browser/RN runtime.
 
 28. **An older failing command can lose its exit code to the demotion regex.** `collectEntries` demotes every failing command but the newest by stripping its output tail with `text.replace(/: [\s\S]*$/, "")` (`src/agents/loopWindow.ts`), which matches from the **first** `: ` in the rendered entry rather than from the separator the renderer wrote. An argv containing `: ` — `git commit -m "fix: something"`, `node -e "console.log('a: b')"` — therefore loses its `-> exit N` along with the tail, so the digest records that the command ran and not that it failed. The newest failure is never demoted, so the most recent one is always intact. **Found 2026-09-12** by the Grok lane in the confirming round of item 18 and agreed non-blocking by both lanes, because the frozen contract does not name colon-bearing argv and acting on it would have been a new axis. The fix is to carry the tail as its own field rather than re-parsing the rendered text, which is a one-line change to `DigestEntry`. Not scheduled: it rides with the next item that touches `loopWindow.ts`, and if none does before Phase B closes it is worth its own trivial task.
+
+29. **The worker loop is 17.2% of a run's tokens; the review swarm is 78.7%, and it is output-bound.**
+    Measured 2026-09-12 over the **six real end-to-end runs** in `~/.polish/polish.db` (6,964 events,
+    1,060,632 tokens), by summing `usage` per `metadata.role` from the event log. Reviewers
+    834,635 (78.7%), worker loops 182,900 (17.2%), council 43,097 (4.1%). The reviewers' ratio is
+    **5.0x output to input** (138,414 in, 696,221 out) and `review_adversarial` alone is 64.4% of
+    all spend, so their cost is generation, not context: no prompt-window or packing work touches it.
+    **This reorders the economics of the remaining plan.** Item 18, now accepted, removes resent
+    worker history — 113,248 tokens, 10.7% of a run, which is its absolute ceiling — and replaces it
+    with a digest plus one verbatim turn, 51,255 tokens, so its net is **5.8% of a run if turn counts
+    hold**, and zero if the bounded window costs the worker one extra turn in fourteen. Items 11-15
+    are ordered by finding number, and none of them addresses the 78.7%.
+    **Two further cautions from the same corpus.** Only **2 of 6 runs reached `DONE`** (three
+    `NEEDS_HUMAN`, one stuck in `INTERPRETING_MISSION`), so cost-per-completed-task has n=2. Those
+    two disagree by a factor of seven — 123,031 and 914,392 tokens, worker share 48.5% and 13.5% —
+    on one fixture with two small free models. There is no corpus on production-grade models at all,
+    and acquiring one is out of bounds while paid provider APIs are forbidden.
+    **Not a defect and not scheduled**: it is a measurement that should decide what gets scheduled
+    next. The candidate targets it implies are the reviewer axes' output volume and the number of
+    axes run per candidate, neither of which is an open finding today.
+
