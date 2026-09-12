@@ -135,6 +135,21 @@ describe("buildLoopDigest", () => {
     expect(changedLine).toContain("leaf.ts (write)");
   });
 
+  it("names what a failed call was aimed at, not merely that it failed", () => {
+    const digest = buildLoopDigest(
+      [
+        turn(1, [failed("read", { path: "src/forbidden.ts" }, "path escapes sandbox")]),
+        turn(2, [failed("run_command", { argv: ["node", "denied.js"] }, "command not in allowlist")]),
+        turn(3, [failed("read", { path: "src/forbidden.ts" }, "path escapes sandbox")]),
+      ],
+      400,
+    );
+    expect(digest).toContain("read src/forbidden.ts: path escapes sandbox");
+    expect(digest).toContain("run_command node denied.js: command not in allowlist");
+    // The same failure twice is one entry with a count, not two.
+    expect(digest).toContain("(x2)");
+  });
+
   it("is empty before there is any history to summarise", () => {
     expect(buildLoopDigest([], 400)).toBe("");
   });
@@ -151,6 +166,29 @@ describe("buildWireWindow", () => {
     });
     expect(window.map((message) => message.role)).toEqual(["system", "user"]);
     expect(window.at(-1)?.content).toBe(pack.content);
+  });
+
+  it("summarises only what precedes the turn it sends verbatim", () => {
+    const archive: ChatMessage[] = [
+      pack,
+      { role: "assistant", content: "", toolCalls: [{ id: "old", name: "read", arguments: "{}" }] },
+      { role: "tool", toolCallId: "old", content: "older output" },
+      { role: "assistant", content: "", toolCalls: [{ id: "new", name: "read", arguments: "{}" }] },
+      { role: "tool", toolCallId: "new", content: "newest output" },
+    ];
+    const window = buildWireWindow({
+      archive,
+      turns: [
+        turn(1, [ok("read", { path: "src/older.ts" }, { path: "src/older.ts" })]),
+        turn(2, [ok("read", { path: "src/newest.ts" }, { path: "src/newest.ts" })]),
+      ],
+      digestCap: 400,
+    });
+    const body = window.map((message) => message.content).join("\n");
+    expect(body).toContain("src/older.ts");
+    // The newest turn is already present verbatim; digesting it too would pay for it twice.
+    expect(body).not.toContain("src/newest.ts");
+    expect(body).toContain("newest output");
   });
 
   it("keeps a multi-call turn's results paired with the assistant that asked for them", () => {

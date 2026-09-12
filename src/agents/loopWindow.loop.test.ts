@@ -23,6 +23,12 @@ const FAILING_EARLIER = ["node", "fail-early.js"];
 const LATE_MARKER = "zeta-teardown-exploded";
 const EARLIER_MARKER = "alpha-setup-exploded";
 const cleanup: string[] = [];
+const LONG_DIR = "deeply/nested/directory/of/the/project";
+/** Long enough that twenty of them want more than a 200-token digest and less than a 400 one. */
+const LONG_PATHS = Array.from(
+  { length: 20 },
+  (_, i) => `${LONG_DIR}/module-with-a-descriptive-name-${String(i).padStart(2, "0")}.ts`,
+);
 
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -115,7 +121,7 @@ describe("the worker's context window", () => {
     const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
 
     provider.script("worker", [
-      reply([call("read", { path: "src/math.ts" })]),
+      reply([call("read", { path: "docs/read-only-here.md" })]),
       reply([call("list", { path: "src" })]),
       reply([call("search", { query: "add", path: "src" })]),
       reply([call("repo_intel", { action: "symbol", query: "add" })]),
@@ -135,7 +141,7 @@ describe("the worker's context window", () => {
     const digest = digestOf(provider.calls[10]!);
     expect(digest).toBeDefined();
     for (const expected of [
-      "src/math.ts",
+      "read docs/read-only-here.md",
       "list src",
       'search "add"',
       'symbol "add"',
@@ -150,6 +156,34 @@ describe("the worker's context window", () => {
     // Only the newest failure keeps its output, so a run of failures cannot crowd out the rest.
     expect(digest!).toContain("fail-early.js -> exit 4");
     expect(digest!).not.toContain(EARLIER_MARKER);
+
+    store.close();
+    await handle.destroy();
+  });
+
+  it("gives the production seam the budget-derived allowance, not a smaller one", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    // 32_000 is the production effective task budget, for which the contract derives 400. A seam
+    // wired to some other quantity - maxTurns, say - yields 200 and is otherwise silent.
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 24, maxTokens: 32_000 });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+
+    provider.script("worker", [
+      ...LONG_PATHS.map((path) => reply([call("read", { path })])),
+      reply([call("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" })]),
+      reply([call("finish", { summary: "done" })]),
+    ]);
+
+    const result = await new AgentRunner(deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("FINISHED");
+
+    const digest = digestOf(provider.calls.at(-1)!);
+    expect(digest).toBeDefined();
+    const size = estimateTokens(digest!);
+    expect(size).toBeGreaterThan(200);
+    expect(size).toBeLessThanOrEqual(400);
 
     store.close();
     await handle.destroy();
@@ -300,6 +334,10 @@ async function repositoryFixture(): Promise<{
   for (let i = 0; i < 20; i += 1) {
     writeFileSync(join(repoDir, `big-${String(i)}.txt`), `marker-big-${String(i)} ${"q".repeat(1_980)}\n`);
   }
+  mkdirSync(join(repoDir, "docs"));
+  writeFileSync(join(repoDir, "docs/read-only-here.md"), "a path no other tool in that loop names\n");
+  mkdirSync(join(repoDir, LONG_DIR), { recursive: true });
+  for (const path of LONG_PATHS) writeFileSync(join(repoDir, path), "short\n");
   writeFileSync(
     join(repoDir, "fail-late.js"),
     `process.stderr.write(${JSON.stringify(`${LATE_MARKER}: the teardown hook threw`)});process.exit(3);\n`,

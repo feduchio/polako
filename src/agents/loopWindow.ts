@@ -100,7 +100,12 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
     for (const result of turn.toolResults) {
       const parsed = parseArgs(args.get(result.toolCallId));
       if (!result.ok) {
-        const key = `${result.name}: ${tail(result.error ?? "failed")}`;
+        // A failure carries its target too: "read failed" tells a worker nothing about which path
+        // it may not read. The output is absent on failure, so the identity comes from the
+        // arguments alone.
+        const identity = identifyingArgument(result.name, null, parsed);
+        const label = identity === "" ? result.name : `${result.name} ${identity}`;
+        const key = `${label}: ${tail(result.error ?? "failed")}`;
         const prior = errorCounts.get(key);
         errorCounts.set(key, { turn: turn.turn, count: (prior?.count ?? 0) + 1 });
         continue;
@@ -168,7 +173,11 @@ function identifyingArgument(name: string, output: unknown, args: Record<string,
   switch (name) {
     case "read":
     case "list":
+    case "write":
+    case "apply_patch":
       return shortPath(pathOf(output, args));
+    case "run_command":
+      return stringField(args, "argv") ?? "";
     case "search":
     case "request_context":
       return quote(stringField(args, "query") ?? "");
