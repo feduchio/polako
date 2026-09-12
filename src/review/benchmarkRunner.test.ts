@@ -117,6 +117,28 @@ describe("review benchmark runner", () => {
     expect(nex.calls.length + nvidia.calls.length).toBe(20);
   });
 
+  it("bounds each provider call with the configured timeout signal", async () => {
+    const waitForAbort = (request: CompletionRequest): Promise<CompletionResponse> =>
+      new Promise((_resolve, reject) => {
+        request.signal?.addEventListener("abort", () => {
+          reject(new Error("timed out"));
+        }, { once: true });
+      });
+    const nex = provider("nex", "nex-agi/a:free", waitForAbort);
+    const nvidia = provider("nvidia", "nvidia/a:free", waitForAbort);
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const report = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 4,
+      pairs: [pair],
+      cellTimeoutMs: 2,
+    });
+    expect(report.cells).toHaveLength(12);
+    expect(report.cells.every((cell) => cell.outcome === "transport_failure")).toBe(true);
+  });
+
   it("selects two free JSON families deterministically and fails closed", () => {
     const nex = provider("openrouter", "unused", () => reply('{"findings":[]}'));
     const nvidia = provider("other", "unused", () => reply('{"findings":[]}'));

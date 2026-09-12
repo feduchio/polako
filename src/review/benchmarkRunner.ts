@@ -74,6 +74,8 @@ export interface RunReviewerBenchmarkInput {
   reviewers: readonly [BenchmarkReviewer, BenchmarkReviewer];
   seed: number;
   liveAbort?: boolean;
+  cellTimeoutMs?: number;
+  onCell?: (cell: RecordedBenchmarkCell, completed: number, requested: number) => void;
   pairs?: readonly ReviewerBenchmarkPair[];
 }
 
@@ -113,8 +115,9 @@ export async function runReviewerBenchmark(
   let partial = false;
 
   for (const scheduled of schedule) {
-    const result = await runCell(scheduled, input.protocols);
+    const result = await runCell(scheduled, input.protocols, input.cellTimeoutMs ?? 30_000);
     cells.push(result);
+    input.onCell?.(result, cells.length, schedule.length);
     if (
       input.liveAbort === true &&
       cells.length === 20 &&
@@ -217,7 +220,7 @@ export async function rescoreReviewerBenchmark(
       reviewer: { provider: replay, model: input.model, family: input.family },
       repetition: oracle.repetition,
     };
-    const cell = await runCell(scheduled, input.protocols);
+    const cell = await runCell(scheduled, input.protocols, 30_000);
     if (
       cell.request?.messages[0]?.content !== packet.system ||
       cell.request.messages[1]?.content !== packet.user
@@ -232,13 +235,14 @@ export async function rescoreReviewerBenchmark(
 async function runCell(
   scheduled: ScheduledBenchmarkCell,
   protocols: ProtocolRegistry,
+  timeoutMs: number,
 ): Promise<RecordedBenchmarkCell> {
   const root = mkdtempSync(join(tmpdir(), "polish-review-benchmark-"));
   const path = join(root, scheduled.pair.path);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, sourceFor(scheduled.pair, scheduled.label), "utf8");
   const capture: Capture = { request: null, response: null, error: null };
-  const provider = recordingProvider(scheduled.reviewer.provider, capture);
+  const provider = recordingProvider(scheduled.reviewer.provider, capture, timeoutMs);
   const span = changedLineSpan(scheduled.pair);
   const oracle: BenchmarkOracle = {
     cellId: scheduled.cellId,
@@ -320,7 +324,7 @@ function buildReport(
   };
 }
 
-function recordingProvider(inner: ProviderAdapter, capture: Capture): ProviderAdapter {
+function recordingProvider(inner: ProviderAdapter, capture: Capture, timeoutMs: number): ProviderAdapter {
   return {
     id: inner.id,
     kind: inner.kind,
@@ -329,7 +333,11 @@ function recordingProvider(inner: ProviderAdapter, capture: Capture): ProviderAd
     complete: async (request) => {
       capture.request = structuredClone(request);
       try {
-        const response = await inner.complete(request);
+        const timeout = AbortSignal.timeout(timeoutMs);
+        const signal = request.signal === undefined
+          ? timeout
+          : AbortSignal.any([request.signal, timeout]);
+        const response = await inner.complete({ ...request, signal });
         capture.response = structuredClone(response);
         return response;
       } catch (error) {
