@@ -69,6 +69,12 @@ describe("the worker's context window", () => {
     // asked for two reads at once makes the next request legitimately larger, and MC5 requires
     // exactly that. Measured across the whole loop the footprint is the pack plus at most one
     // digest, where on the unmodified tree it grows with every turn.
+    // The pack is the one part of the prompt that must be on every request, and asserting it only
+    // on turn one leaves the rest of the loop to a builder-level check.
+    for (const request of provider.calls) {
+      expect(request.messages[0]).toEqual({ role: "user", content: task.description });
+    }
+
     const footprints = provider.calls.map(historicalTokens);
     const pack = footprints[0]!;
     expect(Math.max(...footprints)).toBeLessThanOrEqual(pack + 400);
