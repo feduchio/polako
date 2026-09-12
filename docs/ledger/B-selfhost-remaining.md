@@ -317,7 +317,7 @@ architectural answer and follow them.
 
 ## Findings 41, 39 and 37 fixed, 2026-09-12
 
-Branch `task/B-review-plumbing`, eight commits on `3022deb`. Gate green: 733 tests, 75 files.
+Branch `task/B-review-plumbing`, eight commits on `3022deb`. Gate green: 732 tests, 75 files.
 Each fix was verified by planting the defect back and watching a named assertion fail, and each was
 then reviewed by Grok and GPT-5.6-sol independently. **Both reviews found real blocking defects in
 my fixes**, listed below, and all are repaired.
