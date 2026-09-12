@@ -32,8 +32,18 @@ describe("run economics", () => {
       reviewer: { inputTokens: 35, outputTokens: 350, totalTokens: 385, calls: 3 },
       worker: { inputTokens: 100, outputTokens: 10, totalTokens: 110, calls: 1 },
     });
+    expect(report.byPurpose).toEqual({
+      agent_run: { inputTokens: 100, outputTokens: 10, totalTokens: 110, calls: 1 },
+      council_intake_planner: { inputTokens: 30, outputTokens: 5, totalTokens: 35, calls: 1 },
+      review_adversarial: { inputTokens: 8, outputTokens: 80, totalTokens: 88, calls: 1 },
+      review_correctness: { inputTokens: 20, outputTokens: 200, totalTokens: 220, calls: 1 },
+      review_regression: { inputTokens: 7, outputTokens: 70, totalTokens: 77, calls: 1 },
+    });
     expect(report.byTask[TASK_ID]).toEqual({ inputTokens: 135, outputTokens: 360, totalTokens: 495, calls: 4 });
     expect(report.byTask["unassigned"]).toEqual({ inputTokens: 30, outputTokens: 5, totalTokens: 35, calls: 1 });
+    for (const breakdown of [report.byRole, report.byPurpose, report.byTask]) {
+      expect(sumBreakdown(breakdown)).toEqual(report.tokens);
+    }
     expect(report.usd).toBe(0.375);
     expect(report.nullUsageCalls).toBe(0);
     expect(report.nullCostCalls).toBe(0);
@@ -56,6 +66,8 @@ describe("run economics", () => {
     expect(nullCost.failedCalls).toBe(1);
     expect(nullCost.nullCostCalls).toBe(1);
     expect(nullCost.nullUsageCalls).toBe(0);
+    expect(nullCost.tokens).toEqual({ inputTokens: 1, outputTokens: 2, totalTokens: 3, calls: 1 });
+    expect(nullCost.byRole["worker"]).toEqual({ inputTokens: 1, outputTokens: 2, totalTokens: 3, calls: 1 });
 
     const nullUsage = projectRunEconomics(run("DONE"), [
       modelCall(1, "worker", "agent_run", TASK_ID, null, null, null, "a", false),
@@ -65,6 +77,20 @@ describe("run economics", () => {
     expect(nullUsage.nullCostCalls).toBe(0);
     expect(nullUsage.nullUsageCalls).toBe(1);
     expect(nullUsage.tokens.totalTokens).toBe(0);
+
+    const absentUsage = projectRunEconomics(run("DONE"), [
+      event(1, "model.call", {
+        callId: "absent",
+        role: "worker",
+        purpose: "agent_run",
+        taskId: TASK_ID,
+        ok: false,
+      }),
+    ]);
+    expect(absentUsage.tokens).toEqual({ inputTokens: 0, outputTokens: 0, totalTokens: 0, calls: 0 });
+    expect(absentUsage.nullUsageCalls).toBe(1);
+    expect(absentUsage.byRole).toEqual({});
+    expect(absentUsage.byTask).toEqual({});
   });
 
   it("reports review cycles, causes, latest validation yield and candidate attempts", () => {
@@ -96,6 +122,8 @@ describe("run economics", () => {
       modelCall(20, "reviewer", "pairwise_verification", TASK_ID, 1, 50, 0, "m4"),
       ...[1, 1, 2, 2].map((attempt, index) => candidateCreated(21 + index, attempt, index)),
       event(30, "run.phase_changed", { run: { ...run("NEEDS_HUMAN"), phase: "NEEDS_HUMAN" } }),
+      event(29, "task.created", { task: { id: TASK_ID, state: "READY" } }),
+      event(30, "task.state_changed", { task: { id: TASK_ID, state: "GATED" }, from: "READY", to: "GATED" }),
       event(31, "task.state_changed", { task: { id: TASK_ID, state: "INTEGRATED" } }),
       event(32, "task.state_changed", { task: { id: OTHER_TASK_ID, state: "READY" } }),
     ];
@@ -119,14 +147,63 @@ describe("run economics", () => {
     expect(total.reviewerOutputTokens).toBe(950);
     expect(total.outputTokensPerRawFinding).toBe(475);
     expect(total.outputTokensPerValidFinding).toBe(950);
+    expect(total.completionRate).toBe(0.25);
 
+    const correctnessAxis = report.review.byAxis["correctness"];
+    expect(correctnessAxis).toMatchObject({
+      requested: 3,
+      completed: 1,
+      incomplete: 2,
+      reviewerInputTokens: 10,
+      reviewerOutputTokens: 200,
+      completionRate: 1 / 3,
+      rawFindings: 2,
+      validFindings: 1,
+      outputTokensPerRawFinding: 100,
+      outputTokensPerValidFinding: 200,
+    });
     const clean = report.review.byAxis["regression"];
+    expect(clean).toMatchObject({
+      requested: 3,
+      completed: 1,
+      incomplete: 2,
+      reviewerInputTokens: 20,
+      reviewerOutputTokens: 300,
+      completionRate: 1 / 3,
+    });
     expect(clean?.rawYield).toBe(0);
     expect(clean?.validationYield).toBeNull();
     expect(clean?.outputTokensPerRawFinding).toBeNull();
+    expect(report.review.byAxis["adversarial"]).toMatchObject({
+      requested: 2,
+      completed: 0,
+      incomplete: 2,
+      reviewerInputTokens: 30,
+      reviewerOutputTokens: 400,
+      completionRate: 0,
+      rawYield: null,
+    });
     expect(report.review.byAxis["unassigned"]?.reviewerOutputTokens).toBe(50);
-    expect(report.review.rounds["1"]).toMatchObject({ requested: 7, completed: 2, incomplete: 5 });
-    expect(report.review.rounds["2"]).toMatchObject({ requested: 1, completed: 0, incomplete: 1 });
+    expect(report.review.rounds).toEqual({
+      "1": {
+        requested: 7,
+        completed: 2,
+        incomplete: 5,
+        byAxis: {
+          adversarial: { requested: 1, completed: 0, incomplete: 1 },
+          correctness: { requested: 3, completed: 1, incomplete: 2 },
+          regression: { requested: 3, completed: 1, incomplete: 2 },
+        },
+      },
+      "2": {
+        requested: 1,
+        completed: 0,
+        incomplete: 1,
+        byAxis: {
+          adversarial: { requested: 1, completed: 0, incomplete: 1 },
+        },
+      },
+    });
     expect(report.candidatesByTask[TASK_ID]).toEqual({ candidateCount: 4, maxAttempt: 2 });
     expect(report.outcome).toEqual({
       phase: "NEEDS_HUMAN",
@@ -147,6 +224,24 @@ describe("run economics", () => {
     expect(forward.usageConflict).toBe(true);
   });
 
+  it("reports corpus-shaped null-cost and null-usage counts together", () => {
+    const report = projectRunEconomics(run("CREATED"), [
+      modelCall(1, "worker", "agent_run", TASK_ID, 2, 3, 0, "free"),
+      modelCall(2, "planner", "council_intake_planner", null, 5, 7, null, "unpriced"),
+      modelCall(3, "reviewer", "review_correctness", TASK_ID, null, null, null, "failed", false),
+      event(4, "run.phase_changed", { run: { ...run("NEEDS_HUMAN"), phase: "NEEDS_HUMAN" } }),
+    ]);
+    expect(report.tokens).toEqual({ inputTokens: 7, outputTokens: 10, totalTokens: 17, calls: 2 });
+    expect(report.usd).toBeNull();
+    expect(report.nullCostCalls).toBe(1);
+    expect(report.nullUsageCalls).toBe(1);
+    expect(report.byTask).toEqual({
+      [TASK_ID]: { inputTokens: 2, outputTokens: 3, totalTokens: 5, calls: 1 },
+      unassigned: { inputTokens: 5, outputTokens: 7, totalTokens: 12, calls: 1 },
+    });
+    expect(renderRunEconomics(report)).toContain("USD: unknown (1 null-cost, 1 null-usage calls)");
+  });
+
   it("renders a dry report with cycles and role spend", () => {
     const report = projectRunEconomics(run("DONE"), [
       modelCall(1, "worker", "agent_run", TASK_ID, 100, 10, 0, "a"),
@@ -154,7 +249,10 @@ describe("run economics", () => {
     const text = renderRunEconomics(report);
     expect(text).toContain("Tokens: 110 total = 100 input + 10 output");
     expect(text).toContain("worker: 110 = 100 in + 10 out");
+    expect(text).toContain("agent_run: 110 = 100 in + 10 out");
+    expect(text).toContain(`${TASK_ID}: unknown, 110 tokens`);
     expect(text).toContain("Review: 0 requested, 0 completed, 0 incomplete");
+    expect(text).toContain("Usage conflict: no");
     expect(text).not.toMatch(/great|excellent|hope|helpful/i);
   });
 });
@@ -289,4 +387,23 @@ function candidateCreated(seq: number, attempt: number, index: number): Event {
   return event(seq, "candidate.created", {
     candidate: { id: id("cand", 100 + index), taskId: TASK_ID, attempt },
   });
+}
+
+function sumBreakdown(values: Record<string, {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  calls: number;
+}>): {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  calls: number;
+} {
+  return Object.values(values).reduce((sum, value) => ({
+    inputTokens: sum.inputTokens + value.inputTokens,
+    outputTokens: sum.outputTokens + value.outputTokens,
+    totalTokens: sum.totalTokens + value.totalTokens,
+    calls: sum.calls + value.calls,
+  }), { inputTokens: 0, outputTokens: 0, totalTokens: 0, calls: 0 });
 }

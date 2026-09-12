@@ -197,10 +197,19 @@ export function renderRunEconomics(report: RunEconomicsReport): string {
     "By role:",
     ...renderTokenBreakdown(report.byRole),
     "",
+    "By purpose:",
+    ...renderTokenBreakdown(report.byPurpose),
+    "",
+    "Tasks:",
+    ...renderTasks(report),
+    "",
     `Review: ${String(report.review.total.requested)} requested, ${String(report.review.total.completed)} completed, ${String(report.review.total.incomplete)} incomplete`,
     `Review failures: ${renderCauses(report.review.total.failureCauses)}`,
     ...Object.entries(report.review.byAxis).map(([axis, value]) =>
-      `  ${axis}: ${String(value.completed)}/${String(value.requested)} complete, ${String(value.rawFindings)} raw, ${String(value.validFindings)} valid, ${formatRatio(value.outputTokensPerValidFinding)} output tokens/valid finding`),
+      `  ${axis}: ${String(value.completed)}/${String(value.requested)} complete (${formatPercent(value.completionRate)}), ${formatInt(value.reviewerInputTokens)} in + ${formatInt(value.reviewerOutputTokens)} out, ${String(value.rawFindings)} raw, ${String(value.validFindings)} valid, ${formatRatio(value.outputTokensPerValidFinding)} output tokens/valid finding`),
+    `Review rounds: ${Object.entries(report.review.rounds).map(([round, value]) =>
+      `${round}=${String(value.completed)}/${String(value.requested)}`).join(", ") || "none"}`,
+    `Usage conflict: ${report.usageConflict ? "YES" : "no"}`,
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -479,8 +488,29 @@ function renderCauses(causes: Record<ReviewFailureCause, number>): string {
     .join(", ");
 }
 
+function renderTasks(report: RunEconomicsReport): string[] {
+  const taskIds = new Set([
+    ...Object.keys(report.byTask),
+    ...Object.keys(report.outcome.taskStates),
+    ...Object.keys(report.candidatesByTask),
+  ]);
+  return [...taskIds].sort().map((taskId) => {
+    const tokens = report.byTask[taskId] ?? emptyTokens();
+    const candidates = report.candidatesByTask[taskId];
+    const state = report.outcome.taskStates[taskId] ?? "unknown";
+    const candidateText = candidates === undefined
+      ? "0 candidates"
+      : `${String(candidates.candidateCount)} candidates, max attempt ${String(candidates.maxAttempt)}`;
+    return `  ${taskId}: ${state}, ${formatInt(tokens.totalTokens)} tokens, ${candidateText}`;
+  });
+}
+
 function formatRatio(value: number | null): string {
   return value === null ? "undefined" : value.toFixed(2);
+}
+
+function formatPercent(value: number | null): string {
+  return value === null ? "undefined" : `${(value * 100).toFixed(1)}%`;
 }
 
 function formatInt(value: number): string {
