@@ -1,9 +1,8 @@
 # B-selfhost-29 — run economics as a first-class record
 
-**Status:** DRAFT, revision 3. Not frozen. Base `89c99aa`.
-Revisions 1 and 2 were both rejected in contract review, by two different reviewers, and both
-rejections were correct. Most of their findings were to my own factual claims about the corpus.
-See *Revision history*.
+**Status:** DRAFT, revision 4. Not frozen. Implementation base `93bd7b6`.
+Revisions 1–3 were corrected by two contract reviews and the prompt/runtime audit. See *Revision
+history*. The contract now measures the complete communication funnel rather than token totals only.
 **Finding:** item **29** in `docs/ledger/B-selfhost-remaining.md`.
 
 ## Why this is scheduled ahead of items 11–15
@@ -92,10 +91,10 @@ present but whose `costUsd` is null. The third is the one revision 2 had no home
 only reason this corpus's dollar figure is unknown rather than zero. Alongside them, the tokens of
 any failed call that does carry usage.
 
-All 85 failed calls in the corpus have no `usage`, so their token cost is genuinely unrecorded and
-no projection can recover it. What is recoverable, and what a retry storm actually shows up as, is
-the count. Revision 1 asserted that failed calls "consumed tokens" as if the corpus recorded them;
-it does not.
+All 85 failed calls in the corpus have `usage: null`, so their token cost is genuinely unrecorded
+and no projection can recover it. What is recoverable, and what a retry storm actually shows up as,
+is the count. Revision 1 asserted that failed calls "consumed tokens" as if the corpus recorded
+them; it does not.
 
 **MC4.** **A dollar figure is reported only when every contributing call has cost data** — a
 non-null `costUsd` on a present `usage` object. If any contributing call has a null `costUsd` or a null
@@ -110,16 +109,30 @@ tree does today: `usdUsage` (`src/observe/project.ts:468`) adds the 228 zeros, s
 when the truth is "96 of 324 calls have no price". On this corpus the honest answer is **unknown**.
 
 **MC5a — cycles and yield.** The report states **how many cycles ran and what they produced**:
-review executions per run, per round index and per axis, split into completed and not-completed with
-the failure cause; candidate attempts per task; and the **findings each axis produced**. Without
-this the report cannot answer whether the exchange between roles was productive, which is the
-question it exists for. The corpus makes the stakes concrete: 2,600 review executions, 18 completed,
-zero findings, 696,221 reviewer output tokens — and every one of those numbers had to be dug out of
-SQLite by hand.
+review executions per run, per round index and per axis, split into completed and not-completed;
+candidate attempts per task; raw findings raised; and validation outcomes for those findings.
+Without this the report cannot answer whether exchange between workers and reviewers was productive.
 
-**MC5b — productivity, as a ratio the reader can check.** Output tokens per finding, per axis and
-per run, reported as **undefined** rather than as a large number when an axis produced no findings.
-Dividing by zero and printing a number is the defect class this programme has hit most often.
+Every incomplete review is grouped mechanically into exactly one stable cause:
+`rate_limit`, `schema`, `bad_request`, `timeout`, or `other`. The classifier uses the persisted
+error text and must not call a model. This makes losses visible at each transition:
+
+`review requested → review completed → raw finding raised → finding validated`.
+
+The old corpus makes the stakes concrete: 2,600 review executions, 18 completed, zero findings,
+696,221 reviewer output tokens. That corpus predates the finding-41 parser repair, so the report
+must present it as history, not infer current reviewer quality from it.
+
+**MC5b — productivity, as ratios the reader can check.** Per axis and per run:
+
+- completion rate = completed executions / requested executions;
+- raw yield = raw findings / completed executions;
+- validation yield = valid findings / raw findings;
+- reviewer output tokens per raw finding and per valid finding.
+
+Every zero-denominator ratio is **undefined**, never zero, infinity, or an invented sentinel. These
+are diagnostic ratios, not claims that a low-yield reviewer is bad: clean code can correctly yield
+no finding.
 
 **MC5.** Spend is paired with **outcome**: the run's **latest recorded phase together with whether
 that phase is terminal**, and each task's final state. Cost without outcome cannot answer
@@ -174,9 +187,9 @@ Without the null-task call this check is the one revision 1 shipped: green on a 
 on every real run.
 
 **AC2.** Two fixtures. One `ok: false` call **with** usage is included in the total and in the
-failed-call count — synthetic, because the corpus has no such call. One `ok: false` call **without**
-usage raises the failed-call count and the no-usage count, and adds nothing to the total. Assert all
-four numbers.
+failed-call count — synthetic, because the corpus has no such call. One `ok: false` call with
+**`usage: null`** raises the failed-call count and the null-usage count, and adds nothing to the
+total. Assert all four numbers.
 
 **AC3.** Three cost cases, which is what it takes to separate "free" from "unpriced":
   - every call `costUsd: 0` → the amount is **$0.00**, reported as known;
@@ -220,10 +233,19 @@ sum, input and output are separate, the dollar amount is unknown with both count
 breakdown sums to the total via `unassigned`. One check that fails on every mistake this contract was
 rejected twice for.
 
-**AC11a.** Cycles and yield: a fixture with two rounds, three axes, one axis failing with a
-provider error and one completing with two findings. Assert the per-round and per-axis execution
-counts, the completed/not-completed split with its cause, and the findings per axis. Assert output
-tokens per finding for the productive axis, and **undefined** for the axis that produced none.
+**AC11a.** Cycles and yield: a fixture with two rounds and three axes. Include one completed review
+that raises two findings, one completed clean review, and five incomplete reviews whose persisted
+errors map one-to-one to `rate_limit`, `schema`, `bad_request`, `timeout`, and `other`. Validate one
+finding as `VALID` and reject the other. Assert:
+
+- per-round and per-axis execution totals;
+- completed/incomplete totals and all five cause buckets;
+- raw and validation yields;
+- output tokens per raw and per valid finding;
+- **undefined** ratios for the clean axis rather than zero or infinity.
+
+The expected figures and cause labels are hand-written literals. They may not be derived through the
+classifier or aggregation function under test.
 
 **AC11.** MC1, observed at the seam rather than asserted as a preference. A test loads a **completed**
 run's events into a store, constructs the production path that `cost` uses **without any live
@@ -257,6 +279,10 @@ reads live state.
 | A non-terminal run given a faked terminal phase, or omitted | AC5's second fixture |
 | The report reading live budget state instead of the event log | AC11 |
 | Only the role read from the payload, purpose and task from `metadata` | AC7 |
+| Every incomplete review grouped as `other` | AC11a's five literal cause buckets |
+| Schema failures grouped with provider 400s | AC11a's separate `schema` and `bad_request` buckets |
+| Raw findings counted as valid without `finding.validated` | AC11a's one-valid/one-rejected fixture |
+| Zero-findings axis reports zero tokens-per-finding | AC11a's undefined-ratio assertions |
 
 ## Out of scope
 
@@ -281,30 +307,15 @@ reads live state.
 
 ## Revision history
 
-**Revision 1 → 2**, after contract review. Two blocking defects and six corrections, all upheld:
+**Revision 3 → 4**, after the source sync and prompt/runtime audit:
 
-- **`usage.costUsd` is not null everywhere.** It is zero on 228 calls, null on 11, and absent with
-  its whole `usage` object on 85. MC4's rationale rested on the false claim, and as written it would
-  have forced an all-free run to report `$0.00` as the very number the clause exists to forbid. The
-  rule is now about *missing* price, not about zero, and `usdUsage`'s actual behaviour is quoted
-  instead of an invented one.
-- **MC2 was unsatisfiable on the only corpus.** 28 usage-bearing calls carry `taskId: null` — all
-  43,097 council tokens — and four of six runs have no task rows at all, so "each breakdown sums
-  exactly to the run total" could not hold. An `unassigned` bucket is now required, and AC1 must
-  contain such a call; without it AC1 was green on a fixture and wrong on every real run.
-- The `metadata` key is **absent**, not present-and-null.
-- Every failed call in the corpus has **no `usage`**, so MC3's "failed calls consumed tokens" was
-  wrong about the data; the recoverable signal is the counts.
-- `run.phase_changed` carries **no `to` field**; an outcome fold written against the suite's other
-  fixtures would pass and return nothing on all six real runs.
-- Placement and reuse were unstated: the fold must be store-free under `src/observe/` because the
-  CLI may not import `store`, `broker` or `convergence`, which also rules out reusing
-  `foldModelCallUsage`. The command is named `cost`.
-
-Also added on the reviewer's scope observation: the report may not print a cost-per-completed-task
-ratio, and why.
-
-## Revision history
+- the report now separates every communication stage—requested review, completed review, raw
+  finding, validation—rather than calling any non-empty model output productive;
+- incomplete reviews have five deterministic cause buckets;
+- productivity includes completion, raw-yield and validation-yield ratios;
+- reviewer output tokens are reported per raw and per valid finding;
+- zero-denominator ratios are undefined;
+- the stale duplicate revision-1 history was removed.
 
 **Revision 2 → 3**, after a second contract review by a different reviewer, which found five blocking
 defects the first review missed. All five upheld:
@@ -330,8 +341,8 @@ planner; and `callId` conflict resolution is specified rather than left to the i
 **Revision 1 → 2**, after the first contract review. Two blocking defects and six corrections, all
 upheld:
 
-- **`usage.costUsd` is not null everywhere.** It is zero on 228 calls, null on 11, and the whole
-  `usage` object is null on 85. MC4's rationale rested on the false claim, and as written it would
+- **`usage.costUsd` is not null everywhere.** It is zero on 228 calls, null on 11, and `usage` is
+  explicitly null on 85. MC4's rationale rested on the false claim, and as written it would
   have forced an all-free run to report `$0.00` as the very number the clause exists to forbid. The
   rule is now about *missing* price, not about zero, and `usdUsage`'s actual behaviour is quoted
   instead of an invented one.
