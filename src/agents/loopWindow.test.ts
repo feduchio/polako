@@ -122,6 +122,19 @@ describe("buildLoopDigest", () => {
     // No shortened form is specified for an argv, so the only legal move is to drop it whole.
     expect(hugeArgv).not.toContain("aaaa");
 
+    // MC6 names the search query beside the argv, and only the argv was exercised: a mutant that
+    // shortened the query to its last 80 characters left every other assertion green.
+    const hugeQuery = buildLoopDigest(
+      [
+        turn(1, [ok("write", { path: "src/kept-beside-query.ts" }, { path: "src/kept-beside-query.ts" })]),
+        turn(2, [ok("search", { query: "c".repeat(50_000) }, { exitCode: 0 })]),
+      ],
+      cap,
+    );
+    expect(estimateTokens(hugeQuery)).toBeLessThanOrEqual(cap);
+    expect(hugeQuery).not.toContain("cccc");
+    expect(hugeQuery).toContain("src/kept-beside-query.ts (write)");
+
     const overCapPath = `src/${"deep/".repeat(120)}leaf.ts`;
     const manyChanged = buildLoopDigest(
       [
