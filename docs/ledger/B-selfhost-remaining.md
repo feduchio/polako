@@ -75,3 +75,15 @@ C1 simplification pass, C2 pathology/adaptive budget, C3 Python llm-verifier sid
     output volume and the number of axes run per candidate -- are deliberately left unscheduled
     until the report exists to judge them by.
 
+30. **Two existing folds carry the defects item 29 forbids in new code.** `usdUsage`
+    (`src/observe/project.ts:468`) sums the `costUsd` values it finds and skips the ones it does not,
+    so on the recorded corpus it returns `0` for a run where **96 of 324 calls have no price** — a
+    figure indistinguishable from "this run was free". And `foldModelCallUsage`
+    (`src/convergence/pathology/budget.ts:47`) drops `taskId: null` from its per-task map, which on
+    this corpus silently omits all 43,097 council tokens, 100% of council spend. Both are otherwise
+    sound: `foldModelCallUsage` orders by `seq` and deduplicates retried calls by `callId`, which is
+    the behaviour item 29's contract adopts. **Found 2026-09-12** during item 29's contract review.
+    Not scheduled: both have their own callers and their own tests, and item 29 deliberately builds a
+    separate store-free fold because `src/cli/` may import neither. Worth a small task once item 29's
+    report exists to compare them against.
+
