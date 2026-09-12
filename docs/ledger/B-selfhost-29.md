@@ -1,7 +1,7 @@
 # B-selfhost-29 — run economics as a first-class record
 
-**Status:** DRAFT, revision 6. Not frozen. Implementation base `93bd7b6`.
-Revisions 1–5 were corrected by four contract reviews and the prompt/runtime audit. See *Revision
+**Status:** DRAFT, revision 7. Not frozen. Implementation base `93bd7b6`.
+Revisions 1–6 were corrected by five contract reviews and the prompt/runtime audit. See *Revision
 history*. The contract now defines each logical call, finding outcome, payload shape and denominator.
 **Finding:** item **29** in `docs/ledger/B-selfhost-remaining.md`.
 
@@ -84,7 +84,8 @@ A logical `model.call` group is identified by a non-empty `payload.callId`, fall
 the fallback. Within a group ordered by `(seq, id)`, the first event carrying a usage object is the
 usage representative; if none carries usage, the first event is the null-usage representative.
 Thus an earlier `usage: null` duplicate cannot suppress later recorded spend. A disagreement among
-usage-bearing duplicates on tokens, cost, role, purpose or task sets a conflict flag.
+usage-bearing duplicates on tokens, cost, role, purpose or task sets the report-level boolean
+`usageConflict: true`.
 
 The by-task breakdown therefore needs an explicit **`unassigned`** bucket for usage-bearing calls
 whose `taskId` is null. Without it the clause is unsatisfiable on the only corpus that exists: 28
@@ -93,11 +94,11 @@ empty by-task map against a non-zero total.
 
 **MC3.** Failure is visible. **Three counts**, because the corpus makes them three different
 questions: logical calls represented by `ok: false`; logical calls whose representative `usage` is
-null; and successful logical calls whose representative usage is present but whose `costUsd` is
-null. The third is the one revision 2 had no home for, and it is the only reason this corpus's dollar
-figure is unknown rather than zero. Alongside them, the tokens of any failed call that does carry
-usage. A null-usage duplicate in a group that has a usage-bearing representative does not increment
-the null-usage count or make MC4's dollar amount unknown.
+null; and logical calls whose representative usage is present but whose `costUsd` is null, whether
+that call succeeded or failed. The third is the one revision 2 had no home for, and it is the only
+reason this corpus's dollar figure is unknown rather than zero. Alongside them, the tokens of any
+failed call that does carry usage. A null-usage duplicate in a group that has a usage-bearing
+representative does not increment the null-usage count or make MC4's dollar amount unknown.
 
 All 85 failed calls in the corpus have `usage: null`, so their token cost is genuinely unrecorded
 and no projection can recover it. What is recoverable, and what a retry storm actually shows up as,
@@ -106,9 +107,10 @@ them; it does not.
 
 **MC4.** **A dollar figure is reported only when every contributing call has cost data** — a
 non-null `costUsd` on a present `usage` object. If any contributing call has a null `costUsd` or a null
-`usage`, the amount is reported as **unknown**, with the **null-cost count and the null-usage count**
-from MC3 attached — 96 and 85 respectively on this corpus. Revision 2 attached "both counts from
-MC3" while MC3 counted neither of the two that matter here.
+`usage`, the amount is reported as **unknown**, with the disjoint **null-cost count and null-usage
+count** from MC3 attached — 11 and 85 respectively on this corpus; together they are the 96 calls
+with no price. Revision 2 attached "both counts from MC3" while MC3 counted neither of the two that
+matter here. "Contributing call" means the logical representative selected by MC2.
 
 A total of `$0.00` is legitimate when every contributing call priced itself at zero, which is what
 a free model does and what 228 of these calls did. The forbidden thing is narrower and is what the
@@ -118,8 +120,10 @@ when the truth is "96 of 324 calls have no price". On this corpus the honest ans
 
 **MC5a — cycles and yield.** The report states **how many cycles ran and what they produced**.
 One review execution is one unique `payload.execution.id` seen in `review.started` or
-`review.finished`; a later event for the same id replaces its earlier state. Requested executions
-are that set, including starts with no finish. Raw findings are unique
+`review.finished`; a later event by `(seq, id)` for the same execution id replaces its earlier
+state. Requested executions are that set, including starts with no finish. A completed execution is
+one whose latest payload has `execution.completed === true`. Round and axis come from
+`payload.execution.roundIndex` and `payload.execution.axis`. Raw findings are unique
 `finding.raised.payload.finding.id` values. A finding's validation outcome is the latest
 `finding.validated.payload.validation.verdict` by `(seq, id)`, joined through
 `payload.validation.findingId`. Valid findings are distinct finding ids whose latest verdict is
@@ -175,8 +179,8 @@ run or invents one.
 **MC6.** Deterministic and pure. The same events produce the same report, independent of the order
 they are handed to the projection, ordered by `seq` internally, with `id` breaking a `seq` tie. No
 clock. Two usage-bearing events sharing a `callId` are one spend record: the first by that ordering
-wins, and a disagreement on tokens, cost, role, purpose or task sets a conflict flag rather than
-silently resolving it. Null-usage duplicates are handled by MC2's representative rule.
+wins, and a disagreement on tokens, cost, role, purpose or task sets `usageConflict: true` rather
+than silently resolving it. Null-usage duplicates are handled by MC2's representative rule.
 
 **MC7.** The projection reads `payload.role`, `payload.purpose`, `payload.taskId` and
 `payload.usage` — the fields the events actually carry. It must not depend on `payload.metadata`,
@@ -239,12 +243,14 @@ total. Assert all four numbers.
   - one call with `usage: null` among several priced → **unknown**, with a null-usage count of 1.
 
 Assert the two counts as distinct fields: a null-priced success and a null-usage failure are
-different facts and revision 2 had a home for neither.
+different facts and revision 2 had a home for neither. Repeat the null-price case with `ok: false`
+and a present usage object; it still increments `nullCostCalls`.
 
 The first case forbids treating zero as missing; the second and third forbid the partial sum that
 `usdUsage` performs today.
 
-**AC4.** With every `costUsd` present and non-zero, the dollar amount is their exact sum.
+**AC4.** With every `costUsd` present and non-zero, the dollar amount is their exact sum. Use binary
+exact fixture values such as `0.125 + 0.25 = 0.375`; no implicit rounding rule is permitted.
 
 **AC5.** Outcome pairing: the report carries the run's latest phase, **whether it is terminal**, and
 each task's final state,
@@ -255,11 +261,14 @@ whose `run.phase_changed` payload is shaped **as the store records it** — `{ r
 faked. At least one `task.state_changed` is `{ task: { id, state, ... } }` with no `from` or `to`;
 its final state must still be reported.
 
-**AC6.** Determinism: the same events in reverse insertion order produce an identical report.
+**AC6.** Determinism: the same events in reverse insertion order produce an identical report. Two
+events also share a `seq` and differ in `id`, so replacing the `(seq, id)` ordering with `(seq, ts)`
+fails.
 
 **AC7.** An event with **no `metadata` key at all** and `payload.role`, `payload.purpose` and
 `payload.taskId` set is attributed to all three. The corpus's payloads omit the key rather than
-nulling it, and all three fields must be covered, not only the role.
+nulling it, and all three fields must be covered, not only the role. A reviewer event with an
+unmatched purpose is placed under the reviewer-axis `unassigned` bucket.
 
 **AC8.** The CLI subcommand prints the report for a run id, and exits non-zero with a diagnostic for
 an unknown run id.
@@ -274,7 +283,8 @@ must behave identically, so neither key-presence branch can pass alone.
 council call, phase carried under `run` with no `to` — the report's run total equals the hand-written
 sum, input and output are separate, the dollar amount is unknown with both counts, and the by-task
 breakdown sums to the total via `unassigned`. One check that fails on every mistake this contract was
-rejected twice for.
+rejected twice for. Assert the counts literally as `nullCostCalls: 1` and `nullUsageCalls: 1`; the
+null-cost count is not their union.
 
 **AC11a.** Cycles and yield: use exact production envelopes:
 `review.started|finished.payload.execution`, `finding.raised.payload.finding`, and
@@ -289,7 +299,8 @@ The completed execution's `execution.findings` contains the same two raw finding
 persisted as `finding.raised`, so double-counting fails. One finding is validated `UNCERTAIN` then
 `VALID`; the other is validated `VALID` then `REJECTED`. Reviewer `model.call` events for all three
 axes carry the **same** task id and distinct `purpose: review_<axis>` values with different literal
-output-token counts. Include two candidate creations for one task with attempt values 1 and 2.
+output-token counts. Include four candidate creations for one task with attempt values 1, 1, 2, 2,
+mirroring the real corpus rather than making the two candidate metrics equal.
 Assert:
 
 - per-round and per-axis execution totals;
@@ -299,9 +310,9 @@ Assert:
   tokens-per-finding ratios are undefined;
 - raw and validation yields from unique finding ids and their latest validation verdict, without
   also counting `execution.findings`;
-- output tokens per raw and per valid finding;
+- hand-written output tokens per raw and per valid finding for the productive axis;
 - per-axis reviewer output tokens attributed through purpose, not task id;
-- `candidateCount: 2` and `maxAttempt: 2` for the candidate task.
+- `candidateCount: 4` and `maxAttempt: 2` for the candidate task.
 
 The expected figures and cause labels are hand-written literals. They may not be derived through the
 classifier or aggregation function under test.
@@ -348,6 +359,8 @@ both be green while production still reads live state.
 | Two missing-`callId` calls merged under one null key | AC1's two-event assertion |
 | An early `usage: null` suppresses a later usage-bearing duplicate | AC1's retry fixture |
 | Reviewer usage joined to an axis through task id | AC11a's shared-task multi-axis fixture |
+| `candidateCount` and `maxAttempt` rendered from one value | AC11a's 4-vs-2 literals |
+| Unmatched reviewer purpose dropped instead of assigned | AC7's reviewer-axis `unassigned` bucket |
 
 ## Out of scope
 
@@ -371,6 +384,15 @@ both be green while production still reads live state.
   is not — which is the defect class this programme has hit most often.
 
 ## Revision history
+
+**Revision 6 → 7**, after both Grok and Claude rejected the same commit:
+
+- corrected MC4's disjoint counts to 11 null-cost and 85 null-usage calls; 96 is their union;
+- made candidate count and maximum attempt unequal and corpus-shaped (4 versus 2);
+- defined completed executions and the exact round/axis fields;
+- defined a report-level usage-conflict flag;
+- covered null-cost failed calls, `seq` ties, unmatched reviewer purposes and binary-exact USD sums;
+- required literal per-axis productivity ratios.
 
 **Revision 5 → 6**, after the Claude contract review:
 
