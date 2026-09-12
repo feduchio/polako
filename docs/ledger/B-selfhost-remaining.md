@@ -315,3 +315,55 @@ architectural answer and follow them.
     review swarm that costs 78.7% of the budget and returns nothing, and one that returns what it
     already knows.
 
+## Findings 41, 39 and 37 fixed, 2026-09-12
+
+Branch `task/B-review-plumbing`, eight commits on `3022deb`. Gate green: 733 tests, 75 files.
+Each fix was verified by planting the defect back and watching a named assertion fail, and each was
+then reviewed by Grok and GPT-5.6-sol independently. **Both reviews found real blocking defects in
+my fixes**, listed below, and all are repaired.
+
+**41 — the request asked for an object, the parser demanded an array.** `REVIEWER_OUTPUT_CONTRACT`
+now asks for `{"findings": [...]}`, which is what `response_format: {type: "json_object"}` can
+return. `findingValues` accepts that form, a bare array, or a lone finding object. `normalizeFinding`
+wraps the singular containers live models actually returned -- `evidence` as one object,
+`reproduction` as one string -- and lower-cases `severity`, because a probe returned `"High"` and
+the enum is lower-case. Field validation is untouched: `RawFindingSchema` still rejects a malformed
+evidence ref, and both reviewers traced it to confirm nothing was loosened.
+
+**39 — a discarded verdict now says why.** `PairwiseJudge` exposes `usedFallback` and
+`fallbackReason`, appends the reason to the heuristic rationale, and the tournament reads the real
+state instead of hard-coding `fallback: false`. Two review findings: the flag was
+**last-comparison state**, so a later success erased an earlier fallback -- it is now sticky per
+judge, which is what a tournament-level `fallback` has to mean; and `provider.listModels()` sat
+**outside** the `try`, so a rejection there escaped the fallback path entirely.
+
+**37 — a bound on review attempts per axis.** `review.maxAxisAttemptsPerRound`, default 6,
+counted from persisted executions so it holds across scheduler ticks. Three review findings, all
+serious:
+  - The stop returned **`NEEDS_HUMAN`, which `RUN_PHASE_TABLE` forbids out of `REVIEWING`**. The
+    engine would have thrown `INVALID_TRANSITION` on every tick: an unbounded retry loop traded for
+    an unbounded crash loop. Now `EXHAUSTED_NEXT_PHASE = "FAILED"` with a `providers_unavailable`
+    terminal reason, asserted through `canTransitionPhase` rather than against a copy of the table.
+  - The **empty-reviewer wait ran before the exhaustion check**, so once sticky failures excluded
+    every model the driver waited forever -- the same unbounded loop in a quieter form. Exhaustion
+    is now checked first.
+  - **Every failure counted**, so one transient outage across six models could terminate a sound
+    run. Only failures `isStickyReviewSkip` classes as non-retryable now count; a 503 or a timeout
+    buys another tick.
+
+**Where the implementation departs from finding 37's wording, and why.** The finding said "record
+the round as unverified rather than retrying it 2,300 times". The implementation fails the run
+terminally instead. Advancing to `VALIDATING` with a round nobody reviewed would admit an unreviewed
+checkpoint into convergence, which is a worse failure than stopping; and `REVIEWING` has no third
+exit. Recorded as a deliberate departure rather than silently satisfied.
+
+**42. Review quality is still unmeasured, and my own probe was contaminated.** The first probe that
+"proved" free models find real defects listed, among its acceptance criteria, *"the budget guard
+must not admit a spend equal to the cap when the cap is exclusive elsewhere"* — which is the
+finding. I had written the answer into the question. Re-probed with a single honest criterion
+("withinBudget must reject a spend that would exceed the cap"), `nex-agi/nex-n2.5-pro:free` returned
+`{"findings": []}` in 81 output tokens, and it is arguably right: `spent <= cap` does not admit a
+spend that *exceeds* the cap. So what is established is that the plumbing no longer discards
+reviews. **Whether the reviews are any good is open**, and the honest next measurement is a
+defect-injection corpus whose acceptance text does not name the defect.
+
