@@ -39,7 +39,8 @@ const DEFAULT_BASE_POLICY = [
 
 /**
  * Build a worker context pack and fit it to `maxPackTokens`.
- * Mission + task/acceptance are always retained when present.
+ * The instruction hierarchy, mission, base policy, task/acceptance and the task protocol are
+ * protected: they are never dropped, and if they alone exceed the budget the build throws.
  */
 export function buildWorkerContextPack(input: BuildWorkerInput): WorkerContextPack {
   const sections: Record<string, string> = {
@@ -75,7 +76,13 @@ export function buildWorkerContextPack(input: BuildWorkerInput): WorkerContextPa
   ].join("\n");
 
   if (input.protocol) {
-    const supplementary = input.protocol.members.filter((member) => member.kind !== "base");
+    const taskProtocol = input.protocol.members.find((member) => member.kind === "task");
+    if (taskProtocol !== undefined) {
+      sections["taskProtocol"] = `## Protocol: ${taskProtocol.name}\n\n${taskProtocol.body.trim()}`;
+    }
+    const supplementary = input.protocol.members.filter(
+      (member) => member.kind !== "base" && member.kind !== "task",
+    );
     if (supplementary.length > 0) {
       sections["protocolSupplementary"] = supplementary
         .map((member) => `## Protocol: ${member.name}\n\n${member.body.trim()}`)
@@ -98,10 +105,12 @@ export function buildWorkerContextPack(input: BuildWorkerInput): WorkerContextPa
   }
 
   const taskFiles = new Set(input.fileFragments.map((f) => f.path));
+  const originFindingId = input.task.origin.kind === "valid_finding" ? input.task.origin.findingId : null;
   const findings = input.findings.filter(
     (f) =>
       f.status === "VALID" &&
-      f.evidence.some((e) => taskFiles.has(e.path) || input.task.description.includes(e.path)),
+      (f.id === originFindingId ||
+        f.evidence.some((e) => taskFiles.has(e.path) || input.task.description.includes(e.path))),
   );
   if (findings.length > 0) {
     sections["findings"] = fenceUntrusted(
@@ -172,6 +181,7 @@ export function fitWorkerPack(
   const pack = (): WorkerContextPack => {
     const text = included.map((k) => `## ${k}\n${local[k] ?? ""}`).join("\n\n");
     return {
+      text,
       sections: Object.fromEntries(included.map((k) => [k, local[k] ?? ""])),
       included: [...included],
       estimatedTokens: estimateTokens(text),

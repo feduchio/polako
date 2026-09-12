@@ -49,7 +49,8 @@ export class AgentRunner implements CandidateWorker {
 
     const messages: ChatMessage[] = [];
     if (this.deps.systemPrompt !== undefined) messages.push({ role: "system", content: this.deps.systemPrompt });
-    messages.push({ role: "user", content: this.deps.prompt?.(task) ?? task.description });
+    const composed = this.deps.prompt?.(task) ?? null;
+    messages.push({ role: "user", content: composed?.text ?? task.description });
 
     const turns: AgentTurn[] = [];
     const tools = createAgentTools({
@@ -152,6 +153,7 @@ export class AgentRunner implements CandidateWorker {
       loopEvidence: acceptedEvidence,
       output,
       startedAt,
+      protocolHash: composed?.protocolHash ?? null,
     });
   }
 
@@ -235,6 +237,7 @@ export class AgentRunner implements CandidateWorker {
     loopEvidence: LoopEvidence | null;
     output: string | null;
     startedAt: number;
+    protocolHash: string | null;
   }): AgentLoopResult {
     const transcript: AgentTranscript = {
       runId: input.task.runId,
@@ -245,6 +248,7 @@ export class AgentRunner implements CandidateWorker {
       turns: input.turns,
       totalTokens: input.totalTokens,
       loopEvidence: input.loopEvidence,
+      protocolHash: input.protocolHash,
       startedAt: input.startedAt,
       completedAt: this.now(),
     };

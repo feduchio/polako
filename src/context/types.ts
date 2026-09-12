@@ -49,6 +49,9 @@ export interface FailedAttempt {
 }
 
 export interface WorkerContextPack {
+  /** The assembled text, exactly as measured. Callers send this rather than re-rendering
+   *  `sections`, so the cap binds on the bytes that actually leave. */
+  text: string;
   sections: Record<string, string>;
   /** Ordered section keys currently included */
   included: string[];

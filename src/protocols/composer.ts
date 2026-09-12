@@ -5,6 +5,7 @@ import {
   BASE_PROTOCOL_NAME,
   type ComposeInput,
   type ProtocolBundle,
+  type TaskProtocolName,
   type ProtocolBundleMember,
 } from "./types.js";
 
@@ -72,6 +73,37 @@ export function compose(registry: ProtocolRegistry, input: ComposeInput): Protoc
 
   const members = [base, task, ...domainMembers, role].map(toMember);
   return wrap(members);
+}
+
+/**
+ * Worker composition: base -> task -> domains (lexicographic), with **no role**.
+ *
+ * `compose` cannot serve a worker. It requires a role and validates `kind: role`, and none of the
+ * role protocols in the tree applies to a worker; passing an unrelated role as a stand-in would
+ * hand the worker a system prompt for someone else's job.
+ */
+export function composeForWorker(
+  registry: ProtocolRegistry,
+  input: { task: TaskProtocolName; domains?: readonly string[] },
+): ProtocolBundle {
+  const base = registry.get(BASE_PROTOCOL_NAME);
+  if (base.meta.kind !== "base") {
+    throw new PolishError("INVARIANT_VIOLATION", `${BASE_PROTOCOL_NAME} must have kind base`);
+  }
+  const task = registry.get(input.task);
+  if (task.meta.kind !== "task") {
+    throw new PolishError("INVARIANT_VIOLATION", `${input.task} must have kind task`);
+  }
+  const domainMembers = [...(input.domains ?? [])]
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => {
+      const d = registry.get(name);
+      if (d.meta.kind !== "domain") {
+        throw new PolishError("INVARIANT_VIOLATION", `${name} must have kind domain`);
+      }
+      return d;
+    });
+  return wrap([base, task, ...domainMembers].map(toMember));
 }
 
 /**

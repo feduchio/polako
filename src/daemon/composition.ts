@@ -1,6 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AgentRunner } from "../agents/runner.js";
+import { AGENT_TOOL_NAMES } from "../agents/types.js";
+import { composeWorkerInstruction, workerPackCap } from "../context/workerInstruction.js";
+import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import {
   createAuditionStrategyFromConfig,
   ModelAuditioner,
@@ -97,6 +100,8 @@ export interface ProductionDeps {
   broker: ModelBroker;
   router: ModelRouter;
   providers: ProviderAdapter[];
+  /** Loaded once: `ProtocolRegistry.load` is synchronous file IO over every protocol directory. */
+  protocols: ProtocolRegistry;
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
   /** A run's own `--budget-tokens` / `--budget-usd`, empty when it has none. */
   resolveRunBudget?: (runId: string) => RunBudgetLimits;
@@ -167,6 +172,7 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     clock: options.clock,
     config: options.config,
     home: options.home,
+    protocols: ProtocolRegistry.load(defaultProtocolsRoot()),
     catalog,
     broker,
     ...(options.resolveRunBudget === undefined ? {} : { resolveRunBudget: options.resolveRunBudget }),
@@ -551,6 +557,9 @@ export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseCon
 
 export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
   const ranked = deps.router.select({ role: "worker", count: deps.config.candidates.normal, requireTools: true });
+  const profile = resolveDiscoveredProfile(ctx);
+  const maxTokens = deps.config.budget.maxTaskTokens ?? 32_000;
+  const maxPackTokens = workerPackCap(maxTokens, deps.config.contextBudget.maxPackTokens);
   return (index: number) => {
     const model = ranked[index % Math.max(ranked.length, 1)]?.entry.info.ref ?? {
       provider: deps.providers[0]?.id ?? "scripted",
@@ -561,9 +570,20 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
       complete: (request) => client.complete(request).then((record) => ("response" in record ? record.response : record)),
       artifacts: deps.store.artifacts,
       model,
-      commandPolicy: commandPolicyFor(ctx, resolveDiscoveredProfile(ctx)),
+      commandPolicy: commandPolicyFor(ctx, profile),
       maxTurns: deps.config.agent.maxTurns,
-      maxTokens: deps.config.budget.maxTaskTokens ?? 32_000,
+      maxTokens,
+      // The one seam between a task and what a production worker is told. Item 18 rebinds this
+      // rather than unpicking a concatenation.
+      prompt: (task) =>
+        composeWorkerInstruction({
+          registry: deps.protocols,
+          task,
+          findings: ctx.store.repos.findings.listByRun(ctx.run.id),
+          profile,
+          tools: [...AGENT_TOOL_NAMES],
+          maxPackTokens,
+        }),
       now: () => deps.clock.now(),
     });
   };

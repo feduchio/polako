@@ -80,6 +80,9 @@ export interface AgentTranscript {
   turns: AgentTurn[];
   totalTokens: number;
   loopEvidence: LoopEvidence | null;
+  /** Hash of the protocol bundle the instruction was composed from, so a reviewer can tell which
+   *  instruction this worker actually received. */
+  protocolHash: string | null;
   startedAt: number;
   completedAt: number;
 }
@@ -94,7 +97,10 @@ export interface AgentRunnerDeps {
   maxTurns: number;
   maxTokens: number;
   systemPrompt?: string;
-  prompt?: (task: Task) => string;
+  /** Returns the worker's instruction and the hash of the protocol bundle it was composed
+   *  from. A return channel rather than a closure: a runner is reusable across tasks, and a
+   *  side channel would make the recorded hash depend on call order. */
+  prompt?: (task: Task) => { text: string; protocolHash: string | null };
   createIntelligence?: (worktreePath: string) => RepositoryIntelligence;
   requestContext?: RequestContext;
   redact?: (text: string) => string;

@@ -1,4 +1,4 @@
-export { compose, fitToBudget } from "./composer.js";
+export { compose, composeForWorker, fitToBudget } from "./composer.js";
 export { parseSkillMarkdown } from "./frontmatter.js";
 export { ProtocolRegistry, defaultProtocolsRoot } from "./loader.js";
 export {
