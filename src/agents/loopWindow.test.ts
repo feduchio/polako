@@ -13,6 +13,7 @@ const EXPECTED_CAP: readonly (readonly [number, number])[] = [
   [16_000, 200],
   [8_000, 200],
   [80_000, 400],
+  [16_001, 200],
 ];
 
 describe("loopDigestCap", () => {
@@ -192,6 +193,28 @@ describe("buildLoopDigest", () => {
     expect(command).toContain("node early.js -> exit 0");
     expect(command).not.toContain("after-4.ts");
 
+    // Changed paths outlive even the newest failing command, which is the one adjacent pair the
+    // four fixtures above skip.
+    const overFailure = buildLoopDigest(
+      [
+        turn(1, [ok("write", { path: "src/kept.ts" }, { path: "src/kept.ts" })]),
+        turn(2, [ok("run_command", { argv: ["node", "newer-broke.js"] }, { exitCode: 7, stderr: "nope" })]),
+      ],
+      16,
+    );
+    expect(overFailure).toContain("src/kept.ts (write)");
+    expect(overFailure).not.toContain("newer-broke.js");
+
+    const overError = buildLoopDigest(
+      [
+        turn(1, [ok("write", { path: "src/kept.ts" }, { path: "src/kept.ts" })]),
+        turn(2, [failed("read", { path: "src/newer-denied.ts" }, "path escapes sandbox")]),
+      ],
+      16,
+    );
+    expect(overError).toContain("src/kept.ts (write)");
+    expect(overError).not.toContain("newer-denied.ts");
+
     const noted = buildLoopDigest(
       [
         turn(1, [ok("read", { path: "src/early-read.ts" }, { path: "src/early-read.ts" })]),
@@ -311,6 +334,29 @@ describe("buildWireWindow", () => {
     // The newest turn is already present verbatim; digesting it too would pay for it twice.
     expect(body).not.toContain("src/newest.ts");
     expect(body).toContain("newest output");
+  });
+
+  it("carries the system message on every turn, not only the first", () => {
+    const archive: ChatMessage[] = [
+      { role: "system", content: "the standing system message" },
+      pack,
+      { role: "assistant", content: "", toolCalls: [{ id: "a", name: "read", arguments: "{}" }] },
+      { role: "tool", toolCallId: "a", content: "first" },
+      { role: "assistant", content: "", toolCalls: [{ id: "b", name: "read", arguments: "{}" }] },
+      { role: "tool", toolCallId: "b", content: "second" },
+    ];
+    const window = buildWireWindow({
+      archive,
+      turns: [
+        turn(1, [ok("read", { path: "src/a.ts" }, { path: "src/a.ts" })]),
+        turn(2, [ok("read", { path: "src/b.ts" }, { path: "src/b.ts" })]),
+      ],
+      digestCap: 400,
+    });
+    // Turn 1 is not the interesting case: a prompt dropped only once the digest appears is the
+    // plausible mistake.
+    expect(window[0]).toEqual({ role: "system", content: "the standing system message" });
+    expect(window[1]?.content).toBe(pack.content);
   });
 
   it("keeps a multi-call turn's results paired with the assistant that asked for them", () => {
