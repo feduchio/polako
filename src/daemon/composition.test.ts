@@ -269,6 +269,84 @@ describe("production composition", () => {
     expect(investigation).not.toContain("smallest change that makes the reproduction pass");
   });
 
+  it("gives a second task on the same worker its own pack", async () => {
+    // The pack is per task, so it belongs on `prompt`, not on `systemPrompt`. Putting it on the
+    // latter would freeze the first task's evidence for the worker's lifetime, and every
+    // assertion about a single task would still pass.
+    const provider = new ScriptedProvider("scripted", [
+      { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 } },
+    ]);
+    provider.script("worker", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "list", arguments: "{}" }] },
+      { kind: "reply", content: "", toolCalls: [{ id: "t2", name: "list", arguments: "{}" }] },
+    ]);
+    const config = defaultConfig();
+    config.agent.maxTurns = 1;
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+      resolveSandbox: (ctx) => new WorktreeSandbox(ctx.run.projectPath, join(dir, "worktrees", ctx.run.id), config.sandbox),
+    });
+    await deps.catalog.discover();
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-worker-two-"));
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "demo" }));
+    const git = await Git.init(repoDir);
+    await git.commitAll("init");
+    const head = await git.revParse("HEAD");
+    const runId = id("run", clock.now());
+    const interpretationId = id("interp", clock.now());
+    const ctx = {
+      run: {
+        id: runId,
+        missionId: id("msn", clock.now()),
+        projectPath: repoDir,
+        runBranch: "polish/run",
+        phase: "EXECUTING",
+        control: "RUNNING",
+        currentCheckpointHash: head,
+        baselineId: null,
+        interpretationId,
+        createdAt: clock.now(),
+        updatedAt: clock.now(),
+        terminalReason: null,
+      },
+      store,
+      scheduler: new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock,
+      config,
+    } satisfies PhaseContext;
+    const worker = createWorkerFactory(deps, ctx)(0);
+    const task = (title: string, kind: "bugfix" | "refactor") =>
+      createTaskFromRequirement(interpretationId, "R1", {
+        id: id("task", clock.now()),
+        runId,
+        title,
+        description: `WHAT: ${title}`,
+        kind,
+        acceptance: [`${title} is done`],
+        complexity: "trivial" as const,
+        baseCheckpointHash: head,
+        now: clock.now(),
+      });
+    const sandboxFor = new WorktreeSandbox(repoDir, join(dir, "worktrees", runId), config.sandbox);
+    const handleA = await sandboxFor.create({ id: id("cand", clock.now()), baseCommit: head, policy: CommandPolicy.forProject([], null, false, { packageScripts: [], search: true }) });
+    try {
+      await worker.runLoop(task("alpha", "bugfix"), handleA);
+      await worker.runLoop(task("beta", "refactor"), handleA);
+      const runs = provider.calls.filter((call) => call.metadata.purpose === "agent_run");
+      expect(runs).toHaveLength(2);
+      const second = runs[1]!.messages.map((m) => m.content).join("\n");
+      expect(second).toContain("beta is done");
+      expect(second).not.toContain("alpha is done");
+    } finally {
+      await handleA.destroy();
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the pack within the derived cap, dropping evidence rather than the hierarchy", async () => {
     // The pack is resent every turn, so its size displaces worker turns. The cap is derived from
     // the task budget; here the ceiling is lowered so it binds on a small fixture.
