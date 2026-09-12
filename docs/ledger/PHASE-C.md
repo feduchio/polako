@@ -26,7 +26,8 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | B-selfhost-7 accepted | `1dc1c5cfbb2f92efb2fa8f58f15e92f02a3c80b2` on `task/B-selfhost-7-integration` | Bounded B finding 7 only. |
 | B-selfhost-8 accepted | `14beb802857fde8a5251404dc518301cb5b1a0a4` on `task/B-selfhost-8-integration` | Bounded B finding 8 only. |
 | B-selfhost-9+19 accepted | `9e157e1a0a5d7369f2be905d8c36121789e09087` on `task/B-selfhost-9-19-integration` | Bounded B findings 9 and 19, plus finding 23's reviewer half. |
-| B-selfhost-18 accepted (next HOST) | `8ea156db5207c5b159869b6e8ea2620c628b932f` on `task/B-selfhost-18-integration` | Bounded B finding 18. Phase B not fully closed. Phase C not accepted. |
+| B-selfhost-18 accepted | `8ea156db5207c5b159869b6e8ea2620c628b932f` on `task/B-selfhost-18-integration` | Bounded B finding 18. |
+| B-selfhost-29 accepted (next HOST) | `3d718313e8c341432e2c20d636d55bad2c3282eb` on `task/B-selfhost-29-integration` | Run economics and review productivity report. Phase B not fully closed. Phase C not accepted. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -39,7 +40,11 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open items: **29 first**, then **11–15**, plus **16, 17, 21, 22, 24, 25** scheduled into the items that rework the same code, **23**'s detector half in its own slot, and **26, 27, 28** recorded. Items **3–9**, **18** and **19** ACCEPTED.
+Open order: **42** unbiased reviewer-quality corpus; **31** validated explicit state and A/B against
+item 18; **32 + 34 + 44** verifier scoring/sidecar and structured-output removal; **35 + 23**
+progress/no-progress stopping; **30** repair the two older accounting folds; then **11–15**, plus
+**16, 17, 21, 22, 24, 25** at their existing seams. Findings **26, 27, 28, 43, 45** remain recorded
+inputs to those tasks. Items **3–9, 18, 19, 29, 37, 39, 41** ACCEPTED or fixed.
 
 **Order changed 2026-09-12 on measurement, not on preference.** Item 29 — run economics as a derived record — goes ahead of 11–15 because the remaining sequence was ordered by finding number while the tokens are somewhere else: over the six real runs in the store the review swarm is **78.7%** of spend at a 5:1 output-to-input ratio, the worker loop **17.2%**, the council **4.1%**. Item 18 was accepted on a turn-count model whose net is **5.8% of a run if an untested assumption holds**; its ceiling was 10.7%. Nothing in items 11–15 touches the 78.7%, and no claim about it can be checked until the spend is a record rather than a throwaway script. The A/B of the fixture corpus on the same two free models follows item 29 and tests item 18's assumption directly.
 

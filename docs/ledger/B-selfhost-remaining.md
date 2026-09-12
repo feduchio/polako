@@ -49,7 +49,10 @@ C1 simplification pass, C2 pathology/adaptive budget, C3 Python llm-verifier sid
 
 28. **An older failing command can lose its exit code to the demotion regex.** `collectEntries` demotes every failing command but the newest by stripping its output tail with `text.replace(/: [\s\S]*$/, "")` (`src/agents/loopWindow.ts`), which matches from the **first** `: ` in the rendered entry rather than from the separator the renderer wrote. An argv containing `: ` — `git commit -m "fix: something"`, `node -e "console.log('a: b')"` — therefore loses its `-> exit N` along with the tail, so the digest records that the command ran and not that it failed. The newest failure is never demoted, so the most recent one is always intact. **Found 2026-09-12** by the Grok lane in the confirming round of item 18 and agreed non-blocking by both lanes, because the frozen contract does not name colon-bearing argv and acting on it would have been a new axis. The fix is to carry the tail as its own field rather than re-parsing the rendered text, which is a one-line change to `DigestEntry`. Not scheduled: it rides with the next item that touches `loopWindow.ts`, and if none does before Phase B closes it is worth its own trivial task.
 
-29. **The worker loop is 17.2% of a run's tokens; the review swarm is 78.7%, and it is output-bound.**
+29. ~~**The worker loop is 17.2% of a run's tokens; the review swarm is 78.7%, and it is output-bound.**~~
+    **ACCEPTED** as `docs/ledger/B-selfhost-29.md` at
+    `3d718313e8c341432e2c20d636d55bad2c3282eb`; run record
+    `docs/ledger/B-selfhost-29-run.md`.
     Measured 2026-09-12 over the **six real end-to-end runs** in `~/.polish/polish.db` (6,964 events,
     1,060,632 tokens), by summing `usage` per `payload.role` from the event log. Reviewers
     834,635 (78.7%), worker loops 182,900 (17.2%), council 43,097 (4.1%). The reviewers' ratio is
@@ -66,7 +69,7 @@ C1 simplification pass, C2 pathology/adaptive budget, C3 Python llm-verifier sid
     on one fixture with two small free models. There is no corpus on production-grade models at all,
     and acquiring one is out of bounds while paid provider APIs are forbidden.
     **Not a defect.** It is a measurement that decides what gets scheduled next, and it did:
-    **scheduled 2026-09-12** as `docs/ledger/B-selfhost-29.md`, ahead of items 11-15, on the
+    **scheduled and accepted 2026-09-12** as `docs/ledger/B-selfhost-29.md`, ahead of items 11-15, on the
     decision to make the economics measurable before optimising further rather than repeat at
     larger scale the mistake of optimising against a model instead of a measurement. The A/B of the
     existing fixture corpus on the same two free models, before and after item 18, follows that item
