@@ -69,6 +69,11 @@ describe("the worker's context window", () => {
     // asked for two reads at once makes the next request legitimately larger, and MC5 requires
     // exactly that. Measured across the whole loop the footprint is the pack plus at most one
     // digest, where on the unmodified tree it grows with every turn.
+    // No system prompt is configured here, so turn one's request is the pack and nothing else.
+    // The builder observes the same clause, but only the loop can show what the runner sends.
+    expect(provider.calls[0]!.messages).toHaveLength(1);
+    expect(provider.calls[0]!.messages[0]).toEqual({ role: "user", content: task.description });
+
     // The pack is the one part of the prompt that must be on every request, and asserting it only
     // on turn one leaves the rest of the loop to a builder-level check.
     for (const request of provider.calls) {
