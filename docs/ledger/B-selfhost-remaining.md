@@ -165,3 +165,64 @@ on silently, and one of them is about an item that is already accepted.
     detector, and abandoning a hopeless candidate is the largest single token saving available,
     because it cuts whole rounds rather than trimming prompts.
 
+## The review swarm has never produced a finding, 2026-09-12
+
+Measured while extending item 29's contract, by querying `review_executions` and the event log
+directly. This is the most consequential measurement of the programme so far and it reframes the
+remaining plan, so the numbers come first.
+
+**2,600 review executions. 18 completed. Zero findings.** Not "few findings" -- the `findings`
+table has **0 rows**, and every one of the 18 completed executions returned an empty array, evenly
+across all three axes (correctness 6, regression 6, adversarial 6). The 126 successful reviewer
+model calls generated **696,221 output tokens, 5,526 per call**, against **0 findings**.
+
+Why the other 2,582 did not complete:
+
+| Cause | Executions |
+| --- | --- |
+| `rate limited` 429 from the free OpenRouter tier | 2,465 |
+| **Schema failure** -- `{"expected":"array"}` / "review response must contain a findings" | **105** |
+| `bad request (400)` | 6 |
+
+36. **The reviewer output contract is beyond the models it is given to.** 105 executions failed
+    validation because the response was not an array of findings, and the 18 that validated returned
+    `[]` after 5,526 output tokens apiece. `REVIEWER_OUTPUT_CONTRACT`
+    (`src/review/reviewerProtocol.ts:14`) demands "JSON only as an array of findings", each with
+    criterion, severity, blocking, claim, evidence, reproduction and optional suggestedCheck -- from
+    `google/gemma-4-26b-a4b-it:free` and its peers. This is precisely the failure mode SKILL.state
+    documents for open-weight models: its error taxonomy attributes 68% to premature state
+    overwrite, 20% to schema comprehension and 12% to JSON syntax, and concludes that "small-model
+    degradation stems from structured output adherence rather than reasoning capacity". Two remedies
+    exist in the references and neither is in the tree: **grammar-constrained decoding**, or
+    **dropping structured generation entirely** in favour of LLM-as-a-Verifier's logprob-expectation
+    scoring, where there is no JSON to get wrong because the output is a handful of score tokens.
+    Finding 32 argued this from cost; this argues it from the reviews not working at all.
+
+37. **There is no circuit breaker on review retries.** One run executed **2,402 correctness reviews
+    in a single round**, 2,300 of them rate-limited, alongside 269 `model.retry_scheduled` events.
+    The loop kept re-executing an axis that the provider was refusing. Nothing bounded it by
+    consecutive failures, by wall clock, or by fraction of a round's executions failing. Finding 23
+    named the verification treadmill from the *agent's* side; this is the same pathology in the
+    *provider* dimension, and it is cheaper to fix because the rule is local: stop an axis after N
+    consecutive provider failures and record the round as unverified rather than retrying it 2,300
+    times.
+
+38. **Zero findings is not yet proof the reviewers are useless, and saying otherwise would repeat
+    this programme's worst habit.** Three readings fit the data and it does not separate them: the
+    reviewed code was clean; the reviewers cannot express what they find through this contract
+    (finding 36 makes this the most likely); or findings were produced and not persisted. What
+    *is* established is narrower and sufficient: **78.7% of every token this tool has ever spent
+    went to a review swarm whose recorded output is nothing at all.** The corpus is also from
+    2026-09-04/05, several accepted items ago -- C4 added the prosecutor protocol and items 3-19
+    have landed since -- so the zero must be re-measured on the current tree before it is treated as
+    a property of the code rather than of that snapshot. **That re-measurement is the first thing
+    the item 29 report should be pointed at**, and it is the reason the report must carry review
+    yield, not only tokens.
+
+**Consequence for the order.** Item 29 stays first and grows to carry the yield figures, because
+every number above was obtained by hand-querying SQLite and would have been invisible otherwise.
+Findings 36 and 37 come next, ahead of items 11-15: a review swarm that spends 79% of the budget
+and returns nothing is a larger defect than anything remaining on the finding list, and finding 37
+is a small, local fix. Findings 32 and 33 -- verifier scoring and the pivot tournament -- are the
+architectural answer and follow them.
+

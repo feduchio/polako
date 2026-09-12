@@ -109,6 +109,18 @@ tree does today: `usdUsage` (`src/observe/project.ts:468`) adds the 228 zeros, s
 11 nulls and the 85 missing, and returns `0` — a figure indistinguishable from "this run was free"
 when the truth is "96 of 324 calls have no price". On this corpus the honest answer is **unknown**.
 
+**MC5a — cycles and yield.** The report states **how many cycles ran and what they produced**:
+review executions per run, per round index and per axis, split into completed and not-completed with
+the failure cause; candidate attempts per task; and the **findings each axis produced**. Without
+this the report cannot answer whether the exchange between roles was productive, which is the
+question it exists for. The corpus makes the stakes concrete: 2,600 review executions, 18 completed,
+zero findings, 696,221 reviewer output tokens — and every one of those numbers had to be dug out of
+SQLite by hand.
+
+**MC5b — productivity, as a ratio the reader can check.** Output tokens per finding, per axis and
+per run, reported as **undefined** rather than as a large number when an axis produced no findings.
+Dividing by zero and printing a number is the defect class this programme has hit most often.
+
 **MC5.** Spend is paired with **outcome**: the run's **latest recorded phase together with whether
 that phase is terminal**, and each task's final state. Cost without outcome cannot answer
 cost-per-completed-task, which is the question finding 29 could not answer.
@@ -207,6 +219,11 @@ council call, phase carried under `run` with no `to` — the report's run total 
 sum, input and output are separate, the dollar amount is unknown with both counts, and the by-task
 breakdown sums to the total via `unassigned`. One check that fails on every mistake this contract was
 rejected twice for.
+
+**AC11a.** Cycles and yield: a fixture with two rounds, three axes, one axis failing with a
+provider error and one completing with two findings. Assert the per-round and per-axis execution
+counts, the completed/not-completed split with its cause, and the findings per axis. Assert output
+tokens per finding for the productive axis, and **undefined** for the axis that produced none.
 
 **AC11.** MC1, observed at the seam rather than asserted as a preference. A test loads a **completed**
 run's events into a store, constructs the production path that `cost` uses **without any live
