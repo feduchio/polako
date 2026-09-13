@@ -489,7 +489,7 @@ seven review rounds. Every finding below has exactly one disposition. None is dr
 | 13 | **P1.12** — daemon coding E2E for `NEEDS_HUMAN`, STOP/RESUME, crash recovery |
 | 14 | **DROPPED.** Requires real paid provider APIs, which policy forbids. Transport-layer cassettes if the need returns |
 | 15 | **P1.13** — `runtime=required` happy path; depends on P1.6 and P1.8 |
-| 16 | **P1.6** — one-line missing `off` early return in `corpusRuntimeEvidenceAllowsDone` |
+| 16 | **ACCEPTED** at `e45aebc` as P1.6. The missing `off` early return in `corpusRuntimeEvidenceAllowsDone` is added; one round, both lanes clean. Run record `docs/ledger/P1.6-run.md` |
 | 17, 21, 22, 25 | **P1.7** — one seam, one rewrite: `DaemonService.runConfig`, `withRuntimeValidationMode`, the two budget merge sites |
 | 18 | ACCEPTED at `8ea156d`; 15 rounds |
 | 19 | ACCEPTED at `9e157e1` |
