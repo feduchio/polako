@@ -213,16 +213,45 @@ describe("B2 production candidate drivers", () => {
   });
 
   it("INTEGRATING advances the run head only when integration gates pass", async () => {
-    const { runId } = seedRun(store, clock, fixture);
+    const { runId, taskId } = seedRun(store, clock, fixture);
     await engine.tickRun(runId);
     await engine.tickRun(runId);
+    const passed = store.repos.candidates.listByTask(taskId)
+      .find((candidate) => candidate.state === "PASSED_GATES");
+    if (passed?.headCommit === undefined || passed.headCommit === null) {
+      throw new Error("missing passed candidate");
+    }
+    const misleadingDiff = store.artifacts.put(
+      "diff --git a/src/a.test.ts b/src/a.test.ts\n+test only\n",
+      "candidate_diff",
+      `${passed.baseCheckpointHash}..${passed.headCommit}`,
+    );
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId,
+      ts: clock.now(),
+      type: "candidate.state_changed",
+      payload: { candidate: { ...passed, diffRef: misleadingDiff } },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [misleadingDiff],
+    }]);
     await engine.tickRun(runId);
     await engine.tickRun(runId);
     const run = store.repos.runs.get(runId)!;
     expect(run.phase).toBe("REVIEWING");
     expect(run.currentCheckpointHash).not.toBe(fixture.base);
     expect(store.events.list(runId, { types: ["integration.started", "integration.finished"] }).length).toBe(2);
-    expect(store.events.list(runId, { types: ["checkpoint.created"] })).toHaveLength(1);
+    const checkpointEvents = store.events.list(runId, { types: ["checkpoint.created"] });
+    expect(checkpointEvents).toHaveLength(1);
+    expect(checkpointEvents[0]?.payload["change"]).toEqual({
+      taskId,
+      parentHash: fixture.base,
+      headHash: run.currentCheckpointHash,
+      paths: ["outcome.txt"],
+      classification: "production",
+      causalEventId: checkpointEvents[0]?.id,
+    });
     const runHead = new GitBranchRunHead(fixture.repoDir, "run");
     expect(await runHead.read()).toBe(run.currentCheckpointHash);
   });

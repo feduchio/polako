@@ -95,6 +95,11 @@ export class Git {
     return files;
   }
 
+  async changedFilesBetween(base: string, head: string): Promise<string[]> {
+    const text = await this.out(["diff", "--name-only", "-z", `${base}..${head}`]);
+    return text.split("\0").filter((path) => path.length > 0);
+  }
+
   async diffStat(base: string, head = "HEAD"): Promise<DiffStat> {
     const text = await this.out(["diff", "--shortstat", `${base}..${head}`]);
     const files = /(\d+) files? changed/.exec(text);

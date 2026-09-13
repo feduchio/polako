@@ -11,7 +11,11 @@ import { ModelObservationRepository } from "./observations.js";
 import { BudgetTracker, QuotaTracker } from "./quota.js";
 import { SecretStore } from "./secrets.js";
 import { hashJson } from "../shared/hash.js";
-import { EMPIRICAL_SCORE_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "./responseSchemas.js";
+import {
+  EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  PROGRESS_SCORE_RESPONSE_SCHEMA,
+  REVIEW_FINDINGS_RESPONSE_SCHEMA,
+} from "./responseSchemas.js";
 
 describe("A12 global model observations", () => {
   let dir: string;
@@ -113,9 +117,16 @@ describe("A12 global model observations", () => {
       supported: false,
       at: 12,
     });
+    observations.recordStrictProbe(model, {
+      schema: "progress",
+      schemaHash: hashJson(PROGRESS_SCORE_RESPONSE_SCHEMA),
+      supported: true,
+      at: 13,
+    });
     observations.restoreCatalog(catalog);
     expect(catalog.get(model)?.info.capabilities.supportsStrictReviewSchema).toBe(true);
     expect(catalog.get(model)?.info.capabilities.supportsStrictScoreSchema).toBe(false);
+    expect(catalog.get(model)?.info.capabilities.supportsStrictProgressSchema).toBe(true);
     expect(observations.latestStrictProbe(
       model,
       "score",

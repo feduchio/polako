@@ -60,6 +60,8 @@ function intendedAction(kind: Pathology, ctx: StrategyContext, occurrenceHint: "
       return ctx.current !== null && provenC2RollbackTarget(ctx.current, ctx.priorCheckpoints) !== null
         ? "ROLLBACK"
         : "NEEDS_HUMAN";
+    case "test_only_verification_treadmill":
+      return "NEEDS_HUMAN";
     case "no_progress":
       if (occurrenceHint === "first" && ctx.ensembleChangesByPathology.no_progress < ctx.maxEnsembleChangesPerPathology && ctx.eligibleEnsemble !== null) {
         return "CHANGE_ENSEMBLE";

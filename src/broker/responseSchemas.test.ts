@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { EMPIRICAL_SCORE_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "./responseSchemas.js";
+import {
+  EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  PROGRESS_SCORE_RESPONSE_SCHEMA,
+  REVIEW_FINDINGS_RESPONSE_SCHEMA,
+} from "./responseSchemas.js";
 
 describe("frozen strict response schemas", () => {
   it("pins every reviewer field independently from the exported object", () => {
@@ -67,6 +71,21 @@ describe("frozen strict response schemas", () => {
         properties: {
           scoreA: { type: "integer", minimum: 0, maximum: 4 },
           scoreB: { type: "integer", minimum: 0, maximum: 4 },
+        },
+      },
+    });
+  });
+
+  it("pins progress to one bounded integer and no extras", () => {
+    expect(PROGRESS_SCORE_RESPONSE_SCHEMA).toEqual({
+      name: "agent_progress_score",
+      strict: true,
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["progress"],
+        properties: {
+          progress: { type: "integer", minimum: 0, maximum: 4 },
         },
       },
     });

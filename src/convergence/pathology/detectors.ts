@@ -1,5 +1,6 @@
 import { PATHOLOGY_ORDER, type Pathology } from "../../domain/convergence.js";
 import type { ConvergenceStrategy } from "../../domain/config.js";
+import type { CheckpointChangeRecord } from "../../domain/convergence.js";
 import type { DetectorFinding, PathologySample, TaskWorkClassRecord } from "./types.js";
 import { sampleKey } from "./types.js";
 import { progressImproved } from "./sample.js";
@@ -11,6 +12,7 @@ export type ConvergenceKnobs = Pick<
   | "noProgressAttempts"
   | "disagreementWindow"
   | "taskGrowthWindow"
+  | "testOnlyCheckpointWindow"
 >;
 
 function windowOf<T>(items: readonly T[], size: number): T[] | null {
@@ -160,6 +162,55 @@ export function detectStyleOnlyGrowth(samples: readonly PathologySample[], windo
   };
 }
 
+export function detectTestOnlyTreadmill(
+  samples: readonly PathologySample[],
+  windowSize: number,
+): DetectorFinding | null {
+  if (!Number.isInteger(windowSize) || windowSize < 3) return null;
+  const latest = samples.at(-1);
+  if (latest?.version !== 2) return null;
+  const distinct: CheckpointChangeRecord[] = [];
+  const seen = new Set<string>();
+  for (const change of [...(latest.checkpointChanges ?? [])].reverse()) {
+    if (seen.has(change.headHash)) continue;
+    seen.add(change.headHash);
+    distinct.unshift(change);
+    if (distinct.length === windowSize) break;
+  }
+  if (distinct.length !== windowSize) return null;
+  const taskById = new Map(latest.taskWorkClasses.map((task) => [task.taskId, task]));
+  const evidenceRefs: string[] = [];
+  for (const change of distinct) {
+    if (change.classification !== "test_only") return null;
+    const task = taskById.get(change.taskId);
+    if (
+      task?.originKind !== "valid_finding" ||
+      task.originFindingId === null ||
+      task.originFindingId === undefined
+    ) {
+      return null;
+    }
+    const finding = latest.findingObservations
+      .filter((item) => item.findingId === task.originFindingId)
+      .sort((a, b) => (a.seq ?? -1) - (b.seq ?? -1))
+      .at(-1);
+    if (
+      finding?.findingId === undefined ||
+      !finding.blocking ||
+      (finding.status !== "VALID" && finding.status !== "RESOLVED")
+    ) {
+      return null;
+    }
+    evidenceRefs.push(change.causalEventId, task.taskId, finding.findingId);
+  }
+  return {
+    kind: "test_only_verification_treadmill",
+    sampleKeys: keys(samples.slice(-1)),
+    evidenceRefs,
+    reason: `${String(windowSize)} validated blocking fixes changed tests only`,
+  };
+}
+
 export function runDetectors(input: {
   samples: readonly PathologySample[];
   knobs: ConvergenceKnobs;
@@ -171,7 +222,11 @@ export function runDetectors(input: {
   const noProgress = detectNoProgress(input.samples, input.knobs.noProgressAttempts, input.doneEligible);
   const disagreement = detectDisagreement(input.samples, input.knobs.disagreementWindow);
   const growth = detectStyleOnlyGrowth(input.samples, input.knobs.taskGrowthWindow);
-  for (const item of [finding, checkpoint, noProgress, disagreement, growth]) {
+  const treadmill = detectTestOnlyTreadmill(
+    input.samples,
+    input.knobs.testOnlyCheckpointWindow,
+  );
+  for (const item of [finding, checkpoint, treadmill, noProgress, disagreement, growth]) {
     if (item !== null) findings.push(item);
   }
   return findings.sort((a, b) => PATHOLOGY_ORDER.indexOf(a.kind) - PATHOLOGY_ORDER.indexOf(b.kind));

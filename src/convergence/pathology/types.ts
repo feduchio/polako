@@ -2,18 +2,21 @@ import type { EvidenceVector } from "../../domain/checkpoint.js";
 import type { Severity } from "../../domain/common.js";
 import type { FindingStatus } from "../../domain/finding.js";
 import type { C2StrategyAction, Pathology } from "../../domain/convergence.js";
+import type { CheckpointChangeRecord } from "../../domain/convergence.js";
 import type { ModelRef } from "../../domain/common.js";
 import type { TaskWorkClass } from "../../domain/task.js";
 
-export const PATHOLOGY_SAMPLE_VERSION = 1;
+export const PATHOLOGY_SAMPLE_VERSION = 2;
 
 export interface FindingObservation {
+  findingId?: string;
   fingerprint: string;
   status: FindingStatus;
   blocking: boolean;
   severity: Severity;
   checkpointHash: string;
   causalEventId: string;
+  seq?: number;
 }
 
 export interface TaskWorkClassRecord {
@@ -24,6 +27,7 @@ export interface TaskWorkClassRecord {
   classificationEventId: string | null;
   kind: string;
   originKind: string;
+  originFindingId?: string | null;
 }
 
 export interface CanonicalProgressVector {
@@ -76,7 +80,7 @@ export interface PathologyBudgetSnapshot extends CanonicalBudgetUsage {
 }
 
 export interface PathologySample {
-  version: typeof PATHOLOGY_SAMPLE_VERSION;
+  version: 1 | typeof PATHOLOGY_SAMPLE_VERSION;
   runId: string;
   boundaryEventId: string;
   boundarySeq: number;
@@ -87,6 +91,7 @@ export interface PathologySample {
   disagreementRounds: DisagreementRound[];
   taskIds: string[];
   taskWorkClasses: TaskWorkClassRecord[];
+  checkpointChanges?: CheckpointChangeRecord[];
   budget: PathologyBudgetSnapshot;
 }
 

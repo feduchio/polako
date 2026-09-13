@@ -69,6 +69,13 @@ export class ScriptedProvider implements ProviderAdapter {
     ) {
       return reply('{"scoreA":2,"scoreB":2}', 1, 1, 0);
     }
+    if (
+      this.autoStrictProbes &&
+      request.metadata.purpose === "capability_probe_strict_progress" &&
+      request.responseSchema?.name === "agent_progress_score"
+    ) {
+      return reply('{"progress":2}', 1, 1, 0);
+    }
     const queue = this.scripts.get(request.model.model) ?? [];
     const step = queue.shift() ?? this.fallback;
     switch (step.kind) {

@@ -70,11 +70,16 @@ describe("probeModelCapabilities", () => {
         });
       },
     });
-    expect(purposes).toEqual(["capability_probe_strict_review", "capability_probe_strict_score"]);
+    expect(purposes).toEqual([
+      "capability_probe_strict_review",
+      "capability_probe_strict_score",
+      "capability_probe_strict_progress",
+    ]);
     expect(result.checks.strictReview.verdict).toBe("supported");
     expect(result.checks.strictScore.verdict).toBe("unsupported");
     expect(result.info.capabilities.supportsStrictReviewSchema).toBe(true);
     expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+    expect(result.info.capabilities.supportsStrictProgressSchema).toBe(false);
   });
 
   it("does not inherit strict support from advertisements on timeout", async () => {
@@ -129,7 +134,7 @@ describe("probeModelCapabilities", () => {
     let strictCalls = 0;
     const result = await probeModelCapabilities(provider, model("m"), {
       runId: RUN,
-      cachedStrict: { review: true, score: false },
+      cachedStrict: { review: true, score: false, progress: true },
       strictComplete: () => {
         strictCalls++;
         throw new Error("must not run");
@@ -138,6 +143,34 @@ describe("probeModelCapabilities", () => {
     expect(strictCalls).toBe(0);
     expect(result.info.capabilities.supportsStrictReviewSchema).toBe(true);
     expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+    expect(result.info.capabilities.supportsStrictProgressSchema).toBe(true);
+  });
+
+  it("keeps progress support independent from pair-score support", async () => {
+    const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("m", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const result = await probeModelCapabilities(provider, model("m"), {
+      runId: RUN,
+      strictComplete: (request) => Promise.resolve({
+        message: {
+          role: "assistant",
+          content: request.metadata.purpose.endsWith("review")
+            ? '{"findings":[]}'
+            : request.metadata.purpose.endsWith("progress")
+              ? '{"progress":0}'
+              : '{"progress":0}',
+        },
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+        finishReason: "stop",
+        latencyMs: 1,
+      }),
+    });
+    expect(result.info.capabilities.supportsStrictReviewSchema).toBe(true);
+    expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+    expect(result.info.capabilities.supportsStrictProgressSchema).toBe(true);
   });
 
   it("treats finish=stop prose without tool_calls as inconclusive and preserves declared supportsTools", async () => {
@@ -255,13 +288,16 @@ describe("bounded catalog discovery", () => {
       ...FAKE_CAPABILITIES.strong,
       supportsStrictReviewSchema: true,
       supportsStrictScoreSchema: true,
+      supportsStrictProgressSchema: true,
     });
     catalog.upsert(advertised);
     expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictReviewSchema).toBeUndefined();
     expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictScoreSchema).toBeUndefined();
+    expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictProgressSchema).toBeUndefined();
     catalog.upsert({ ...advertised, source: "probe" });
     expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictReviewSchema).toBe(true);
     expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictScoreSchema).toBe(true);
+    expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictProgressSchema).toBe(true);
   });
 
   it("probes only the shortlist cap, not every listed model", async () => {

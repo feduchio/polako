@@ -19,6 +19,7 @@ describe("PolishConfig", () => {
     expect(cfg.verifier.empiricalRepeats).toBe(4);
     expect(cfg.convergence.noProgressAttempts).toBe(3);
     expect(cfg.convergence.taskGrowthWindow).toBe(3);
+    expect(cfg.convergence.testOnlyCheckpointWindow).toBe(3);
     expect(cfg.convergence.findingOscillationWindow).toBe(4);
     expect(cfg.convergence.checkpointOscillationWindow).toBe(4);
     expect(cfg.convergence.maxDebateRounds).toBe(2);
@@ -28,6 +29,15 @@ describe("PolishConfig", () => {
     expect(cfg.audition.maxModels).toBe(4);
     expect(cfg.audition.maxTasks).toBe(4);
     expect(cfg.audition.tasks.length).toBeGreaterThan(0);
+  });
+
+  it("requires at least three checkpoints for the test-only treadmill window", () => {
+    expect(() => PolishConfigSchema.parse({
+      convergence: { testOnlyCheckpointWindow: 2 },
+    })).toThrow();
+    expect(PolishConfigSchema.parse({
+      convergence: { testOnlyCheckpointWindow: 4 },
+    }).convergence.testOnlyCheckpointWindow).toBe(4);
   });
 
   it("keeps sidecar repeats independent from four-way empirical repeats", () => {

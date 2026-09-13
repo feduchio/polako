@@ -53,6 +53,7 @@ export function isNovelRound(
 export const PathologySchema = z.enum([
   "finding_oscillation",
   "checkpoint_oscillation",
+  "test_only_verification_treadmill",
   "no_progress",
   "disagreement_not_shrinking",
   "task_graph_growth_from_nonblocking",
@@ -66,3 +67,18 @@ export const PATHOLOGY_DECISION_VERSION = 1;
 
 export const C2StrategyActionSchema = z.enum(["CHANGE_ENSEMBLE", "ROLLBACK", "NEEDS_HUMAN", "BUDGET_STOP"]);
 export type C2StrategyAction = z.infer<typeof C2StrategyActionSchema>;
+
+export type CheckpointChangeClassification =
+  | "production"
+  | "test_only"
+  | "metadata_only"
+  | "unknown";
+
+export interface CheckpointChangeRecord {
+  taskId: string;
+  parentHash: string;
+  headHash: string;
+  paths: string[];
+  classification: CheckpointChangeClassification;
+  causalEventId: string;
+}

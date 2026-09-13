@@ -17,6 +17,9 @@ import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { AgentRunner } from "./runner.js";
 import type { AgentRunnerDeps } from "./types.js";
+import { EmpiricalProgressTracker } from "./progressTracker.js";
+import { defaultProtocolsRoot, ProtocolRegistry } from "../protocols/loader.js";
+import { progressSystemPrompt } from "../context/progressInstruction.js";
 
 const SECRET = "agent-runner-super-secret";
 const NOW = 1_700_000_000_000;
@@ -228,6 +231,252 @@ describe("AgentRunner", () => {
     expect(seen[0]).not.toBe(seen[1]);
     expect(provider.calls).toHaveLength(4);
     expect(provider.calls[0]?.messages).not.toBe(provider.calls[2]?.messages);
+    store.close();
+  });
+
+  it("abandons a 16-turn no-op at turn 8 with lower combined scripted usage", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const baseline = harness(store, fixture.policy, { maxTurns: 16, maxTokens: 10_000 });
+    const enabled = harness(store, fixture.policy, { maxTurns: 16, maxTokens: 10_000 });
+    for (const provider of [baseline.provider, enabled.provider]) {
+      provider.script("worker", Array.from({ length: 16 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `read-${index}`))));
+    }
+    const first = new ScriptedProvider("progress-a", [{ name: "a", capabilities: FAKE_CAPABILITIES.strong }]);
+    const second = new ScriptedProvider("progress-b", [{ name: "b", capabilities: FAKE_CAPABILITIES.strong }]);
+    first.script("a", [{ kind: "reply", content: '{"progress":0}' }]);
+    second.script("b", [{ kind: "reply", content: '{"progress":0}' }]);
+    const records: unknown[] = [];
+    const protocols = ProtocolRegistry.load(defaultProtocolsRoot());
+    enabled.deps.createProgressTracker = () => new EmpiricalProgressTracker({
+      systemPrompt: progressSystemPrompt(protocols, "bugfix"),
+      models: [
+        { provider: first, model: { provider: "progress-a", model: "a" }, family: "a" },
+        { provider: second, model: { provider: "progress-b", model: "b" }, family: "b" },
+      ],
+    });
+    enabled.deps.onProgress = (_task, record) => records.push(record);
+    const handles = await Promise.all([
+      fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, branch: "polish/test/progress-off", policy: fixture.policy }),
+      fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, branch: "polish/test/progress-on", policy: fixture.policy }),
+    ]);
+    const task = { ...codingTask(fixture.runId, fixture.base), complexity: "normal" as const };
+    const without = await new AgentRunner(baseline.deps).run(task, handles[0]);
+    const withProgress = await new AgentRunner(enabled.deps).run(task, handles[1]);
+    const baselineTranscript = JSON.parse(store.artifacts.getText(without.transcriptRef!.sha256)) as {
+      turns: unknown[];
+      totalTokens: number;
+    };
+    const progressTranscript = JSON.parse(store.artifacts.getText(withProgress.transcriptRef!.sha256)) as {
+      status: string;
+      turns: unknown[];
+      totalTokens: number;
+      progress: unknown[];
+    };
+    expect(baselineTranscript.turns).toHaveLength(16);
+    expect(progressTranscript).toMatchObject({ status: "ABANDONED_PROGRESS" });
+    expect(progressTranscript.turns).toHaveLength(8);
+    expect(first.calls).toHaveLength(1);
+    expect(second.calls).toHaveLength(1);
+    expect(records).toHaveLength(1);
+    const progressUsage = [...first.calls, ...second.calls].length * 15;
+    expect(progressTranscript.totalTokens + progressUsage).toBeLessThan(baselineTranscript.totalTokens);
+    await Promise.all(handles.map((handle) => handle.destroy()));
+    store.close();
+  });
+
+  it("does not let a rejected finish disable a later unanimous abandon", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 10_000 });
+    provider.script("worker", [
+      ...Array.from({ length: 4 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `read-before-${index}`))),
+      replyWith(tool("finish", { summary: "unsupported" }, "rejected-finish")),
+      ...Array.from({ length: 3 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `read-after-${index}`))),
+    ]);
+    let scoreCalls = 0;
+    deps.createProgressTracker = () => ({
+      score: () => {
+        scoreCalls++;
+        return Promise.resolve({
+          modelScores: [
+            { model: { provider: "a", model: "m" }, score: 0 },
+            { model: { provider: "b", model: "m" }, score: 0 },
+          ],
+          mean: 0,
+          stateFingerprint: "same",
+        });
+      },
+    });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      branch: "polish/test/rejected-finish-progress",
+      policy: fixture.policy,
+    });
+    const outcome = await new AgentRunner(deps).run(
+      { ...codingTask(fixture.runId, fixture.base), complexity: "normal" },
+      handle,
+    );
+    expect(outcome).toMatchObject({ status: "failed", error: "ABANDONED_PROGRESS" });
+    expect(scoreCalls).toBe(1);
+    expect(provider.calls[5]?.messages.at(-1)?.content).toContain("finish rejected");
+    await handle.destroy();
+    store.close();
+  });
+
+  it("does not score when live evidence changes across the checkpoint", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 10_000 });
+    provider.script("worker", [
+      ...Array.from({ length: 4 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `read-before-${index}`))),
+      replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "evidence")),
+      ...Array.from({ length: 3 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `read-after-${index}`))),
+    ]);
+    let scoreCalls = 0;
+    deps.createProgressTracker = () => ({
+      score: () => {
+        scoreCalls++;
+        return Promise.resolve(null);
+      },
+    });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      branch: "polish/test/evidence-progress",
+      policy: fixture.policy,
+    });
+    await new AgentRunner(deps).run(
+      { ...codingTask(fixture.runId, fixture.base), complexity: "normal" },
+      handle,
+    );
+    expect(scoreCalls).toBe(0);
+    await handle.destroy();
+    store.close();
+  });
+
+  it("caps high-score plateau checks at turns 8 and 12", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 32, maxTokens: 20_000 });
+    provider.script("worker", Array.from({ length: 32 }, (_, index) =>
+      replyWith(tool("read", { path: "src/math.ts" }, `read-${index}`))));
+    let scoreCalls = 0;
+    deps.createProgressTracker = () => ({
+      score: () => {
+        scoreCalls++;
+        return Promise.resolve({
+          modelScores: [
+            { model: { provider: "a", model: "m" }, score: 4 },
+            { model: { provider: "b", model: "m" }, score: 4 },
+          ],
+          mean: 1,
+          stateFingerprint: "same",
+        });
+      },
+    });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      branch: "polish/test/high-progress",
+      policy: fixture.policy,
+    });
+    const outcome = await new AgentRunner(deps).run(
+      { ...codingTask(fixture.runId, fixture.base), complexity: "normal" },
+      handle,
+    );
+    const transcript = JSON.parse(store.artifacts.getText(outcome.transcriptRef!.sha256)) as {
+      turns: unknown[];
+      progress: unknown[];
+    };
+    expect(transcript.turns).toHaveLength(32);
+    expect(transcript.progress).toHaveLength(2);
+    expect(scoreCalls).toBe(2);
+    await handle.destroy();
+    store.close();
+  });
+
+  it("does not score a productive rollout whose diff changes at every checkpoint", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 16, maxTokens: 10_000 });
+    provider.script("worker", [
+      ...Array.from({ length: 3 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `r1-${index}`))),
+      replyWith(tool("write", { path: "src/math.ts", content: "export const value = 1;\n" }, "write-4")),
+      ...Array.from({ length: 3 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `r2-${index}`))),
+      replyWith(tool("write", { path: "src/math.ts", content: "export const value = 2;\n" }, "write-8")),
+      ...Array.from({ length: 3 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `r3-${index}`))),
+      replyWith(tool("write", { path: "src/math.ts", content: "export const value = 3;\n" }, "write-12")),
+      replyWith(tool("finish", { summary: "done" }, "finish-13")),
+    ]);
+    let scoreCalls = 0;
+    deps.createProgressTracker = () => ({
+      score: () => {
+        scoreCalls++;
+        return Promise.resolve(null);
+      },
+    });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      branch: "polish/test/productive-progress",
+      policy: fixture.policy,
+    });
+    const outcome = await new AgentRunner(deps).run(
+      { ...codingTask(fixture.runId, fixture.base), complexity: "normal" },
+      handle,
+    );
+    expect(outcome.status).toBe("completed");
+    expect(scoreCalls).toBe(0);
+    await handle.destroy();
+    store.close();
+  });
+
+  it("accepts finish before scoring a plateau at turn 8", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 10_000 });
+    provider.script("worker", [
+      replyWith(tool("write", { path: "src/math.ts", content: "export const value = 1;\n" }, "write-1")),
+      ...Array.from({ length: 6 }, (_, index) =>
+        replyWith(tool("read", { path: "src/math.ts" }, `read-${index}`))),
+      replyWith(tool("finish", { summary: "done" }, "finish-8")),
+    ]);
+    let scoreCalls = 0;
+    deps.createProgressTracker = () => ({
+      score: () => {
+        scoreCalls++;
+        return Promise.resolve(null);
+      },
+    });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      branch: "polish/test/finish-before-progress",
+      policy: fixture.policy,
+    });
+    const outcome = await new AgentRunner(deps).run(
+      { ...codingTask(fixture.runId, fixture.base), complexity: "normal" },
+      handle,
+    );
+    expect(outcome.status).toBe("completed");
+    expect(scoreCalls).toBe(0);
+    await handle.destroy();
     store.close();
   });
 });

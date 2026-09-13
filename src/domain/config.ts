@@ -64,6 +64,7 @@ export const ConvergenceStrategySchema = z.object({
   checkpointOscillationWindow: evenWindowSize(4).default(4),
   disagreementWindow: z.number().int().min(2).default(2),
   taskGrowthWindow: z.number().int().min(2).default(3),
+  testOnlyCheckpointWindow: z.number().int().min(3).default(3),
   /** persisted CHANGE_ENSEMBLE cap per pathology kind */
   maxEnsembleChangesPerPathology: z.number().int().min(1).default(1),
 });
@@ -121,6 +122,7 @@ export type DiscoveryConfig = z.infer<typeof DiscoveryConfigSchema>;
 export const AgentConfigSchema = z.object({
   /** max tool-loop turns per worker invocation (not task retry attempts) */
   maxTurns: z.number().int().min(1).default(32),
+  progressEnabled: z.boolean().default(true),
 });
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 

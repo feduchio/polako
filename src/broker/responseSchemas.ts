@@ -61,6 +61,19 @@ export const EMPIRICAL_SCORE_RESPONSE_SCHEMA = {
   },
 } as const;
 
+export const PROGRESS_SCORE_RESPONSE_SCHEMA = {
+  name: "agent_progress_score",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["progress"],
+    properties: {
+      progress: { type: "integer", minimum: 0, maximum: 4 },
+    },
+  },
+} as const;
+
 export const DISABLED_REASONING = {
   effort: "none",
   exclude: true,

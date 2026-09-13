@@ -209,6 +209,7 @@ function stripUnprobedStrictCapabilities(info: ModelInfo): ModelInfo {
   const {
     supportsStrictReviewSchema: _review,
     supportsStrictScoreSchema: _score,
+    supportsStrictProgressSchema: _progress,
     ...capabilities
   } = info.capabilities;
   return { ...info, capabilities };

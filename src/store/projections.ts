@@ -80,7 +80,7 @@ const ModelObservationSchema = z.union([
     kind: z.literal("strict_probe"),
     model: ModelRefSchema,
     observedAt: z.number().int().nonnegative(),
-    schema: z.enum(["review", "score"]),
+    schema: z.enum(["review", "score", "progress"]),
     schemaHash: z.string().regex(/^[0-9a-f]{64}$/),
     supported: z.boolean(),
     detail: z.string().optional(),

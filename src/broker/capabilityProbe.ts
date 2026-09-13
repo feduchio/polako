@@ -3,6 +3,7 @@ import { ProviderError } from "./types.js";
 import {
   DISABLED_REASONING,
   EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  PROGRESS_SCORE_RESPONSE_SCHEMA,
   REVIEW_FINDINGS_RESPONSE_SCHEMA,
 } from "./responseSchemas.js";
 
@@ -20,6 +21,7 @@ export interface CapabilityProbeChecks {
   json: CapabilityProbeCheck;
   strictReview: CapabilityProbeCheck;
   strictScore: CapabilityProbeCheck;
+  strictProgress: CapabilityProbeCheck;
 }
 
 export interface CapabilityProbeResult {
@@ -49,7 +51,7 @@ export async function probeModelCapabilities(
     maxTokens?: number;
     skipHealth?: boolean;
     strictComplete?: ProviderAdapter["complete"];
-    cachedStrict?: { review?: boolean; score?: boolean };
+    cachedStrict?: { review?: boolean; score?: boolean; progress?: boolean };
   },
 ): Promise<CapabilityProbeResult> {
   const probeMaxTokens = ctx.maxTokens ?? DEFAULT_PROBE_MAX_TOKENS;
@@ -59,6 +61,7 @@ export async function probeModelCapabilities(
     json: { ok: false, verdict: "probe_failed" },
     strictReview: { ok: false, verdict: "probe_failed" },
     strictScore: { ok: false, verdict: "probe_failed" },
+    strictProgress: { ok: false, verdict: "probe_failed" },
   };
 
   if (ctx.skipHealth !== true) {
@@ -68,7 +71,7 @@ export async function probeModelCapabilities(
       : { ok: false, verdict: "unsupported", ...(health.detail !== undefined ? { detail: health.detail } : {}) };
     if (!health.ok) {
       return {
-        info: probedInfo(model, model.capabilities.supportsTools, model.capabilities.supportsJson, false, false),
+        info: probedInfo(model, model.capabilities.supportsTools, model.capabilities.supportsJson, false, false, false),
         available: false,
         checks,
       };
@@ -130,6 +133,23 @@ export async function probeModelCapabilities(
     : ctx.cachedStrict?.score === undefined ? "probe_failed" : ctx.cachedStrict.score ? "supported" : "unsupported";
   checks.strictScore = checkFromStrictVerdict(strictScoreVerdict);
 
+  const strictProgressVerdict = ctx.cachedStrict?.progress === undefined && ctx.strictComplete !== undefined
+    ? await strictProbe(
+        ctx.strictComplete,
+        model,
+        ctx,
+        probeMaxTokens,
+        PROGRESS_SCORE_RESPONSE_SCHEMA,
+        (value) => isRecord(value) &&
+          Object.keys(value).join(",") === "progress" &&
+          isScore(value["progress"]),
+        "capability_probe_strict_progress",
+      )
+    : ctx.cachedStrict?.progress === undefined
+      ? "probe_failed"
+      : ctx.cachedStrict.progress ? "supported" : "unsupported";
+  checks.strictProgress = checkFromStrictVerdict(strictProgressVerdict);
+
   let jsonVerdict: ProbeVerdict;
   try {
     const jsonRequest: CompletionRequest = {
@@ -166,6 +186,7 @@ export async function probeModelCapabilities(
       resolveCapability(model.capabilities.supportsJson, jsonVerdict),
       strictReviewVerdict === "supported",
       strictScoreVerdict === "supported",
+      strictProgressVerdict === "supported",
     ),
     available: checks.health.ok,
     checks,
@@ -224,6 +245,7 @@ function probedInfo(
   supportsJson: boolean,
   supportsStrictReviewSchema: boolean,
   supportsStrictScoreSchema: boolean,
+  supportsStrictProgressSchema: boolean,
 ): ModelInfo {
   return {
     ...model,
@@ -234,6 +256,7 @@ function probedInfo(
       supportsJson,
       supportsStrictReviewSchema,
       supportsStrictScoreSchema,
+      supportsStrictProgressSchema,
     },
   };
 }

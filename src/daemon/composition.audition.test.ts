@@ -100,7 +100,7 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
       await createDiscoveringModelsDriverFromCatalog(deps)(ctx);
       expect(auditionCalls(provider)).toEqual([]);
       expect(strictProbeEpochComplete(deps, ctx)).toBe(true);
-      expect(new ModelObservationRepository(store).list().filter((row) => row.kind === "strict_probe")).toHaveLength(2);
+      expect(new ModelObservationRepository(store).list().filter((row) => row.kind === "strict_probe")).toHaveLength(3);
     }
   });
 
@@ -215,11 +215,12 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
     await createDiscoveringModelsDriverFromCatalog(deps)(ctx);
     const strict = new ModelObservationRepository(store).list()
       .filter((row) => row.kind === "strict_probe");
-    expect(strict).toHaveLength(2);
+    expect(strict).toHaveLength(3);
     expect(strict.every((row) => !row.supported)).toBe(true);
     expect(deps.catalog.get({ provider: "scripted", model: "free" })?.info.capabilities).toMatchObject({
       supportsStrictReviewSchema: false,
       supportsStrictScoreSchema: false,
+      supportsStrictProgressSchema: false,
     });
     expect(strictProbeEpochComplete(deps, ctx)).toBe(true);
   });

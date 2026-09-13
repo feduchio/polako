@@ -32,7 +32,11 @@ import { id } from "../shared/ids.js";
 import type { PhaseContext } from "../engine/types.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ModelObservationRepository } from "../broker/observations.js";
-import { EMPIRICAL_SCORE_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import {
+  EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  PROGRESS_SCORE_RESPONSE_SCHEMA,
+  REVIEW_FINDINGS_RESPONSE_SCHEMA,
+} from "../broker/responseSchemas.js";
 import { hashJson } from "../shared/hash.js";
 
 describe("production composition", () => {
@@ -450,6 +454,164 @@ describe("production composition", () => {
     ], { runId: run.id, taskId: task.id, taskKind: task.kind, task: task.description, acceptance: task.acceptance });
     expect(result?.fallback).toBe(false);
     expect(provider.calls).toHaveLength(8);
+  });
+
+  it("injects task-attributed progress only for normal or complex coding workers", async () => {
+    const config = defaultConfig();
+    config.agent.maxTurns = 8;
+    const freeWorker = {
+      ...FAKE_CAPABILITIES.frontier,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const freeProgress = {
+      ...FAKE_CAPABILITIES.strong,
+      supportsTools: false,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const provider = new ScriptedProvider("models", [
+      { name: "worker", capabilities: { ...freeWorker, family: "worker" } },
+      { name: "progress-unprobed", capabilities: { ...freeProgress, family: "00-unprobed" } },
+      {
+        name: "progress-paid",
+        capabilities: { ...freeProgress, family: "01-paid", inputCostPerM: 1, outputCostPerM: 1 },
+      },
+      {
+        name: "progress-unknown",
+        capabilities: { ...freeProgress, family: "02-unknown", inputCostPerM: null, outputCostPerM: null },
+      },
+      { name: "progress-a", capabilities: { ...freeProgress, family: "a" } },
+      { name: "progress-b", capabilities: { ...freeProgress, family: "b" } },
+    ]);
+    provider.script("worker", Array.from({ length: 24 }, (_, index) => ({
+      kind: "reply" as const,
+      content: "",
+      toolCalls: [{
+        id: `read-${index}`,
+        name: "read",
+        arguments: JSON.stringify({ path: "package.json" }),
+      }],
+    })));
+    provider.script("progress-a", [{ kind: "reply", content: '{"progress":0}' }]);
+    provider.script("progress-b", [{ kind: "reply", content: '{"progress":0}' }]);
+    for (const model of ["progress-unprobed", "progress-paid", "progress-unknown"]) {
+      provider.script(model, [{
+        kind: "fn",
+        fn: () => {
+          throw new Error(`${model} must not be selected for progress`);
+        },
+      }]);
+    }
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-progress-production-"));
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "progress" }));
+    const git = await Git.init(repoDir);
+    const head = await git.commitAll("base");
+    if (head === null) throw new Error("missing progress fixture base");
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+      resolveSandbox: (ctx) => new WorktreeSandbox(
+        ctx.run.projectPath,
+        join(dir, "progress-worktrees", ctx.run.id),
+        config.sandbox,
+      ),
+    });
+    await deps.catalog.discover();
+    const observations = new ModelObservationRepository(store);
+    const schemaHash = hashJson(PROGRESS_SCORE_RESPONSE_SCHEMA);
+    for (const model of ["progress-a", "progress-b", "progress-paid", "progress-unknown"]) {
+      observations.recordStrictProbe({ provider: "models", model }, {
+        schema: "progress",
+        schemaHash,
+        supported: true,
+        at: clock.now(),
+      });
+    }
+    observations.restoreCatalog(deps.catalog);
+    const engine = new RunEngine({
+      store,
+      clock,
+      scheduler: new Scheduler(store, clock, { workerId: "pw", laneLimits: config.lanes, leaseMs: 60_000 }),
+      config,
+      assertProjectClean: () => undefined,
+    }, false);
+    const run = engine.createRun({ projectPath: repoDir });
+    const interpretationId = id("interp", clock.now());
+    const normal = createTaskFromRequirement(interpretationId, "R1", {
+      id: id("task", clock.now()),
+      runId: run.id,
+      title: "Normal",
+      description: "Inspect without changing files",
+      kind: "bugfix",
+      acceptance: ["No useful progress exists"],
+      complexity: "normal",
+      baseCheckpointHash: head,
+      now: clock.now(),
+    });
+    const ctx = {
+      run,
+      store,
+      scheduler: new Scheduler(store, clock, { workerId: "pw2", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock,
+      config,
+    } satisfies PhaseContext;
+    const sandbox = new WorktreeSandbox(repoDir, join(dir, "progress-candidates"), config.sandbox);
+    const normalHandle = await sandbox.create({
+      id: id("cand", clock.now()),
+      baseCommit: head,
+      branch: "polish/progress/normal",
+      policy: CommandPolicy.forProject([], null, false, { search: true }),
+    });
+    const normalOutcome = await createWorkerFactory(deps, ctx)(0).run(normal, normalHandle);
+    expect(normalOutcome).toMatchObject({ status: "failed", error: "ABANDONED_PROGRESS" });
+    if (normalOutcome.transcriptRef === null || normalOutcome.transcriptRef === undefined) {
+      throw new Error("missing progress transcript");
+    }
+    expect(JSON.parse(store.artifacts.getText(normalOutcome.transcriptRef.sha256))).toMatchObject({
+      status: "ABANDONED_PROGRESS",
+      progress: [{
+        turn: 8,
+        decision: "abandon",
+        modelScores: [
+          { model: { provider: "models", model: "progress-a" }, score: 0 },
+          { model: { provider: "models", model: "progress-b" }, score: 0 },
+        ],
+      }],
+    });
+    const progressCalls = store.events.list(run.id, { types: ["model.call"] })
+      .filter((event) => event.payload["purpose"] === "agent_progress_score");
+    expect(progressCalls).toHaveLength(2);
+    expect(progressCalls.every((event) => event.payload["taskId"] === normal.id)).toBe(true);
+    expect(store.events.list(run.id, { types: ["worker.progress_scored"] })).toHaveLength(1);
+    expect(store.events.list(run.id, { types: ["worker.progress_abandoned"] })).toHaveLength(1);
+
+    const excluded = [
+      { ...normal, id: id("task", clock.now() + 1), complexity: "trivial" as const },
+      {
+        ...normal,
+        id: id("task", clock.now() + 2),
+        kind: "investigation" as const,
+        touchesProductCode: false,
+        origin: { kind: "investigation" as const, findingId: id("find", clock.now()), round: 1 },
+      },
+    ];
+    for (const [index, task] of excluded.entries()) {
+      const handle = await sandbox.create({
+        id: id("cand", clock.now() + index + 1),
+        baseCommit: head,
+        branch: `polish/progress/excluded-${index}`,
+        policy: CommandPolicy.forProject([], null, false, { search: true }),
+      });
+      await createWorkerFactory(deps, ctx)(0).run(task, handle);
+      await handle.destroy();
+    }
+    expect(store.events.list(run.id, { types: ["model.call"] })
+      .filter((event) => event.payload["purpose"] === "agent_progress_score")).toHaveLength(2);
+    await normalHandle.destroy();
   });
 
   it("buildProductionDeps discovers models with capability probes", async () => {

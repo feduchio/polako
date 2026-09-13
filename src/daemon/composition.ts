@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AgentRunner } from "../agents/runner.js";
+import { EmpiricalProgressTracker, type ProgressModel } from "../agents/progressTracker.js";
 import { AGENT_TOOL_NAMES } from "../agents/types.js";
 import { composeWorkerInstruction, workerPackCap } from "../context/workerInstruction.js";
+import { progressSystemPrompt } from "../context/progressInstruction.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import {
   createAuditionStrategyFromConfig,
@@ -70,6 +72,7 @@ import type { Store } from "../store/index.js";
 import type { FacadeRunMetadata } from "./types.js";
 import {
   EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  PROGRESS_SCORE_RESPONSE_SCHEMA,
   REVIEW_FINDINGS_RESPONSE_SCHEMA,
 } from "../broker/responseSchemas.js";
 import { EmpiricalVerifier, type EmpiricalModel } from "../verify/empirical.js";
@@ -419,6 +422,7 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
     });
     const reviewSchemaHash = hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA);
     const scoreSchemaHash = hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA);
+    const progressSchemaHash = hashJson(PROGRESS_SCORE_RESPONSE_SCHEMA);
     const discovery = await deps.catalog.discover({
       maxProbesPerProvider: deps.config.discovery.maxProbesPerProvider,
       pinnedModels,
@@ -426,6 +430,7 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
       capabilityProbe: (adapter, model) => {
         const review = observations.latestStrictProbe(model.ref, "review", reviewSchemaHash);
         const score = observations.latestStrictProbe(model.ref, "score", scoreSchemaHash);
+        const progress = observations.latestStrictProbe(model.ref, "progress", progressSchemaHash);
         return probeModelCapabilities(adapter, model, {
           runId: ctx.run.id,
           maxTokens: deps.config.discovery.probeMaxTokens,
@@ -434,6 +439,7 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
           cachedStrict: {
             ...(review === null ? {} : { review: review.supported }),
             ...(score === null ? {} : { score: score.supported }),
+            ...(progress === null ? {} : { progress: progress.supported }),
           },
         });
       },
@@ -456,6 +462,15 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
           schemaHash: scoreSchemaHash,
           supported: probe?.checks.strictScore.verdict === "supported",
           ...(probe === undefined ? { detail: "capability probe failed before strict score result" } : {}),
+          at: ctx.clock.now(),
+        });
+      }
+      if (observations.latestStrictProbe(model.ref, "progress", progressSchemaHash) === null) {
+        observations.recordStrictProbe(model.ref, {
+          schema: "progress",
+          schemaHash: progressSchemaHash,
+          supported: probe?.checks.strictProgress.verdict === "supported",
+          ...(probe === undefined ? { detail: "capability probe failed before strict progress result" } : {}),
           at: ctx.clock.now(),
         });
       }
@@ -488,6 +503,7 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
           shortlisted: discovery.shortlisted.map((model) => model.ref),
           reviewSchemaHash,
           scoreSchemaHash,
+          progressSchemaHash,
         },
         causedBy: [],
         actor: SYSTEM_ACTOR,
@@ -745,6 +761,7 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
   const profile = resolveDiscoveredProfile(ctx);
   const maxTokens = deps.config.budget.maxTaskTokens ?? 32_000;
   const maxPackTokens = workerPackCap(maxTokens, deps.config.contextBudget.maxPackTokens);
+  const progressModels = selectProgressModels(deps);
   return (index: number) => {
     const model = ranked[index % Math.max(ranked.length, 1)]?.entry.info.ref ?? {
       provider: deps.providers[0]?.id ?? "scripted",
@@ -769,9 +786,83 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
           tools: [...AGENT_TOOL_NAMES],
           maxPackTokens,
         }),
+      createProgressTracker: (task) => {
+        if (
+          !ctx.config.agent.progressEnabled ||
+          task.complexity === "trivial" ||
+          task.kind === "investigation" ||
+          progressModels.length !== 2
+        ) {
+          return null;
+        }
+        return new EmpiricalProgressTracker({
+          models: progressModels,
+          systemPrompt: progressSystemPrompt(deps.protocols, task.kind),
+        });
+      },
+      onProgress: (task, record) => {
+        const scoredId = id("evt", ctx.clock.now());
+        const events: NewEvent[] = [{
+          id: scoredId,
+          runId: ctx.run.id,
+          ts: ctx.clock.now(),
+          type: "worker.progress_scored",
+          payload: { taskId: task.id, workerModel: model, record },
+          causedBy: [],
+          actor: SYSTEM_ACTOR,
+          artifacts: [],
+        }];
+        if (record.decision === "abandon") {
+          events.push({
+            id: id("evt", ctx.clock.now()),
+            runId: ctx.run.id,
+            ts: ctx.clock.now(),
+            type: "worker.progress_abandoned",
+            payload: { taskId: task.id, workerModel: model, record },
+            causedBy: [scoredId],
+            actor: SYSTEM_ACTOR,
+            artifacts: [],
+          });
+        }
+        ctx.store.events.append(events);
+      },
       now: () => deps.clock.now(),
     });
   };
+}
+
+function selectProgressModels(deps: ProductionDeps): ProgressModel[] {
+  const eligible = deps.catalog.list()
+    .filter((entry) =>
+      entry.available &&
+      entry.info.capabilities.supportsStrictProgressSchema === true &&
+      entry.info.capabilities.inputCostPerM === 0 &&
+      entry.info.capabilities.outputCostPerM === 0)
+    .sort((a, b) =>
+      compareText(a.info.capabilities.family, b.info.capabilities.family) ||
+      compareText(modelRefKey(a.info.ref), modelRefKey(b.info.ref)));
+  const selected: ProgressModel[] = [];
+  const families = new Set<string>();
+  for (const entry of eligible) {
+    if (families.has(entry.info.capabilities.family)) continue;
+    const adapter = deps.catalog.provider(entry.info.ref.provider);
+    if (adapter === undefined) continue;
+    selected.push({
+      family: entry.info.capabilities.family,
+      model: entry.info.ref,
+      provider: {
+        id: adapter.id,
+        kind: adapter.kind,
+        concurrency: adapter.concurrency,
+        listModels: (signal) => adapter.listModels(signal),
+        health: (signal) => adapter.health(signal),
+        complete: async (request) => (await deps.broker.complete(request)).response,
+      },
+    });
+    families.add(entry.info.capabilities.family);
+    if (selected.length === 2) break;
+  }
+  return selected;
 }
 
 export function resolveCouncilRoles(deps: ProductionDeps, ctx?: PhaseContext): CouncilRoleConfigs {

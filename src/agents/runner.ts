@@ -14,6 +14,8 @@ import {
 } from "./tools.js";
 import type {
   AgentLoopResult,
+  AgentProgressRecord,
+  AgentProgressState,
   AgentRunnerDeps,
   AgentRunStatus,
   AgentToolResult,
@@ -23,6 +25,8 @@ import type {
   LoopEvidence,
   WorkerOutcome,
 } from "./types.js";
+import { progressStateFingerprint, shouldAbandonProgress } from "./progressTracker.js";
+import { sha256Hex } from "../shared/hash.js";
 
 export class AgentRunner implements CandidateWorker {
   get model(): ModelRef {
@@ -71,6 +75,9 @@ export class AgentRunner implements CandidateWorker {
     let status: AgentRunStatus = "STOPPED";
     let output: string | null = null;
     let acceptedEvidence: LoopEvidence | null = null;
+    const progressTracker = this.deps.createProgressTracker?.(task) ?? null;
+    const progress: AgentProgressRecord[] = [];
+    const progressStates = new Map<number, AgentProgressState>();
 
     while (turns.length < this.deps.maxTurns && totalTokens < this.deps.maxTokens) {
       const remainingTokens = this.deps.maxTokens - totalTokens;
@@ -138,13 +145,46 @@ export class AgentRunner implements CandidateWorker {
         }
       }
       if (status === "FINISHED") break;
+      if (progressTracker !== null && (turn.turn === 4 || turn.turn === 8 || turn.turn === 12)) {
+        const state = await this.progressState(task, worktree, loopEvidence);
+        if (state !== null) {
+          progressStates.set(turn.turn, state);
+          const previousTurn = turn.turn === 8 ? 4 : turn.turn === 12 ? 8 : null;
+          const previous = previousTurn === null ? null : progressStates.get(previousTurn) ?? null;
+          if (
+            turn.turn !== 4 &&
+            previous !== null &&
+            progressStateFingerprint(previous) === progressStateFingerprint(state)
+          ) {
+            const score = await progressTracker.score({ task, turns, state });
+            if (score !== null) {
+              const abandon = shouldAbandonProgress(score.modelScores);
+              const record: AgentProgressRecord = {
+                turn: turn.turn,
+                ...score,
+                decision: abandon ? "abandon" : "continue",
+              };
+              progress.push(record);
+              this.deps.onProgress?.(task, record);
+              if (abandon) {
+                status = "ABANDONED_PROGRESS";
+                break;
+              }
+            }
+          }
+        }
+      }
       if (turns.length >= this.deps.maxTurns || totalTokens >= this.deps.maxTokens) {
         status = "BUDGET_EXCEEDED";
         break;
       }
     }
 
-    if (status !== "FINISHED" && (turns.length >= this.deps.maxTurns || totalTokens >= this.deps.maxTokens)) {
+    if (
+      status !== "FINISHED" &&
+      status !== "ABANDONED_PROGRESS" &&
+      (turns.length >= this.deps.maxTurns || totalTokens >= this.deps.maxTokens)
+    ) {
       status = "BUDGET_EXCEEDED";
     }
 
@@ -157,6 +197,7 @@ export class AgentRunner implements CandidateWorker {
       loopEvidence: acceptedEvidence,
       output,
       startedAt,
+      progress,
       protocolHash: composed?.protocolHash ?? null,
     });
   }
@@ -242,6 +283,7 @@ export class AgentRunner implements CandidateWorker {
     output: string | null;
     startedAt: number;
     protocolHash: string | null;
+    progress: AgentProgressRecord[];
   }): AgentLoopResult {
     const transcript: AgentTranscript = {
       runId: input.task.runId,
@@ -253,6 +295,7 @@ export class AgentRunner implements CandidateWorker {
       totalTokens: input.totalTokens,
       loopEvidence: input.loopEvidence,
       protocolHash: input.protocolHash,
+      ...(input.progress.length === 0 ? {} : { progress: input.progress }),
       startedAt: input.startedAt,
       completedAt: this.now(),
     };
@@ -272,6 +315,29 @@ export class AgentRunner implements CandidateWorker {
       transcriptRef,
       evidenceRefs,
     };
+  }
+
+  private async progressState(
+    task: Task,
+    worktree: SandboxHandle,
+    loopEvidence: LoopEvidence,
+  ): Promise<AgentProgressState | null> {
+    try {
+      const [diff, changedPaths] = await Promise.all([
+        worktree.git.diffAgainst(task.baseCheckpointHash),
+        worktree.git.changedFiles(task.baseCheckpointHash),
+      ]);
+      return {
+        diffHash: sha256Hex(diff),
+        changedPaths,
+        liveEvidenceCount:
+          loopEvidence.writes.length +
+          loopEvidence.patches.length +
+          loopEvidence.commandOutputRefs.length,
+      };
+    } catch {
+      return null;
+    }
   }
 }
 

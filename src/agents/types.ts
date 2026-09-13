@@ -69,7 +69,34 @@ export interface AgentTurn {
   toolResults: AgentToolResult[];
 }
 
-export type AgentRunStatus = "FINISHED" | "BUDGET_EXCEEDED" | "STOPPED" | "FAILED";
+export interface AgentProgressState {
+  diffHash: string;
+  changedPaths: string[];
+  liveEvidenceCount: number;
+}
+
+export interface AgentProgressRecord {
+  turn: 8 | 12;
+  modelScores: { model: ModelRef; score: number }[];
+  mean: number;
+  stateFingerprint: string;
+  decision: "continue" | "abandon";
+}
+
+export interface AgentProgressTracker {
+  score(input: {
+    task: Task;
+    turns: readonly AgentTurn[];
+    state: AgentProgressState;
+  }): Promise<Omit<AgentProgressRecord, "turn" | "decision"> | null>;
+}
+
+export type AgentRunStatus =
+  | "FINISHED"
+  | "BUDGET_EXCEEDED"
+  | "STOPPED"
+  | "FAILED"
+  | "ABANDONED_PROGRESS";
 
 export interface AgentTranscript {
   runId: string;
@@ -83,6 +110,7 @@ export interface AgentTranscript {
   /** Hash of the protocol bundle the instruction was composed from, so a reviewer can tell which
    *  instruction this worker actually received. */
   protocolHash: string | null;
+  progress?: AgentProgressRecord[];
   startedAt: number;
   completedAt: number;
 }
@@ -101,6 +129,8 @@ export interface AgentRunnerDeps {
    *  from. A return channel rather than a closure: a runner is reusable across tasks, and a
    *  side channel would make the recorded hash depend on call order. */
   prompt?: (task: Task) => { text: string; protocolHash: string | null };
+  createProgressTracker?: (task: Task) => AgentProgressTracker | null;
+  onProgress?: (task: Task, record: AgentProgressRecord) => void;
   createIntelligence?: (worktreePath: string) => RepositoryIntelligence;
   requestContext?: RequestContext;
   redact?: (text: string) => string;

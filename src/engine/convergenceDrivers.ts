@@ -149,6 +149,7 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
       ensembleChangesByPathology: {
         finding_oscillation: ensembleChangeCount(decisions, "finding_oscillation"),
         checkpoint_oscillation: ensembleChangeCount(decisions, "checkpoint_oscillation"),
+        test_only_verification_treadmill: ensembleChangeCount(decisions, "test_only_verification_treadmill"),
         no_progress: ensembleChangeCount(decisions, "no_progress"),
         disagreement_not_shrinking: ensembleChangeCount(decisions, "disagreement_not_shrinking"),
         task_graph_growth_from_nonblocking: ensembleChangeCount(decisions, "task_graph_growth_from_nonblocking"),

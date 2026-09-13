@@ -7,7 +7,11 @@ import { id } from "../shared/ids.js";
 import type { Db } from "../store/db.js";
 import type { EventLog } from "../store/eventLog.js";
 import type { ModelCatalog } from "./catalog.js";
-import { EMPIRICAL_SCORE_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "./responseSchemas.js";
+import {
+  EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  PROGRESS_SCORE_RESPONSE_SCHEMA,
+  REVIEW_FINDINGS_RESPONSE_SCHEMA,
+} from "./responseSchemas.js";
 import { hashJson } from "../shared/hash.js";
 
 export const DEFAULT_MIN_SCORES_FOR_ROUTING = 3;
@@ -49,7 +53,7 @@ export type ModelObservation =
       kind: "strict_probe";
       model: ModelRef;
       observedAt: number;
-      schema: "review" | "score";
+      schema: "review" | "score" | "progress";
       schemaHash: string;
       supported: boolean;
       detail?: string;
@@ -133,7 +137,7 @@ export class ModelObservationRepository {
   recordStrictProbe(
     model: ModelRef,
     input: {
-      schema: "review" | "score";
+      schema: "review" | "score" | "progress";
       schemaHash: string;
       supported: boolean;
       detail?: string;
@@ -156,7 +160,7 @@ export class ModelObservationRepository {
 
   latestStrictProbe(
     model: ModelRef,
-    schema: "review" | "score",
+    schema: "review" | "score" | "progress",
     schemaHash: string,
   ): Extract<ModelObservation, { kind: "strict_probe" }> | null {
     const matches = this.list().filter((observation): observation is Extract<ModelObservation, { kind: "strict_probe" }> =>
@@ -211,6 +215,7 @@ export class ModelObservationRepository {
     const currentHashes = {
       review: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
       score: hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA),
+      progress: hashJson(PROGRESS_SCORE_RESPONSE_SCHEMA),
     } as const;
     for (const observation of observations) {
       if (observation.kind !== "strict_probe") continue;
@@ -227,7 +232,9 @@ export class ModelObservationRepository {
           ...entry.info.capabilities,
           ...(observation.schema === "review"
             ? { supportsStrictReviewSchema: observation.supported }
-            : { supportsStrictScoreSchema: observation.supported }),
+            : observation.schema === "score"
+              ? { supportsStrictScoreSchema: observation.supported }
+              : { supportsStrictProgressSchema: observation.supported }),
         },
       });
     }

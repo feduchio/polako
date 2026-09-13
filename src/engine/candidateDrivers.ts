@@ -7,6 +7,7 @@ import { emptyFindingCounts, type Checkpoint, type EvidenceVector } from "../dom
 import { SYSTEM_ACTOR, type ArtifactRef } from "../domain/common.js";
 import type { PolishConfig } from "../domain/config.js";
 import type { NewEvent } from "../domain/event.js";
+import type { CheckpointChangeRecord } from "../domain/convergence.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { compareToBaseline } from "../domain/checks.js";
 import type { GateResult } from "../project/checkRunner.js";
@@ -32,6 +33,8 @@ import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { Sandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
+import { Git } from "../sandbox/git.js";
+import { classifyCheckpointPaths } from "../convergence/pathology/changeClassification.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
 import type { Task } from "../domain/task.js";
 import { incompleteCodingWorkTerminal } from "../convergence/antiFakeDone.js";
@@ -406,7 +409,23 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
     }
 
     const checkpoint = createCheckpoint(ctx, integrating, integratedCommit, gateResult, result.previousHead);
-    appendCheckpoint(ctx, checkpoint);
+    let classified: ReturnType<typeof classifyCheckpointPaths> = {
+      paths: [],
+      classification: "unknown",
+    };
+    try {
+      classified = classifyCheckpointPaths(
+        await new Git(ctx.run.projectPath).changedFilesBetween(result.previousHead, integratedCommit),
+      );
+    } catch {
+      // The integration is already durable. Missing path evidence must fail safe, not fail integration.
+    }
+    appendCheckpoint(ctx, checkpoint, {
+      taskId: integrating.id,
+      parentHash: result.previousHead,
+      headHash: integratedCommit,
+      ...classified,
+    });
     appendRunCheckpoint(ctx, checkpoint.commitHash);
     appendTaskEvent(ctx, {
       ...integrating,
@@ -872,13 +891,18 @@ function patchTask(ctx: PhaseContext, task: Task): Task {
   return task;
 }
 
-function appendCheckpoint(ctx: PhaseContext, checkpoint: Checkpoint): void {
+function appendCheckpoint(
+  ctx: PhaseContext,
+  checkpoint: Checkpoint,
+  change: Omit<CheckpointChangeRecord, "causalEventId">,
+): void {
+  const eventId = id("evt", ctx.clock.now());
   ctx.store.events.append([{
-    id: id("evt", ctx.clock.now()),
+    id: eventId,
     runId: ctx.run.id,
     ts: ctx.clock.now(),
     type: "checkpoint.created",
-    payload: { checkpoint },
+    payload: { checkpoint, change: { ...change, causalEventId: eventId } },
     causedBy: [],
     actor: SYSTEM_ACTOR,
     artifacts: [],

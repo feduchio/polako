@@ -256,6 +256,7 @@ describe("C2 sliding-window detectors", () => {
       ensembleChangesByPathology: {
         finding_oscillation: 0,
         checkpoint_oscillation: 0,
+        test_only_verification_treadmill: 0,
         no_progress: 0,
         disagreement_not_shrinking: 0,
         task_graph_growth_from_nonblocking: 0,
@@ -277,6 +278,7 @@ describe("C2 sliding-window detectors", () => {
       ensembleChangesByPathology: {
         finding_oscillation: 0,
         checkpoint_oscillation: 0,
+        test_only_verification_treadmill: 0,
         no_progress: 0,
         disagreement_not_shrinking: 0,
         task_graph_growth_from_nonblocking: 0,
@@ -297,6 +299,7 @@ describe("C2 sliding-window detectors", () => {
       ensembleChangesByPathology: {
         finding_oscillation: 0,
         checkpoint_oscillation: 0,
+        test_only_verification_treadmill: 0,
         no_progress: 0,
         disagreement_not_shrinking: 1,
         task_graph_growth_from_nonblocking: 0,

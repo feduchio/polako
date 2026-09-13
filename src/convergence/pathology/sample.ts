@@ -1,6 +1,7 @@
 import type { Actor } from "../../domain/common.js";
 import type { Checkpoint, EvidenceVector } from "../../domain/checkpoint.js";
 import type { CleanRound } from "../../domain/convergence.js";
+import type { CheckpointChangeRecord } from "../../domain/convergence.js";
 import type { Event } from "../../domain/event.js";
 import type { Finding, FindingValidation } from "../../domain/finding.js";
 import type { ReviewExecution } from "../../domain/review.js";
@@ -41,12 +42,43 @@ export interface FoldedPrefix {
   reviewExecutions: ReviewExecution[];
   findingObservations: FindingObservation[];
   acceptedEvidenceRefs: string[];
+  checkpointChanges: CheckpointChangeRecord[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function checkpointChangeOf(value: unknown): CheckpointChangeRecord | null {
+  const row = asRecord(value);
+  if (row === null) return null;
+  const classification = row["classification"];
+  if (
+    typeof row["taskId"] !== "string" ||
+    typeof row["parentHash"] !== "string" ||
+    typeof row["headHash"] !== "string" ||
+    typeof row["causalEventId"] !== "string" ||
+    !Array.isArray(row["paths"]) ||
+    !row["paths"].every((path) => typeof path === "string") ||
+    (
+      classification !== "production" &&
+      classification !== "test_only" &&
+      classification !== "metadata_only" &&
+      classification !== "unknown"
+    )
+  ) {
+    return null;
+  }
+  return {
+    taskId: row["taskId"],
+    parentHash: row["parentHash"],
+    headHash: row["headHash"],
+    causalEventId: row["causalEventId"],
+    paths: row["paths"],
+    classification,
+  };
 }
 
 function sortById<T extends { id: string }>(items: T[]): T[] {
@@ -120,6 +152,7 @@ export function foldPrefix(events: readonly Event[]): FoldedPrefix {
   const reviews = new Map<string, ReviewExecution>();
   const findingObservations: FindingObservation[] = [];
   const acceptedEvidenceRefs = new Set<string>();
+  const checkpointChanges: CheckpointChangeRecord[] = [];
 
   for (const event of ordered) {
     runId = event.runId;
@@ -139,18 +172,22 @@ export function foldPrefix(events: readonly Event[]): FoldedPrefix {
         checkpoints.set(checkpoint.id, checkpoint);
         checkpointHash = checkpoint.commitHash;
       }
+      const change = checkpointChangeOf(payload["change"]);
+      if (change !== null) checkpointChanges.push(change);
     }
     if (event.type === "finding.raised" || event.type === "finding.status_changed" || event.type === "finding.validated") {
       const finding = asRecord(payload["finding"]) as Finding | null;
       if (finding !== null) {
         findings.set(finding.id, finding);
         findingObservations.push({
+          findingId: finding.id,
           fingerprint: finding.fingerprint,
           status: finding.status,
           blocking: finding.blocking,
           severity: finding.severity,
           checkpointHash: finding.checkpointHash,
           causalEventId: event.id,
+          seq: event.seq,
         });
       }
     }
@@ -195,6 +232,7 @@ export function foldPrefix(events: readonly Event[]): FoldedPrefix {
     reviewExecutions: sortById([...reviews.values()]),
     findingObservations,
     acceptedEvidenceRefs: [...acceptedEvidenceRefs].sort(),
+    checkpointChanges,
   };
 }
 
@@ -251,6 +289,10 @@ function workClassRecords(fold: FoldedPrefix): TaskWorkClassRecord[] {
       classificationEventId: task.classificationEventId ?? null,
       kind: task.kind,
       originKind: task.origin.kind,
+      originFindingId:
+        task.origin.kind === "valid_finding" || task.origin.kind === "investigation"
+          ? task.origin.findingId
+          : null,
     }))
     .sort((a, b) => a.taskId.localeCompare(b.taskId));
 }
@@ -354,6 +396,7 @@ export function buildPathologySample(input: {
     disagreementRounds: disagreementRoundsOf(fold, input.config.review.reviewersPerRound),
     taskIds: fold.tasks.map((task) => task.id).sort(),
     taskWorkClasses: workClassRecords(fold),
+    checkpointChanges: fold.checkpointChanges,
     budget: buildPathologyBudgetSnapshot({
       events: prefix,
       observedAt: input.boundary.ts,

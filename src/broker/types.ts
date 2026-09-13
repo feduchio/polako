@@ -13,6 +13,7 @@ export const ModelCapabilitiesSchema = z.object({
   supportsJson: z.boolean(),
   supportsStrictReviewSchema: z.boolean().optional(),
   supportsStrictScoreSchema: z.boolean().optional(),
+  supportsStrictProgressSchema: z.boolean().optional(),
   /** USD per 1M tokens; null when unknown. Unknown is not treated as free. */
   inputCostPerM: z.number().nonnegative().nullable(),
   outputCostPerM: z.number().nonnegative().nullable(),
