@@ -75,6 +75,16 @@ const ModelObservationSchema = z.union([
     score: z.number().min(0).max(1),
     detail: z.string().optional(),
   }),
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal("strict_probe"),
+    model: ModelRefSchema,
+    observedAt: z.number().int().nonnegative(),
+    schema: z.enum(["review", "score"]),
+    schemaHash: z.string().regex(/^[0-9a-f]{64}$/),
+    supported: z.boolean(),
+    detail: z.string().optional(),
+  }),
 ]);
 
 interface TableSpec {

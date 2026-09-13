@@ -79,11 +79,16 @@ function evenWindowSize(min: number) {
 }
 
 export const VerifierStrategySchema = z.object({
-  backend: z.enum(["ts", "sidecar"]).default("sidecar"),
+  backend: z.enum(["ts", "sidecar", "empirical"]).default("empirical"),
   /** score granularity (letter tokens); default follows LLM-as-a-Verifier findings */
   granularity: z.number().int().min(2).max(26).default(20),
   /** repeated evaluations per pair */
   repeats: z.number().int().min(1).default(2),
+  empiricalRepeats: z.number().int().min(4).multipleOf(4).default(4),
+  empiricalPivots: z.literal(2).default(2),
+  maxEmpiricalCalls: z.literal(48).default(48),
+  maxEmpiricalInputTokens: z.literal(192_000).default(192_000),
+  maxVerifierDiffTokens: z.literal(2_000).default(2_000),
   criteria: z.array(z.string()).default(["specification", "output", "errors", "regression", "scope"]),
   /** use pivot tournament when candidates exceed this count */
   pivotTournamentFrom: z.number().int().min(3).default(4),

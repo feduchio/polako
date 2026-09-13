@@ -5,6 +5,7 @@ import type {
   ModelInfo,
   ProviderAdapter,
 } from "../broker/types.js";
+import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { sha256Hex } from "../shared/hash.js";
 import { canonicalJsonLine } from "./benchmark.js";
@@ -40,8 +41,31 @@ describe("review benchmark runner", () => {
       cell.request?.messages[0]?.content.startsWith("You are an independent correctness reviewer.")))
       .toBe(true);
     expect(report.cells.every((cell) => cell.request?.metadata.purpose === "review_correctness")).toBe(true);
+    expect(report.transportMode).toBe("strict_schema");
+    expect(report.cells[0]?.request?.responseSchema).toEqual(REVIEW_FINDINGS_RESPONSE_SCHEMA);
+    expect(report.cells[0]?.request?.reasoning).toEqual(DISABLED_REASONING);
+    expect(report.cells.every((cell) => cell.request?.responseSchema?.strict === true)).toBe(true);
     expect(report.packetSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(report.oracleSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("retains a contemporaneous legacy json_object control arm", async () => {
+    const nex = provider("nex", "nex-agi/a:free", () => reply('{"findings":[]}'));
+    const nvidia = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const report = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 43,
+      pairs: [pair],
+      transportMode: "legacy_json_object",
+    });
+    expect(report.transportMode).toBe("legacy_json_object");
+    expect(report.cells.every((cell) =>
+      cell.request?.responseFormat === "json" &&
+      cell.request.responseSchema === undefined &&
+      cell.request.reasoning === undefined)).toBe(true);
   });
 
   it("keeps pair metadata blind outside diff and cell ids off the wire", async () => {

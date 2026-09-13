@@ -164,13 +164,18 @@ export class DaemonService implements RpcHandler {
         return this.runReviewBenchmark(
           optionalNumber(params, "seed") ?? 42,
           params["liveAbort"] === true,
+          params["transport"] === "legacy" ? "legacy_json_object" : "strict_schema",
         );
       default:
         throw new PolishError("NOT_FOUND", `unknown RPC method ${method}`);
     }
   }
 
-  private async runReviewBenchmark(seed: number, liveAbort: boolean): Promise<unknown> {
+  private async runReviewBenchmark(
+    seed: number,
+    liveAbort: boolean,
+    transportMode: "legacy_json_object" | "strict_schema",
+  ): Promise<unknown> {
     if (!Number.isInteger(seed)) throw new PolishError("INVALID_ARGUMENT", "benchmark seed must be an integer");
     const catalogs = await Promise.all(this.productionDeps.providers.map(async (provider) => ({
       provider,
@@ -182,17 +187,18 @@ export class DaemonService implements RpcHandler {
       reviewers,
       seed,
       liveAbort,
+      transportMode,
     });
     const packet = this.store.artifacts.put(
       report.packetJsonl,
       "review_benchmark_packets",
-      `review-benchmark:${String(seed)}:packets`,
+      `review-benchmark:${String(seed)}:${transportMode}:packets`,
       this.clock.now(),
     );
     const oracle = this.store.artifacts.put(
       report.oracleJsonl,
       "review_benchmark_oracle",
-      `review-benchmark:${String(seed)}:oracle`,
+      `review-benchmark:${String(seed)}:${transportMode}:oracle`,
       this.clock.now(),
     );
     const stored = {
@@ -203,7 +209,7 @@ export class DaemonService implements RpcHandler {
     const reportArtifact = this.store.artifacts.put(
       JSON.stringify(stored),
       "review_benchmark_report",
-      `review-benchmark:${String(seed)}:report`,
+      `review-benchmark:${String(seed)}:${transportMode}:report`,
       this.clock.now(),
     );
     return {

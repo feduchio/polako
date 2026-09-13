@@ -15,6 +15,7 @@ import { BudgetTracker, QuotaTracker, isBudgetError } from "./quota.js";
 import { ModelRouter } from "./router.js";
 import { SecretStore, parseDotenv } from "./secrets.js";
 import { ProviderError, type CompletionRequest } from "./types.js";
+import { DISABLED_REASONING, EMPIRICAL_SCORE_RESPONSE_SCHEMA } from "./responseSchemas.js";
 
 const NOW = 1_700_000_000_000;
 
@@ -183,12 +184,23 @@ describe("ModelBroker", () => {
         },
       },
     ]);
-    await expect(broker.complete({ ...req(runId, "big"), maxTokens: 123, temperature: 0.25 })).rejects.toThrow(/aborted/);
+    await expect(broker.complete({
+      ...req(runId, "big"),
+      maxTokens: 123,
+      temperature: 0.25,
+      responseSchema: EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+      reasoning: DISABLED_REASONING,
+    })).rejects.toThrow(/aborted/);
     const events = store.events.list(runId, { types: ["model.call"] });
     expect(events).toHaveLength(1);
     expect(events[0]!.payload).toMatchObject({ ok: false, attempts: 1 });
     const reqText = store.artifacts.getText(events[0]!.artifacts[0]!.sha256);
-    expect(JSON.parse(reqText)).toMatchObject({ maxTokens: 123, temperature: 0.25 });
+    expect(JSON.parse(reqText)).toMatchObject({
+      maxTokens: 123,
+      temperature: 0.25,
+      responseSchema: EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+      reasoning: DISABLED_REASONING,
+    });
   });
 
   it("records a model.call when cancelled while waiting for quota or during retry backoff", async () => {

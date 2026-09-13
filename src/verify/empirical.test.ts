@@ -1,0 +1,242 @@
+import { describe, expect, it } from "vitest";
+import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { ProviderError } from "../broker/types.js";
+import { defaultProtocolsRoot, ProtocolRegistry } from "../protocols/loader.js";
+import {
+  EmpiricalVerifier,
+  parseEmpiricalScore,
+  pptPairSet,
+  ringPairs,
+  sigmoidMass,
+} from "./empirical.js";
+import type { TournamentCandidate } from "./strategy.js";
+
+const PROTOCOLS = ProtocolRegistry.load(defaultProtocolsRoot());
+
+function candidate(id: string, diff = `diff --git a/${id}.ts b/${id}.ts\n+export const ${id} = true;\n`): TournamentCandidate {
+  return {
+    id,
+    diff,
+    metrics: {
+      candidateId: id,
+      checksPassed: 2,
+      checksTotal: 2,
+      newFailures: 0,
+      newFailureKeys: [],
+      linesChanged: 1,
+      filesChanged: 1,
+      insertions: 1,
+      deletions: 0,
+    },
+    diffSummary: { files: 1, insertions: 1, deletions: 0 },
+    gateReport: { passed: true, checks: [{ name: "test", kind: "test", status: "passed" }] },
+  };
+}
+
+function reply(scoreA: number, scoreB: number) {
+  return { kind: "reply" as const, content: JSON.stringify({ scoreA, scoreB }) };
+}
+
+function verifier(count = 8, maxCalls = 48) {
+  const first = new ScriptedProvider("p0", [{ name: "m0", capabilities: {
+    contextWindow: 32_000,
+    maxOutputTokens: 1_000,
+    supportsTools: false,
+    supportsJson: true,
+    supportsStrictScoreSchema: true,
+    inputCostPerM: 0,
+    outputCostPerM: 0,
+    tier: "strong",
+    family: "family-a",
+  } }]);
+  const second = new ScriptedProvider("p1", [{ name: "m1", capabilities: {
+    contextWindow: 32_000,
+    maxOutputTokens: 1_000,
+    supportsTools: false,
+    supportsJson: true,
+    supportsStrictScoreSchema: true,
+    inputCostPerM: 0,
+    outputCostPerM: 0,
+    tier: "strong",
+    family: "family-b",
+  } }]);
+  const sequence = Array.from({ length: count }, (_, index) =>
+    index % 2 === 0 ? reply(4, 0) : reply(0, 4));
+  first.script("m0", sequence);
+  second.script("m1", sequence);
+  return {
+    strategy: new EmpiricalVerifier({
+      models: [
+        { provider: first, model: { provider: "p0", model: "m0" }, family: "family-a" },
+        { provider: second, model: { provider: "p1", model: "m1" }, family: "family-b" },
+      ],
+      protocols: PROTOCOLS,
+      repeats: 4,
+      maxCalls,
+    }),
+    first,
+    second,
+  };
+}
+
+describe("EmpiricalVerifier", () => {
+  it("counterbalances both families and both slots for each criterion", async () => {
+    const { strategy, first, second } = verifier();
+    const result = await strategy.selectFrontier(
+      [candidate("a"), candidate("b")],
+      {
+        runId: "run_test",
+        taskId: "task_test",
+        taskKind: "bugfix",
+        task: "one criterion",
+      },
+    );
+    expect(result.winnerId).toBe("a");
+    expect(result.scores).toEqual({
+      a: 0.7310585786300049,
+      b: 0.2689414213699951,
+    });
+    expect(result).toMatchObject({
+      backend: "empirical",
+      client: "live",
+      scoreScheme: "empirical_repeats",
+      requestedEvaluations: 8,
+      completedEvaluations: 8,
+      fallback: false,
+    });
+    expect(first.calls).toHaveLength(4);
+    expect(second.calls).toHaveLength(4);
+    for (const calls of [first.calls, second.calls]) {
+      expect(calls[0]?.messages[1]?.content).toContain('"candidateA":{"id":"a"');
+      expect(calls[1]?.messages[1]?.content).toContain('"candidateA":{"id":"b"');
+    }
+    const system = first.calls[0]?.messages[0]?.content ?? "";
+    expect(system).toContain("Protocol: base");
+    expect(system).toContain("Protocol: bugfix");
+    expect(system).toContain("Protocol: judge");
+    expect(system).toContain("scoreA and scoreB");
+  });
+
+  it("pins sigmoid mass to independent literals", () => {
+    expect(sigmoidMass(5 / 6, 1 / 6)).toBe(0.6607563687658172);
+    expect(1 - sigmoidMass(5 / 6, 1 / 6)).toBe(0.3392436312341828);
+  });
+
+  it("rejects prose, extra keys, missing keys and out-of-range scores", () => {
+    for (const body of [
+      'reasoning {"scoreA":4,"scoreB":0}',
+      '{"scoreA":4,"scoreB":0,"reason":"x"}',
+      '{"scoreA":4}',
+      '{"scoreA":5,"scoreB":0}',
+    ]) {
+      expect(() => parseEmpiricalScore(body)).toThrow();
+    }
+  });
+
+  it("pins ring and pivot pair sets", () => {
+    expect(ringPairs(["b", "a"])).toEqual([["a", "b"]]);
+    expect(pptPairSet(["a", "b", "c"], [])).toEqual([
+      ["a", "b"], ["b", "c"], ["a", "c"],
+    ]);
+    expect(pptPairSet(["a", "b", "c", "d"], ["a", "b"])).toHaveLength(6);
+    expect(pptPairSet(["a", "b", "c", "d", "e"], ["a", "c"])).toEqual([
+      ["a", "b"], ["b", "c"], ["c", "d"], ["d", "e"], ["a", "e"],
+      ["a", "d"], ["c", "e"], ["a", "c"],
+    ]);
+    expect(pptPairSet(["a", "b", "c", "d", "e", "f", "g", "h"], ["a", "c"])).toEqual([
+      ["a", "b"], ["b", "c"], ["c", "d"], ["d", "e"], ["e", "f"], ["f", "g"],
+      ["g", "h"], ["a", "h"], ["a", "d"], ["a", "e"], ["c", "e"], ["a", "f"],
+      ["c", "f"], ["a", "g"], ["c", "g"], ["c", "h"], ["a", "c"],
+    ]);
+  });
+
+  it("truncates N=3 to four criteria and hard-stops at 48 calls", async () => {
+    const { strategy, first, second } = verifier(48);
+    const result = await strategy.selectFrontier(
+      [candidate("a"), candidate("b"), candidate("c")],
+      {
+        runId: "run_test",
+        taskKind: "feature",
+        task: "c1; c2; c3; c4; c5; c6; c7; c8",
+      },
+    );
+    expect(first.calls.length + second.calls.length).toBe(48);
+    expect(result.criteria).toEqual(["c1", "c2", "c3", "c4"]);
+    expect(result.nComparisons).toBe(3);
+  });
+
+  it("falls back before provider calls when the pair set cannot fit two criteria", async () => {
+    const { strategy, first, second } = verifier();
+    const result = await strategy.selectFrontier(
+      ["a", "b", "c", "d", "e"].map((id) => candidate(id)),
+      { runId: "run_test", taskKind: "refactor", task: "one" },
+    );
+    expect(result.fallback).toBe(true);
+    expect(first.calls).toHaveLength(0);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it("falls back before calls when only one model family is available", async () => {
+    const { first } = verifier();
+    first.calls.length = 0;
+    const strategy = new EmpiricalVerifier({
+      models: [{ provider: first, model: { provider: "p0", model: "m0" }, family: "family-a" }],
+      protocols: PROTOCOLS,
+    });
+    const result = await strategy.selectFrontier(
+      [candidate("a"), candidate("b")],
+      { runId: "run_test", taskKind: "bugfix", task: "one" },
+    );
+    expect(result.fallback).toBe(true);
+    expect(result.client).toBe("none");
+    expect(first.calls).toHaveLength(0);
+  });
+
+  it("falls back before calls for missing or oversized diffs", async () => {
+    const { strategy, first, second } = verifier();
+    const missing = candidate("a");
+    delete missing.diff;
+    const result = await strategy.selectFrontier(
+      [missing, candidate("b", "x".repeat(8_004))],
+      { runId: "run_test", taskKind: "investigation", task: "one" },
+    );
+    expect(result.fallback).toBe(true);
+    expect(first.calls).toHaveLength(0);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it("abandons the whole empirical selection when a pair completes under half", async () => {
+    const first = new ScriptedProvider("p0", [{ name: "m0", capabilities: FAKE_CAPABILITIES.strong }]);
+    const second = new ScriptedProvider("p1", [{ name: "m1", capabilities: FAKE_CAPABILITIES.strong }]);
+    first.script("m0", [
+      reply(4, 0),
+      ...Array.from({ length: 3 }, () => ({
+        kind: "error" as const,
+        error: new ProviderError("p0", "server", "down"),
+      })),
+    ]);
+    second.script("m1", Array.from({ length: 4 }, () => ({
+      kind: "error" as const,
+      error: new ProviderError("p1", "server", "down"),
+    })));
+    const strategy = new EmpiricalVerifier({
+      models: [
+        { provider: first, model: { provider: "p0", model: "m0" }, family: "family-a" },
+        { provider: second, model: { provider: "p1", model: "m1" }, family: "family-b" },
+      ],
+      protocols: PROTOCOLS,
+    });
+    const result = await strategy.selectFrontier(
+      [candidate("a"), candidate("b")],
+      { runId: "run_test", taskKind: "bugfix", task: "one" },
+    );
+    expect(result).toMatchObject({
+      fallback: true,
+      backend: "empirical",
+      client: "none",
+      requestedEvaluations: 8,
+      completedEvaluations: 1,
+    });
+    expect(result.fallbackReason).toContain("fewer than half");
+  });
+});

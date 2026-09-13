@@ -126,6 +126,31 @@ describe("B4 production REVIEWING driver", () => {
     expect(store.events.list(runId, { types: ["review.finished"] })).toHaveLength(3);
   });
 
+  it("fails visibly when a completed strict-probe epoch has no reviewers", async () => {
+    engine.registerPhase("REVIEWING", createReviewingDriver({
+      ...reviewingOptions(fixture, () => []),
+      strictProbeEpochComplete: () => true,
+    }));
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("FAILED");
+    expect(run.terminalReason?.code).toBe("providers_unavailable");
+    expect(store.events.list(runId, { types: ["review.started"] })).toHaveLength(0);
+  });
+
+  it("treats a missing in-shortlist strict probe as an invariant failure", async () => {
+    engine.registerPhase("REVIEWING", createReviewingDriver({
+      ...reviewingOptions(fixture, () => []),
+      strictProbeEpochComplete: () => false,
+    }));
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("FAILED");
+    expect(run.terminalReason?.code).toBe("internal_error");
+  });
+
   it("keeps reviewer prompts isolated from each other", async () => {
     scriptReviewResponses(provider, "one.ts", "two.ts", "three.ts");
     const { runId } = seedReviewingRun(store, clock, fixture);

@@ -193,7 +193,7 @@ describe("VerifierAdapter real Python child", () => {
     delete process.env["POLISH_VERIFIER_PREFER"];
     delete process.env["POLISH_VERIFIER_CLIENT"];
     try {
-      const strategy = createVerifierStrategy(defaultConfig().verifier, {
+      const strategy = createVerifierStrategy({ ...defaultConfig().verifier, backend: "sidecar" }, {
         command: python,
         scriptPath: SCRIPT,
         requestTimeoutMs: 8_000,
@@ -233,7 +233,7 @@ describe("VerifierAdapter real Python child", () => {
     process.env["POLISH_VERIFIER_ALLOW_LIVE"] = "1";
     delete process.env["POLISH_VERIFIER_CLIENT"];
     try {
-      const strategy = createVerifierStrategy(defaultConfig().verifier, {
+      const strategy = createVerifierStrategy({ ...defaultConfig().verifier, backend: "sidecar" }, {
         command: python,
         scriptPath: SCRIPT,
         requestTimeoutMs: 8_000,
@@ -305,7 +305,7 @@ describe("VerifierAdapter real Python child", () => {
     process.env["POLISH_VERIFIER_PREFER"] = "cand-weak";
     delete process.env["POLISH_VERIFIER_CLIENT"];
     try {
-      const strategy = createVerifierStrategy(defaultConfig().verifier, {
+      const strategy = createVerifierStrategy({ ...defaultConfig().verifier, backend: "sidecar" }, {
         command: python,
         scriptPath: SCRIPT,
         requestTimeoutMs: 8_000,
@@ -337,7 +337,8 @@ describe("VerifierAdapter real Python child", () => {
   it("records direct logprobs when the verifier exposes them", async () => {
     const sidecar = adapter({ POLISH_VERIFIER_SCRIPTED_MODE: "direct", POLISH_VERIFIER_PREFER: "a" });
     await sidecar.comparePair(candidate("a", 4), candidate("b", 4), { runId: "run_direct" });
-    expect(sidecar.lastProvenance.logprobScheme).toBe("direct");
+    expect(sidecar.lastProvenance.claimedLogprobScheme).toBe("direct");
+    expect(sidecar.lastProvenance.logprobScheme).toBeUndefined();
     expect(sidecar.usedFallback).toBe(false);
   }, 20_000);
 
@@ -345,7 +346,8 @@ describe("VerifierAdapter real Python child", () => {
     const sidecar = adapter({ POLISH_VERIFIER_SCRIPTED_MODE: "withheld", POLISH_VERIFIER_PREFER: "b" });
     const verdict = await sidecar.comparePair(candidate("a", 4), candidate("b", 4), { runId: "run_two_stage" });
     expect(verdict.winner).toBe("b");
-    expect(sidecar.lastProvenance.logprobScheme).toBe("two_stage");
+    expect(sidecar.lastProvenance.claimedLogprobScheme).toBe("two_stage");
+    expect(sidecar.lastProvenance.logprobScheme).toBeUndefined();
     expect(sidecar.usedFallback).toBe(false);
   }, 20_000);
 

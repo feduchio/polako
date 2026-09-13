@@ -43,7 +43,14 @@ describe("production REVIEWING cost-eligible routing", () => {
       },
       {
         name: "free-reviewer",
-        capabilities: { ...FAKE_CAPABILITIES.fast, family: "free", supportsJson: true, inputCostPerM: 0, outputCostPerM: 0 },
+        capabilities: {
+          ...FAKE_CAPABILITIES.fast,
+          family: "free",
+          supportsJson: true,
+          supportsStrictReviewSchema: true,
+          inputCostPerM: 0,
+          outputCostPerM: 0,
+        },
       },
       {
         name: "unknown-price",

@@ -1,4 +1,6 @@
 import type { CandidateMetrics } from "./metrics.js";
+import type { TaskKind } from "../domain/task.js";
+import type { ModelRef } from "../domain/common.js";
 
 export interface TournamentCandidate {
   id: string;
@@ -9,12 +11,15 @@ export interface TournamentCandidate {
     checks: { name: string; kind: string; status: string }[];
     passed: boolean;
   } | null;
+  diff?: string;
 }
 
 export interface PairwiseContext {
   runId: string;
+  taskId?: string;
   task?: string;
   acceptance?: string[];
+  taskKind?: TaskKind;
 }
 
 export interface PairwiseVerdict {
@@ -24,7 +29,8 @@ export interface PairwiseVerdict {
 }
 
 export type LogprobScheme = "direct" | "two_stage";
-export type VerifierBackend = "sidecar" | "ts";
+export type ScoreScheme = "empirical_repeats";
+export type VerifierBackend = "sidecar" | "ts" | "empirical";
 export type VerifierClientKind = "scripted" | "live" | "none";
 
 export interface FrontierSelectOptions {
@@ -43,6 +49,13 @@ export interface FrontierSelection {
   method: "ppt" | "pairwise";
   fallback: boolean;
   logprobScheme?: LogprobScheme;
+  claimedLogprobScheme?: LogprobScheme;
+  scoreScheme?: ScoreScheme;
+  backend?: VerifierBackend;
+  models?: ModelRef[];
+  requestedEvaluations?: number;
+  completedEvaluations?: number;
+  fallbackReason?: string | null;
   criteria: string[];
   nComparisons: number;
   client: VerifierClientKind;

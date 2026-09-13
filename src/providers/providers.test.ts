@@ -5,8 +5,16 @@ import type { FetchLike } from "./openaiCompat.js";
 import { GeminiProvider } from "./gemini.js";
 import { GroqProvider } from "./groq.js";
 import { OpenRouterProvider } from "./openrouter.js";
+import { RecordReplayProvider } from "./recordReplay.js";
+import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 
 const FIXTURES = join(import.meta.dirname, "../../fixtures/providers");
+
+interface CapturedPayload {
+  response_format?: unknown;
+  reasoning?: unknown;
+  [key: string]: unknown;
+}
 
 export function fixture(name: string): unknown {
   return JSON.parse(readFileSync(join(FIXTURES, name), "utf8"));
@@ -42,6 +50,37 @@ describe("OpenRouterProvider", () => {
     expect(seen[0]?.headers["HTTP-Referer"]).toBeDefined();
     expect(seen[0]?.headers["X-Title"]).toBe("Polish");
     expect(seen[0]?.headers["authorization"]).toBe("Bearer sk-or-test-key-12345678");
+  });
+
+  it("sends strict JSON Schema and reasoning options as distinct request fields", async () => {
+    const payloads: CapturedPayload[] = [];
+    const provider = new OpenRouterProvider({
+      id: "openrouter",
+      apiKey: "test-key",
+      baseUrl: "https://openrouter.test/api/v1",
+      fetch: fakeFetch((_url, init) => {
+        payloads.push(JSON.parse(String(init.body)) as CapturedPayload);
+        return {
+          status: 200,
+          body: {
+            choices: [{ message: { content: "{\"findings\":[]}" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          },
+        };
+      }),
+    });
+    await provider.complete({
+      model: { provider: "openrouter", model: "strict" },
+      messages: [{ role: "user", content: "review" }],
+      responseSchema: REVIEW_FINDINGS_RESPONSE_SCHEMA,
+      reasoning: DISABLED_REASONING,
+      metadata: { runId: "run_test", role: "reviewer", purpose: "test" },
+    });
+    expect(payloads[0]?.response_format).toEqual({
+      type: "json_schema",
+      json_schema: REVIEW_FINDINGS_RESPONSE_SCHEMA,
+    });
+    expect(payloads[0]?.reasoning).toEqual(DISABLED_REASONING);
   });
 });
 
@@ -93,5 +132,28 @@ describe("createProviderFromConfig", () => {
     const or = createProviderFromConfig({ id: "or", kind: "openrouter", enabled: true, apiKeyEnv: "OPENROUTER_API_KEY" }, "sk-secret");
     expect(or?.kind).toBe("openrouter");
     expect(or?.id).toBe("or");
+  });
+});
+
+describe("RecordReplayProvider request identity", () => {
+  const base = {
+    model: { provider: "p", model: "m" },
+    messages: [{ role: "user" as const, content: "x" }],
+    metadata: { runId: "run_test", role: "reviewer", purpose: "test" },
+  };
+
+  it("distinguishes schema and reasoning changes", () => {
+    const plain = RecordReplayProvider.requestKey({ ...base, responseFormat: "json" });
+    const strict = RecordReplayProvider.requestKey({
+      ...base,
+      responseSchema: REVIEW_FINDINGS_RESPONSE_SCHEMA,
+      reasoning: DISABLED_REASONING,
+    });
+    const reasoning = RecordReplayProvider.requestKey({
+      ...base,
+      responseSchema: REVIEW_FINDINGS_RESPONSE_SCHEMA,
+      reasoning: { effort: "low", exclude: true },
+    });
+    expect(new Set([plain, strict, reasoning]).size).toBe(3);
   });
 });

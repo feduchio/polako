@@ -186,7 +186,14 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
           gates,
           ...(corpus === undefined ? {} : { corpus }),
         });
-        gated.push(applyGateResult(ctx, candidate, headCommit, gateResult));
+        const diff = await checkout.git.diff(candidate.baseCheckpointHash, headCommit);
+        const diffRef = ctx.store.artifacts.put(
+          diff,
+          "candidate_diff",
+          `${candidate.baseCheckpointHash}..${headCommit}`,
+          ctx.clock.now(),
+        );
+        gated.push({ ...applyGateResult(ctx, candidate, headCommit, gateResult), diffRef });
       } finally {
         await checkout.destroy().catch(() => undefined);
       }
@@ -209,7 +216,7 @@ export function createComparingDriver(options: ComparingDriverOptions = {}): Pha
     const baseline = ctx.store.repos.baselines.listByRun(ctx.run.id)[0];
     if (baseline === undefined) throw new Error("baseline missing for candidate comparison");
 
-    const sources = eligible.map((candidate) => toTournamentSource(candidate, baseline));
+    const sources = eligible.map((candidate) => toTournamentSource(ctx, candidate, baseline));
     const strategy = await resolveVerifierStrategy(ctx, task, options);
     try {
       return await finishComparing(ctx, task, eligible, sources, baseline, strategy);
@@ -231,7 +238,13 @@ async function finishComparing(
     candidates: sources,
     baseline,
     strategy,
-    context: { runId: ctx.run.id, task: task.description, acceptance: task.acceptance },
+    context: {
+      runId: ctx.run.id,
+      taskId: task.id,
+      taskKind: task.kind,
+      task: task.description,
+      acceptance: task.acceptance,
+    },
     pivotFrom: ctx.config.verifier.pivotTournamentFrom,
     pivots: 2,
     repeats: ctx.config.verifier.repeats,
@@ -250,6 +263,12 @@ async function finishComparing(
       fallback,
       client,
       logprobScheme: selection.logprobScheme ?? null,
+      claimedLogprobScheme: selection.claimedLogprobScheme ?? null,
+      scoreScheme: selection.scoreScheme ?? null,
+      models: selection.models ?? [],
+      requestedEvaluations: selection.requestedEvaluations ?? 0,
+      completedEvaluations: selection.completedEvaluations ?? 0,
+      fallbackReason: selection.fallbackReason ?? null,
       criteria: selection.criteria ?? [],
       nComparisons: selection.nComparisons ?? selection.evidence.length,
       frontier: selection.frontier,
@@ -281,6 +300,12 @@ async function finishComparing(
     fallback,
     client,
     logprobScheme: selection.logprobScheme ?? null,
+    claimedLogprobScheme: selection.claimedLogprobScheme ?? null,
+    scoreScheme: selection.scoreScheme ?? null,
+    models: selection.models ?? [],
+    requestedEvaluations: selection.requestedEvaluations ?? 0,
+    completedEvaluations: selection.completedEvaluations ?? 0,
+    fallbackReason: selection.fallbackReason ?? null,
     criteria: selection.criteria ?? [],
     nComparisons: selection.nComparisons ?? selection.evidence.length,
     eligible: eligible.map((candidate) => candidate.id),
@@ -467,7 +492,11 @@ function handleNoComparisonWinner(
   return { status: "complete", nextPhase: "NEEDS_HUMAN" };
 }
 
-function toTournamentSource(candidate: Candidate, baseline: BaselineSnapshot): TournamentSourceCandidate {
+function toTournamentSource(
+  ctx: PhaseContext,
+  candidate: Candidate,
+  baseline: BaselineSnapshot,
+): TournamentSourceCandidate {
   const gateReport = candidate.gateReport;
   const checks = gateReport?.checks ?? [];
   return {
@@ -479,6 +508,7 @@ function toTournamentSource(candidate: Candidate, baseline: BaselineSnapshot): T
       regression: compareToBaseline(baseline, checks),
       passed: gateReport.passed,
     },
+    ...(candidate.diffRef === null ? {} : { diff: ctx.store.artifacts.getText(candidate.diffRef.sha256) }),
   };
 }
 

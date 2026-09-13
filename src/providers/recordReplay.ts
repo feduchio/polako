@@ -35,6 +35,8 @@ export class RecordReplayProvider implements ProviderAdapter {
       messages: req.messages,
       tools: req.tools ?? null,
       responseFormat: req.responseFormat ?? "text",
+      responseSchema: req.responseSchema ?? null,
+      reasoning: req.reasoning ?? null,
       maxTokens: req.maxTokens ?? null,
       temperature: req.temperature ?? null,
     });

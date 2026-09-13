@@ -44,6 +44,77 @@ describe("probeModelCapabilities", () => {
     expect(result.info.capabilities.supportsJson).toBe(true);
   });
 
+  it("probes review and score schemas independently and fail-closed", async () => {
+    const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("m", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const purposes: string[] = [];
+    const result = await probeModelCapabilities(provider, model("m"), {
+      runId: RUN,
+      strictComplete: (request) => {
+        purposes.push(request.metadata.purpose);
+        return Promise.resolve({
+          message: {
+            role: "assistant",
+            content: request.metadata.purpose.endsWith("review")
+              ? '{"findings":[]}'
+              : '{"scoreA":4,"scoreB":"bad"}',
+          },
+          usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+          finishReason: "stop",
+          latencyMs: 1,
+        });
+      },
+    });
+    expect(purposes).toEqual(["capability_probe_strict_review", "capability_probe_strict_score"]);
+    expect(result.checks.strictReview.verdict).toBe("supported");
+    expect(result.checks.strictScore.verdict).toBe("unsupported");
+    expect(result.info.capabilities.supportsStrictReviewSchema).toBe(true);
+    expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+  });
+
+  it("does not inherit strict support from advertisements on timeout", async () => {
+    const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("m", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const result = await probeModelCapabilities(provider, model("m", {
+      ...FAKE_CAPABILITIES.strong,
+      supportsStrictReviewSchema: true,
+      supportsStrictScoreSchema: true,
+    }), {
+      runId: RUN,
+      strictComplete: () => Promise.reject(new ProviderError("p", "timeout", "timed out")),
+    });
+    expect(result.checks.strictReview.verdict).toBe("inconclusive");
+    expect(result.checks.strictScore.verdict).toBe("inconclusive");
+    expect(result.info.capabilities.supportsStrictReviewSchema).toBe(false);
+    expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+  });
+
+  it("reuses cached strict probe results without another strict call", async () => {
+    const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("m", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    let strictCalls = 0;
+    const result = await probeModelCapabilities(provider, model("m"), {
+      runId: RUN,
+      cachedStrict: { review: true, score: false },
+      strictComplete: () => {
+        strictCalls++;
+        throw new Error("must not run");
+      },
+    });
+    expect(strictCalls).toBe(0);
+    expect(result.info.capabilities.supportsStrictReviewSchema).toBe(true);
+    expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+  });
+
   it("treats finish=stop prose without tool_calls as inconclusive and preserves declared supportsTools", async () => {
     const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.frontier }]);
     provider.script("m", [

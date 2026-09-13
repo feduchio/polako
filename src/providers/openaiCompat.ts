@@ -63,7 +63,15 @@ export class OpenAICompatProvider implements ProviderAdapter {
     if (request.tools && request.tools.length > 0) {
       payload["tools"] = request.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
     }
-    if (request.responseFormat === "json") payload["response_format"] = { type: "json_object" };
+    if (request.responseSchema !== undefined) {
+      payload["response_format"] = {
+        type: "json_schema",
+        json_schema: request.responseSchema,
+      };
+    } else if (request.responseFormat === "json") {
+      payload["response_format"] = { type: "json_object" };
+    }
+    if (request.reasoning !== undefined) payload["reasoning"] = request.reasoning;
     if (request.maxTokens !== undefined) payload["max_tokens"] = request.maxTokens;
     if (request.temperature !== undefined) payload["temperature"] = request.temperature;
 

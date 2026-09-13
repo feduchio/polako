@@ -203,6 +203,11 @@ describe("B2 production candidate drivers", () => {
     expect(candidates.find((candidate) => candidate.state === "PASSED_GATES")?.gateReport?.passed).toBe(true);
     expect(candidates.find((candidate) => candidate.state === "FAILED_GATES")?.gateReport?.passed).toBe(false);
     expect(candidates.every((candidate) => (candidate.gateReport?.diffStat.files ?? 0) > 0)).toBe(true);
+    expect(candidates.every((candidate) => candidate.diffRef?.kind === "candidate_diff")).toBe(true);
+    for (const candidate of candidates) {
+      if (candidate.diffRef === null) throw new Error("missing candidate diff artifact");
+      expect(store.artifacts.getText(candidate.diffRef.sha256)).toContain("diff --git");
+    }
   });
 
   it("INTEGRATING advances the run head only when integration gates pass", async () => {

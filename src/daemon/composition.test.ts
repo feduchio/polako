@@ -24,6 +24,7 @@ import {
   installProductionDrivers,
   promoteEligibleTasksToReady,
   resolveEnsembleAlternatives,
+  resolveProductionVerifier,
 } from "./composition.js";
 import { selectEligibleEnsemble } from "../convergence/pathology/index.js";
 import { createInvestigationTask, createTaskFromRequirement } from "../domain/task.js";
@@ -78,6 +79,7 @@ describe("production composition", () => {
     const freeJson = {
       ...FAKE_CAPABILITIES.strong,
       supportsJson: true,
+      supportsStrictReviewSchema: true,
       inputCostPerM: 0,
       outputCostPerM: 0,
     };
@@ -108,6 +110,89 @@ describe("production composition", () => {
     });
     expect(alternative).not.toBeNull();
     expect(alternative).not.toEqual(options[0]?.ensemble);
+  });
+
+  it("builds the default empirical verifier from two free strict families through the broker", async () => {
+    const config = defaultConfig();
+    const capabilities = {
+      ...FAKE_CAPABILITIES.strong,
+      supportsStrictScoreSchema: true,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const provider = new ScriptedProvider("scores", [
+      { name: "a", capabilities: { ...capabilities, family: "family-a" } },
+      { name: "b", capabilities: { ...capabilities, family: "family-b" } },
+    ]);
+    const responses = Array.from({ length: 4 }, (_, index) => ({
+      kind: "reply" as const,
+      content: JSON.stringify(index % 2 === 0 ? { scoreA: 4, scoreB: 0 } : { scoreA: 0, scoreB: 4 }),
+    }));
+    provider.script("a", responses);
+    provider.script("b", responses);
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+    });
+    await deps.catalog.discover();
+    const engine = new RunEngine({
+      store,
+      clock,
+      scheduler: new Scheduler(store, clock, { workerId: "w", laneLimits: config.lanes, leaseMs: 60_000 }),
+      config,
+      assertProjectClean: () => undefined,
+    }, false);
+    const run = engine.createRun({ projectPath: dir });
+    const interpretationId = id("interp", clock.now());
+    const task = createTaskFromRequirement(interpretationId, "R1", {
+      id: id("task", clock.now()),
+      runId: run.id,
+      title: "Compare",
+      description: "one criterion",
+      kind: "bugfix",
+      acceptance: ["works"],
+      complexity: "normal",
+      baseCheckpointHash: "a".repeat(40),
+      now: clock.now(),
+    });
+    const ctx = {
+      run,
+      store,
+      scheduler: new Scheduler(store, clock, { workerId: "w2", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock,
+      config,
+    } satisfies PhaseContext;
+    const strategy = await resolveProductionVerifier(deps, ctx, task);
+    const result = await strategy.selectFrontier?.([
+      {
+        id: "a",
+        diff: "diff --git a/a b/a\n+x\n",
+        metrics: { candidateId: "a", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] },
+      },
+      {
+        id: "b",
+        diff: "diff --git a/b b/b\n+y\n",
+        metrics: { candidateId: "b", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] },
+      },
+    ], {
+      runId: run.id,
+      taskId: task.id,
+      taskKind: task.kind,
+      task: task.description,
+      acceptance: task.acceptance,
+    });
+    expect(result?.backend).toBe("empirical");
+    expect(result?.requestedEvaluations).toBe(8);
+    expect(provider.calls).toHaveLength(8);
+    const calls = store.events.list(run.id, { types: ["model.call"] });
+    expect(calls).toHaveLength(8);
+    expect(calls.every((event) =>
+      event.payload["role"] === "verifier" &&
+      event.payload["purpose"] === "empirical_pair_score" &&
+      event.payload["taskId"] === task.id)).toBe(true);
   });
 
   it("buildProductionDeps discovers models with capability probes", async () => {

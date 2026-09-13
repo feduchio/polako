@@ -57,6 +57,7 @@ export interface RecordedBenchmarkCell extends BenchmarkCellResult {
 
 export interface ReviewerBenchmarkReport {
   seed: number;
+  transportMode: "legacy_json_object" | "strict_schema" | null;
   corpusSha256: string;
   requested: number;
   partial: boolean;
@@ -77,6 +78,7 @@ export interface RunReviewerBenchmarkInput {
   reviewers: readonly [BenchmarkReviewer, BenchmarkReviewer];
   seed: number;
   liveAbort?: boolean;
+  transportMode?: "legacy_json_object" | "strict_schema";
   cellTimeoutMs?: number;
   onCell?: (cell: RecordedBenchmarkCell, completed: number, requested: number) => void;
   pairs?: readonly ReviewerBenchmarkPair[];
@@ -118,7 +120,12 @@ export async function runReviewerBenchmark(
   let partial = false;
 
   for (const scheduled of schedule) {
-    const result = await runCell(scheduled, input.protocols, input.cellTimeoutMs ?? 30_000);
+    const result = await runCell(
+      scheduled,
+      input.protocols,
+      input.cellTimeoutMs ?? 30_000,
+      input.transportMode ?? "strict_schema",
+    );
     cells.push(result);
     input.onCell?.(result, cells.length, schedule.length);
     if (
@@ -131,7 +138,14 @@ export async function runReviewerBenchmark(
     }
   }
 
-  return buildReport(input.seed, benchmarkCorpusSha256(input.pairs ?? REVIEWER_BENCHMARK_PAIRS), schedule.length, partial, cells);
+  return buildReport(
+    input.seed,
+    benchmarkCorpusSha256(input.pairs ?? REVIEWER_BENCHMARK_PAIRS),
+    schedule.length,
+    partial,
+    cells,
+    input.transportMode ?? "strict_schema",
+  );
 }
 
 export function buildBenchmarkSchedule(
@@ -185,7 +199,7 @@ export function renderReviewerBenchmark(report: ReviewerBenchmarkReport): string
   const schemaRate = ratioText(report.team.schemaFailures, report.team.scheduled);
   const transportRate = ratioText(report.team.transportFailures, report.team.scheduled);
   const lines = [
-    `Reviewer benchmark: ${String(report.team.completed)}/${String(report.requested)} completed cells${report.partial ? " (partial)" : ""}`,
+    `Reviewer benchmark: ${String(report.team.completed)}/${String(report.requested)} completed cells${report.partial ? " (partial)" : ""} [transport=${report.transportMode ?? "rescore"}]`,
     ...Object.entries(report.byModel).map(([model, score]) =>
       `${model}: ${formatRate(score.primaryRecall)} primary recall, ${formatRate(score.strictIdRecall)} strict-id recall, ${formatRate(score.falsePositiveRate)} false positives, ${formatRate(report.byModelDiscrimination[model]?.rate ?? null)} pair discrimination, ${String(score.inputTokens)} input + ${String(score.outputTokens)} output tokens, ${formatNumber(score.outputTokensPerPrimaryHit)} output tokens/hit`),
     `team: ${formatRate(report.team.primaryRecall)} primary recall, ${formatRate(report.team.strictIdRecall)} strict-id recall, ${formatRate(report.team.falsePositiveRate)} false positives, ${formatRate(report.teamDiscrimination.rate)} pair discrimination`,
@@ -229,7 +243,7 @@ export async function rescoreReviewerBenchmark(
       reviewer: { provider: replay, model: input.model, family: input.family },
       repetition: oracle.repetition,
     };
-    const cell = await runCell(scheduled, input.protocols, 30_000);
+    const cell = await runCell(scheduled, input.protocols, 30_000, "strict_schema");
     if (
       cell.request?.messages[0]?.content !== packet.system ||
       cell.request.messages[1]?.content !== packet.user
@@ -241,13 +255,14 @@ export async function rescoreReviewerBenchmark(
   const usedPairs = [...new Set(cells.map((cell) => cell.oracle.pairId))]
     .map((pairId) => REVIEWER_BENCHMARK_PAIRS.find((pair) => pair.pairId === pairId))
     .filter((pair): pair is ReviewerBenchmarkPair => pair !== undefined);
-  return buildReport(input.seed, benchmarkCorpusSha256(usedPairs), cells.length, false, cells);
+  return buildReport(input.seed, benchmarkCorpusSha256(usedPairs), cells.length, false, cells, null);
 }
 
 async function runCell(
   scheduled: ScheduledBenchmarkCell,
   protocols: ProtocolRegistry,
   timeoutMs: number,
+  responseMode: "legacy_json_object" | "strict_schema",
 ): Promise<RecordedBenchmarkCell> {
   const root = mkdtempSync(join(tmpdir(), "polish-review-benchmark-"));
   const path = join(root, scheduled.pair.path);
@@ -283,6 +298,7 @@ async function runCell(
       protocols,
       repositoryRoot: root,
       now: scheduled.repetition,
+      responseMode,
     });
     findings = result.findings;
     outcome = findings.length === 0 ? "completed_empty" : "completed_with_findings";
@@ -311,6 +327,7 @@ function buildReport(
   requested: number,
   partial: boolean,
   cells: RecordedBenchmarkCell[],
+  transportMode: "legacy_json_object" | "strict_schema" | null,
 ): ReviewerBenchmarkReport {
   const byModel = Object.fromEntries(
     [...new Set(cells.map((cell) => modelKey(cell.model)))].sort().map((key) => [
@@ -329,6 +346,7 @@ function buildReport(
   const oracleJsonl = cells.map((cell) => canonicalJsonLine(cell.oracle)).join("");
   return {
     seed,
+    transportMode,
     corpusSha256,
     requested,
     partial,

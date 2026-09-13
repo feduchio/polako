@@ -10,6 +10,8 @@ import { ModelCatalog } from "./catalog.js";
 import { ModelObservationRepository } from "./observations.js";
 import { BudgetTracker, QuotaTracker } from "./quota.js";
 import { SecretStore } from "./secrets.js";
+import { hashJson } from "../shared/hash.js";
+import { EMPIRICAL_SCORE_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "./responseSchemas.js";
 
 describe("A12 global model observations", () => {
   let dir: string;
@@ -89,5 +91,35 @@ describe("A12 global model observations", () => {
     expect(catalog.get(model)?.stats.calls).toBe(2);
     expect(catalog.get(model)?.stats.failures).toBe(1);
     expect(catalog.get(model)?.stats.quality).toBeCloseTo(0.36);
+  });
+
+  it("restores only current strict-schema probe observations", () => {
+    const observations = new ModelObservationRepository(store);
+    observations.recordStrictProbe(model, {
+      schema: "review",
+      schemaHash: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
+      supported: true,
+      at: 10,
+    });
+    observations.recordStrictProbe(model, {
+      schema: "score",
+      schemaHash: "b".repeat(64),
+      supported: true,
+      at: 11,
+    });
+    observations.recordStrictProbe(model, {
+      schema: "score",
+      schemaHash: hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA),
+      supported: false,
+      at: 12,
+    });
+    observations.restoreCatalog(catalog);
+    expect(catalog.get(model)?.info.capabilities.supportsStrictReviewSchema).toBe(true);
+    expect(catalog.get(model)?.info.capabilities.supportsStrictScoreSchema).toBe(false);
+    expect(observations.latestStrictProbe(
+      model,
+      "score",
+      hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA),
+    )?.supported).toBe(false);
   });
 });

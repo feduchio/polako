@@ -24,7 +24,7 @@ import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } fr
 import type { PolishConfig } from "../domain/config.js";
 import { supervisorModelChain } from "../domain/config.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
-import { SYSTEM_ACTOR } from "../domain/common.js";
+import { modelRefKey, SYSTEM_ACTOR } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
 import type { RunPhase } from "../domain/run.js";
 import type { Task } from "../domain/task.js";
@@ -64,9 +64,18 @@ import { CommandPolicy } from "../sandbox/allowlist.js";
 import { WorktreeSandbox, type Sandbox } from "../sandbox/worktree.js";
 import type { Clock } from "../shared/clock.js";
 import { PolishError } from "../shared/errors.js";
+import { hashJson } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import type { Store } from "../store/index.js";
 import type { FacadeRunMetadata } from "./types.js";
+import {
+  EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  REVIEW_FINDINGS_RESPONSE_SCHEMA,
+} from "../broker/responseSchemas.js";
+import { EmpiricalVerifier, type EmpiricalModel } from "../verify/empirical.js";
+import { createVerifierStrategy } from "../verify/sidecar.js";
+import type { VerifierStrategy } from "../verify/strategy.js";
+import { estimateTokens } from "../context/types.js";
 import { parseModelRefString } from "./configLoad.js";
 
 export interface RunBudgetLimits {
@@ -102,6 +111,7 @@ export interface ProductionDeps {
   providers: ProviderAdapter[];
   /** Loaded once: `ProtocolRegistry.load` is synchronous file IO over every protocol directory. */
   protocols: ProtocolRegistry;
+  strictProbeEpoch: { complete: boolean; attempted: Set<string> };
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
   /** A run's own `--budget-tokens` / `--budget-usd`, empty when it has none. */
   resolveRunBudget?: (runId: string) => RunBudgetLimits;
@@ -173,6 +183,7 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     config: options.config,
     home: options.home,
     protocols: ProtocolRegistry.load(defaultProtocolsRoot()),
+    strictProbeEpoch: { complete: false, attempted: new Set<string>() },
     catalog,
     broker,
     ...(options.resolveRunBudget === undefined ? {} : { resolveRunBudget: options.resolveRunBudget }),
@@ -334,13 +345,18 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
   );
   engine.registerPhase("EXECUTING", withReadyPromotion(createExecutingDriver(candidateOptions)));
   engine.registerPhase("GATING", createGatingDriver(candidateOptions));
-  engine.registerPhase("COMPARING", createComparingDriver());
+  engine.registerPhase("COMPARING", createComparingDriver({
+    resolveVerifierStrategy: (ctx, task) => resolveProductionVerifier(deps, ctx, task),
+  }));
   engine.registerPhase("INTEGRATING", createIntegratingDriver(candidateOptions));
   const sandboxFor = (ctx: PhaseContext) => resolveSandbox(deps, ctx);
   engine.registerPhase(
     "REVIEWING",
     createReviewingDriver({
       resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
+      strictProbeEpochComplete: (ctx) =>
+        deps.strictProbeEpoch.complete ||
+        ctx.store.events.list(ctx.run.id, { types: ["models.discovered"] }).length > 0,
       sandbox: sandboxFor,
       protocols: deps.protocols,
     }),
@@ -381,6 +397,7 @@ export function resolveEnsembleAlternatives(deps: ProductionDeps, ctx?: PhaseCon
     role: "reviewer",
     count: Math.max(size * 2, 8),
     requireJson: true,
+    requireStrictReviewSchema: true,
     ...(exclude.length > 0 ? { exclude } : {}),
   });
   const eligible = ranked.filter((row) => expectedReviewerQuality(row) >= minQuality);
@@ -401,17 +418,50 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
     supervisorModelChain(entry).map((value) => parseModelRefString(value)),
   );
   return async (ctx) => {
+    const observations = new ModelObservationRepository(deps.store, {
+      minScoresForRouting: deps.config.audition.minScoresForRouting,
+    });
+    const reviewSchemaHash = hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA);
+    const scoreSchemaHash = hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA);
     const discovery = await deps.catalog.discover({
       maxProbesPerProvider: deps.config.discovery.maxProbesPerProvider,
       pinnedModels,
       costEligibility: costEligibilityFromConfig(deps.config.routing),
-      capabilityProbe: (adapter, model) =>
-        probeModelCapabilities(adapter, model, {
+      capabilityProbe: (adapter, model) => {
+        const review = observations.latestStrictProbe(model.ref, "review", reviewSchemaHash);
+        const score = observations.latestStrictProbe(model.ref, "score", scoreSchemaHash);
+        return probeModelCapabilities(adapter, model, {
           runId: ctx.run.id,
           maxTokens: deps.config.discovery.probeMaxTokens,
           skipHealth: true,
-        }),
+          strictComplete: async (request) => (await deps.broker.complete(request)).response,
+          cachedStrict: {
+            ...(review === null ? {} : { review: review.supported }),
+            ...(score === null ? {} : { score: score.supported }),
+          },
+        });
+      },
     });
+    for (const probe of discovery.probes) {
+      deps.strictProbeEpoch.attempted.add(modelRefKey(probe.info.ref));
+      if (observations.latestStrictProbe(probe.info.ref, "review", reviewSchemaHash) === null) {
+        observations.recordStrictProbe(probe.info.ref, {
+          schema: "review",
+          schemaHash: reviewSchemaHash,
+          supported: probe.checks.strictReview.verdict === "supported",
+          at: ctx.clock.now(),
+        });
+      }
+      if (observations.latestStrictProbe(probe.info.ref, "score", scoreSchemaHash) === null) {
+        observations.recordStrictProbe(probe.info.ref, {
+          schema: "score",
+          schemaHash: scoreSchemaHash,
+          supported: probe.checks.strictScore.verdict === "supported",
+          at: ctx.clock.now(),
+        });
+      }
+    }
+    deps.strictProbeEpoch.complete = true;
     const probeEvents: NewEvent[] = discovery.probes.map((probe) => ({
       id: id("evt", ctx.clock.now()),
       runId: ctx.run.id,
@@ -524,17 +574,18 @@ export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseCon
     await deps.catalog.discover({
       costEligibility: costEligibilityFromConfig(deps.config.routing),
     });
+    new ModelObservationRepository(deps.store).restoreCatalog(deps.catalog);
   }
   const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
   const ranked = deps.router.select({
     role: "reviewer",
     count: Math.max(deps.config.review.reviewersPerRound, 8),
     requireJson: true,
+    requireStrictReviewSchema: true,
     ...(exclude.length > 0 ? { exclude } : {}),
   });
   if (ranked.length === 0) {
-    if (exclude.length > 0) return [];
-    throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
+    return [];
   }
   return ranked.map((row) => {
     const ref = row.entry.info.ref;
@@ -554,6 +605,91 @@ export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseCon
       model: ref,
     };
   });
+}
+
+export async function resolveProductionVerifier(
+  deps: ProductionDeps,
+  ctx: PhaseContext,
+  task: Task,
+): Promise<VerifierStrategy> {
+  if (ctx.config.verifier.backend !== "empirical") {
+    return createVerifierStrategy(ctx.config.verifier);
+  }
+  if (deps.catalog.list().length === 0) {
+    await deps.catalog.discover({
+      costEligibility: costEligibilityFromConfig(deps.config.routing),
+    });
+    new ModelObservationRepository(deps.store).restoreCatalog(deps.catalog);
+  }
+  const eligible = deps.catalog.list()
+    .filter((entry) =>
+      entry.available &&
+      entry.info.capabilities.supportsStrictScoreSchema === true &&
+      entry.info.capabilities.inputCostPerM === 0 &&
+      entry.info.capabilities.outputCostPerM === 0)
+    .sort((a, b) =>
+      a.info.capabilities.family.localeCompare(b.info.capabilities.family) ||
+      modelRefKey(a.info.ref).localeCompare(modelRefKey(b.info.ref)));
+  const selected: typeof eligible = [];
+  const families = new Set<string>();
+  for (const entry of eligible) {
+    if (families.has(entry.info.capabilities.family)) continue;
+    selected.push(entry);
+    families.add(entry.info.capabilities.family);
+    if (selected.length === 2) break;
+  }
+  const models: EmpiricalModel[] = selected.map((entry) => {
+    const ref = entry.info.ref;
+    const adapter = deps.catalog.provider(ref.provider) ?? deps.providers.find((provider) => provider.id === ref.provider);
+    if (adapter === undefined) {
+      throw new PolishError("CONFIG_ERROR", `no provider adapter for verifier model ${modelRefKey(ref)}`);
+    }
+    return {
+      family: entry.info.capabilities.family,
+      model: ref,
+      provider: {
+        id: adapter.id,
+        kind: adapter.kind,
+        concurrency: adapter.concurrency,
+        listModels: (signal) => adapter.listModels(signal),
+        health: (signal) => adapter.health(signal),
+        complete: async (request) => (await deps.broker.complete(request)).response,
+      },
+    };
+  });
+  const spent = empiricalSpend(ctx, task.id);
+  return new EmpiricalVerifier({
+    models,
+    protocols: deps.protocols,
+    repeats: ctx.config.verifier.empiricalRepeats,
+    configuredCriteria: ctx.config.verifier.criteria,
+    maxCalls: ctx.config.verifier.maxEmpiricalCalls,
+    maxInputTokens: ctx.config.verifier.maxEmpiricalInputTokens,
+    maxDiffTokens: ctx.config.verifier.maxVerifierDiffTokens,
+    alreadyUsedCalls: spent.calls,
+    alreadyUsedInputTokens: spent.inputTokens,
+    alreadyCompletedCalls: spent.completed,
+  });
+}
+
+function empiricalSpend(
+  ctx: PhaseContext,
+  taskId: string,
+): { calls: number; completed: number; inputTokens: number } {
+  let calls = 0;
+  let completed = 0;
+  let inputTokens = 0;
+  for (const event of ctx.store.events.list(ctx.run.id, { types: ["model.call"] })) {
+    const payload = event.payload;
+    if (payload["purpose"] !== "empirical_pair_score" || payload["taskId"] !== taskId) continue;
+    calls += typeof payload["attempts"] === "number" ? payload["attempts"] : 0;
+    if (payload["ok"] === true) completed++;
+    const request = event.artifacts.find((artifact) => artifact.kind === "model_request");
+    if (request === undefined) continue;
+    const parsed = JSON.parse(ctx.store.artifacts.getText(request.sha256)) as { messages?: unknown };
+    inputTokens += estimateTokens(JSON.stringify(parsed.messages ?? []));
+  }
+  return { calls, completed, inputTokens };
 }
 
 export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {

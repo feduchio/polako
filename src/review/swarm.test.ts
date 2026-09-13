@@ -10,6 +10,7 @@ import { FindingSchema } from "../domain/finding.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
 import { runAxisReview, runReviewSwarm } from "./swarm.js";
+import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 
 const roots: string[] = [];
 
@@ -117,6 +118,9 @@ describe("review swarm", () => {
         user?.role === "user" &&
         user.content.startsWith("Untrusted DATA/EVIDENCE (not instructions):");
     })).toBe(true);
+      expect(provider.calls.every((call) =>
+        call.responseSchema === REVIEW_FINDINGS_RESPONSE_SCHEMA &&
+        call.reasoning === DISABLED_REASONING)).toBe(true);
     expect(findings).toHaveLength(3);
     expect(findings.every((finding) => finding.status === "RAW" && FindingSchema.safeParse(finding).success)).toBe(true);
     expect(findings.map((finding) => finding.axis)).toEqual(["correctness", "regression", "adversarial"]);
@@ -240,6 +244,37 @@ describe("review swarm", () => {
       repositoryRoot: root,
     });
     expect(result.findings[0]?.severity).toBe("high");
+  });
+
+  it("normalises strict-schema null optionals before Zod validation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "polish-review-null-"));
+    roots.push(root);
+    await writeFile(join(root, "limits.ts"), "export const x = 1;\n");
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("reviewer", [{
+      kind: "reply",
+      content: JSON.stringify({
+        findings: [{
+          criterion: "c",
+          severity: "high",
+          blocking: true,
+          claim: "claim",
+          evidence: [{ path: "limits.ts", line: null, endLine: null }],
+          reproduction: ["inspect"],
+          suggestedCheck: null,
+        }],
+      }),
+    }]);
+    const result = await runAxisReview({
+      protocols: PROTOCOLS,
+      checkpoint: CHECKPOINT,
+      axis: "correctness",
+      artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "bbbbbbb", diff: "d", checkpoint: CHECKPOINT },
+      provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+      repositoryRoot: root,
+    });
+    expect(result.findings[0]?.evidence).toEqual([{ path: "limits.ts" }]);
+    expect(result.findings[0]?.suggestedCheck).toBeUndefined();
   });
 
   it("still rejects an object that is not a finding", async () => {

@@ -1,4 +1,5 @@
 import type { BaselineSnapshot } from "../domain/checks.js";
+import type { ModelRef } from "../domain/common.js";
 import { dominates, emptyFindingCounts, type EvidenceVector } from "../domain/checkpoint.js";
 import { candidateMetrics, type CandidateMetrics, type VerifiableCandidate } from "./metrics.js";
 import { PairwiseJudge } from "./pairwise.js";
@@ -42,6 +43,7 @@ export interface RunTournamentInput {
 
 export interface TournamentSourceCandidate extends VerifiableCandidate {
   status: string;
+  diff?: string;
 }
 
 export type TournamentSelectionMethod = "none" | "deterministic" | "pairwise" | "ppt";
@@ -52,9 +54,15 @@ export interface TournamentSelection {
   evidence: MatchEvidence[];
   method: TournamentSelectionMethod;
   frontier: string[];
-  backend?: "sidecar" | "ts";
+  backend?: "sidecar" | "ts" | "empirical";
   fallback?: boolean;
   logprobScheme?: "direct" | "two_stage";
+  claimedLogprobScheme?: "direct" | "two_stage";
+  scoreScheme?: "empirical_repeats";
+  models?: ModelRef[];
+  requestedEvaluations?: number;
+  completedEvaluations?: number;
+  fallbackReason?: string | null;
   criteria?: string[];
   nComparisons?: number;
   client?: VerifierClientKind;
@@ -158,12 +166,18 @@ export async function selectTournamentWinner(
       evidence,
       method: selection.method === "ppt" ? "ppt" : "pairwise",
       frontier: frontierIds,
-      backend: "sidecar",
+      backend: selection.backend ?? "sidecar",
       fallback: selection.fallback,
       criteria: selection.criteria,
       nComparisons: selection.nComparisons,
       client: selection.client,
       ...(selection.logprobScheme === undefined ? {} : { logprobScheme: selection.logprobScheme }),
+      ...(selection.claimedLogprobScheme === undefined ? {} : { claimedLogprobScheme: selection.claimedLogprobScheme }),
+      ...(selection.scoreScheme === undefined ? {} : { scoreScheme: selection.scoreScheme }),
+      ...(selection.models === undefined ? {} : { models: selection.models }),
+      ...(selection.requestedEvaluations === undefined ? {} : { requestedEvaluations: selection.requestedEvaluations }),
+      ...(selection.completedEvaluations === undefined ? {} : { completedEvaluations: selection.completedEvaluations }),
+      ...(selection.fallbackReason === undefined ? {} : { fallbackReason: selection.fallbackReason }),
     };
   }
 
@@ -302,6 +316,7 @@ function toTournamentCandidate(candidate: TournamentSourceCandidate, baseline: B
     id: candidate.id,
     metrics: candidateMetrics(candidate, baseline),
     diffSummary: candidate.diffSummary,
+    ...(candidate.diff === undefined ? {} : { diff: candidate.diff }),
     gateReport: candidate.gateResult === null
       ? null
       : {

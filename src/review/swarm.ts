@@ -16,6 +16,7 @@ import {
 import { sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
+import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 
 export interface ReviewProvider {
   provider: ProviderAdapter;
@@ -38,6 +39,7 @@ export interface RunAxisReviewInput {
   protocols: ProtocolRegistry;
   repositoryRoot?: string;
   now?: number;
+  responseMode?: "legacy_json_object" | "strict_schema";
 }
 
 export interface RunAxisReviewResult {
@@ -70,7 +72,12 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
       { role: "system", content: reviewerSystemPrompt(input.protocols, input.axis) },
       { role: "user", content: userContent },
     ],
-    responseFormat: "json",
+      ...(input.responseMode === "legacy_json_object"
+        ? { responseFormat: "json" as const }
+        : {
+            responseSchema: REVIEW_FINDINGS_RESPONSE_SCHEMA,
+            reasoning: DISABLED_REASONING,
+          }),
     temperature: 0,
     metadata: {
       runId: input.checkpoint.runId,
@@ -192,6 +199,17 @@ function normalizeFinding(value: unknown): unknown {
   // discarded an otherwise valid finding.
   const severity = out["severity"];
   if (typeof severity === "string") out["severity"] = severity.trim().toLowerCase();
+  if (out["suggestedCheck"] === null) delete out["suggestedCheck"];
+  if (Array.isArray(out["evidence"])) {
+    const evidenceItems: unknown[] = out["evidence"];
+    out["evidence"] = evidenceItems.map((item) => {
+      if (!isRecord(item)) return item;
+      const ref = { ...item };
+      if (ref["line"] === null) delete ref["line"];
+      if (ref["endLine"] === null) delete ref["endLine"];
+      return ref;
+    });
+  }
   return out;
 }
 

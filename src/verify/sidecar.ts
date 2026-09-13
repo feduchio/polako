@@ -56,6 +56,7 @@ export interface VerifierProvenance {
   fallback: boolean;
   client: VerifierClientKind;
   logprobScheme?: "direct" | "two_stage";
+  claimedLogprobScheme?: "direct" | "two_stage";
   criteria: string[];
   nComparisons: number;
 }
@@ -256,14 +257,14 @@ export class VerifierAdapter implements VerifierStrategy {
       nComparisons,
       client: this.clientKind(),
     };
-    if (logprobScheme !== undefined) selection.logprobScheme = logprobScheme;
+    if (logprobScheme !== undefined) selection.claimedLogprobScheme = logprobScheme;
     this.lastProvenance = {
       backend: "sidecar",
       fallback,
       client: this.clientKind(),
       criteria: resolvedCriteria,
       nComparisons,
-      ...(logprobScheme === undefined ? {} : { logprobScheme }),
+      ...(logprobScheme === undefined ? {} : { claimedLogprobScheme: logprobScheme }),
     };
     return selection;
   }
@@ -470,7 +471,7 @@ export class VerifierAdapter implements VerifierStrategy {
 
 export function createVerifierStrategy(
   verifier: {
-    backend: "ts" | "sidecar";
+    backend: "ts" | "sidecar" | "empirical";
     repeats: number;
     granularity: number;
     criteria: string[];
@@ -479,7 +480,7 @@ export function createVerifierStrategy(
   options: VerifierSidecarOptions = {},
 ): VerifierStrategy {
   const fallback = options.fallback ?? new PairwiseJudge();
-  if (verifier.backend === "ts") return fallback;
+  if (verifier.backend === "ts" || verifier.backend === "empirical") return fallback;
   return new VerifierAdapter({
     ...options,
     fallback,
@@ -570,7 +571,7 @@ function provenanceFrom(
     client,
     criteria: meta.criteria.length > 0 ? meta.criteria : criteria,
     nComparisons: meta.nComparisons,
-    ...(meta.logprobScheme === undefined ? {} : { logprobScheme: meta.logprobScheme }),
+    ...(meta.logprobScheme === undefined ? {} : { claimedLogprobScheme: meta.logprobScheme }),
   };
 }
 

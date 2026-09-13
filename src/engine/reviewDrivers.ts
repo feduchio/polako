@@ -69,6 +69,7 @@ import type { Sandbox, SandboxHandle } from "../sandbox/worktree.js";
 
 export interface ReviewDriverOptions {
   resolveReviewers?: (ctx: PhaseContext) => ReviewProvider[] | Promise<ReviewProvider[]>;
+  strictProbeEpochComplete?: (ctx: PhaseContext) => boolean;
   resolveAxes?: (ctx: PhaseContext) => ReviewAxis[] | Promise<ReviewAxis[]>;
   sandbox?: Sandbox | ((ctx: PhaseContext) => Sandbox | Promise<Sandbox>);
   policy?: CommandPolicy | ((ctx: PhaseContext) => CommandPolicy | Promise<CommandPolicy>);
@@ -127,7 +128,19 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
       // Checked after exhaustion: sticky failures exclude every model, and waiting on an exclusion
       // that will never lift is the unbounded loop in a quieter form.
       if (recentlyRateLimitedReviewModels(ctx).length > 0) return { status: "waiting" };
-      throw new PolishError("CONFIG_ERROR", "no cost-eligible reviewer models available");
+      return {
+        status: "complete",
+        nextPhase: "FAILED",
+        terminalReason: options.strictProbeEpochComplete?.(ctx) === false
+          ? {
+              code: "internal_error",
+              summary: "strict reviewer probe epoch is incomplete",
+            }
+          : {
+              code: "providers_unavailable",
+              summary: "no probed strict-schema reviewer models available",
+            },
+      };
     }
     if (options.sandbox === undefined) {
       throw new PolishError("CONFIG_ERROR", "production REVIEWING requires a sandbox");

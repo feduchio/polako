@@ -15,6 +15,8 @@ export interface SelectionRequest {
   minTier?: ModelTier;
   requireTools?: boolean;
   requireJson?: boolean;
+  requireStrictReviewSchema?: boolean;
+  requireStrictScoreSchema?: boolean;
   minContextWindow?: number;
   /** models that must not be selected (e.g. the implementer, when picking its reviewers) */
   exclude?: ModelRef[];
@@ -79,6 +81,8 @@ export class ModelRouter {
       if (req.minTier && TIER_RANK[c.tier] < TIER_RANK[req.minTier]) return false;
       if (req.requireTools && !c.supportsTools) return false;
       if (req.requireJson && !c.supportsJson) return false;
+      if (req.requireStrictReviewSchema && c.supportsStrictReviewSchema !== true) return false;
+      if (req.requireStrictScoreSchema && c.supportsStrictScoreSchema !== true) return false;
       if (req.minContextWindow !== undefined && c.contextWindow < req.minContextWindow) return false;
       if (!isCostEligible(c, this.policy.costEligibility)) return false;
       return true;

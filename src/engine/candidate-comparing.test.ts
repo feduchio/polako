@@ -196,6 +196,51 @@ describe("B3 production comparing driver", () => {
     expect(compared?.payload["winner"]).toBe(tieAId);
   });
 
+  it("persists empirical backend and score provenance without claiming logprobs", async () => {
+    const { runId } = seedComparingRun(store, clock, fixture, [
+      passedCandidate(tieAId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+      passedCandidate(tieBId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),
+    ]);
+    const models = [
+      { provider: "p", model: "a" },
+      { provider: "p", model: "b" },
+    ];
+    const strategy: VerifierStrategy = {
+      comparePair: () => Promise.reject(new Error("pair path must not run")),
+      selectFrontier: (candidates) => Promise.resolve({
+        winnerId: candidates[0]?.id ?? null,
+        ranking: candidates.map((candidate) => candidate.id),
+        scores: Object.fromEntries(candidates.map((candidate, index) => [candidate.id, 1 - index])),
+        rationale: "mechanical",
+        method: "ppt",
+        fallback: false,
+        criteria: ["correctness", "regression"],
+        nComparisons: 1,
+        client: "live",
+        backend: "empirical",
+        scoreScheme: "empirical_repeats",
+        models,
+        requestedEvaluations: 8,
+        completedEvaluations: 7,
+        fallbackReason: null,
+      }),
+    };
+    const engine = engineWithComparing({ resolveVerifierStrategy: () => strategy });
+    await engine.tickRun(runId);
+    const payload = store.events.list(runId, { types: ["candidate.compared"] })[0]?.payload;
+    expect(payload).toMatchObject({
+      backend: "empirical",
+      client: "live",
+      scoreScheme: "empirical_repeats",
+      models,
+      requestedEvaluations: 8,
+      completedEvaluations: 7,
+      logprobScheme: null,
+      claimedLogprobScheme: null,
+      fallbackReason: null,
+    });
+  });
+
   it("still yields a tournament result when the sidecar is down", async () => {
     const { runId } = seedComparingRun(store, clock, fixture, [
       passedCandidate(tieAId, fixture.base, [check("gate", "pass")], { files: 1, insertions: 2, deletions: 0 }),

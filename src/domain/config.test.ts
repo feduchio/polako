@@ -14,7 +14,9 @@ describe("PolishConfig", () => {
     expect(cfg.routing.maxInputCostPerM).toBe(0);
     expect(cfg.routing.maxOutputCostPerM).toBe(0);
     expect(cfg.council.maxAttemptsPerModel).toBe(2);
-    expect(cfg.verifier.backend).toBe("sidecar");
+    expect(cfg.verifier.backend).toBe("empirical");
+    expect(cfg.verifier.repeats).toBe(2);
+    expect(cfg.verifier.empiricalRepeats).toBe(4);
     expect(cfg.convergence.noProgressAttempts).toBe(3);
     expect(cfg.convergence.taskGrowthWindow).toBe(3);
     expect(cfg.convergence.findingOscillationWindow).toBe(4);
@@ -26,6 +28,11 @@ describe("PolishConfig", () => {
     expect(cfg.audition.maxModels).toBe(4);
     expect(cfg.audition.maxTasks).toBe(4);
     expect(cfg.audition.tasks.length).toBeGreaterThan(0);
+  });
+
+  it("keeps sidecar repeats independent from four-way empirical repeats", () => {
+    expect(PolishConfigSchema.parse({ verifier: { backend: "sidecar", repeats: 1 } }).verifier.repeats).toBe(1);
+    expect(() => PolishConfigSchema.parse({ verifier: { empiricalRepeats: 6 } })).toThrow();
   });
 
   it("accepts an additive [audition] section and keeps existing keys parseable", () => {

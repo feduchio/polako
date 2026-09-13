@@ -120,11 +120,15 @@ async function benchmarkReviewCommand(args: string[], daemonCall: CliDaemonCall)
   const liveAbort = args.includes("--live-abort");
   const seedValue = flag(args, "--seed");
   const seed = seedValue === undefined ? 42 : positiveInteger(seedValue, "--seed");
+  const transportValue = flag(args, "--transport") ?? "strict";
+  if (transportValue !== "strict" && transportValue !== "legacy") {
+    throw new Error("--transport must be strict|legacy");
+  }
   const result = await daemonCall<{
     summary: string;
     report: unknown;
     artifacts: unknown;
-  }>("benchmark.review", { seed, liveAbort });
+  }>("benchmark.review", { seed, liveAbort, transport: transportValue });
   if (json) {
     print(result);
     return;
@@ -268,7 +272,7 @@ const usage = `Usage:
   polish watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   polish log <run-id> [--follow] [--json]
   polish cost <run-id> [--json]
-  polish benchmark-review [--seed n] [--live-abort] [--json]
+  polish benchmark-review [--seed n] [--transport strict|legacy] [--live-abort] [--json]
   polish diff <run-id>
   polish pause|resume|stop|kill <run-id>
   polish answer <run-id> <answer>

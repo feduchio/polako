@@ -7,6 +7,8 @@ import { id } from "../shared/ids.js";
 import type { Db } from "../store/db.js";
 import type { EventLog } from "../store/eventLog.js";
 import type { ModelCatalog } from "./catalog.js";
+import { EMPIRICAL_SCORE_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "./responseSchemas.js";
+import { hashJson } from "../shared/hash.js";
 
 export const DEFAULT_MIN_SCORES_FOR_ROUTING = 3;
 
@@ -40,6 +42,16 @@ export type ModelObservation =
       observedAt: number;
       taskId: string;
       score: number;
+      detail?: string;
+    }
+  | {
+      id: string;
+      kind: "strict_probe";
+      model: ModelRef;
+      observedAt: number;
+      schema: "review" | "score";
+      schemaHash: string;
+      supported: boolean;
       detail?: string;
     };
 
@@ -118,6 +130,43 @@ export class ModelObservationRepository {
     return observation;
   }
 
+  recordStrictProbe(
+    model: ModelRef,
+    input: {
+      schema: "review" | "score";
+      schemaHash: string;
+      supported: boolean;
+      detail?: string;
+      at: number;
+    },
+  ): ModelObservation {
+    const observation: ModelObservation = {
+      id: id("mobs", input.at),
+      kind: "strict_probe",
+      model,
+      observedAt: input.at,
+      schema: input.schema,
+      schemaHash: input.schemaHash,
+      supported: input.supported,
+      ...(input.detail === undefined ? {} : { detail: input.detail }),
+    };
+    this.record(observation);
+    return observation;
+  }
+
+  latestStrictProbe(
+    model: ModelRef,
+    schema: "review" | "score",
+    schemaHash: string,
+  ): Extract<ModelObservation, { kind: "strict_probe" }> | null {
+    const matches = this.list().filter((observation): observation is Extract<ModelObservation, { kind: "strict_probe" }> =>
+      observation.kind === "strict_probe" &&
+      modelRefKey(observation.model) === modelRefKey(model) &&
+      observation.schema === schema &&
+      observation.schemaHash === schemaHash);
+    return matches.at(-1) ?? null;
+  }
+
   list(): ModelObservation[] {
     const rows = this.store.db.prepare("SELECT json FROM model_observations ORDER BY observed_at, id").all() as { json: string }[];
     return rows.map((row) => JSON.parse(row.json) as ModelObservation);
@@ -151,9 +200,35 @@ export class ModelObservationRepository {
         catalog.recordCall(observation.model, { ...observation.outcome, at: observation.observedAt });
       } else if (observation.kind === "quality") {
         catalog.recordQuality(observation.model, observation.quality);
-      } else if ((auditionCounts.get(modelRefKey(observation.model)) ?? 0) >= minScores) {
+      } else if (
+        observation.kind === "audition" &&
+        (auditionCounts.get(modelRefKey(observation.model)) ?? 0) >= minScores
+      ) {
         catalog.recordQuality(observation.model, observation.score);
       }
+    }
+    const latestStrict = new Map<string, Extract<ModelObservation, { kind: "strict_probe" }>>();
+    const currentHashes = {
+      review: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
+      score: hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA),
+    } as const;
+    for (const observation of observations) {
+      if (observation.kind !== "strict_probe") continue;
+      if (observation.schemaHash !== currentHashes[observation.schema]) continue;
+      latestStrict.set(`${modelRefKey(observation.model)}:${observation.schema}`, observation);
+    }
+    for (const observation of latestStrict.values()) {
+      const entry = catalog.get(observation.model);
+      if (entry === undefined) continue;
+      catalog.upsert({
+        ...entry.info,
+        capabilities: {
+          ...entry.info.capabilities,
+          ...(observation.schema === "review"
+            ? { supportsStrictReviewSchema: observation.supported }
+            : { supportsStrictScoreSchema: observation.supported }),
+        },
+      });
     }
   }
 

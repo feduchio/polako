@@ -1,5 +1,10 @@
 import type { ModelInfo, ProviderAdapter, CompletionRequest } from "./types.js";
 import { ProviderError } from "./types.js";
+import {
+  DISABLED_REASONING,
+  EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  REVIEW_FINDINGS_RESPONSE_SCHEMA,
+} from "./responseSchemas.js";
 
 export type ProbeVerdict = "supported" | "unsupported" | "inconclusive" | "probe_failed";
 
@@ -13,6 +18,8 @@ export interface CapabilityProbeChecks {
   health: CapabilityProbeCheck;
   tools: CapabilityProbeCheck;
   json: CapabilityProbeCheck;
+  strictReview: CapabilityProbeCheck;
+  strictScore: CapabilityProbeCheck;
 }
 
 export interface CapabilityProbeResult {
@@ -36,13 +43,22 @@ const DEFAULT_PROBE_MAX_TOKENS = 256;
 export async function probeModelCapabilities(
   adapter: ProviderAdapter,
   model: ModelInfo,
-  ctx: { runId: string; signal?: AbortSignal; maxTokens?: number; skipHealth?: boolean },
+  ctx: {
+    runId: string;
+    signal?: AbortSignal;
+    maxTokens?: number;
+    skipHealth?: boolean;
+    strictComplete?: ProviderAdapter["complete"];
+    cachedStrict?: { review?: boolean; score?: boolean };
+  },
 ): Promise<CapabilityProbeResult> {
   const probeMaxTokens = ctx.maxTokens ?? DEFAULT_PROBE_MAX_TOKENS;
   const checks: CapabilityProbeChecks = {
     health: { ok: false, verdict: "unsupported" },
     tools: { ok: false, verdict: "probe_failed" },
     json: { ok: false, verdict: "probe_failed" },
+    strictReview: { ok: false, verdict: "probe_failed" },
+    strictScore: { ok: false, verdict: "probe_failed" },
   };
 
   if (ctx.skipHealth !== true) {
@@ -52,7 +68,7 @@ export async function probeModelCapabilities(
       : { ok: false, verdict: "unsupported", ...(health.detail !== undefined ? { detail: health.detail } : {}) };
     if (!health.ok) {
       return {
-        info: probedInfo(model, model.capabilities.supportsTools, model.capabilities.supportsJson),
+        info: probedInfo(model, model.capabilities.supportsTools, model.capabilities.supportsJson, false, false),
         available: false,
         checks,
       };
@@ -84,6 +100,34 @@ export async function probeModelCapabilities(
     toolsVerdict = probeErrorVerdict(err);
     checks.tools = { ok: false, verdict: toolsVerdict, detail: probeErrorDetail(err) };
   }
+
+  const strictReviewVerdict = ctx.cachedStrict?.review === undefined && ctx.strictComplete !== undefined
+    ? await strictProbe(
+        ctx.strictComplete,
+        model,
+        ctx,
+        probeMaxTokens,
+        REVIEW_FINDINGS_RESPONSE_SCHEMA,
+        (value) => isRecord(value) && Array.isArray(value["findings"]),
+        "capability_probe_strict_review",
+      )
+    : ctx.cachedStrict?.review === undefined ? "probe_failed" : ctx.cachedStrict.review ? "supported" : "unsupported";
+  checks.strictReview = checkFromStrictVerdict(strictReviewVerdict);
+
+  const strictScoreVerdict = ctx.cachedStrict?.score === undefined && ctx.strictComplete !== undefined
+    ? await strictProbe(
+        ctx.strictComplete,
+        model,
+        ctx,
+        probeMaxTokens,
+        EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+        (value) => isRecord(value) &&
+          isScore(value["scoreA"]) &&
+          isScore(value["scoreB"]),
+        "capability_probe_strict_score",
+      )
+    : ctx.cachedStrict?.score === undefined ? "probe_failed" : ctx.cachedStrict.score ? "supported" : "unsupported";
+  checks.strictScore = checkFromStrictVerdict(strictScoreVerdict);
 
   let jsonVerdict: ProbeVerdict;
   try {
@@ -119,6 +163,8 @@ export async function probeModelCapabilities(
       model,
       resolveCapability(model.capabilities.supportsTools, toolsVerdict),
       resolveCapability(model.capabilities.supportsJson, jsonVerdict),
+      strictReviewVerdict === "supported",
+      strictScoreVerdict === "supported",
     ),
     available: checks.health.ok,
     checks,
@@ -131,11 +177,63 @@ function resolveCapability(declared: boolean, verdict: ProbeVerdict): boolean {
   return declared;
 }
 
-function probedInfo(model: ModelInfo, supportsTools: boolean, supportsJson: boolean): ModelInfo {
+async function strictProbe(
+  complete: ProviderAdapter["complete"],
+  model: ModelInfo,
+  ctx: { runId: string; signal?: AbortSignal },
+  maxTokens: number,
+  responseSchema: NonNullable<CompletionRequest["responseSchema"]>,
+  accepts: (value: unknown) => boolean,
+  purpose: string,
+): Promise<ProbeVerdict> {
+  try {
+    const request: CompletionRequest = {
+      model: model.ref,
+      messages: [{ role: "user", content: "Return an empty valid response for the supplied schema." }],
+      responseSchema,
+      reasoning: DISABLED_REASONING,
+      maxTokens,
+      temperature: 0,
+      metadata: { runId: ctx.runId, purpose, role: "probe", retryPolicy: { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 } },
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    };
+    const response = await complete(request);
+    const value: unknown = JSON.parse(response.message.content);
+    return accepts(value) ? "supported" : "unsupported";
+  } catch (error) {
+    return probeErrorVerdict(error);
+  }
+}
+
+function checkFromStrictVerdict(verdict: ProbeVerdict): CapabilityProbeCheck {
+  return { ok: verdict === "supported", verdict };
+}
+
+function isScore(value: unknown): boolean {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 4;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function probedInfo(
+  model: ModelInfo,
+  supportsTools: boolean,
+  supportsJson: boolean,
+  supportsStrictReviewSchema: boolean,
+  supportsStrictScoreSchema: boolean,
+): ModelInfo {
   return {
     ...model,
     source: "probe",
-    capabilities: { ...model.capabilities, supportsTools, supportsJson },
+    capabilities: {
+      ...model.capabilities,
+      supportsTools,
+      supportsJson,
+      supportsStrictReviewSchema,
+      supportsStrictScoreSchema,
+    },
   };
 }
 

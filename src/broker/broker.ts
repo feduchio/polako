@@ -230,6 +230,8 @@ export class ModelBroker {
             messages: request.messages,
             tools: request.tools,
             responseFormat: request.responseFormat,
+            responseSchema: request.responseSchema ?? null,
+            reasoning: request.reasoning ?? null,
             maxTokens: request.maxTokens ?? null,
             temperature: request.temperature ?? null,
           },

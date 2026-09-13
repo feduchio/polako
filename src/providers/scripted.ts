@@ -53,6 +53,18 @@ export class ScriptedProvider implements ProviderAdapter {
     if (!this.models.some((m) => m.ref.model === request.model.model)) {
       throw new ProviderError(this.id, "not_found", `unknown model ${request.model.model}`);
     }
+    if (
+      request.metadata.purpose === "capability_probe_strict_review" &&
+      request.responseSchema?.name === "review_findings"
+    ) {
+      return reply('{"findings":[]}', 1, 1, 0);
+    }
+    if (
+      request.metadata.purpose === "capability_probe_strict_score" &&
+      request.responseSchema?.name === "empirical_pair_score"
+    ) {
+      return reply('{"scoreA":2,"scoreB":2}', 1, 1, 0);
+    }
     const queue = this.scripts.get(request.model.model) ?? [];
     const step = queue.shift() ?? this.fallback;
     switch (step.kind) {
