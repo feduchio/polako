@@ -38,7 +38,12 @@ import {
   selectEligibleEnsemble,
   selectStrategy,
 } from "./index.js";
+import fc from "fast-check";
 import { exhaustedDimensions } from "./budget.js";
+
+function sumOf(record: Record<string, number>): number {
+  return Object.values(record).reduce((a, b) => a + b, 0);
+}
 import { PATHOLOGY_SAMPLE_VERSION, type CanonicalProgressVector, type PathologySample, type TaskWorkClassRecord } from "./types.js";
 
 const NOW = 1_700_000_000_000;
@@ -404,9 +409,60 @@ describe("C2 budget fold", () => {
       call(5, { callId: "c5", taskId: null, usage: { inputTokens: 9, outputTokens: 1, costUsd: 0 } }),
     ];
     const fold = foldModelCallUsage(events);
-    const sum = (record: Record<string, number>): number => Object.values(record).reduce((a, b) => a + b, 0);
-    expect(sum(fold.perTask) + sum(fold.perRole)).toBe(fold.runTokens);
+    expect(sumOf(fold.perTask) + sumOf(fold.perRole)).toBe(fold.runTokens);
     expect(fold.runTokens).toBe(57);
+  });
+
+  it("attributes prototype-colliding ids and roles instead of losing them", () => {
+    const fold = foldModelCallUsage([
+      call(0, { callId: "c1", taskId: null, role: "__proto__", usage: { inputTokens: 5, outputTokens: 0, costUsd: 0 } }),
+      call(1, { callId: "c2", taskId: null, role: "constructor", usage: { inputTokens: 3, outputTokens: 0, costUsd: 0 } }),
+      call(2, { callId: "c3", taskId: "__proto__", role: "worker", usage: { inputTokens: 2, outputTokens: 0, costUsd: 0 } }),
+    ]);
+    // Compared as entries, not by key lookup: reading `.constructor` off a plain object returns
+    // something truthy whether or not the key was ever set, so a lookup cannot tell the two apart.
+    expect(Object.entries(fold.perRole).sort()).toEqual([["__proto__", 5], ["constructor", 3]]);
+    expect(Object.entries(fold.perTask)).toEqual([["__proto__", 2]]);
+    expect(sumOf(fold.perTask) + sumOf(fold.perRole)).toBe(fold.runTokens);
+  });
+
+  /**
+   * The equation is the item's claim, and a hand-written fixture only ever checks the shapes its
+   * author thought of. `__proto__` reached this fold because a reviewer generated it, not because
+   * anyone wrote a case for it.
+   */
+  it("attributes every token over arbitrary ids, roles and safe-integer usage", () => {
+    const key = fc.oneof(
+      fc.constantFrom("__proto__", "constructor", "toString", "hasOwnProperty", "", "worker", "reviewer"),
+      fc.string(),
+    );
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            taskId: fc.option(key, { nil: null }),
+            role: fc.option(key, { nil: null }),
+            inputTokens: fc.integer({ min: 0, max: 1_000_000 }),
+            outputTokens: fc.integer({ min: 0, max: 1_000_000 }),
+          }),
+          { maxLength: 30 },
+        ),
+        (rows) => {
+          const fold = foldModelCallUsage(
+            rows.map((row, index) =>
+              call(index, {
+                callId: `c${String(index)}`,
+                taskId: row.taskId,
+                role: row.role,
+                usage: { inputTokens: row.inputTokens, outputTokens: row.outputTokens, costUsd: 0 },
+              }),
+            ),
+          );
+          expect(sumOf(fold.perTask) + sumOf(fold.perRole)).toBe(fold.runTokens);
+        },
+      ),
+      { numRuns: 300 },
+    );
   });
 
   it("does not enforce a role bucket as a task budget", () => {

@@ -76,8 +76,11 @@ export function foldModelCallUsage(events: readonly Event[]): CanonicalBudgetUsa
   let runTokens = 0;
   let knownRunUsd = 0;
   const unknownCostCalls: string[] = [];
-  const perTask: Record<string, number> = {};
-  const perRole: Record<string, number> = {};
+  // Maps, not object literals: a task id or role of `__proto__` assigned into `{}` sets the
+  // prototype instead of an own key and the tokens vanish, and `constructor` reads back as a
+  // function. Both are event payload values, so neither key is unreachable by construction.
+  const perTask = new Map<string, number>();
+  const perRole = new Map<string, number>();
   for (const callId of [...byCall.keys()].sort()) {
     const row = byCall.get(callId);
     if (row === undefined) continue;
@@ -86,16 +89,17 @@ export function foldModelCallUsage(events: readonly Event[]): CanonicalBudgetUsa
     else knownRunUsd += row.costUsd;
     // Disjoint by construction, so `sum(perTask) + sum(perRole) === runTokens`. Roles stay out of
     // `perTask` because `exhaustedDimensions` enforces every key there as a task budget.
-    if (row.taskId !== null) perTask[row.taskId] = (perTask[row.taskId] ?? 0) + row.tokens;
-    else perRole[row.role] = (perRole[row.role] ?? 0) + row.tokens;
+    const bucket = row.taskId !== null ? perTask : perRole;
+    const key = row.taskId ?? row.role;
+    bucket.set(key, (bucket.get(key) ?? 0) + row.tokens);
   }
 
   return {
     runTokens,
     knownRunUsd,
     unknownCostCalls,
-    perTask,
-    perRole,
+    perTask: Object.fromEntries(perTask),
+    perRole: Object.fromEntries(perRole),
     sourceWatermark,
     usageConflict,
   };
