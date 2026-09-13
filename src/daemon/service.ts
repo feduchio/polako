@@ -195,18 +195,22 @@ export class DaemonService implements RpcHandler {
       `review-benchmark:${String(seed)}:oracle`,
       this.clock.now(),
     );
-    const result = {
+    const stored = {
       summary: renderReviewerBenchmark(report),
       report,
       artifacts: { packet, oracle },
     };
-    this.store.artifacts.put(
-      JSON.stringify(result),
+    const reportArtifact = this.store.artifacts.put(
+      JSON.stringify(stored),
       "review_benchmark_report",
       `review-benchmark:${String(seed)}:report`,
       this.clock.now(),
     );
-    return result;
+    return {
+      summary: stored.summary,
+      report,
+      artifacts: { packet, oracle, report: reportArtifact },
+    };
   }
 
   private async addProject(path: string, requestedName: string | undefined): Promise<ProjectRecord> {

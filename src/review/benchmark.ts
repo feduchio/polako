@@ -187,7 +187,21 @@ export function scoreTeamQuality(cells: readonly BenchmarkCellResult[]): Quality
       usage,
     });
   }
-  return scoreQuality(teamCells);
+  const quality = scoreQuality(teamCells);
+  const accounting = scoreQuality(cells);
+  return {
+    ...quality,
+    // Quality is an OR over the two-model team. Cost and failure accounting is not: every logical
+    // cell was scheduled and paid for, even when its sibling model completed successfully.
+    scheduled: accounting.scheduled,
+    completed: accounting.completed,
+    transportFailures: accounting.transportFailures,
+    schemaFailures: accounting.schemaFailures,
+    inputTokens: accounting.inputTokens,
+    outputTokens: accounting.outputTokens,
+    completionRate: accounting.completionRate,
+    outputTokensPerPrimaryHit: ratio(accounting.outputTokens, quality.primaryHits),
+  };
 }
 
 export function wilson95(successes: number, total: number): WilsonInterval | null {

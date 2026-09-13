@@ -30,9 +30,10 @@ describe("benchmark.review RPC", () => {
         artifacts: {
           packet: { sha256: string };
           oracle: { sha256: string };
+          report: { sha256: string };
         };
       };
-      expect(result.summary).toContain("Reviewer benchmark: 96/96 cells");
+      expect(result.summary).toContain("Reviewer benchmark: 96/96 completed cells");
       expect(result.report.requested).toBe(96);
       expect(result.report.cells).toHaveLength(96);
       expect(nex.calls).toHaveLength(48);
@@ -40,6 +41,20 @@ describe("benchmark.review RPC", () => {
       expect(service.store.repos.runs.listAll()).toEqual([]);
       expect(service.store.artifacts.has(result.artifacts.packet.sha256)).toBe(true);
       expect(service.store.artifacts.has(result.artifacts.oracle.sha256)).toBe(true);
+      expect(service.store.artifacts.has(result.artifacts.report.sha256)).toBe(true);
+      const packet = service.store.artifacts.getText(result.artifacts.packet.sha256);
+      const oracle = service.store.artifacts.getText(result.artifacts.oracle.sha256);
+      expect(JSON.parse(packet.split("\n")[0] ?? "{}")).toEqual(expect.objectContaining({
+        cellId: expect.any(String),
+        system: expect.any(String),
+        user: expect.any(String),
+      }));
+      expect(packet).not.toContain('"label"');
+      expect(JSON.parse(oracle.split("\n")[0] ?? "{}")).toEqual(expect.objectContaining({
+        label: expect.stringMatching(/^(clean|mutant)$/),
+        line: 2,
+        endLine: 2,
+      }));
     } finally {
       await service.close();
     }

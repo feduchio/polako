@@ -39,6 +39,10 @@ describe("reviewer benchmark corpus", () => {
 
   it("keeps labels and oracle language out of each diff", () => {
     for (const pair of REVIEWER_BENCHMARK_PAIRS) {
+      const cleanDiff = addedFileDiff(pair, "clean");
+      const mutantDiff = addedFileDiff(pair, "mutant");
+      expect(/^\+\+\+ b\/(.+)$/m.exec(cleanDiff)?.[1]).toBe(BENCHMARK_PATH);
+      expect(/^\+\+\+ b\/(.+)$/m.exec(mutantDiff)?.[1]).toBe(BENCHMARK_PATH);
       for (const label of ["clean", "mutant"] as const) {
         const diff = addedFileDiff(pair, label);
         expect(diff).toContain(`// ${pair.criterionId}: ${pair.property}`);

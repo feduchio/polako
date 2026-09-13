@@ -176,12 +176,15 @@ export function selectBenchmarkReviewers(
 }
 
 export function renderReviewerBenchmark(report: ReviewerBenchmarkReport): string {
+  const schemaRate = ratioText(report.team.schemaFailures, report.team.scheduled);
+  const transportRate = ratioText(report.team.transportFailures, report.team.scheduled);
   const lines = [
-    `Reviewer benchmark: ${String(report.cells.length)}/${String(report.requested)} cells${report.partial ? " (partial)" : ""}`,
+    `Reviewer benchmark: ${String(report.team.completed)}/${String(report.requested)} completed cells${report.partial ? " (partial)" : ""}`,
     ...Object.entries(report.byModel).map(([model, score]) =>
-      `${model}: ${formatRate(score.primaryRecall)} primary recall, ${formatRate(score.strictIdRecall)} strict-id recall, ${formatRate(score.falsePositiveRate)} false positives, ${String(score.outputTokens)} output tokens, ${formatNumber(score.outputTokensPerPrimaryHit)} output tokens/hit`),
-    `team: ${formatRate(report.team.primaryRecall)} primary recall, ${formatRate(report.team.falsePositiveRate)} false positives, ${formatRate(report.teamDiscrimination.rate)} pair discrimination`,
-    `failures: schema=${String(report.team.schemaFailures)}, transport=${String(report.team.transportFailures)}`,
+      `${model}: ${formatRate(score.primaryRecall)} primary recall, ${formatRate(score.strictIdRecall)} strict-id recall, ${formatRate(score.falsePositiveRate)} false positives, ${String(score.inputTokens)} input + ${String(score.outputTokens)} output tokens, ${formatNumber(score.outputTokensPerPrimaryHit)} output tokens/hit`),
+    `team: ${formatRate(report.team.primaryRecall)} primary recall, ${formatRate(report.team.strictIdRecall)} strict-id recall, ${formatRate(report.team.falsePositiveRate)} false positives, ${formatRate(report.teamDiscrimination.rate)} pair discrimination`,
+    `team tokens: ${String(report.team.inputTokens)} input + ${String(report.team.outputTokens)} output, ${formatNumber(report.team.outputTokensPerPrimaryHit)} output tokens/hit`,
+    `failures: schema=${String(report.team.schemaFailures)}/${String(report.team.scheduled)} (${schemaRate}), transport=${String(report.team.transportFailures)}/${String(report.team.scheduled)} (${transportRate})`,
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -412,6 +415,10 @@ function formatRate(value: number | null): string {
 
 function formatNumber(value: number | null): string {
   return value === null ? "undefined" : value.toFixed(2);
+}
+
+function ratioText(numerator: number, denominator: number): string {
+  return denominator === 0 ? "undefined" : `${(numerator / denominator * 100).toFixed(1)}%`;
 }
 
 function parseJsonl<T>(text: string, accepts: (value: unknown) => value is T): T[] {

@@ -6,6 +6,7 @@ import {
   scorePerModelDiscrimination,
   scoreQuality,
   scoreTeamDiscrimination,
+  scoreTeamQuality,
   strictIdHit,
   wilson95,
   type BenchmarkCellResult,
@@ -44,6 +45,10 @@ describe("review benchmark scorer", () => {
     const split = finding("c", "src/subject.ts", undefined);
     split.evidence.push({ path: "src/other.ts", line: 8, endLine: 8 });
     expect(primaryHit([split], ORACLE)).toBe(false);
+    const miss = finding("c", "src/other.ts", 20);
+    const implicitEnd = finding("c", "src/subject.ts", 8);
+    delete implicitEnd.evidence[0]?.endLine;
+    expect(primaryHit([miss, implicitEnd], ORACLE)).toBe(true);
   });
 
   it("keeps failures outside quality denominators but inside scheduled-cell rates", () => {
@@ -66,6 +71,15 @@ describe("review benchmark scorer", () => {
     expect(score.outputTokensPerPrimaryHit).toBe(50);
   });
 
+  it("uses completed clean cells as the false-positive denominator", () => {
+    const cells = [
+      cell("clean", "completed_with_findings", [finding("c", "src/subject.ts", 8)], 1),
+      cell("clean", "completed_empty", [], 1),
+      cell("clean", "schema_failure", [], 1),
+    ];
+    expect(scoreQuality(cells).falsePositiveRate).toBe(0.5);
+  });
+
   it("scores matched discrimination per model and as a two-model team", () => {
     const hit = finding("c", "src/subject.ts", 8);
     const cells = [
@@ -78,6 +92,33 @@ describe("review benchmark scorer", () => {
     ];
     expect(scorePerModelDiscrimination(cells)).toEqual({ eligible: 2, discriminated: 1, rate: 0.5 });
     expect(scoreTeamDiscrimination(cells)).toEqual({ eligible: 1, discriminated: 0, rate: 0 });
+  });
+
+  it("keys discrimination by pair and excludes either failed side", () => {
+    const hit = finding("c", "src/subject.ts", 8);
+    const cells = [
+      cell("mutant", "completed_with_findings", [hit], 1, "m1", 1, "pair-a"),
+      cell("clean", "completed_empty", [], 1, "m1", 1, "pair-a"),
+      cell("mutant", "completed_with_findings", [hit], 1, "m1", 1, "pair-b"),
+      cell("clean", "transport_failure", [], null, "m1", 1, "pair-b"),
+    ];
+    expect(scorePerModelDiscrimination(cells)).toEqual({ eligible: 1, discriminated: 1, rate: 1 });
+  });
+
+  it("uses OR across completed team models without hiding their failures", () => {
+    const cells = [
+      cell("mutant", "completed_with_findings", [finding("c", "src/subject.ts", 8)], 4, "m1"),
+      cell("mutant", "completed_empty", [], 5, "m2"),
+      cell("clean", "transport_failure", [], null, "m1"),
+      cell("clean", "completed_empty", [], 6, "m2"),
+    ];
+    const team = scoreTeamQuality(cells);
+    expect(team.primaryRecall).toBe(1);
+    expect(team.falsePositiveRate).toBe(0);
+    expect(team.scheduled).toBe(4);
+    expect(team.completed).toBe(3);
+    expect(team.transportFailures).toBe(1);
+    expect(team.outputTokens).toBe(15);
   });
 
   it("uses the published Wilson literals and null at zero denominator", () => {
@@ -120,9 +161,10 @@ function cell(
   outputTokens: number | null,
   model = "m1",
   repetition = 1,
+  pairId = "pair-1",
 ): BenchmarkCellResult {
   return {
-    oracle: { ...ORACLE, label, repetition },
+    oracle: { ...ORACLE, pairId, label, repetition },
     model: { provider: "test", model },
     family: model,
     outcome,

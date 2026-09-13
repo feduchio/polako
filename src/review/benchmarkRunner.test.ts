@@ -10,6 +10,7 @@ import { canonicalJsonLine } from "./benchmark.js";
 import { REVIEWER_BENCHMARK_PAIRS } from "./benchmarkCorpus.js";
 import {
   buildBenchmarkSchedule,
+  renderReviewerBenchmark,
   runReviewerBenchmark,
   rescoreReviewerBenchmark,
   selectBenchmarkReviewers,
@@ -107,7 +108,13 @@ describe("review benchmark runner", () => {
 
     const full = await runReviewerBenchmark({ protocols: PROTOCOLS, reviewers, seed: 5 });
     expect(full.cells).toHaveLength(96);
-    expect(full.team.transportFailures).toBe(48);
+    expect(full.team.transportFailures).toBe(96);
+    expect(full.team.completed).toBe(0);
+    const summary = renderReviewerBenchmark(full);
+    expect(summary).toContain("0/96 completed cells");
+    expect(summary).toContain("undefined primary recall");
+    expect(summary).toContain("0 input + 0 output tokens");
+    expect(summary).toContain("transport=96/96 (100.0%)");
 
     nex.calls.length = 0;
     nvidia.calls.length = 0;
@@ -115,6 +122,21 @@ describe("review benchmark runner", () => {
     expect(partial.partial).toBe(true);
     expect(partial.cells).toHaveLength(20);
     expect(nex.calls.length + nvidia.calls.length).toBe(20);
+  });
+
+  it("does not hide one family's failures behind its sibling's completion", async () => {
+    const fail = provider("nex", "nex-agi/a:free", () => Promise.reject(new Error("down")));
+    const pass = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const report = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(fail, "nex-agi"), reviewer(pass, "nvidia")],
+      seed: 8,
+    });
+    expect(report.team.scheduled).toBe(96);
+    expect(report.team.completed).toBe(48);
+    expect(report.team.transportFailures).toBe(48);
+    expect(report.team.completionRate).toBe(0.5);
+    expect(renderReviewerBenchmark(report)).toContain("transport=48/96 (50.0%)");
   });
 
   it("bounds each provider call with the configured timeout signal", async () => {
@@ -139,6 +161,28 @@ describe("review benchmark runner", () => {
     expect(report.cells.every((cell) => cell.outcome === "transport_failure")).toBe(true);
   });
 
+  it("pins the live abort boundary at four versus five failures", async () => {
+    const run = async (failures: number) => {
+      let count = 0;
+      const execute = (): Promise<CompletionResponse> => {
+        count++;
+        return count <= failures
+          ? Promise.reject(new Error("transport"))
+          : Promise.resolve(reply('{"findings":[]}'));
+      };
+      const nex = provider("nex", "nex-agi/a:free", execute);
+      const nvidia = provider("nvidia", "nvidia/a:free", execute);
+      return runReviewerBenchmark({
+        protocols: PROTOCOLS,
+        reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+        seed: 6,
+        liveAbort: true,
+      });
+    };
+    expect((await run(4)).cells).toHaveLength(96);
+    expect((await run(5)).cells).toHaveLength(20);
+  });
+
   it("selects two free JSON families deterministically and fails closed", () => {
     const nex = provider("openrouter", "unused", () => reply('{"findings":[]}'));
     const nvidia = provider("other", "unused", () => reply('{"findings":[]}'));
@@ -156,19 +200,22 @@ describe("review benchmark runner", () => {
   });
 
   it("rebuilds the same shuffled schedule from its seed", () => {
-    const nex = provider("nex", "nex-agi/a:free", () => reply('{"findings":[]}'));
-    const nvidia = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const nex = provider("nex", "nex-agi/a:free", benchmarkReply);
+    const nvidia = provider("nvidia", "nvidia/a:free", benchmarkReply);
     const reviewers = [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")] as const;
-    const first = buildBenchmarkSchedule(reviewers, 42).map((cell) => cell.cellId);
-    const second = buildBenchmarkSchedule(reviewers, 42).map((cell) => cell.cellId);
-    const other = buildBenchmarkSchedule(reviewers, 43).map((cell) => cell.cellId);
+    const key = (cell: ReturnType<typeof buildBenchmarkSchedule>[number]) =>
+      `${cell.pair.pairId}:${cell.label}:${cell.reviewer.family}:${String(cell.repetition)}`;
+    const first = buildBenchmarkSchedule(reviewers, 42).map(key);
+    const second = buildBenchmarkSchedule(reviewers, 42).map(key);
+    const other = buildBenchmarkSchedule(reviewers, 43).map(key);
     expect(first).toEqual(second);
     expect(first).not.toEqual(other);
+    expect(first).not.toEqual([...first].sort());
   });
 
   it("rescoring replays raw bodies through the production parser without provider access", async () => {
-    const nex = provider("nex", "nex-agi/a:free", () => reply('{"findings":[]}'));
-    const nvidia = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const nex = provider("nex", "nex-agi/a:free", benchmarkReply);
+    const nvidia = provider("nvidia", "nvidia/a:free", benchmarkReply);
     const pair = REVIEWER_BENCHMARK_PAIRS[0];
     if (pair === undefined) throw new Error("missing benchmark pair");
     const original = await runReviewerBenchmark({
@@ -182,6 +229,10 @@ describe("review benchmark runner", () => {
       raw: cell.rawContent,
       usage: cell.usage,
     })).join("");
+    expect(original.team.primaryRecall).toBe(1);
+    expect(original.team.falsePositiveRate).toBe(0);
+    expect(original.cells.filter((cell) => cell.findings.length > 0)
+      .every((cell) => cell.findings[0]?.evidenceStrength === "strong")).toBe(true);
     const rescored = await rescoreReviewerBenchmark({
       protocols: PROTOCOLS,
       packetJsonl: original.packetJsonl,
@@ -269,6 +320,21 @@ function reply(content: string, inputTokens = 10, outputTokens = 5): CompletionR
     finishReason: "stop",
     latencyMs: 1,
   };
+}
+
+function benchmarkReply(request: CompletionRequest): CompletionResponse {
+  const body = request.messages.map((message) => message.content).join("\n");
+  if (!body.includes("spent <= cap")) return reply('{"findings":[]}');
+  return reply(JSON.stringify({
+    findings: [{
+      criterion: "INV-01: exclusive cap",
+      severity: "high",
+      blocking: true,
+      claim: "Equal spend is admitted by an exclusive cap.",
+      evidence: [{ path: "src/subject.ts", line: 2 }],
+      reproduction: ["Call withinBudget(5, 5)."],
+    }],
+  }), 10, 20);
 }
 
 function pack(request: CompletionRequest): Record<string, unknown> {
