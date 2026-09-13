@@ -125,6 +125,10 @@ function protocolEntryError(skillPath: string, error: unknown): PolishError {
   // An errno means the file could not be read; anything else here is the content being wrong.
   // The root scan already draws that line, and an operator told INVALID_ARGUMENT about a
   // permission error looks for the wrong problem.
+  //
+  // This relies on `parseSkillMarkdown` wrapping YAML failures: `YAMLParseError.code` is a string
+  // such as `BAD_INDENT`, so a raw one would be read as an errno and reported as `IO_ERROR`,
+  // sending the operator to `chmod` for a badly indented file.
   const code = typeof (error as NodeJS.ErrnoException | null)?.code === "string" ? "IO_ERROR" : "INVALID_ARGUMENT";
   return new PolishError(
     code,
