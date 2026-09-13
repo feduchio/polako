@@ -599,3 +599,19 @@ otherwise look like unfinished work.
     history. Not deleted by P1.10, whose MC6 confines it to diagnostics: removing a defensive guard
     needs its own argument about whether the invariant could become reachable. Rides with the next
     item that touches the loader.
+
+50. **A task id of `__proto__` bypasses the per-task token budget in the live tracker.**
+    `BudgetTracker.record` accumulates into an object literal — `s.perTask[taskId] = (s.perTask[taskId]
+    ?? 0) + tokens` (`src/broker/quota.ts:163`) — so `taskId: "__proto__"` sets the object's prototype
+    instead of creating an own key and records **no** tokens. `assertWithin` then reads
+    `(s.perTask[taskId] ?? 0)` (`:142`), gets the prototype object rather than a count, and
+    `>= maxTaskTokens` compares an object to a number, which is `false`. The task spends without
+    limit. `"constructor"` has the analogous shape: the read returns a function, the comparison is
+    `false`, and the write may throw or be ignored depending on the key. **Found 2026-09-13** by the
+    GPT-5.6-sol lane in round 2 of P1.9, while attacking that item's fix for the *same* hazard in
+    `foldModelCallUsage`. Pre-existing and unchanged from base; `quota.ts` is not in P1.9's diff.
+    Reachability is the open question and is why this is recorded rather than assumed harmless: task
+    ids are minted by `src/shared/ids.ts` and cannot be `__proto__` today, so this is a latent
+    enforcement bypass rather than a live one. Closure is the same one-line shape P1.9 applied —
+    accumulate in a `Map` — and it belongs with the next item that touches the tracker, which is
+    **P1.3**, since that item already restores spend into it.
