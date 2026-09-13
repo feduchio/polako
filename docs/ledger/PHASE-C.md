@@ -29,6 +29,7 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | B-selfhost-18 accepted | `8ea156db5207c5b159869b6e8ea2620c628b932f` on `task/B-selfhost-18-integration` | Bounded B finding 18. |
 | B-selfhost-29 accepted | `3d718313e8c341432e2c20d636d55bad2c3282eb` on `task/B-selfhost-29-integration` | Run economics and review productivity report. |
 | B-selfhost-42 accepted (next HOST) | `b055c81a6f1c42c0b14bede314803ae2f4d32309` on `task/B-selfhost-42-integration` | Blinded reviewer-quality benchmark. Phase B not fully closed. Phase C not accepted. |
+| B-selfhost-32+34+44+11 accepted (next HOST) | `78a33788c50c7a9aaf851a70d618f6e5df5b450b` on `task/B-selfhost-32-34-44-candidate` | Strict review transport, fail-closed capability probes, empirical verifier/PPT, production tournament wiring. Two clean Grok+Claude rounds; live seed-43 report in the run ledger. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -41,8 +42,7 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open order: **32 + 34 + 44 + 11** verifier scoring, strict structured output and production
-tournament wiring; **35 + 23** progress/no-progress stopping; **31 + 28** validated explicit state
+Open order: **35 + 23** progress/no-progress stopping; **31 + 28** validated explicit state
 and A/B against item 18; **26** worker-claim sanitisation; **30** repair the two older accounting
 folds; then remaining **12–15**, plus
 **16, 17, 21, 22, 24, 25** at their existing seams. Findings **26, 27, 28, 43, 45** remain recorded
@@ -54,6 +54,12 @@ and progress controls therefore precede another worker-runtime rewrite: they mak
 31 trustworthy and stop a weak review loop from multiplying the cost of that change. Item 11 is
 absorbed into 32 because both reopen production COMPARING; 28 rides with 31's `loopWindow` rewrite;
 27 rides with C9 hardening. No finding is dropped.
+
+**Verifier measurement 2026-09-13.** Strict schema reduced schema failures from 11/96 to 2/96 and
+then 0/96, and disabled reasoning reduced output tokens from 87,090 to 20,653 on the original-model
+transport A/B. It did not improve raw gating: strict false positives remained 72.7–85.7% and pair
+discrimination was 5.9–9.5%. Denominators differed because free transport failures were 21–36/96,
+so no semantic quality win is claimed. This is why 35+23 remains next.
 
 **Order changed 2026-09-12 on measurement, not on preference.** Item 29 — run economics as a derived record — goes ahead of 11–15 because the remaining sequence was ordered by finding number while the tokens are somewhere else: over the six real runs in the store the review swarm is **78.7%** of spend at a 5:1 output-to-input ratio, the worker loop **17.2%**, the council **4.1%**. Item 18 was accepted on a turn-count model whose net is **5.8% of a run if an untested assumption holds**; its ceiling was 10.7%. Nothing in items 11–15 touches the 78.7%, and no claim about it can be checked until the spend is a record rather than a throwaway script. The A/B of the fixture corpus on the same two free models follows item 29 and tests item 18's assumption directly.
 

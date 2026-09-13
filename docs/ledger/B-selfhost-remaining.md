@@ -22,7 +22,10 @@ Full Phase-B self-host closure is **DEFERRED_BY_USER** until operator observabil
 8. ~~`--budget-tokens` / `--budget-usd` stored in facade metadata; `applyRunBudgetOverrides` unused; Option A hard caps required (not C2).~~ — **ACCEPTED** as `docs/ledger/B-selfhost-8.md` at `14beb802857fde8a5251404dc518301cb5b1a0a4`.
 9. ~~Candidate provenance is `worker/candidate-N`.~~ — **ACCEPTED** as `docs/ledger/B-selfhost-9-19.md` at `9e157e1a0a5d7369f2be905d8c36121789e09087`. **Shape confirmed 2026-09-11**, and it is a propagation gap rather than a missing value: `createWorkerFactory` already selects a real model through the router and hands that `ModelRef` to `AgentRunner` (`src/daemon/composition.ts:442-452`), which records it on the persisted transcript (`src/agents/runner.ts:237`). The synthetic identity is minted separately and downstream: `toCandidate` hardcodes `model: { provider: "worker", model: \`candidate-${index}\` }` (`src/engine/candidateDrivers.ts:457`), and the same literal is written into the `worker.started` payload and actor (`:124-127`) and carried by every `candidate.created` / `candidate.state_changed` / `candidate.gated` actor through `appendCandidateEvents` (`:715-724`). So one candidate has two model identities in the same run — the truthful one inside the transcript artifact, the synthetic one in the event log and the `Candidate` record that the tournament, the report and the observer read. The user-visible surface is `displayModel` on `worker.started` (`src/observe/project.ts:234-241`), which renders "Candidate 0". Git branch naming is unrelated and needs no change: `polish/${runId}/candidates/${candidateId}` (`src/engine/candidates.ts:116-117`). The note at `docs/ledger/B2.md:58` — "Candidate `model` is recorded as `candidate-${index}` until the factory supplies a ModelRef" — is stale in its premise: the factory does supply one now, and only `toCandidate` fails to use it.
 10. ~~Reviewer selection is `provider.listModels()[0]`~~ — lifted to bootstrap cost eligibility (Router + explicit `ReviewProvider`).
-11. Production tournament `new PairwiseJudge()` with no provider → heuristic-only on a non-dominated frontier.
+11. ~~Production tournament `new PairwiseJudge()` with no provider → heuristic-only on a
+    non-dominated frontier.~~ — **ACCEPTED** with 32+34+44 as
+    `docs/ledger/B-selfhost-32-34-44.md` at `78a3378`; production defaults to the broker-backed
+    empirical verifier and the providerless empirical factory now fails loudly.
 12. Crash recovery restores scheduler jobs only (not run settings, catalog rediscover, per-run budget, runtime mode). **Accumulated spend is among the losses, which makes a hard cap non-durable across a restart:** `ModelBroker.restore(runId)` (`src/broker/broker.ts:274-280`) folds a run's `model.call` events back into the budget tracker, but it has no production caller — every call site is a test. `DaemonService`'s recovery is `engine.recover()` alone, which restores scheduler jobs. So a restarted daemon believes every run has spent nothing, and a run may spend its whole budget again after each restart. B-selfhost-8 makes a run's budget *limits* survive a restart, resolved lazily from its `facade.json`, and deliberately stops there: restoring spend is this item's, and the two are independent — limits without spend still bind, spend without limits binds the wrong number. Recorded while drawing B-selfhost-8's scope boundary, at both reviewers' request.
 13. B10 NEEDS_HUMAN / STOP-RESUME / crash through DaemonService/RPC coding composition (engine/RPC round-trips exist; daemon coding E2E is DONE-only).
 14. Controlled **real-provider coding** E2E + RecordReplay (B11 recorded probes only).
@@ -123,7 +126,12 @@ on silently, and one of them is about an item that is already accepted.
     checked over fifteen rounds. It is a defect of the contract's design choice, made by me, and it
     is what the A/B was scheduled to catch.
 
-32. **Our review swarm is LLM-as-a-Judge where the reference is a verifier, and that is the whole
+32. **ACCEPTED with deliberate free-tier departure** as
+    `docs/ledger/B-selfhost-32-34-44.md` at `78a3378`, run record
+    `docs/ledger/B-selfhost-32-34-44-run.md`. Free providers returned no token distributions, so the
+    accepted implementation uses honestly named repeated empirical 0–4 rewards rather than claiming
+    logprob expectation. Original finding: **Our review swarm is LLM-as-a-Judge where the reference
+    is a verifier, and that is the whole
     of the 78.7%.** `REVIEWER_OUTPUT_CONTRACT` (`src/review/reviewerProtocol.ts:14`) asks each axis
     for "JSON only as an array of findings", each with claim, evidence, reproduction -- generated
     prose. Measured consequence (finding 29): reviewers spend 138,414 input against **696,221
@@ -164,7 +172,10 @@ on silently, and one of them is about an item that is already accepted.
     scheduled ("wire a provider") is therefore too small: wiring a provider into an O(N²)
     prose-judging tournament buys the expensive half of the reference and none of the cheap half.
 
-34. **`logprobScheme` is provenance we record and never compute.** `VerifierAdapter`
+34. **ACCEPTED** with 32 as `docs/ledger/B-selfhost-32-34-44.md` at `78a3378`.
+    `logprobScheme` remains null unless TypeScript observes distributions; sidecar assertions are
+    recorded separately as `claimedLogprobScheme`. Original finding:
+    **`logprobScheme` is provenance we record and never compute.** `VerifierAdapter`
     (`src/verify/sidecar.ts:67`) accepts `scores` and a `logprobScheme` of `"direct" | "two_stage"`
     from an external sidecar and threads it into `VerifierProvenance`
     (`src/engine/candidateDrivers.ts:252`). Nothing in the tree ever reads a logprob: the field
@@ -389,7 +400,11 @@ forbidden: `"Out of scope but helpful" | Reject` in
 evidence over confidence", and each `reviewer-*` body opens with "Assume the author is
 overconfident. Cite file:line or command evidence."
 
-43. **The reviewers' token cost is reasoning, not prose, and an economy clause makes it worse.**
+43. **ACCEPTED** with 32+44 at `78a3378`. Strict reviewer and empirical-score requests now use
+    `reasoning:{effort:"none",exclude:true}`; the seed-43 original-model A/B cut reviewer output
+    from 87,090 to 20,653 tokens while increasing completed cells from 61 to 73. This is transport
+    efficiency, not a quality claim. Original finding:
+    **The reviewers' token cost is reasoning, not prose, and an economy clause makes it worse.**
     Measured against two free models at `temperature: 0` on one diff. The returned JSON is already
     mechanically precise and compact -- a full finding renders to roughly 450 characters, about 115
     tokens -- while `completion_tokens` is 435-1,107. The gap is the model's own reasoning, which no
@@ -402,7 +417,11 @@ overconfident. Cite file:line or command evidence."
     verifier, a reasoning-effort parameter, or LLM-as-a-Verifier's scoring, where the output is a
     handful of score tokens and there is no prose to economise.
 
-44. **Shape variance is the dominant reviewer failure mode, and patching observed variants does not
+44. **ACCEPTED** with 32 at `78a3378`. The production path now uses an exact strict JSON Schema and
+    fail-closed active capability probes; replay normalisation remains compatibility only. Live
+    seed-43 schema failures were 11/96 on legacy, 2/96 on strict original, and 0/96 on the strict
+    operational replicate. Original finding:
+    **Shape variance is the dominant reviewer failure mode, and patching observed variants does not
     converge.** Four `evidence` shapes seen across four probes of the same two models on nearly the
     same input: an array of refs (valid); a single ref object (fixed by `normalizeFinding`); a ref
     using `startLine` instead of `line` (survives, Zod strips the extra key); and one whose `path`
@@ -428,4 +447,10 @@ overconfident. Cite file:line or command evidence."
     check. That is a genuine, mechanically checkable finding from a free model. What remains
     unmeasured is the rate: one injected defect found twice is not a hit rate, and the corpus needed
     for one is still the next measurement finding 42 names.
+    **Re-measured after accepted 32+34+44, seed 43:** strict output fixes shape but not judgement.
+    The strict original arm completed 73/96 with 2 schema failures, 72.7% false positives and 9.5%
+    discrimination; the operational-strict replicate completed 60/96 with zero schema failures,
+    85.7% false positives and 5.9% discrimination. Different completion denominators prohibit a
+    quality A/B claim. Raw review remains unsuitable for production gating; full provenance is in
+    `docs/ledger/B-selfhost-32-34-44-run.md`.
 
