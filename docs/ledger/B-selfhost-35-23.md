@@ -1,6 +1,8 @@
 # B-selfhost-35 + 23 — prefix progress and test-only treadmill stop
 
-**Status:** DRAFT, revision 3. Not frozen. Base `889b62d`.
+**Status:** **FROZEN**, revision 3. Base `889b62d`.
+Frozen after independent Grok and Claude reviews on `57656dd`; reviewed-file sha256
+`24acac09945bf579b299c5a07268160573fe812e59d172d3e81cc59d86c3b28c`.
 
 ## Scope
 
