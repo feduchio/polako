@@ -22,6 +22,12 @@ describe("reviewer benchmark corpus", () => {
     expect(benchmarkCorpusSha256()).toMatch(/^[0-9a-f]{64}$/);
     expect(benchmarkCorpusSha256(REVIEWER_BENCHMARK_PAIRS.slice(0, 7)))
       .not.toBe(benchmarkCorpusSha256());
+    expect(benchmarkCorpusSha256([...REVIEWER_BENCHMARK_PAIRS].reverse()))
+      .toBe(benchmarkCorpusSha256());
+    const first = REVIEWER_BENCHMARK_PAIRS[0];
+    if (first === undefined) throw new Error("missing first pair");
+    expect(benchmarkCorpusSha256([{ ...first, cleanSource: `${first.cleanSource}\n` }]))
+      .not.toBe(benchmarkCorpusSha256([first]));
   });
 
   it("passes every clean suite and fails only the named mutant invariant", () => {

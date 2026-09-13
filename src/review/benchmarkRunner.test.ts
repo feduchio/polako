@@ -380,6 +380,35 @@ describe("review benchmark runner", () => {
       seed: 12,
     })).rejects.toThrow("must end with a newline");
   });
+
+  it("keeps corpus identity stable when rescore encounters pairs in shuffled order", async () => {
+    const nex = provider("nex", "nex-agi/a:free", () => reply('{"findings":[]}'));
+    const nvidia = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const pairs = REVIEWER_BENCHMARK_PAIRS.slice(0, 2);
+    const original = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 17,
+      pairs,
+    });
+    const responseJsonl = original.cells.map((cell) => canonicalJsonLine({
+      cellId: cell.oracle.cellId,
+      raw: cell.rawContent,
+      usage: cell.usage,
+    })).join("");
+    const rescored = await rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: original.packetJsonl,
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl,
+      packetSha256: original.packetSha256,
+      oracleSha256: original.oracleSha256,
+      model: { provider: "external", model: "flagship" },
+      family: "external",
+      seed: 17,
+    });
+    expect(rescored.corpusSha256).toBe(original.corpusSha256);
+  });
 });
 
 interface TestProvider extends ProviderAdapter {

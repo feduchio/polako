@@ -196,7 +196,7 @@ export function addedFileDiff(pairValue: ReviewerBenchmarkPair, label: "clean" |
 export function benchmarkCorpusSha256(
   pairs: readonly ReviewerBenchmarkPair[] = REVIEWER_BENCHMARK_PAIRS,
 ): string {
-  return sha256Hex(JSON.stringify(pairs.map((pairValue) => ({
+  return sha256Hex(JSON.stringify([...pairs].sort((a, b) => a.pairId.localeCompare(b.pairId)).map((pairValue) => ({
     pairId: pairValue.pairId,
     criterionId: pairValue.criterionId,
     property: pairValue.property,
