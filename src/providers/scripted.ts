@@ -26,14 +26,16 @@ export class ScriptedProvider implements ProviderAdapter {
   constructor(
     readonly id: string,
     models: ScriptedModel[],
-    opts: { concurrency?: number | null; fallback?: ScriptStep } = {},
+    opts: { concurrency?: number | null; fallback?: ScriptStep; autoStrictProbes?: boolean } = {},
   ) {
     this.concurrency = opts.concurrency ?? null;
     this.models = models.map((m) => ({ ref: { provider: id, model: m.name }, displayName: m.displayName ?? m.name, capabilities: m.capabilities, source: "provider" }));
     this.fallback = opts.fallback ?? { kind: "fn", fn: (req) => reply(lastUser(req), 10, 5) };
+    this.autoStrictProbes = opts.autoStrictProbes ?? true;
   }
 
   private readonly fallback: ScriptStep;
+  private readonly autoStrictProbes: boolean;
 
   script(model: string, steps: ScriptStep[]): this {
     this.scripts.set(model, [...(this.scripts.get(model) ?? []), ...steps]);
@@ -54,12 +56,14 @@ export class ScriptedProvider implements ProviderAdapter {
       throw new ProviderError(this.id, "not_found", `unknown model ${request.model.model}`);
     }
     if (
+      this.autoStrictProbes &&
       request.metadata.purpose === "capability_probe_strict_review" &&
       request.responseSchema?.name === "review_findings"
     ) {
       return reply('{"findings":[]}', 1, 1, 0);
     }
     if (
+      this.autoStrictProbes &&
       request.metadata.purpose === "capability_probe_strict_score" &&
       request.responseSchema?.name === "empirical_pair_score"
     ) {

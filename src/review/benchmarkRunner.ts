@@ -58,6 +58,7 @@ export interface RecordedBenchmarkCell extends BenchmarkCellResult {
 export interface ReviewerBenchmarkReport {
   seed: number;
   transportMode: "legacy_json_object" | "strict_schema" | null;
+  configuration: "original" | "operational_strict" | null;
   corpusSha256: string;
   requested: number;
   partial: boolean;
@@ -79,6 +80,7 @@ export interface RunReviewerBenchmarkInput {
   seed: number;
   liveAbort?: boolean;
   transportMode?: "legacy_json_object" | "strict_schema";
+  configuration?: "original" | "operational_strict";
   cellTimeoutMs?: number;
   onCell?: (cell: RecordedBenchmarkCell, completed: number, requested: number) => void;
   pairs?: readonly ReviewerBenchmarkPair[];
@@ -145,6 +147,7 @@ export async function runReviewerBenchmark(
     partial,
     cells,
     input.transportMode ?? "strict_schema",
+    input.configuration ?? "original",
   );
 }
 
@@ -195,11 +198,41 @@ export function selectBenchmarkReviewers(
   return [select("nex-agi"), select("nvidia")];
 }
 
+export function selectOperationalBenchmarkReviewers(
+  catalogs: readonly { provider: ProviderAdapter; models: readonly ModelInfo[] }[],
+): [BenchmarkReviewer, BenchmarkReviewer] {
+  const eligible = catalogs.flatMap(({ provider, models }) =>
+    models
+      .filter((model) =>
+        model.capabilities.supportsStrictReviewSchema === true &&
+        model.capabilities.inputCostPerM === 0 &&
+        model.capabilities.outputCostPerM === 0)
+      .map((model) => ({ provider, model })))
+    .sort((a, b) =>
+      compareText(a.model.capabilities.family, b.model.capabilities.family) ||
+      compareText(modelKey(a.model.ref), modelKey(b.model.ref)));
+  const selected: BenchmarkReviewer[] = [];
+  const families = new Set<string>();
+  for (const entry of eligible) {
+    const family = entry.model.capabilities.family;
+    if (families.has(family)) continue;
+    selected.push({ provider: entry.provider, model: entry.model.ref, family });
+    families.add(family);
+    if (selected.length === 2) break;
+  }
+  const first = selected[0];
+  const second = selected[1];
+  if (first === undefined || second === undefined) {
+    throw new Error("benchmark requires two distinct free probed-strict reviewer families");
+  }
+  return [first, second];
+}
+
 export function renderReviewerBenchmark(report: ReviewerBenchmarkReport): string {
   const schemaRate = ratioText(report.team.schemaFailures, report.team.scheduled);
   const transportRate = ratioText(report.team.transportFailures, report.team.scheduled);
   const lines = [
-    `Reviewer benchmark: ${String(report.team.completed)}/${String(report.requested)} completed cells${report.partial ? " (partial)" : ""} [transport=${report.transportMode ?? "rescore"}]`,
+    `Reviewer benchmark: ${String(report.team.completed)}/${String(report.requested)} completed cells${report.partial ? " (partial)" : ""} [configuration=${report.configuration ?? "rescore"}, transport=${report.transportMode ?? "rescore"}]`,
     ...Object.entries(report.byModel).map(([model, score]) =>
       `${model}: ${formatRate(score.primaryRecall)} primary recall, ${formatRate(score.strictIdRecall)} strict-id recall, ${formatRate(score.falsePositiveRate)} false positives, ${formatRate(report.byModelDiscrimination[model]?.rate ?? null)} pair discrimination, ${String(score.inputTokens)} input + ${String(score.outputTokens)} output tokens, ${formatNumber(score.outputTokensPerPrimaryHit)} output tokens/hit`),
     `team: ${formatRate(report.team.primaryRecall)} primary recall, ${formatRate(report.team.strictIdRecall)} strict-id recall, ${formatRate(report.team.falsePositiveRate)} false positives, ${formatRate(report.teamDiscrimination.rate)} pair discrimination`,
@@ -207,6 +240,17 @@ export function renderReviewerBenchmark(report: ReviewerBenchmarkReport): string
     `failures: schema=${String(report.team.schemaFailures)}/${String(report.team.scheduled)} (${schemaRate}), transport=${String(report.team.transportFailures)}/${String(report.team.scheduled)} (${transportRate})`,
   ];
   return `${lines.join("\n")}\n`;
+}
+
+export function renderReviewerBenchmarkComparison(reports: readonly ReviewerBenchmarkReport[]): string {
+  return `${reports.map((report) => {
+    const refs = [...new Set(report.cells.map((cell) => modelKey(cell.model)))].sort(compareText).join(",");
+    return [
+      `configuration=${report.configuration ?? "rescore"} transport=${report.transportMode ?? "rescore"} models=${refs}`,
+      `completion=${String(report.team.completed)}/${String(report.team.scheduled)} schema=${String(report.team.schemaFailures)} transport_failures=${String(report.team.transportFailures)}`,
+      `primary=${formatRate(report.team.primaryRecall)} strict=${formatRate(report.team.strictIdRecall)} false_positive=${formatRate(report.team.falsePositiveRate)} discrimination=${formatRate(report.teamDiscrimination.rate)}`,
+    ].join(" ");
+  }).join("\n")}\n`;
 }
 
 export async function rescoreReviewerBenchmark(
@@ -255,7 +299,7 @@ export async function rescoreReviewerBenchmark(
   const usedPairs = [...new Set(cells.map((cell) => cell.oracle.pairId))]
     .map((pairId) => REVIEWER_BENCHMARK_PAIRS.find((pair) => pair.pairId === pairId))
     .filter((pair): pair is ReviewerBenchmarkPair => pair !== undefined);
-  return buildReport(input.seed, benchmarkCorpusSha256(usedPairs), cells.length, false, cells, null);
+  return buildReport(input.seed, benchmarkCorpusSha256(usedPairs), cells.length, false, cells, null, null);
 }
 
 async function runCell(
@@ -328,6 +372,7 @@ function buildReport(
   partial: boolean,
   cells: RecordedBenchmarkCell[],
   transportMode: "legacy_json_object" | "strict_schema" | null,
+  configuration: "original" | "operational_strict" | null,
 ): ReviewerBenchmarkReport {
   const byModel = Object.fromEntries(
     [...new Set(cells.map((cell) => modelKey(cell.model)))].sort().map((key) => [
@@ -347,6 +392,7 @@ function buildReport(
   return {
     seed,
     transportMode,
+    configuration,
     corpusSha256,
     requested,
     partial,
@@ -443,6 +489,10 @@ function shuffled<T>(values: readonly T[], seed: number): T[] {
 
 function modelKey(model: ModelRef): string {
   return `${model.provider}:${model.model}`;
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function formatRate(value: number | null): string {

@@ -124,11 +124,15 @@ async function benchmarkReviewCommand(args: string[], daemonCall: CliDaemonCall)
   if (transportValue !== "strict" && transportValue !== "legacy") {
     throw new Error("--transport must be strict|legacy");
   }
+  const configuration = flag(args, "--configuration") ?? "original";
+  if (configuration !== "original" && configuration !== "operational") {
+    throw new Error("--configuration must be original|operational");
+  }
   const result = await daemonCall<{
     summary: string;
     report: unknown;
     artifacts: unknown;
-  }>("benchmark.review", { seed, liveAbort, transport: transportValue });
+  }>("benchmark.review", { seed, liveAbort, transport: transportValue, configuration });
   if (json) {
     print(result);
     return;
@@ -272,7 +276,7 @@ const usage = `Usage:
   polish watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   polish log <run-id> [--follow] [--json]
   polish cost <run-id> [--json]
-  polish benchmark-review [--seed n] [--transport strict|legacy] [--live-abort] [--json]
+  polish benchmark-review [--seed n] [--transport strict|legacy] [--configuration original|operational] [--live-abort] [--json]
   polish diff <run-id>
   polish pause|resume|stop|kill <run-id>
   polish answer <run-id> <answer>

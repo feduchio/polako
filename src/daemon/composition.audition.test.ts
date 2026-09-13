@@ -17,8 +17,12 @@ import {
   buildProductionDeps,
   createDiscoveringModelsDriverFromCatalog,
   installProductionDrivers,
+  strictProbeEpochComplete,
 } from "./composition.js";
 import { RunEngine } from "../engine/engine.js";
+import { ModelObservationRepository } from "../broker/observations.js";
+import { hashJson } from "../shared/hash.js";
+import { EMPIRICAL_SCORE_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 
 const FREE = { ...FAKE_CAPABILITIES.fast, inputCostPerM: 0, outputCostPerM: 0, supportsJson: true, supportsTools: true };
 
@@ -95,6 +99,8 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
       const ctx = phaseContext(store, clock, config);
       await createDiscoveringModelsDriverFromCatalog(deps)(ctx);
       expect(auditionCalls(provider)).toEqual([]);
+      expect(strictProbeEpochComplete(deps, ctx)).toBe(true);
+      expect(new ModelObservationRepository(store).list().filter((row) => row.kind === "strict_probe")).toHaveLength(2);
     }
   });
 
@@ -127,11 +133,61 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
     expect(installed).toBeDefined();
     await installed!(ctx);
     const first = auditionCalls(provider);
+    const strictCalls = provider.calls.filter((call) => call.metadata.purpose.startsWith("capability_probe_strict_")).length;
     expect(first).toHaveLength(1);
     expect(first[0]?.metadata.purpose).toBe("model-audition:echo");
     expect(first[0]?.metadata.runId).toBe(ctx.run.id);
     await installed!(ctx);
     expect(auditionCalls(provider)).toHaveLength(first.length);
+    expect(provider.calls.filter((call) => call.metadata.purpose.startsWith("capability_probe_strict_"))).toHaveLength(strictCalls);
+  });
+
+  it("derives probe-epoch completeness from persisted shortlist records", () => {
+    const config = defaultConfig();
+    const provider = discoveryProvider([
+      { name: "inside", capabilities: FREE },
+      { name: "outside", capabilities: FREE },
+    ]);
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+    });
+    const ctx = phaseContext(store, clock, config);
+    const reviewSchemaHash = hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA);
+    const scoreSchemaHash = hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA);
+    const observations = new ModelObservationRepository(store);
+    const inside = { provider: provider.id, model: "inside" };
+    observations.recordStrictProbe(inside, {
+      schema: "review",
+      schemaHash: reviewSchemaHash,
+      supported: false,
+      at: clock.now(),
+    });
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId: ctx.run.id,
+      ts: clock.now(),
+      type: "strict_probes.completed",
+      payload: {
+        shortlisted: [inside],
+        reviewSchemaHash,
+        scoreSchemaHash,
+      },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
+    expect(strictProbeEpochComplete(deps, ctx)).toBe(false);
+    observations.recordStrictProbe(inside, {
+      schema: "score",
+      schemaHash: scoreSchemaHash,
+      supported: false,
+      at: clock.now() + 1,
+    });
+    expect(strictProbeEpochComplete(deps, ctx)).toBe(true);
   });
 
   it("does not audition a paid-only cataloged model under default free_only", async () => {

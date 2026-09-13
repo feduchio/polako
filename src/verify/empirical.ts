@@ -65,6 +65,7 @@ export class EmpiricalVerifier implements VerifierStrategy {
   private calls: number;
   private inputTokens: number;
   private completedCalls: number;
+  private requestedCalls: number;
 
   constructor(options: EmpiricalVerifierOptions) {
     if (!Number.isInteger(options.repeats ?? 4) || (options.repeats ?? 4) < 4 || (options.repeats ?? 4) % 4 !== 0) {
@@ -78,6 +79,7 @@ export class EmpiricalVerifier implements VerifierStrategy {
     this.maxInputTokens = options.maxInputTokens ?? 192_000;
     this.maxDiffTokens = options.maxDiffTokens ?? 2_000;
     this.calls = options.alreadyUsedCalls ?? 0;
+    this.requestedCalls = this.calls;
     this.inputTokens = options.alreadyUsedInputTokens ?? 0;
     this.completedCalls = options.alreadyCompletedCalls ?? 0;
     this.fallback = options.fallback ?? new PairwiseJudge();
@@ -115,12 +117,13 @@ export class EmpiricalVerifier implements VerifierStrategy {
 
     const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
     const scores = new Map<string, PairScore>();
+    let pairFailure: string | null = null;
     const ring = ringPairs(ids);
     for (const [aId, bId] of ring) {
       const pair = await this.scorePair(candidateFrom(byId, aId), candidateFrom(byId, bId), context, criteria);
       scores.set(pairKey(aId, bId), orientPairScore(pair, aId, bId));
       if (pair.completed < Math.ceil(pair.requested / 2)) {
-        return this.fallbackSelection(candidates, context, criteria, "empirical pair completed fewer than half its evaluations");
+        pairFailure = "empirical pair completed fewer than half its evaluations";
       }
     }
 
@@ -135,8 +138,12 @@ export class EmpiricalVerifier implements VerifierStrategy {
       const pair = await this.scorePair(candidateFrom(byId, aId), candidateFrom(byId, bId), context, criteria);
       scores.set(key, orientPairScore(pair, aId, bId));
       if (pair.completed < Math.ceil(pair.requested / 2)) {
-        return this.fallbackSelection(candidates, context, criteria, "empirical pair completed fewer than half its evaluations");
+        pairFailure = "empirical pair completed fewer than half its evaluations";
       }
+    }
+
+    if (pairFailure !== null) {
+      return this.fallbackSelection(candidates, context, criteria, pairFailure);
     }
 
     const rankingMass = rankMass(ids, scores);
@@ -158,7 +165,7 @@ export class EmpiricalVerifier implements VerifierStrategy {
       backend: "empirical",
       scoreScheme: "empirical_repeats",
       models: this.models.map((model) => model.model),
-      requestedEvaluations: this.calls,
+      requestedEvaluations: this.requestedCalls,
       completedEvaluations: this.completedCalls,
       fallbackReason: null,
     };
@@ -174,6 +181,7 @@ export class EmpiricalVerifier implements VerifierStrategy {
     let sumB = 0;
     let completed = 0;
     const requested = criteria.length * this.repeats;
+    this.requestedCalls += requested;
     for (const criterion of criteria) {
       for (let repeat = 0; repeat < this.repeats; repeat++) {
         const swapped = repeat % 2 === 1;
@@ -273,7 +281,9 @@ export class EmpiricalVerifier implements VerifierStrategy {
 
   private candidatesFit(candidates: readonly TournamentCandidate[]): boolean {
     return candidates.every((candidate) =>
-      candidate.diff !== undefined && estimateTokens(candidate.diff) <= this.maxDiffTokens);
+      candidate.diff !== undefined &&
+      candidate.diff.length > 0 &&
+      estimateTokens(candidate.diff) <= this.maxDiffTokens);
   }
 
   private hasTwoFamilies(): boolean {
@@ -338,7 +348,7 @@ export class EmpiricalVerifier implements VerifierStrategy {
       backend: "empirical",
       scoreScheme: "empirical_repeats",
       models: this.models.map((model) => model.model),
-      requestedEvaluations: this.calls,
+      requestedEvaluations: this.requestedCalls,
       completedEvaluations: this.completedCalls,
       fallbackReason: reason,
     };
@@ -455,7 +465,7 @@ function maximumPairCount(n: number): number {
   if (n === 2) return 1;
   if (n === 3) return 3;
   if (n === 4) return 6;
-  return Math.min((n * 2) - 2, (n * (n - 1)) / 2);
+  return Math.min((3 * n) - 6, (n * (n - 1)) / 2);
 }
 
 function candidateFrom(

@@ -48,7 +48,7 @@ describe("CLI parsing", () => {
 
     expect(calls).toEqual([{
       method: "benchmark.review",
-      params: { seed: 7, liveAbort: true, transport: "strict" },
+      params: { seed: 7, liveAbort: true, transport: "strict", configuration: "original" },
     }]);
     expect(write.mock.calls.map((call) => String(call[0])).join(""))
       .toBe("Reviewer benchmark: 71/96 completed cells\n");

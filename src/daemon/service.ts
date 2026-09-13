@@ -23,7 +23,11 @@ import {
   renderReviewerBenchmark,
   runReviewerBenchmark,
   selectBenchmarkReviewers,
+  selectOperationalBenchmarkReviewers,
 } from "../review/benchmarkRunner.js";
+import { ModelObservationRepository } from "../broker/observations.js";
+import { REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { hashJson } from "../shared/hash.js";
 import { applyRunBranch } from "./apply.js";
 import { loadPolishConfig } from "./configLoad.js";
 import {
@@ -165,6 +169,7 @@ export class DaemonService implements RpcHandler {
           optionalNumber(params, "seed") ?? 42,
           params["liveAbort"] === true,
           params["transport"] === "legacy" ? "legacy_json_object" : "strict_schema",
+          params["configuration"] === "operational" ? "operational_strict" : "original",
         );
       default:
         throw new PolishError("NOT_FOUND", `unknown RPC method ${method}`);
@@ -175,30 +180,51 @@ export class DaemonService implements RpcHandler {
     seed: number,
     liveAbort: boolean,
     transportMode: "legacy_json_object" | "strict_schema",
+    configuration: "original" | "operational_strict",
   ): Promise<unknown> {
     if (!Number.isInteger(seed)) throw new PolishError("INVALID_ARGUMENT", "benchmark seed must be an integer");
     const catalogs = await Promise.all(this.productionDeps.providers.map(async (provider) => ({
       provider,
       models: await provider.listModels(),
     })));
-    const reviewers = selectBenchmarkReviewers(catalogs);
+    for (const catalog of catalogs) {
+      for (const model of catalog.models) this.productionDeps.catalog.upsert(model);
+    }
+    const observations = new ModelObservationRepository(this.store);
+    observations.restoreCatalog(this.productionDeps.catalog);
+    const reviewSchemaHash = hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA);
+    const operationalCatalogs = catalogs.map(({ provider, models }) => ({
+      provider,
+      models: models.map((model) => ({
+        ...(this.productionDeps.catalog.get(model.ref)?.info ?? model),
+        capabilities: {
+          ...(this.productionDeps.catalog.get(model.ref)?.info.capabilities ?? model.capabilities),
+          supportsStrictReviewSchema:
+            observations.latestStrictProbe(model.ref, "review", reviewSchemaHash)?.supported ?? false,
+        },
+      })),
+    }));
+    const reviewers = configuration === "operational_strict"
+      ? selectOperationalBenchmarkReviewers(operationalCatalogs)
+      : selectBenchmarkReviewers(catalogs);
     const report = await runReviewerBenchmark({
       protocols: this.productionDeps.protocols,
       reviewers,
       seed,
       liveAbort,
       transportMode,
+      configuration,
     });
     const packet = this.store.artifacts.put(
       report.packetJsonl,
       "review_benchmark_packets",
-      `review-benchmark:${String(seed)}:${transportMode}:packets`,
+      `review-benchmark:${String(seed)}:${configuration}:${transportMode}:packets`,
       this.clock.now(),
     );
     const oracle = this.store.artifacts.put(
       report.oracleJsonl,
       "review_benchmark_oracle",
-      `review-benchmark:${String(seed)}:${transportMode}:oracle`,
+      `review-benchmark:${String(seed)}:${configuration}:${transportMode}:oracle`,
       this.clock.now(),
     );
     const stored = {
@@ -209,7 +235,7 @@ export class DaemonService implements RpcHandler {
     const reportArtifact = this.store.artifacts.put(
       JSON.stringify(stored),
       "review_benchmark_report",
-      `review-benchmark:${String(seed)}:${transportMode}:report`,
+      `review-benchmark:${String(seed)}:${configuration}:${transportMode}:report`,
       this.clock.now(),
     );
     return {

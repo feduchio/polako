@@ -18,6 +18,7 @@ export const KNOWN_EVENT_TYPES = [
   "baseline.snapshotted",
   "models.discovered",
   "model.probed",
+  "strict_probes.completed",
   "task.created",
   "task.state_changed",
   "candidate.created",

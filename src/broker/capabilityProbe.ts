@@ -122,6 +122,7 @@ export async function probeModelCapabilities(
         probeMaxTokens,
         EMPIRICAL_SCORE_RESPONSE_SCHEMA,
         (value) => isRecord(value) &&
+          Object.keys(value).sort().join(",") === "scoreA,scoreB" &&
           isScore(value["scoreA"]) &&
           isScore(value["scoreB"]),
         "capability_probe_strict_score",

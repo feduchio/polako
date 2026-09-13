@@ -499,6 +499,15 @@ function toTournamentSource(
 ): TournamentSourceCandidate {
   const gateReport = candidate.gateReport;
   const checks = gateReport?.checks ?? [];
+  const expectedDiffLabel = candidate.headCommit === null
+    ? null
+    : `${candidate.baseCheckpointHash}..${candidate.headCommit}`;
+  const diffRef = candidate.diffRef;
+  const diff = diffRef !== null &&
+    expectedDiffLabel !== null &&
+    diffRef.label === expectedDiffLabel
+    ? ctx.store.artifacts.getText(diffRef.sha256)
+    : undefined;
   return {
     id: candidate.id,
     status: candidate.state === "PASSED_GATES" ? "passed" : "failed_gates",
@@ -508,7 +517,7 @@ function toTournamentSource(
       regression: compareToBaseline(baseline, checks),
       passed: gateReport.passed,
     },
-    ...(candidate.diffRef === null ? {} : { diff: ctx.store.artifacts.getText(candidate.diffRef.sha256) }),
+    ...(diff === undefined ? {} : { diff }),
   };
 }
 

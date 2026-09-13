@@ -103,6 +103,7 @@ describe("EmpiricalVerifier", () => {
       requestedEvaluations: 8,
       completedEvaluations: 8,
       fallback: false,
+      rationale: "Empirical PPT: 1 unique pairs, 8 evaluations, 2 criteria.",
     });
     expect(first.calls).toHaveLength(4);
     expect(second.calls).toHaveLength(4);
@@ -120,6 +121,33 @@ describe("EmpiricalVerifier", () => {
   it("pins sigmoid mass to independent literals", () => {
     expect(sigmoidMass(5 / 6, 1 / 6)).toBe(0.6607563687658172);
     expect(1 - sigmoidMass(5 / 6, 1 / 6)).toBe(0.3392436312341828);
+  });
+
+  it("uses completed-only asymmetric rewards to reach the pinned sigmoid mass", async () => {
+    const first = new ScriptedProvider("p0", [{ name: "m0", capabilities: FAKE_CAPABILITIES.strong }]);
+    const second = new ScriptedProvider("p1", [{ name: "m1", capabilities: FAKE_CAPABILITIES.strong }]);
+    const failure = (provider: string) => ({
+      kind: "error" as const,
+      error: new ProviderError(provider, "server", "down"),
+    });
+    first.script("m0", [reply(4, 0), reply(0, 4), reply(4, 0), failure("p0")]);
+    second.script("m1", [reply(4, 0), reply(0, 4), reply(0, 4), failure("p1")]);
+    const strategy = new EmpiricalVerifier({
+      models: [
+        { provider: first, model: { provider: "p0", model: "m0" }, family: "family-a" },
+        { provider: second, model: { provider: "p1", model: "m1" }, family: "family-b" },
+      ],
+      protocols: PROTOCOLS,
+    });
+    const result = await strategy.selectFrontier(
+      [candidate("a"), candidate("b")],
+      { runId: "run_test", taskKind: "bugfix", task: "one" },
+    );
+    expect(result.completedEvaluations).toBe(6);
+    expect(result.scores).toEqual({
+      a: 0.6607563687658172,
+      b: 0.3392436312341828,
+    });
   });
 
   it("rejects prose, extra keys, missing keys and out-of-range scores", () => {
@@ -238,5 +266,55 @@ describe("EmpiricalVerifier", () => {
       completedEvaluations: 1,
     });
     expect(result.fallbackReason).toContain("fewer than half");
+  });
+
+  it("bounds an all-rate-limited N=3 selection at 48 calls", async () => {
+    const first = new ScriptedProvider("p0", [{ name: "m0", capabilities: FAKE_CAPABILITIES.strong }]);
+    const second = new ScriptedProvider("p1", [{ name: "m1", capabilities: FAKE_CAPABILITIES.strong }]);
+    const failures = (provider: string) => Array.from({ length: 24 }, () => ({
+      kind: "error" as const,
+      error: new ProviderError(provider, "rate_limit", "429"),
+    }));
+    first.script("m0", failures("p0"));
+    second.script("m1", failures("p1"));
+    const strategy = new EmpiricalVerifier({
+      models: [
+        { provider: first, model: { provider: "p0", model: "m0" }, family: "family-a" },
+        { provider: second, model: { provider: "p1", model: "m1" }, family: "family-b" },
+      ],
+      protocols: PROTOCOLS,
+    });
+    const result = await strategy.selectFrontier(
+      [candidate("a"), candidate("b"), candidate("c")],
+      { runId: "run_test", taskKind: "bugfix", task: "c1; c2; c3; c4; c5" },
+    );
+    expect(first.calls.length + second.calls.length).toBe(48);
+    expect(result.fallback).toBe(true);
+    expect(result.completedEvaluations).toBe(0);
+  });
+
+  it("honours persisted attempt and estimated-input ceilings before another call", async () => {
+    for (const limits of [
+      { alreadyUsedCalls: 48 },
+      { maxInputTokens: 100, alreadyUsedInputTokens: 99 },
+    ]) {
+      const { first, second } = verifier();
+      first.calls.length = 0;
+      second.calls.length = 0;
+      const strategy = new EmpiricalVerifier({
+        models: [
+          { provider: first, model: { provider: "p0", model: "m0" }, family: "family-a" },
+          { provider: second, model: { provider: "p1", model: "m1" }, family: "family-b" },
+        ],
+        protocols: PROTOCOLS,
+        ...limits,
+      });
+      const result = await strategy.selectFrontier(
+        [candidate("a"), candidate("b")],
+        { runId: "run_test", taskKind: "bugfix", task: "one" },
+      );
+      expect(result.fallback).toBe(true);
+      expect(first.calls.length + second.calls.length).toBe(0);
+    }
   });
 });

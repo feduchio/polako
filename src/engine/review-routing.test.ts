@@ -56,6 +56,16 @@ describe("production REVIEWING cost-eligible routing", () => {
         name: "unknown-price",
         capabilities: { ...FAKE_CAPABILITIES.strong, family: "unknown", supportsJson: true, inputCostPerM: null, outputCostPerM: null },
       },
+      {
+        name: "free-unprobed",
+        capabilities: {
+          ...FAKE_CAPABILITIES.frontier,
+          family: "free-unprobed",
+          supportsJson: true,
+          inputCostPerM: 0,
+          outputCostPerM: 0,
+        },
+      },
     ]);
     const banned = (name: string) => ({
       kind: "fn" as const,
@@ -65,6 +75,7 @@ describe("production REVIEWING cost-eligible routing", () => {
     });
     provider.script("paid-frontier", [banned("paid-frontier")]);
     provider.script("unknown-price", [banned("unknown-price")]);
+    provider.script("free-unprobed", [banned("free-unprobed")]);
     provider
       .script("free-reviewer", [{ kind: "reply", content: "[]" }])
       .script("free-reviewer", [{ kind: "reply", content: "[]" }])
@@ -97,6 +108,7 @@ describe("production REVIEWING cost-eligible routing", () => {
     expect(provider.calls.every((call) => call.model.model === "free-reviewer")).toBe(true);
     expect(provider.calls.some((call) => call.model.model === "paid-frontier")).toBe(false);
     expect(provider.calls.some((call) => call.model.model === "unknown-price")).toBe(false);
+    expect(provider.calls.some((call) => call.model.model === "free-unprobed")).toBe(false);
 
     const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
     expect(executions.length).toBe(config.review.reviewersPerRound);

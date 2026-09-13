@@ -10,6 +10,9 @@ import type {
 } from "../broker/types.js";
 import { REVIEWER_BENCHMARK_PAIRS, benchmarkCorpusSha256 } from "../review/benchmarkCorpus.js";
 import { DaemonService } from "./service.js";
+import { ModelObservationRepository } from "../broker/observations.js";
+import { REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { hashJson } from "../shared/hash.js";
 
 const cleanup: string[] = [];
 
@@ -81,6 +84,42 @@ describe("benchmark.review RPC", () => {
       await service.close();
     }
   });
+
+  it("runs the separately labelled operational probed-strict configuration", async () => {
+    const home = mkdtempSync(join(tmpdir(), "polish-benchmark-operational-"));
+    cleanup.push(home);
+    const alpha = benchmarkProvider("alpha", "alpha/strict:free", "alpha");
+    const beta = benchmarkProvider("beta", "beta/strict:free", "beta");
+    const service = new DaemonService({ home, providers: [beta, alpha] });
+    try {
+      const observations = new ModelObservationRepository(service.store);
+      const schemaHash = hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA);
+      observations.recordStrictProbe({ provider: "alpha", model: "alpha/strict:free" }, {
+        schema: "review",
+        schemaHash,
+        supported: true,
+        at: 1,
+      });
+      observations.recordStrictProbe({ provider: "beta", model: "beta/strict:free" }, {
+        schema: "review",
+        schemaHash,
+        supported: true,
+        at: 2,
+      });
+      const result = await service.handle("benchmark.review", {
+        seed: 43,
+        transport: "strict",
+        configuration: "operational",
+      }) as { report: { configuration: string; transportMode: string; cells: unknown[] } };
+      expect(result.report.configuration).toBe("operational_strict");
+      expect(result.report.transportMode).toBe("strict_schema");
+      expect(result.report.cells).toHaveLength(96);
+      expect(alpha.calls).toHaveLength(48);
+      expect(beta.calls).toHaveLength(48);
+    } finally {
+      await service.close();
+    }
+  });
 });
 
 interface BenchmarkProvider extends ProviderAdapter {
@@ -97,6 +136,7 @@ function benchmarkProvider(id: string, model: string, family: string): Benchmark
       maxOutputTokens: 2_000,
       supportsTools: false,
       supportsJson: true,
+      supportsStrictReviewSchema: true,
       inputCostPerM: 0,
       outputCostPerM: 0,
       tier: "fast",

@@ -13,9 +13,11 @@ import { REVIEWER_BENCHMARK_PAIRS } from "./benchmarkCorpus.js";
 import {
   buildBenchmarkSchedule,
   renderReviewerBenchmark,
+  renderReviewerBenchmarkComparison,
   runReviewerBenchmark,
   rescoreReviewerBenchmark,
   selectBenchmarkReviewers,
+  selectOperationalBenchmarkReviewers,
   type BenchmarkReviewer,
 } from "./benchmarkRunner.js";
 
@@ -66,6 +68,56 @@ describe("review benchmark runner", () => {
       cell.request?.responseFormat === "json" &&
       cell.request.responseSchema === undefined &&
       cell.request.reasoning === undefined)).toBe(true);
+  });
+
+  it("selects an operational ensemble from two distinct free probed-strict families", () => {
+    const free = {
+      supportsStrictReviewSchema: true,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const p = provider("p", "ignored", () => reply('{"findings":[]}'));
+    const selected = selectOperationalBenchmarkReviewers([{
+      provider: p,
+      models: [
+        info("p", "z", "family-a", free),
+        info("p", "a", "family-a", free),
+        info("p", "b", "family-b", free),
+        info("p", "unprobed", "family-c", { ...free, supportsStrictReviewSchema: false }),
+      ],
+    }]);
+    expect(selected.map((item) => item.model.model)).toEqual(["a", "b"]);
+    expect(selected.map((item) => item.family)).toEqual(["family-a", "family-b"]);
+  });
+
+  it("renders transport denominators beside quality for multi-report comparison", async () => {
+    const nex = provider("nex", "nex-agi/a:free", () => reply('{"findings":[]}'));
+    const nvidia = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const reviewers = [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")] as const;
+    const legacy = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers,
+      seed: 43,
+      pairs: [pair],
+      transportMode: "legacy_json_object",
+      configuration: "original",
+    });
+    const strict = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers,
+      seed: 43,
+      pairs: [pair],
+      transportMode: "strict_schema",
+      configuration: "operational_strict",
+    });
+    const rendered = renderReviewerBenchmarkComparison([legacy, strict]);
+    expect(rendered).toContain("configuration=original transport=legacy_json_object");
+    expect(rendered).toContain("configuration=operational_strict transport=strict_schema");
+    expect(rendered).toContain("completion=12/12 schema=0 transport_failures=0");
+    expect(rendered).toContain("primary=");
+    expect(rendered).toContain("false_positive=");
   });
 
   it("keeps pair metadata blind outside diff and cell ids off the wire", async () => {

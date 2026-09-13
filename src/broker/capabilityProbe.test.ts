@@ -95,6 +95,29 @@ describe("probeModelCapabilities", () => {
     expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
   });
 
+  it.each([
+    ["explicit 400", new ProviderError("p", "bad_request", "schema rejected"), "unsupported"],
+    ["probe failure", new Error("transport broke"), "probe_failed"],
+  ] as const)("records %s as fail-closed strict support", async (_label, error, verdict) => {
+    const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("m", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const result = await probeModelCapabilities(provider, model("m", {
+      ...FAKE_CAPABILITIES.strong,
+      supportsStrictReviewSchema: true,
+      supportsStrictScoreSchema: true,
+    }), {
+      runId: RUN,
+      strictComplete: () => Promise.reject(error),
+    });
+    expect(result.checks.strictReview.verdict).toBe(verdict);
+    expect(result.checks.strictScore.verdict).toBe(verdict);
+    expect(result.info.capabilities.supportsStrictReviewSchema).toBe(false);
+    expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+  });
+
   it("reuses cached strict probe results without another strict call", async () => {
     const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
     provider.script("m", [

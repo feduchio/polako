@@ -24,7 +24,7 @@ import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } fr
 import type { PolishConfig } from "../domain/config.js";
 import { supervisorModelChain } from "../domain/config.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
-import { modelRefKey, SYSTEM_ACTOR } from "../domain/common.js";
+import { modelRefKey, SYSTEM_ACTOR, type ModelRef } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
 import type { RunPhase } from "../domain/run.js";
 import type { Task } from "../domain/task.js";
@@ -111,7 +111,6 @@ export interface ProductionDeps {
   providers: ProviderAdapter[];
   /** Loaded once: `ProtocolRegistry.load` is synchronous file IO over every protocol directory. */
   protocols: ProtocolRegistry;
-  strictProbeEpoch: { complete: boolean; attempted: Set<string> };
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
   /** A run's own `--budget-tokens` / `--budget-usd`, empty when it has none. */
   resolveRunBudget?: (runId: string) => RunBudgetLimits;
@@ -183,7 +182,6 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     config: options.config,
     home: options.home,
     protocols: ProtocolRegistry.load(defaultProtocolsRoot()),
-    strictProbeEpoch: { complete: false, attempted: new Set<string>() },
     catalog,
     broker,
     ...(options.resolveRunBudget === undefined ? {} : { resolveRunBudget: options.resolveRunBudget }),
@@ -354,9 +352,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
     "REVIEWING",
     createReviewingDriver({
       resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
-      strictProbeEpochComplete: (ctx) =>
-        deps.strictProbeEpoch.complete ||
-        ctx.store.events.list(ctx.run.id, { types: ["models.discovered"] }).length > 0,
+      strictProbeEpochComplete: (ctx) => strictProbeEpochComplete(deps, ctx),
       sandbox: sandboxFor,
       protocols: deps.protocols,
     }),
@@ -442,26 +438,29 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
         });
       },
     });
-    for (const probe of discovery.probes) {
-      deps.strictProbeEpoch.attempted.add(modelRefKey(probe.info.ref));
-      if (observations.latestStrictProbe(probe.info.ref, "review", reviewSchemaHash) === null) {
-        observations.recordStrictProbe(probe.info.ref, {
+    const probesByRef = new Map(discovery.probes.map((probe) => [modelRefKey(probe.info.ref), probe]));
+    for (const model of discovery.shortlisted) {
+      const probe = probesByRef.get(modelRefKey(model.ref));
+      if (observations.latestStrictProbe(model.ref, "review", reviewSchemaHash) === null) {
+        observations.recordStrictProbe(model.ref, {
           schema: "review",
           schemaHash: reviewSchemaHash,
-          supported: probe.checks.strictReview.verdict === "supported",
+          supported: probe?.checks.strictReview.verdict === "supported",
+          ...(probe === undefined ? { detail: "capability probe failed before strict review result" } : {}),
           at: ctx.clock.now(),
         });
       }
-      if (observations.latestStrictProbe(probe.info.ref, "score", scoreSchemaHash) === null) {
-        observations.recordStrictProbe(probe.info.ref, {
+      if (observations.latestStrictProbe(model.ref, "score", scoreSchemaHash) === null) {
+        observations.recordStrictProbe(model.ref, {
           schema: "score",
           schemaHash: scoreSchemaHash,
-          supported: probe.checks.strictScore.verdict === "supported",
+          supported: probe?.checks.strictScore.verdict === "supported",
+          ...(probe === undefined ? { detail: "capability probe failed before strict score result" } : {}),
           at: ctx.clock.now(),
         });
       }
     }
-    deps.strictProbeEpoch.complete = true;
+    observations.restoreCatalog(deps.catalog);
     const probeEvents: NewEvent[] = discovery.probes.map((probe) => ({
       id: id("evt", ctx.clock.now()),
       runId: ctx.run.id,
@@ -478,7 +477,23 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
       actor: SYSTEM_ACTOR,
       artifacts: [],
     }));
-    if (probeEvents.length > 0) ctx.store.events.append(probeEvents);
+    ctx.store.events.append([
+      ...probeEvents,
+      {
+        id: id("evt", ctx.clock.now()),
+        runId: ctx.run.id,
+        ts: ctx.clock.now(),
+        type: "strict_probes.completed",
+        payload: {
+          shortlisted: discovery.shortlisted.map((model) => model.ref),
+          reviewSchemaHash,
+          scoreSchemaHash,
+        },
+        causedBy: [],
+        actor: SYSTEM_ACTOR,
+        artifacts: [],
+      },
+    ]);
     await runConfiguredAudition(deps, ctx);
     const models = deps.catalog.list().map((entry) => entry.info);
     return createDiscoveringModelsDriver(models)(ctx);
@@ -607,6 +622,29 @@ export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseCon
   });
 }
 
+export function strictProbeEpochComplete(deps: ProductionDeps, ctx: PhaseContext): boolean {
+  const epoch = ctx.store.events.list(ctx.run.id, { types: ["strict_probes.completed"] }).at(-1);
+  if (epoch === undefined) return false;
+  const reviewSchemaHash = hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA);
+  const scoreSchemaHash = hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA);
+  if (
+    epoch.payload["reviewSchemaHash"] !== reviewSchemaHash ||
+    epoch.payload["scoreSchemaHash"] !== scoreSchemaHash ||
+    !Array.isArray(epoch.payload["shortlisted"])
+  ) {
+    return false;
+  }
+  const observations = new ModelObservationRepository(deps.store);
+  const shortlisted: unknown[] = epoch.payload["shortlisted"];
+  for (const value of shortlisted) {
+    if (!isModelRef(value)) return false;
+    const ref = value;
+    if (observations.latestStrictProbe(ref, "review", reviewSchemaHash) === null) return false;
+    if (observations.latestStrictProbe(ref, "score", scoreSchemaHash) === null) return false;
+  }
+  return true;
+}
+
 export async function resolveProductionVerifier(
   deps: ProductionDeps,
   ctx: PhaseContext,
@@ -628,8 +666,8 @@ export async function resolveProductionVerifier(
       entry.info.capabilities.inputCostPerM === 0 &&
       entry.info.capabilities.outputCostPerM === 0)
     .sort((a, b) =>
-      a.info.capabilities.family.localeCompare(b.info.capabilities.family) ||
-      modelRefKey(a.info.ref).localeCompare(modelRefKey(b.info.ref)));
+      compareText(a.info.capabilities.family, b.info.capabilities.family) ||
+      compareText(modelRefKey(a.info.ref), modelRefKey(b.info.ref)));
   const selected: typeof eligible = [];
   const families = new Set<string>();
   for (const entry of eligible) {
@@ -690,6 +728,16 @@ function empiricalSpend(
     inputTokens += estimateTokens(JSON.stringify(parsed.messages ?? []));
   }
   return { calls, completed, inputTokens };
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function isModelRef(value: unknown): value is ModelRef {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record["provider"] === "string" && typeof record["model"] === "string";
 }
 
 export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {

@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { defaultConfig } from "../domain/config.js";
+import { defaultConfig, PolishConfigSchema } from "../domain/config.js";
 import { RunEngine } from "../engine/engine.js";
 import { isStubDriver } from "../engine/stubs.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
@@ -121,15 +121,22 @@ describe("production composition", () => {
       outputCostPerM: 0,
     };
     const provider = new ScriptedProvider("scores", [
+      { name: "z", capabilities: { ...capabilities, family: "family-a" } },
       { name: "a", capabilities: { ...capabilities, family: "family-a" } },
       { name: "b", capabilities: { ...capabilities, family: "family-b" } },
     ]);
-    const responses = Array.from({ length: 4 }, (_, index) => ({
+    const responses = Array.from({ length: 24 }, (_, index) => ({
       kind: "reply" as const,
       content: JSON.stringify(index % 2 === 0 ? { scoreA: 4, scoreB: 0 } : { scoreA: 0, scoreB: 4 }),
     }));
     provider.script("a", responses);
     provider.script("b", responses);
+    provider.script("z", [{
+      kind: "fn",
+      fn: () => {
+        throw new Error("higher-quality duplicate family model must not replace lexicographic first");
+      },
+    }]);
     const deps = buildProductionDeps({
       store,
       clock,
@@ -138,6 +145,8 @@ describe("production composition", () => {
       providers: [provider],
     });
     await deps.catalog.discover();
+    deps.catalog.recordQuality({ provider: "scores", model: "z" }, 1);
+    deps.catalog.recordQuality({ provider: "scores", model: "a" }, 0);
     const engine = new RunEngine({
       store,
       clock,
@@ -165,8 +174,7 @@ describe("production composition", () => {
       clock,
       config,
     } satisfies PhaseContext;
-    const strategy = await resolveProductionVerifier(deps, ctx, task);
-    const result = await strategy.selectFrontier?.([
+    const candidates = [
       {
         id: "a",
         diff: "diff --git a/a b/a\n+x\n",
@@ -177,13 +185,16 @@ describe("production composition", () => {
         diff: "diff --git a/b b/b\n+y\n",
         metrics: { candidateId: "b", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] },
       },
-    ], {
+    ];
+    const context = {
       runId: run.id,
       taskId: task.id,
       taskKind: task.kind,
       task: task.description,
       acceptance: task.acceptance,
-    });
+    };
+    const strategy = await resolveProductionVerifier(deps, ctx, task);
+    const result = await strategy.selectFrontier?.(candidates, context);
     expect(result?.backend).toBe("empirical");
     expect(result?.requestedEvaluations).toBe(8);
     expect(provider.calls).toHaveLength(8);
@@ -192,7 +203,104 @@ describe("production composition", () => {
     expect(calls.every((event) =>
       event.payload["role"] === "verifier" &&
       event.payload["purpose"] === "empirical_pair_score" &&
-      event.payload["taskId"] === task.id)).toBe(true);
+      event.payload["taskId"] === task.id &&
+      (event.payload["retryPolicy"] as { maxAttempts?: number }).maxAttempts === 1)).toBe(true);
+    expect(new Set(calls.map((event) =>
+      `${(event.payload["model"] as { provider: string; model: string }).provider}:${(event.payload["model"] as { provider: string; model: string }).model}`))).toEqual(
+      new Set(["scores:a", "scores:b"]),
+    );
+
+    for (let iteration = 1; iteration < 6; iteration++) {
+      const next = await resolveProductionVerifier(deps, ctx, task);
+      await next.selectFrontier?.(candidates, context);
+    }
+    expect(provider.calls).toHaveLength(48);
+    const exhausted = await resolveProductionVerifier(deps, ctx, task);
+    const fallback = await exhausted.selectFrontier?.(candidates, context);
+    expect(provider.calls).toHaveLength(48);
+    expect(fallback?.fallback).toBe(true);
+    expect(fallback?.requestedEvaluations).toBe(48);
+  });
+
+  it("restores the empirical input-token ceiling from persisted model requests", async () => {
+    const config = PolishConfigSchema.parse({
+      verifier: { maxEmpiricalInputTokens: 100 },
+    });
+    const capabilities = {
+      ...FAKE_CAPABILITIES.strong,
+      supportsStrictScoreSchema: true,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const provider = new ScriptedProvider("scores", [
+      { name: "a", capabilities: { ...capabilities, family: "family-a" } },
+      { name: "b", capabilities: { ...capabilities, family: "family-b" } },
+    ]);
+    const deps = buildProductionDeps({ store, clock, config, home: join(dir, "home"), providers: [provider] });
+    await deps.catalog.discover();
+    const engine = new RunEngine({
+      store,
+      clock,
+      scheduler: new Scheduler(store, clock, { workerId: "w", laneLimits: config.lanes, leaseMs: 60_000 }),
+      config,
+      assertProjectClean: () => undefined,
+    }, false);
+    const run = engine.createRun({ projectPath: dir });
+    const task = createTaskFromRequirement(id("interp", clock.now()), "R1", {
+      id: id("task", clock.now()),
+      runId: run.id,
+      title: "Compare",
+      description: "one",
+      kind: "bugfix",
+      acceptance: ["works"],
+      complexity: "normal",
+      baseCheckpointHash: "a".repeat(40),
+      now: clock.now(),
+    });
+    const requestArtifact = store.artifacts.put(
+      JSON.stringify({ messages: [{ role: "user", content: "x".repeat(400) }] }),
+      "model_request",
+      "prior empirical request",
+    );
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId: run.id,
+      ts: clock.now(),
+      type: "model.call",
+      payload: {
+        model: { provider: "scores", model: "a" },
+        role: "verifier",
+        purpose: "empirical_pair_score",
+        taskId: task.id,
+        attempts: 1,
+        ok: true,
+      },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [requestArtifact],
+    }]);
+    const ctx = {
+      run,
+      store,
+      scheduler: new Scheduler(store, clock, { workerId: "w2", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock,
+      config,
+    } satisfies PhaseContext;
+    const strategy = await resolveProductionVerifier(deps, ctx, task);
+    const result = await strategy.selectFrontier?.([
+      {
+        id: "a",
+        diff: "+a",
+        metrics: { candidateId: "a", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] },
+      },
+      {
+        id: "b",
+        diff: "+b",
+        metrics: { candidateId: "b", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] },
+      },
+    ], { runId: run.id, taskId: task.id, taskKind: task.kind, task: task.description, acceptance: task.acceptance });
+    expect(result?.fallback).toBe(true);
+    expect(provider.calls).toHaveLength(0);
   });
 
   it("buildProductionDeps discovers models with capability probes", async () => {

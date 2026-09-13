@@ -19,7 +19,7 @@ import { RunEngine } from "./engine.js";
 import { createComparingDriver } from "./candidateDrivers.js";
 import type { PolishConfig } from "../domain/config.js";
 import { defaultPython, sidecarScriptPath, VerifierAdapter } from "../verify/sidecar.js";
-import type { VerifierStrategy } from "../verify/strategy.js";
+import type { TournamentCandidate, VerifierStrategy } from "../verify/strategy.js";
 
 const SIDECAR_SCRIPT = sidecarScriptPath();
 
@@ -239,6 +239,46 @@ describe("B3 production comparing driver", () => {
       claimedLogprobScheme: null,
       fallbackReason: null,
     });
+  });
+
+  it("loads only candidate diffs whose CAS label matches base and head", async () => {
+    const validText = "diff --git a/a.ts b/a.ts\n+valid\n";
+    const valid = store.artifacts.put(
+      validText,
+      "candidate_diff",
+      `${fixture.base}..${fixture.base}`,
+    );
+    const wrong = store.artifacts.put(
+      "diff --git a/b.ts b/b.ts\n+wrong\n",
+      "candidate_diff",
+      `${"f".repeat(40)}..${fixture.base}`,
+    );
+    const { runId } = seedComparingRun(store, clock, fixture, [
+      { ...passedCandidate(tieAId, fixture.base, [check("gate", "pass")]), diffRef: valid },
+      { ...passedCandidate(tieBId, fixture.base, [check("gate", "pass")]), diffRef: wrong },
+    ]);
+    let observed: readonly TournamentCandidate[] = [];
+    const strategy: VerifierStrategy = {
+      comparePair: () => Promise.reject(new Error("pair path must not run")),
+      selectFrontier: (candidates) => {
+        observed = candidates;
+        return Promise.resolve({
+          winnerId: candidates[0]?.id ?? null,
+          ranking: candidates.map((candidate) => candidate.id),
+          scores: Object.fromEntries(candidates.map((candidate) => [candidate.id, 1])),
+          rationale: "mechanical",
+          method: "ppt",
+          fallback: false,
+          criteria: ["correctness"],
+          nComparisons: 1,
+          client: "live",
+          backend: "empirical",
+        });
+      },
+    };
+    await engineWithComparing({ resolveVerifierStrategy: () => strategy }).tickRun(runId);
+    expect(observed.find((candidate) => candidate.id === tieAId)?.diff).toBe(validText);
+    expect(observed.find((candidate) => candidate.id === tieBId)?.diff).toBeUndefined();
   });
 
   it("still yields a tournament result when the sidecar is down", async () => {

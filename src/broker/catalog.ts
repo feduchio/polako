@@ -38,6 +38,7 @@ export interface CatalogDiscoveryResult {
   discovered: number;
   errors: Record<string, string>;
   probes: CapabilityProbeResult[];
+  shortlisted: ModelInfo[];
 }
 
 const EMA = 0.2;
@@ -73,6 +74,7 @@ export class ModelCatalog {
     let discovered = 0;
     const errors: Record<string, string> = {};
     const probes: CapabilityProbeResult[] = [];
+    const shortlisted: ModelInfo[] = [];
     const bounded = options.capabilityProbe !== undefined && options.maxProbesPerProvider !== undefined;
     const pinnedModels = options.pinnedModels ?? [];
 
@@ -100,6 +102,7 @@ export class ModelCatalog {
           ? buildDiscoveryShortlist(models, id, pinnedModels, maxProbes, options.costEligibility)
           : models;
         const shortlistKeys = new Set(shortlist.map((model) => modelRefKey(model.ref)));
+        shortlisted.push(...shortlist);
 
         for (const model of models) {
           if (!shortlistKeys.has(modelRefKey(model.ref))) continue;
@@ -119,7 +122,7 @@ export class ModelCatalog {
         this.providerAvailable.set(id, false);
       }
     }
-    return { discovered, errors, probes };
+    return { discovered, errors, probes, shortlisted };
   }
 
   upsert(info: ModelInfo): CatalogEntry {
