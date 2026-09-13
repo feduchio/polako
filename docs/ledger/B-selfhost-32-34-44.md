@@ -1,6 +1,8 @@
 # B-selfhost-32 + 34 + 44 (+11) — strict review output and empirical verifier
 
-**Status:** DRAFT, revision 5. Not frozen. Base `ecfd45d`.
+**Status:** **FROZEN**, revision 5. Base `ecfd45d`.
+Frozen after independent Grok and Claude reviews on `f895f52`; reviewed-file sha256
+`6f87c12b978b7ed861d3f95a6c4ad6edc775c7602551be9a9ac046c5ddba4e13`.
 Revisions 1–4 were reviewed independently by Grok and Claude; all rejections were correct.
 
 ## Facts that constrain the design
