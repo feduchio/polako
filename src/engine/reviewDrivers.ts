@@ -737,6 +737,10 @@ export function recentlyRateLimitedReviewModels(ctx: PhaseContext): ModelRef[] {
   const latest = new Map<string, ReviewExecution>();
   for (const execution of ctx.store.repos.reviewExecutions.listByRun(ctx.run.id)) {
     if (execution.checkpointHash !== hash) continue;
+    // A skip reached no provider, so it is evidence in neither direction. It must not become the
+    // latest word on a model either: the loop below short-circuits on a completed latest row and
+    // never consults `completedKeys`, so a skip landing after a 429 would lift the exclusion.
+    if (isSkippedExecution(execution)) continue;
     if (!execution.completed && execution.error === undefined) continue;
     const key = modelRefKey(execution.requestedModel);
     const prev = latest.get(key);
@@ -1131,6 +1135,8 @@ function adversarialSkipApplies(
 ): boolean {
   if (!ctx.config.review.skipAdversarialWhenClean) return false;
   if (axis !== "adversarial") return false;
+  // Scoped to this checkpoint and round: a clean verdict from another round is no evidence about
+  // this one.
   const others = reviewRoundExecutions(
     ctx.store.repos.reviewExecutions.listByRun(ctx.run.id),
     checkpointHash,

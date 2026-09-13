@@ -207,6 +207,63 @@ describe("P1.1 conditional adversarial skip", () => {
     expect(excludedModels(store, clock, runId)).toEqual(["limited"]);
   });
 
+  // AC15. The order AC14 missed, and the dangerous one: the skip lands *after* the 429, so it becomes
+  // the latest row for that model. The exclusion loop short-circuits on a completed latest row and
+  // never consults `completedKeys`, so guarding only that set left this path open. Reachable across
+  // ticks, because `rateLimited` is per-tick: a model that 429'd in an earlier round can be the
+  // preferred model for a later round's skip.
+  it("keeps a model excluded when a skip lands after its rate-limit failure", () => {
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    const model = { provider: "reviews", model: "limited" };
+    appendExecution(store, clock, runId, {
+      roundIndex: 1,
+      axis: "correctness",
+      requestedModel: model,
+      completed: false,
+      error: "rate limited: 429",
+      hash: fixture.integrated,
+      at: clock.now() + 3,
+    });
+    appendExecution(store, clock, runId, {
+      roundIndex: 2,
+      axis: "adversarial",
+      requestedModel: model,
+      completed: true,
+      error: "no_prior_findings",
+      hash: fixture.integrated,
+      at: clock.now() + 4,
+    });
+
+    expect(excludedModels(store, clock, runId)).toEqual(["limited"]);
+  });
+
+  // AC16. MC2/MC3 scope: the predicate reads this checkpoint and this round. A clean verdict recorded
+  // for a different round is no evidence about this one, and dropping the scope filter passed the
+  // whole suite before this test existed.
+  it("does not skip on a clean verdict from a different round", async () => {
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    // A complete, entirely clean round 1 moves the driver to round 2, where nothing is observed yet.
+    for (const [index, axis] of (["correctness", "regression", "adversarial"] as const).entries()) {
+      appendExecution(store, clock, runId, {
+        roundIndex: 1,
+        axis,
+        requestedModel: { provider: "reviews", model: "reviewer" },
+        completed: true,
+        error: "",
+        hash: fixture.integrated,
+        at: clock.now() + 3 + index,
+      });
+    }
+    provider
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }])
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }])
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }]);
+
+    await engineWith(true, undefined, ["adversarial", "correctness", "regression"]).tickRun(runId);
+
+    expect(provider.calls.some((call) => (call.messages[1]?.content ?? "").includes('"axis":"adversarial"'))).toBe(true);
+  });
+
   // AC10. Kills the `reviewers[0]` simplification: with the preferred index the adversarial slot
   // resolves to the third model, not the first.
   it("attributes the skip to the reviewer the preferred index selects", async () => {
