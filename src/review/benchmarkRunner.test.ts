@@ -6,6 +6,7 @@ import type {
   ProviderAdapter,
 } from "../broker/types.js";
 import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { ReviewStrategySchema } from "../domain/config.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { sha256Hex } from "../shared/hash.js";
 import { canonicalJsonLine } from "./benchmark.js";
@@ -487,6 +488,63 @@ describe("review benchmark runner", () => {
       seed: 17,
     });
     expect(rescored.corpusSha256).toBe(original.corpusSha256);
+  });
+
+  // P1.2 MC2/AC1: the benchmark is a token-heavy operator command and must be capped exactly as the
+  // driver is. Round 1 found it uncapped.
+  it("caps every benchmark reviewer call at review.maxOutputTokens", async () => {
+    const nex = provider("nex", "nex-agi/a:free", () => reply('{"findings":[]}'));
+    const nvidia = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 7,
+      pairs: [pair],
+    });
+
+    const cap = ReviewStrategySchema.parse({}).maxOutputTokens;
+    const all = [...nex.calls, ...nvidia.calls];
+    expect(all.length).toBeGreaterThan(0);
+    expect(all.every((request) => request.maxTokens === cap)).toBe(true);
+  });
+
+  // P1.2 MC8/fix 3: replay must not turn a truncation into a completion. Exported packets carry the
+  // finish reason; packets recorded before truncation was detected default to "stop".
+  it("preserves a truncated finish reason through rescore", async () => {
+    const nex = provider("nex", "nex-agi/a:free", () => reply('{"findings":[]}'));
+    const nvidia = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const original = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 12,
+      pairs: [pair],
+    });
+
+    const truncated = original.cells.map((cell) => canonicalJsonLine({
+      cellId: cell.oracle.cellId,
+      raw: cell.rawContent,
+      usage: cell.usage,
+      finishReason: "length",
+    })).join("");
+    const rescored = await rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: original.packetJsonl,
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl: truncated,
+      packetSha256: original.packetSha256,
+      oracleSha256: original.oracleSha256,
+      model: { provider: "external", model: "flagship" },
+      family: "external",
+      seed: 12,
+    });
+
+    // Every cell was a truncation, so none may be scored as a completed review.
+    expect(rescored.cells.every((cell) => cell.outcome !== "completed_empty" && cell.outcome !== "completed_with_findings")).toBe(true);
+    expect(rescored.cells.every((cell) => cell.findings.length === 0)).toBe(true);
   });
 });
 

@@ -126,9 +126,25 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
     const exhausted = exhaustedAxes(axes, roundExecutions, required, ctx.config.review.maxAxisAttemptsPerRound);
     if (exhausted.length > 0) return stopForExhaustedAxes(ctx, hash, roundIndex, exhausted);
     if (reviewers.length === 0) {
-      // Checked after exhaustion: sticky failures exclude every model, and waiting on an exclusion
-      // that will never lift is the unbounded loop in a quieter form.
-      if (recentlyRateLimitedReviewModels(ctx).length > 0) return { status: "waiting" };
+      // Only a *transient* exclusion justifies waiting. A rate limit lifts; a truncation or a schema
+      // rejection is deterministic and recurs at the same cap, so waiting on it is the unbounded loop
+      // in a quieter form. `exhaustedAxes` cannot save us here: production routing excludes sticky
+      // models, so with a pool smaller than `maxAxisAttemptsPerRound` the counter never reaches the
+      // cap and the axis would sit in REVIEWING forever.
+      if (transientlyExcludedReviewModels(ctx).length > 0) return { status: "waiting" };
+      const deterministic = deterministicallyExcludedReviewModels(ctx);
+      if (deterministic.length > 0) {
+        return {
+          status: "complete",
+          nextPhase: "FAILED",
+          terminalReason: {
+            code: "providers_unavailable",
+            summary: deterministic.some((entry) => entry.error === REVIEW_TRUNCATED_MESSAGE)
+              ? `every reviewer model exceeded review.maxOutputTokens (${String(ctx.config.review.maxOutputTokens)}); raise the cap or use a terser model`
+              : "every reviewer model failed with a non-retryable error",
+          },
+        };
+      }
       return {
         status: "complete",
         nextPhase: "FAILED",
@@ -731,7 +747,26 @@ function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): 
 }
 
 /** Models whose latest review on this checkpoint is a sticky failure (429, 400, schema). */
+/** Excluded because of a rate limit, which lifts on its own: waiting is justified. */
+export function transientlyExcludedReviewModels(ctx: PhaseContext): ModelRef[] {
+  return excludedReviewModels(ctx)
+    .filter((entry) => isRateLimitMessage(entry.error))
+    .map((entry) => entry.model);
+}
+
+/**
+ * Excluded for a reason that will recur unchanged on the next tick — truncation at the configured cap,
+ * a 400, a schema rejection. Waiting on these never ends, so the run must stop instead.
+ */
+export function deterministicallyExcludedReviewModels(ctx: PhaseContext): { model: ModelRef; error: string }[] {
+  return excludedReviewModels(ctx).filter((entry) => !isRateLimitMessage(entry.error));
+}
+
 export function recentlyRateLimitedReviewModels(ctx: PhaseContext): ModelRef[] {
+  return excludedReviewModels(ctx).map((entry) => entry.model);
+}
+
+function excludedReviewModels(ctx: PhaseContext): { model: ModelRef; error: string }[] {
   const hash = ctx.run.currentCheckpointHash;
   if (hash === null) return [];
   const latest = new Map<string, ReviewExecution>();
@@ -748,7 +783,7 @@ export function recentlyRateLimitedReviewModels(ctx: PhaseContext): ModelRef[] {
     const prevStamp = prev === undefined ? -1 : (prev.finishedAt ?? prev.startedAt);
     if (prev === undefined || stamp >= prevStamp) latest.set(key, execution);
   }
-  const excluded: ModelRef[] = [];
+  const excluded: { model: ModelRef; error: string }[] = [];
   const completedKeys = new Set<string>();
   for (const execution of ctx.store.repos.reviewExecutions.listByRun(ctx.run.id)) {
     // A skipped axis completed without calling the provider, so it is no evidence that the model
@@ -763,7 +798,7 @@ export function recentlyRateLimitedReviewModels(ctx: PhaseContext): ModelRef[] {
     if (!isStickyReviewSkip(undefined, execution.error)) continue;
     const key = modelRefKey(execution.requestedModel);
     if (completedKeys.has(key)) continue;
-    excluded.push(execution.requestedModel);
+    excluded.push({ model: execution.requestedModel, error: execution.error });
   }
   return excluded;
 }

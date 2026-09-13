@@ -15,7 +15,6 @@ import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
 import { createReviewingDriver, recentlyRateLimitedReviewModels, type ReviewDriverOptions } from "./reviewDrivers.js";
-import { RUN_PHASE_TABLE } from "../domain/run.js";
 import { stubDriverFor } from "./stubs.js";
 
 const cleanup: string[] = [];
@@ -576,23 +575,65 @@ describe("P1.2 reviewer output cap", () => {
     expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
   });
 
-  // AC6: bounded, and loud. Every model truncating exhausts the axis rather than looping.
-  it("terminates visibly when every model truncates", async () => {
-    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
-    for (let i = 0; i < 40; i++) {
-      provider.script("reviewer", [{ kind: "reply", content: emptyReview(), finishReason: "length" }]);
+  // AC6, corrected. Round 1 showed the previous AC6 tested a non-production selector: production
+  // `selectReviewProviders` excludes sticky-failed models, so with a pool smaller than
+  // `maxAxisAttemptsPerRound` the counter never reaches the cap and the axis sat in REVIEWING forever.
+  // This harness models exclusion, which is what the daemon does.
+  it("fails visibly, naming the cap, when every available model truncates", async () => {
+    const provider = new ScriptedProvider("reviews", [
+      { name: "a", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "b", capabilities: FAKE_CAPABILITIES.fast },
+    ]);
+    for (let i = 0; i < 20; i++) {
+      provider.script("a", [{ kind: "reply", content: emptyReview(), finishReason: "length" }]);
+      provider.script("b", [{ kind: "reply", content: emptyReview(), finishReason: "length" }]);
     }
+    const all = [
+      { provider, model: { provider: "reviews", model: "a" } },
+      { provider, model: { provider: "reviews", model: "b" } },
+    ];
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of NON_REVIEW_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
+    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, (ctx) => {
+      const excluded = new Set(recentlyRateLimitedReviewModels(ctx).map((model) => model.model));
+      return all.filter((entry) => !excluded.has(entry.model.model));
+    })));
+
     const { runId } = seedReviewingRun(store, clock, fixture);
-    const engine = engineFor([{ provider, model: { provider: "reviews", model: "reviewer" } }]);
-    for (let tick = 0; tick < 12; tick++) {
-      const run = store.repos.runs.get(runId);
-      if (run?.phase !== "REVIEWING") break;
+    for (let tick = 0; tick < 8; tick++) {
+      if (store.repos.runs.get(runId)?.phase !== "REVIEWING") break;
       await engine.tickRun(runId);
     }
 
     const run = store.repos.runs.get(runId)!;
-    expect(run.phase).not.toBe("REVIEWING");
-    expect(RUN_PHASE_TABLE.terminal).toContain(run.phase);
+    expect(run.phase).toBe("FAILED");
+    expect(run.terminalReason?.code).toBe("providers_unavailable");
+    expect(run.terminalReason?.summary).toContain("maxOutputTokens");
+  });
+
+  // AC8. A rate limit still justifies waiting; only a deterministic exclusion terminates.
+  it("keeps waiting when the only exclusion is a rate limit", async () => {
+    const provider = new ScriptedProvider("reviews", [{ name: "a", capabilities: FAKE_CAPABILITIES.strong }]);
+    for (let i = 0; i < 5; i++) {
+      provider.script("a", [{ kind: "error", error: new ProviderError("reviews", "rate_limit", "429", { status: 429 }) }]);
+    }
+    const all = [{ provider, model: { provider: "reviews", model: "a" } }];
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of NON_REVIEW_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
+    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, (ctx) => {
+      const excluded = new Set(recentlyRateLimitedReviewModels(ctx).map((model) => model.model));
+      return all.filter((entry) => !excluded.has(entry.model.model));
+    })));
+
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+    await engine.tickRun(runId);
+
+    expect(store.repos.runs.get(runId)?.phase).toBe("REVIEWING");
   });
 
   // AC7: guards P1.1's MC8a against the new error string.

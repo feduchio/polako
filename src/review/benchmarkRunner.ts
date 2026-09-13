@@ -7,6 +7,7 @@ import type {
   ModelInfo,
   ProviderAdapter,
 } from "../broker/types.js";
+import { ReviewStrategySchema } from "../domain/config.js";
 import type { ModelRef } from "../domain/common.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import type { ProtocolRegistry } from "../protocols/loader.js";
@@ -39,6 +40,8 @@ export interface BenchmarkReviewer {
   provider: ProviderAdapter;
   model: ModelRef;
   family: string;
+  /** `review.maxOutputTokens`; the rescore harness must cap exactly as the live run did. */
+  maxOutputTokens?: number;
 }
 
 export interface ScheduledBenchmarkCell {
@@ -82,6 +85,8 @@ export interface RunReviewerBenchmarkInput {
   transportMode?: "legacy_json_object" | "strict_schema";
   configuration?: "original" | "operational_strict";
   cellTimeoutMs?: number;
+  /** `review.maxOutputTokens`. Defaults to the schema default so the benchmark is never uncapped. */
+  maxOutputTokens?: number;
   onCell?: (cell: RecordedBenchmarkCell, completed: number, requested: number) => void;
   pairs?: readonly ReviewerBenchmarkPair[];
 }
@@ -90,6 +95,12 @@ export interface ImportedBenchmarkResponse {
   cellId: string;
   raw: string;
   usage?: CompletionResponse["usage"];
+  /**
+   * Absent in packets exported before reviewer truncation was detected. Defaulting to `"stop"` keeps
+   * those replayable, but a packet recorded from a truncated response must carry `"length"` or the
+   * rescore turns a truncation into a completion.
+   */
+  finishReason?: CompletionResponse["finishReason"];
 }
 
 export interface RescoreReviewerBenchmarkInput {
@@ -102,6 +113,8 @@ export interface RescoreReviewerBenchmarkInput {
   model: ModelRef;
   family: string;
   seed: number;
+  /** `review.maxOutputTokens`; the rescore harness must cap exactly as the live run did. */
+  maxOutputTokens?: number;
 }
 
 interface Capture {
@@ -127,6 +140,7 @@ export async function runReviewerBenchmark(
       input.protocols,
       input.cellTimeoutMs ?? 30_000,
       input.transportMode ?? "strict_schema",
+      input.maxOutputTokens ?? ReviewStrategySchema.parse({}).maxOutputTokens,
     );
     cells.push(result);
     input.onCell?.(result, cells.length, schedule.length);
@@ -287,7 +301,13 @@ export async function rescoreReviewerBenchmark(
       reviewer: { provider: replay, model: input.model, family: input.family },
       repetition: oracle.repetition,
     };
-    const cell = await runCell(scheduled, input.protocols, 30_000, "strict_schema");
+    const cell = await runCell(
+    scheduled,
+    input.protocols,
+    30_000,
+    "strict_schema",
+    input.maxOutputTokens ?? ReviewStrategySchema.parse({}).maxOutputTokens,
+  );
     if (
       cell.request?.messages[0]?.content !== packet.system ||
       cell.request.messages[1]?.content !== packet.user
@@ -307,6 +327,7 @@ async function runCell(
   protocols: ProtocolRegistry,
   timeoutMs: number,
   responseMode: "legacy_json_object" | "strict_schema",
+  maxOutputTokens: number,
 ): Promise<RecordedBenchmarkCell> {
   const root = mkdtempSync(join(tmpdir(), "polish-review-benchmark-"));
   const path = join(root, scheduled.pair.path);
@@ -343,6 +364,7 @@ async function runCell(
       repositoryRoot: root,
       now: scheduled.repetition,
       responseMode,
+      maxOutputTokens,
     });
     findings = result.findings;
     outcome = findings.length === 0 ? "completed_empty" : "completed_with_findings";
@@ -443,7 +465,7 @@ function replayProvider(model: ModelRef, imported: ImportedBenchmarkResponse): P
     complete: () => Promise.resolve({
       message: { role: "assistant", content: imported.raw },
       usage: imported.usage ?? { inputTokens: 0, outputTokens: 0, costUsd: null },
-      finishReason: "stop",
+      finishReason: imported.finishReason ?? "stop",
       latencyMs: 0,
     }),
     health: () => Promise.resolve({ ok: true, checkedAt: 0 }),
