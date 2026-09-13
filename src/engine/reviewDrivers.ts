@@ -174,13 +174,14 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
         const preferredIndex = Math.max(0, axes.indexOf(axis));
         // Re-read: `roundExecutions` is a pre-loop snapshot, so an earlier axis that reported a
         // finding during this same pass is invisible to it.
-        const skipReviewer = reviewers[preferredIndex % reviewers.length];
-        if (
-          skipReviewer !== undefined &&
-          adversarialSkipApplies(ctx, hash, roundIndex, axis)
-        ) {
-          skipExecution(ctx, hash, roundIndex, axis, skipReviewer, "no_prior_findings");
-          continue;
+        if (adversarialSkipApplies(ctx, hash, roundIndex, axis)) {
+          // The row must name the model that would actually have been called, which is the first
+          // reviewer `reviewAxisWithFallback` would not have passed over.
+          const skipReviewer = nextUsableReviewer(reviewers, preferredIndex, rateLimited);
+          if (skipReviewer !== undefined) {
+            skipExecution(ctx, hash, roundIndex, axis, skipReviewer, SKIP_REASON);
+            continue;
+          }
         }
         const outcome = await reviewAxisWithFallback(ctx, {
           hash,
@@ -746,7 +747,10 @@ export function recentlyRateLimitedReviewModels(ctx: PhaseContext): ModelRef[] {
   const excluded: ModelRef[] = [];
   const completedKeys = new Set<string>();
   for (const execution of ctx.store.repos.reviewExecutions.listByRun(ctx.run.id)) {
-    if (execution.checkpointHash === hash && execution.completed) {
+    // A skipped axis completed without calling the provider, so it is no evidence that the model
+    // works and must not lift a sticky exclusion. Without this a 429'd model is rehabilitated by a
+    // row that never reached it, and the next round calls it again.
+    if (execution.checkpointHash === hash && execution.completed && !isSkippedExecution(execution)) {
       completedKeys.add(modelRefKey(execution.requestedModel));
     }
   }
@@ -1084,6 +1088,32 @@ function finishExecution(
   };
   assertExecutionCheckpoint(finished, started.checkpointHash);
   appendReviewEvent(ctx, "review.finished", finished);
+}
+
+/** Marks an execution that completed the round without calling a provider. */
+const SKIP_REASON = "no_prior_findings";
+
+function isSkippedExecution(execution: ReviewExecution): boolean {
+  return execution.completed && execution.error === SKIP_REASON;
+}
+
+/**
+ * The reviewer `reviewAxisWithFallback` would actually reach: its first choice, then the ring, passing
+ * over models already rate-limited in this pass. `undefined` when every model is excluded, in which
+ * case there is nothing to attribute a skip to and the normal path must run.
+ */
+function nextUsableReviewer(
+  reviewers: readonly ReviewProvider[],
+  preferredIndex: number,
+  rateLimited: ReadonlySet<string>,
+): ReviewProvider | undefined {
+  for (let offset = 0; offset < reviewers.length; offset++) {
+    const reviewer = reviewers[(preferredIndex + offset) % reviewers.length];
+    if (reviewer === undefined) continue;
+    if (rateLimited.has(modelRefKey(reviewer.model))) continue;
+    return reviewer;
+  }
+  return undefined;
 }
 
 /**

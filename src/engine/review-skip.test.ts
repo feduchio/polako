@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { defaultConfig, ReviewStrategySchema, type PolishConfig } from "../domain/config.js";
+import { ProviderError } from "../broker/types.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
@@ -13,7 +14,7 @@ import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
-import { createReviewingDriver, type ReviewDriverOptions } from "./reviewDrivers.js";
+import { createReviewingDriver, recentlyRateLimitedReviewModels, type ReviewDriverOptions } from "./reviewDrivers.js";
 import { stubDriverFor } from "./stubs.js";
 
 const cleanup: string[] = [];
@@ -43,7 +44,11 @@ describe("P1.1 conditional adversarial skip", () => {
     store.close();
   });
 
-  const engineWith = (skip: boolean): RunEngine => {
+  const engineWith = (
+    skip: boolean,
+    reviewers?: readonly { provider: ScriptedProvider; model: { provider: string; model: string } }[],
+    axes?: readonly ("correctness" | "regression" | "adversarial")[],
+  ): RunEngine => {
     const config: PolishConfig = {
       ...defaultConfig(),
       review: { ...defaultConfig().review, skipAdversarialWhenClean: skip },
@@ -51,9 +56,10 @@ describe("P1.1 conditional adversarial skip", () => {
     const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
     const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
     for (const phase of NON_REVIEW_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
-    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, () => [
-      { provider, model: { provider: "reviews", model: "reviewer" } },
-    ])));
+    engine.registerPhase("REVIEWING", createReviewingDriver({
+      ...reviewingOptions(fixture, () => [...(reviewers ?? [{ provider, model: { provider: "reviews", model: "reviewer" } }])]),
+      ...(axes === undefined ? {} : { resolveAxes: () => Promise.resolve([...axes]) }),
+    }));
     return engine;
   };
 
@@ -133,24 +139,167 @@ describe("P1.1 conditional adversarial skip", () => {
       .script("reviewer", [{ kind: "reply", content: emptyReview() }])
       .script("reviewer", [{ kind: "reply", content: emptyReview() }]);
 
-    const config: PolishConfig = {
-      ...defaultConfig(),
-      review: { ...defaultConfig().review, skipAdversarialWhenClean: true },
-    };
-    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
-    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
-    for (const phase of NON_REVIEW_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
-    engine.registerPhase("REVIEWING", createReviewingDriver({
-      ...reviewingOptions(fixture, () => [{ provider, model: { provider: "reviews", model: "reviewer" } }]),
-      resolveAxes: () => Promise.resolve(["adversarial", "correctness", "regression"]),
-    }));
-
     const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
-    await engine.tickRun(runId);
+    await engineWith(true, undefined, ["adversarial", "correctness", "regression"]).tickRun(runId);
 
     expect(provider.calls).toHaveLength(3);
     const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
     expect(executions.some((execution) => execution.error === "no_prior_findings")).toBe(false);
+  });
+
+  // AC9. A skip completes without reaching the provider, so it is no evidence the model works and
+  // must not lift a sticky 429 exclusion. Before the fix, the synthetic row rehabilitated the model
+  // and the next round called it again.
+  it("does not let a skipped execution rehabilitate a rate-limited reviewer", async () => {
+    const two = new ScriptedProvider("reviews", [
+      { name: "limited", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "ok", capabilities: FAKE_CAPABILITIES.fast },
+    ]);
+    two.script("limited", [{ kind: "error", error: new ProviderError("reviews", "rate_limit", "429", { status: 429 }) }]);
+    two.script("ok", [
+      { kind: "reply", content: emptyReview() },
+      { kind: "reply", content: emptyReview() },
+    ]);
+    const reviewers = [
+      { provider: two, model: { provider: "reviews", model: "limited" } },
+      { provider: two, model: { provider: "reviews", model: "ok" } },
+    ];
+
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    const engine = engineWith(true, reviewers);
+    await engine.tickRun(runId);
+
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    const skipped = executions.filter((execution) => execution.error === "no_prior_findings");
+    expect(skipped).toHaveLength(1);
+    // MC4: the row names the model that would actually have been called, not the excluded one.
+    expect(skipped[0]?.requestedModel.model).toBe("ok");
+
+    expect(excludedModels(store, clock, runId)).toEqual(["limited"]);
+  });
+
+  // AC14. The rehabilitation guard itself. `rateLimited` is per-tick, so a model that 429'd in an
+  // earlier round can be the preferred model for a later round's skip; the skip row then names it.
+  // Without the guard that row lifts the sticky exclusion, and the next round calls the model again
+  // even though it has never completed a provider call.
+  it("keeps a model excluded when only a skip row names it as completed", () => {
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    const model = { provider: "reviews", model: "limited" };
+    appendExecution(store, clock, runId, {
+      roundIndex: 1,
+      axis: "adversarial",
+      requestedModel: model,
+      completed: true,
+      error: "no_prior_findings",
+      hash: fixture.integrated,
+      at: clock.now() + 3,
+    });
+    appendExecution(store, clock, runId, {
+      roundIndex: 2,
+      axis: "correctness",
+      requestedModel: model,
+      completed: false,
+      error: "rate limited: 429",
+      hash: fixture.integrated,
+      at: clock.now() + 4,
+    });
+
+    expect(excludedModels(store, clock, runId)).toEqual(["limited"]);
+  });
+
+  // AC10. Kills the `reviewers[0]` simplification: with the preferred index the adversarial slot
+  // resolves to the third model, not the first.
+  it("attributes the skip to the reviewer the preferred index selects", async () => {
+    const three = new ScriptedProvider("reviews", [
+      { name: "m0", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "m1", capabilities: FAKE_CAPABILITIES.fast },
+      { name: "m2", capabilities: FAKE_CAPABILITIES.fast },
+    ]);
+    three.script("m0", [{ kind: "reply", content: emptyReview() }]);
+    three.script("m1", [{ kind: "reply", content: emptyReview() }]);
+    const reviewers = [
+      { provider: three, model: { provider: "reviews", model: "m0" } },
+      { provider: three, model: { provider: "reviews", model: "m1" } },
+      { provider: three, model: { provider: "reviews", model: "m2" } },
+    ];
+
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engineWith(true, reviewers).tickRun(runId);
+
+    const skipped = store.repos.reviewExecutions
+      .forCheckpoint(runId, checkpointHash)
+      .filter((execution) => execution.error === "no_prior_findings");
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.requestedModel.model).toBe("m2");
+    expect(three.calls.some((call) => call.model.model === "m2")).toBe(false);
+  });
+
+  // AC11. Kills the "look only at correctness" simplification: MC3 says *every* completed other axis
+  // must be clean, and no earlier test had `regression` dirty while `correctness` was clean.
+  it("does not skip when only the later earlier-axis reports a finding", async () => {
+    provider
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }])
+      .script("reviewer", [{ kind: "reply", content: reviewJson("regression", "beta.ts") }])
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }]);
+
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engineWith(true).tickRun(runId);
+
+    expect(provider.calls).toHaveLength(3);
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    expect(executions.some((execution) => execution.error === "no_prior_findings")).toBe(false);
+  });
+
+  // AC12. MC3 says *completed* other axes. An incomplete row carries no verdict, so it must not be
+  // read as clean. Seeded directly, because the default order cannot reach adversarial with an
+  // incomplete earlier axis.
+  it("does not treat an incomplete other axis as clean", async () => {
+    const incomplete = {
+      id: id("rvex", clock.now()),
+      runId: "",
+      checkpointHash: fixture.integrated,
+      roundIndex: 1,
+      axis: "correctness" as const,
+      requestedModel: { provider: "reviews", model: "reviewer" },
+      completed: false,
+      findings: [],
+      error: "rate limited: 429",
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+    };
+    provider
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }])
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }])
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }]);
+
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    store.events.append([{
+      id: id("evt", clock.now() + 3),
+      runId,
+      ts: clock.now() + 3,
+      type: "review.finished",
+      payload: { execution: { ...incomplete, runId } },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
+
+    await engineWith(true, undefined, ["adversarial", "correctness", "regression"]).tickRun(runId);
+
+    expect(provider.calls.some((call) => (call.messages[1]?.content ?? "").includes('"axis":"adversarial"'))).toBe(true);
+  });
+
+  // AC13. MC4 requires the existing pair, because projections build rows from both events.
+  it("emits review.started and review.finished for the skip", async () => {
+    provider
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }])
+      .script("reviewer", [{ kind: "reply", content: emptyReview() }]);
+
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    await engineWith(true).tickRun(runId);
+
+    expect(store.events.list(runId, { types: ["review.started"] })).toHaveLength(3);
+    expect(store.events.list(runId, { types: ["review.finished"] })).toHaveLength(3);
   });
 
   // AC6
@@ -283,6 +432,52 @@ function seedReviewingRun(store: Store, clock: FakeClock, fixture: Fixture): { r
     { id: id("evt", clock.now() + 2), runId, ts: clock.now() + 2, type: "checkpoint.created", payload: { checkpoint }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
   ]);
   return { runId, checkpointHash: fixture.integrated };
+}
+
+function excludedModels(store: Store, clock: FakeClock, runId: string): string[] {
+  const run = store.repos.runs.get(runId)!;
+  const scheduler = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 60_000 });
+  return recentlyRateLimitedReviewModels({ run, store, scheduler, clock, config: defaultConfig() })
+    .map((model) => model.model);
+}
+
+function appendExecution(
+  store: Store,
+  clock: FakeClock,
+  runId: string,
+  input: {
+    roundIndex: number;
+    axis: "correctness" | "regression" | "adversarial";
+    requestedModel: { provider: string; model: string };
+    completed: boolean;
+    error: string;
+    hash: string;
+    at: number;
+  },
+): void {
+  const execution = {
+    id: id("rvex", input.at),
+    runId,
+    checkpointHash: input.hash,
+    roundIndex: input.roundIndex,
+    axis: input.axis,
+    requestedModel: input.requestedModel,
+    completed: input.completed,
+    findings: [],
+    error: input.error,
+    startedAt: input.at,
+    finishedAt: input.at,
+  };
+  store.events.append([{
+    id: id("evt", input.at),
+    runId,
+    ts: input.at,
+    type: "review.finished",
+    payload: { execution },
+    causedBy: [],
+    actor: { kind: "system" },
+    artifacts: [],
+  }]);
 }
 
 function emptyReview(): string {
