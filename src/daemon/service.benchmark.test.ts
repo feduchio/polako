@@ -8,6 +8,7 @@ import type {
   ModelInfo,
   ProviderAdapter,
 } from "../broker/types.js";
+import { REVIEWER_BENCHMARK_PAIRS, benchmarkCorpusSha256 } from "../review/benchmarkCorpus.js";
 import { DaemonService } from "./service.js";
 
 const cleanup: string[] = [];
@@ -26,7 +27,7 @@ describe("benchmark.review RPC", () => {
     try {
       const result = await service.handle("benchmark.review", { seed: 9 }) as {
         summary: string;
-        report: { requested: number; cells: unknown[] };
+        report: { requested: number; cells: unknown[]; corpusSha256: string };
         artifacts: {
           packet: { sha256: string };
           oracle: { sha256: string };
@@ -35,6 +36,7 @@ describe("benchmark.review RPC", () => {
       };
       expect(result.summary).toContain("Reviewer benchmark: 96/96 completed cells");
       expect(result.report.requested).toBe(96);
+      expect(result.report.corpusSha256).toBe(benchmarkCorpusSha256());
       expect(result.report.cells).toHaveLength(96);
       expect(nex.calls).toHaveLength(48);
       expect(nvidia.calls).toHaveLength(48);
@@ -55,6 +57,13 @@ describe("benchmark.review RPC", () => {
         line: 2,
         endLine: 2,
       }));
+      const oracleRows = oracle.trimEnd().split("\n").map((line) =>
+        JSON.parse(line) as { pairId: string; criterionId: string });
+      for (const pair of REVIEWER_BENCHMARK_PAIRS) {
+        const rows = oracleRows.filter((row) => row.pairId === pair.pairId);
+        expect(rows).toHaveLength(12);
+        expect(new Set(rows.map((row) => row.criterionId))).toEqual(new Set([pair.criterionId]));
+      }
     } finally {
       await service.close();
     }

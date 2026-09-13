@@ -1,4 +1,5 @@
 import { Script, createContext } from "node:vm";
+import { sha256Hex } from "../shared/hash.js";
 
 export const BENCHMARK_PATH = "src/subject.ts";
 
@@ -190,6 +191,21 @@ export function addedFileDiff(pairValue: ReviewerBenchmarkPair, label: "clean" |
     ...lines.map((line) => `+${line}`),
     "",
   ].join("\n");
+}
+
+export function benchmarkCorpusSha256(
+  pairs: readonly ReviewerBenchmarkPair[] = REVIEWER_BENCHMARK_PAIRS,
+): string {
+  return sha256Hex(JSON.stringify(pairs.map((pairValue) => ({
+    pairId: pairValue.pairId,
+    criterionId: pairValue.criterionId,
+    property: pairValue.property,
+    family: pairValue.family,
+    path: pairValue.path,
+    cleanSource: pairValue.cleanSource,
+    mutantSource: pairValue.mutantSource,
+    invariantNames: pairValue.invariants.map((item) => item.name),
+  }))));
 }
 
 function pair(

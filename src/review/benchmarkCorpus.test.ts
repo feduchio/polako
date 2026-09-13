@@ -3,6 +3,7 @@ import {
   BENCHMARK_PATH,
   REVIEWER_BENCHMARK_PAIRS,
   addedFileDiff,
+  benchmarkCorpusSha256,
   changedLineSpan,
   runInvariants,
 } from "./benchmarkCorpus.js";
@@ -18,6 +19,9 @@ describe("reviewer benchmark corpus", () => {
       expect(changedLineSpan(pair)).toEqual({ line: 2, endLine: 2 });
       expect(pair.cleanSource.split("\n")).toHaveLength(pair.mutantSource.split("\n").length);
     }
+    expect(benchmarkCorpusSha256()).toMatch(/^[0-9a-f]{64}$/);
+    expect(benchmarkCorpusSha256(REVIEWER_BENCHMARK_PAIRS.slice(0, 7)))
+      .not.toBe(benchmarkCorpusSha256());
   });
 
   it("passes every clean suite and fails only the named mutant invariant", () => {

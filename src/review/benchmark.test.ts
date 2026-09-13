@@ -40,6 +40,8 @@ describe("review benchmark scorer", () => {
   it("requires one blocking evidence ref to match both path and range", () => {
     expect(primaryHit([finding("c", "src/subject.ts", undefined)], ORACLE)).toBe(false);
     expect(primaryHit([finding("c", "src/other.ts", 8)], ORACLE)).toBe(false);
+    expect(primaryHit([finding("c", "vendor/src/subject.ts", 8)], ORACLE)).toBe(false);
+    expect(primaryHit([finding("c", "subject.ts", 8)], ORACLE)).toBe(false);
     expect(primaryHit([finding("c", "src/subject.ts", 9)], ORACLE)).toBe(false);
     expect(primaryHit([finding("c", "src/subject.ts", 7, 8)], ORACLE)).toBe(true);
     expect(primaryHit([finding("c", "src/subject.ts", 8, 8, false)], ORACLE)).toBe(false);

@@ -29,6 +29,7 @@ import {
 import {
   REVIEWER_BENCHMARK_PAIRS,
   addedFileDiff,
+  benchmarkCorpusSha256,
   changedLineSpan,
   sourceFor,
   type ReviewerBenchmarkPair,
@@ -56,6 +57,7 @@ export interface RecordedBenchmarkCell extends BenchmarkCellResult {
 
 export interface ReviewerBenchmarkReport {
   seed: number;
+  corpusSha256: string;
   requested: number;
   partial: boolean;
   cells: RecordedBenchmarkCell[];
@@ -129,7 +131,7 @@ export async function runReviewerBenchmark(
     }
   }
 
-  return buildReport(input.seed, schedule.length, partial, cells);
+  return buildReport(input.seed, benchmarkCorpusSha256(input.pairs ?? REVIEWER_BENCHMARK_PAIRS), schedule.length, partial, cells);
 }
 
 export function buildBenchmarkSchedule(
@@ -236,7 +238,10 @@ export async function rescoreReviewerBenchmark(
     }
     cells.push({ ...cell, usage: imported.usage ?? null });
   }
-  return buildReport(input.seed, cells.length, false, cells);
+  const usedPairs = [...new Set(cells.map((cell) => cell.oracle.pairId))]
+    .map((pairId) => REVIEWER_BENCHMARK_PAIRS.find((pair) => pair.pairId === pairId))
+    .filter((pair): pair is ReviewerBenchmarkPair => pair !== undefined);
+  return buildReport(input.seed, benchmarkCorpusSha256(usedPairs), cells.length, false, cells);
 }
 
 async function runCell(
@@ -302,6 +307,7 @@ async function runCell(
 
 function buildReport(
   seed: number,
+  corpusSha256: string,
   requested: number,
   partial: boolean,
   cells: RecordedBenchmarkCell[],
@@ -323,6 +329,7 @@ function buildReport(
   const oracleJsonl = cells.map((cell) => canonicalJsonLine(cell.oracle)).join("");
   return {
     seed,
+    corpusSha256,
     requested,
     partial,
     cells,

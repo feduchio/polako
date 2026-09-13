@@ -226,6 +226,24 @@ describe("review benchmark runner", () => {
       .toEqual([1, 2, 3]);
   });
 
+  it("renders asymmetric model and team rates without swapping fields", async () => {
+    const nex = provider("nex", "nex-agi/a:free", (request) => asymmetricReply("nex", request));
+    const nvidia = provider("nvidia", "nvidia/a:free", (request) => asymmetricReply("nvidia", request));
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const report = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 10,
+      pairs: [pair],
+    });
+    const summary = renderReviewerBenchmark(report);
+    expect(summary).toContain("nex:nex-agi/nex-n2.5-pro:free: 66.7% primary recall, 33.3% strict-id recall, 33.3% false positives, 33.3% pair discrimination, 12 input + 66 output tokens, 33.00 output tokens/hit");
+    expect(summary).toContain("nvidia:nvidia/nemotron:free: 33.3% primary recall, 33.3% strict-id recall, 0.0% false positives, 33.3% pair discrimination, 18 input + 42 output tokens, 42.00 output tokens/hit");
+    expect(summary).toContain("team: 100.0% primary recall, 66.7% strict-id recall, 33.3% false positives, 66.7% pair discrimination");
+    expect(summary).toContain("team tokens: 30 input + 108 output, 36.00 output tokens/hit");
+  });
+
   it("rescoring replays raw bodies through the production parser without provider access", async () => {
     const nex = provider("nex", "nex-agi/a:free", benchmarkReply);
     const nvidia = provider("nvidia", "nvidia/a:free", benchmarkReply);
@@ -443,6 +461,31 @@ function benchmarkReply(request: CompletionRequest): CompletionResponse {
       reproduction: ["Call withinBudget(5, 5)."],
     }],
   }), 10, 20);
+}
+
+function asymmetricReply(family: "nex" | "nvidia", request: CompletionRequest): CompletionResponse {
+  const value = pack(request);
+  const checkpoint = value["checkpoint"] as { seq?: unknown } | undefined;
+  const repetition = typeof checkpoint?.seq === "number" ? checkpoint.seq : 0;
+  const diff = typeof value["diff"] === "string" ? value["diff"] : "";
+  const mutant = diff.includes("spent <= cap");
+  const shouldFind = family === "nex"
+    ? (mutant && repetition <= 2) || (!mutant && repetition === 1)
+    : mutant && repetition === 3;
+  if (!shouldFind) return reply('{"findings":[]}', family === "nex" ? 2 : 3, family === "nex" ? 11 : 7);
+  const criterion = family === "nex" && mutant && repetition === 2
+    ? "exclusive cap is wrong"
+    : "INV-01: exclusive cap";
+  return reply(JSON.stringify({
+    findings: [{
+      criterion,
+      severity: "high",
+      blocking: true,
+      claim: "Equal spend is admitted.",
+      evidence: [{ path: "src/subject.ts", line: 2 }],
+      reproduction: ["Call withinBudget(5, 5)."],
+    }],
+  }), family === "nex" ? 2 : 3, family === "nex" ? 11 : 7);
 }
 
 function pack(request: CompletionRequest): Record<string, unknown> {
