@@ -30,6 +30,7 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | B-selfhost-29 accepted | `3d718313e8c341432e2c20d636d55bad2c3282eb` on `task/B-selfhost-29-integration` | Run economics and review productivity report. |
 | B-selfhost-42 accepted (next HOST) | `b055c81a6f1c42c0b14bede314803ae2f4d32309` on `task/B-selfhost-42-integration` | Blinded reviewer-quality benchmark. Phase B not fully closed. Phase C not accepted. |
 | B-selfhost-32+34+44+11 accepted (next HOST) | `78a33788c50c7a9aaf851a70d618f6e5df5b450b` on `task/B-selfhost-32-34-44-candidate` | Strict review transport, fail-closed capability probes, empirical verifier/PPT, production tournament wiring. Two clean Grok+Claude rounds; live seed-43 report in the run ledger. |
+| B-selfhost-35+23 accepted (next HOST) | `0dc54b003ee26da3ca04b498f82938aa0a8b930c` on `task/B-selfhost-35-23-candidate` | Bounded worker-prefix progress and test-only verification-treadmill stop. Two clean Grok+Claude rounds. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -42,8 +43,8 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open order: **35 + 23** progress/no-progress stopping; **31 + 28** validated explicit state
-and A/B against item 18; **26** worker-claim sanitisation; **30** repair the two older accounting
+Open order after the requested stop: **31 + 28** validated explicit state and A/B against item 18;
+**26** worker-claim sanitisation; **30** repair the two older accounting
 folds; then remaining **12–15**, plus
 **16, 17, 21, 22, 24, 25** at their existing seams. Findings **26, 27, 28, 43, 45** remain recorded
 inputs to those tasks. Items **3–9, 18, 19, 29, 37, 39, 41** ACCEPTED or fixed.
