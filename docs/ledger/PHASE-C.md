@@ -41,9 +41,10 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open order: **31** validated explicit state and A/B against item 18; **32 + 34 + 44** verifier
-scoring/sidecar and structured-output removal; **35 + 23**
-progress/no-progress stopping; **30** repair the two older accounting folds; then **11–15**, plus
+Open order: **32 + 34 + 44 + 11** verifier scoring, strict structured output and production
+tournament wiring; **35 + 23** progress/no-progress stopping; **31 + 28** validated explicit state
+and A/B against item 18; **26** worker-claim sanitisation; **30** repair the two older accounting
+folds; then remaining **12–15**, plus
 **16, 17, 21, 22, 24, 25** at their existing seams. Findings **26, 27, 28, 43, 45** remain recorded
 inputs to those tasks. Items **3–9, 18, 19, 29, 37, 39, 41** ACCEPTED or fixed.
 
