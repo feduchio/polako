@@ -95,5 +95,18 @@ describe("reviewer benchmark corpus", () => {
       { name: "below cap accepted", passed: true },
       { name: "above cap rejected", passed: false },
     ]);
+
+    const brokenFirstSibling = {
+      ...first,
+      mutantSource: first.mutantSource.replace(
+        "spent <= cap",
+        "spent < cap && spent === 0",
+      ),
+    };
+    expect(runInvariants(brokenFirstSibling, "mutant")).toEqual([
+      { name: "equal cap rejected", passed: true },
+      { name: "below cap accepted", passed: false },
+      { name: "above cap rejected", passed: true },
+    ]);
   });
 });
