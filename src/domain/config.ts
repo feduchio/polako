@@ -58,6 +58,14 @@ export const ReviewStrategySchema = z.object({
    * the quality gate is not `pass`. Flip it in its own commit when P2.2 passes.
    */
   skipAdversarialWhenClean: z.boolean().default(false),
+  /**
+   * Hard cap on a reviewer's generated tokens. A tail guard, not a saving: observed completions are
+   * 435-1,107 tokens, so 1500 does not bind in the observed range. The prompt route does not work --
+   * a clause demanding terseness made output rise, 315->349 and 719->895.
+   *
+   * 1500 = 3x the ~115-token rendered size of one finding, times a 4-finding allowance. An estimate.
+   */
+  maxOutputTokens: z.number().int().min(1).default(1500),
 });
 
 export const ConvergenceStrategySchema = z.object({

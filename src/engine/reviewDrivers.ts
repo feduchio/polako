@@ -47,7 +47,7 @@ import {
 import type { TerminalReason } from "../domain/run.js";
 import { PolishError } from "../shared/errors.js";
 import { buildCheckpointReviewArtifact, type CheckpointReviewArtifact } from "../review/artifact.js";
-import { runAxisReview, type ReviewProvider, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
+import { REVIEW_TRUNCATED_MESSAGE, runAxisReview, type ReviewProvider, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { id } from "../shared/ids.js";
 import {
@@ -781,6 +781,7 @@ function isStickyReviewSkip(err: unknown, message: string): boolean {
   return (
     isRateLimitMessage(message) ||
     /\bbad request\b|\b400\b|JSON mode is not enabled/i.test(message) ||
+    message === REVIEW_TRUNCATED_MESSAGE ||
     /invalid_type|expected array|findings array/i.test(message)
   );
 }
@@ -817,6 +818,7 @@ async function reviewAxisWithFallback(
         protocols: input.protocols,
         repositoryRoot: input.repositoryRoot,
         now: ctx.clock.now(),
+        maxOutputTokens: ctx.config.review.maxOutputTokens,
       });
       finishExecution(ctx, started, result.findings, result.model, result.promptDigest);
       for (const finding of result.findings) {

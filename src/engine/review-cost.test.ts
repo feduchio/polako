@@ -15,6 +15,7 @@ import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
 import { createReviewingDriver, recentlyRateLimitedReviewModels, type ReviewDriverOptions } from "./reviewDrivers.js";
+import { RUN_PHASE_TABLE } from "../domain/run.js";
 import { stubDriverFor } from "./stubs.js";
 
 const cleanup: string[] = [];
@@ -24,8 +25,8 @@ afterEach(() => {
 });
 
 /**
- * P1.1: `adversarial` is 64.4% of every token this tool has spent, it runs last, and the earlier axes'
- * verdicts are known by then. Contract: docs/ledger/P1.1.md.
+ * Review-cost work on the REVIEWING driver: P1.1's conditional skip and P1.2's output cap.
+ * Contracts: docs/ledger/P1.1.md, docs/ledger/P1.2.md.
  */
 describe("P1.1 conditional adversarial skip", () => {
   let store: Store;
@@ -490,6 +491,127 @@ function seedReviewingRun(store: Store, clock: FakeClock, fixture: Fixture): { r
   ]);
   return { runId, checkpointHash: fixture.integrated };
 }
+
+// P1.2. A tail guard, not a saving: observed completions are 435-1,107 tokens, so 1500 does not bind.
+// Truncation is a sticky per-model failure, which is a deliberate departure from the plan's wording --
+// recording a failed review as completed would lose the distinction convergence depends on.
+describe("P1.2 reviewer output cap", () => {
+  let store: Store;
+  let clock: FakeClock;
+  let fixture: Fixture;
+
+  beforeEach(async () => {
+    fixture = await repositoryFixture();
+    store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    clock = new FakeClock(1_700_000_000_000);
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  const engineFor = (
+    reviewers: readonly { provider: ScriptedProvider; model: { provider: string; model: string } }[],
+  ): RunEngine => {
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of NON_REVIEW_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
+    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, () => [...reviewers])));
+    return engine;
+  };
+
+  // AC2
+  it("defaults the cap to 1500 on the schema", () => {
+    expect(ReviewStrategySchema.parse({}).maxOutputTokens).toBe(1500);
+  });
+
+  // AC1
+  it("sends the configured cap as maxTokens on every reviewer call", async () => {
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    for (let i = 0; i < 3; i++) provider.script("reviewer", [{ kind: "reply", content: emptyReview() }]);
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    await engineFor([{ provider, model: { provider: "reviews", model: "reviewer" } }]).tickRun(runId);
+
+    expect(provider.calls).toHaveLength(3);
+    expect(provider.calls.every((call) => call.maxTokens === defaultConfig().review.maxOutputTokens)).toBe(true);
+  });
+
+  // AC3 and AC5: a truncated body is never parsed, so it can never yield findings.
+  it("records a truncated response as a failed execution and raises no findings", async () => {
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("reviewer", [{ kind: "reply", content: reviewJson("correctness", "alpha.ts"), finishReason: "length" }]);
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engineFor([{ provider, model: { provider: "reviews", model: "reviewer" } }]).tickRun(runId);
+
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    expect(executions.filter((execution) => execution.completed)).toHaveLength(0);
+    const failed = executions.filter((execution) => !execution.completed);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.error).toContain("truncated");
+    expect(store.repos.findings.listByRun(runId)).toHaveLength(0);
+  });
+
+  // AC4: sticky per model, so the axis falls through in the same tick.
+  it("falls through to the next model when the first truncates", async () => {
+    const provider = new ScriptedProvider("reviews", [
+      { name: "verbose", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "brief", capabilities: FAKE_CAPABILITIES.fast },
+    ]);
+    provider.script("verbose", [{ kind: "reply", content: emptyReview(), finishReason: "length" }]);
+    provider.script("brief", [
+      { kind: "reply", content: emptyReview() },
+      { kind: "reply", content: emptyReview() },
+      { kind: "reply", content: emptyReview() },
+    ]);
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engineFor([
+      { provider, model: { provider: "reviews", model: "verbose" } },
+      { provider, model: { provider: "reviews", model: "brief" } },
+    ]).tickRun(runId);
+
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    expect(executions.some((execution) => !execution.completed && execution.requestedModel.model === "verbose")).toBe(true);
+    expect(executions.filter((execution) => execution.completed && execution.requestedModel.model === "brief")).toHaveLength(3);
+    expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
+  });
+
+  // AC6: bounded, and loud. Every model truncating exhausts the axis rather than looping.
+  it("terminates visibly when every model truncates", async () => {
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    for (let i = 0; i < 40; i++) {
+      provider.script("reviewer", [{ kind: "reply", content: emptyReview(), finishReason: "length" }]);
+    }
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    const engine = engineFor([{ provider, model: { provider: "reviews", model: "reviewer" } }]);
+    for (let tick = 0; tick < 12; tick++) {
+      const run = store.repos.runs.get(runId);
+      if (run?.phase !== "REVIEWING") break;
+      await engine.tickRun(runId);
+    }
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).not.toBe("REVIEWING");
+    expect(RUN_PHASE_TABLE.terminal).toContain(run.phase);
+  });
+
+  // AC7: guards P1.1's MC8a against the new error string.
+  it("does not let a truncated execution act as a skip", () => {
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    const model = { provider: "reviews", model: "limited" };
+    appendExecution(store, clock, runId, {
+      roundIndex: 1, axis: "correctness", requestedModel: model, completed: false,
+      error: "rate limited: 429", hash: fixture.integrated, at: clock.now() + 3,
+    });
+    appendExecution(store, clock, runId, {
+      roundIndex: 1, axis: "regression", requestedModel: model, completed: false,
+      error: "reviewer output truncated at the configured token cap", hash: fixture.integrated, at: clock.now() + 4,
+    });
+
+    // Both rows are failures, so the model stays excluded; a truncation is not a skip and not a success.
+    expect(excludedModels(store, clock, runId)).toEqual(["limited"]);
+  });
+});
 
 function excludedModels(store: Store, clock: FakeClock, runId: string): string[] {
   const run = store.repos.runs.get(runId)!;

@@ -1,4 +1,5 @@
 import type { ProtocolRegistry } from "../protocols/loader.js";
+import { PolishError } from "../shared/errors.js";
 import { reviewerSystemPrompt } from "./reviewerProtocol.js";
 import { realpath, readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -29,6 +30,9 @@ export interface ReviewedFinding extends Finding {
   evidenceIssues: string[];
 }
 
+/** Sticky, per-model: one model's overflowing answer may fit another. Matched by `isStickyReviewSkip`. */
+export const REVIEW_TRUNCATED_MESSAGE = "reviewer output truncated at the configured token cap";
+
 export interface RunAxisReviewInput {
   checkpoint: Checkpoint;
   axis: ReviewAxis;
@@ -40,6 +44,8 @@ export interface RunAxisReviewInput {
   repositoryRoot?: string;
   now?: number;
   responseMode?: "legacy_json_object" | "strict_schema";
+  /** Hard cap on generated tokens; see `review.maxOutputTokens`. */
+  maxOutputTokens?: number;
 }
 
 export interface RunAxisReviewResult {
@@ -79,6 +85,7 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
             reasoning: DISABLED_REASONING,
           }),
     temperature: 0,
+    ...(input.maxOutputTokens === undefined ? {} : { maxTokens: input.maxOutputTokens }),
     metadata: {
       runId: input.checkpoint.runId,
       purpose: `review_${input.axis}`,
@@ -86,6 +93,12 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
       ...(input.checkpoint.taskId === null ? {} : { taskId: input.checkpoint.taskId }),
     },
   });
+
+  if (response.finishReason === "length") {
+    // Do not parse: a truncated body is invalid JSON, and a partial finding set presented as complete
+    // is worse than a recorded failure. Sticky, so the axis falls through to the next model.
+    throw new PolishError("PROVIDER_ERROR", REVIEW_TRUNCATED_MESSAGE);
+  }
 
   const now = input.now ?? Date.now();
   const raws = parseRawFindings(response.message.content);

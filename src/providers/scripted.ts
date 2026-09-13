@@ -8,7 +8,7 @@ export interface ScriptedModel {
 }
 
 export type ScriptStep =
-  | { kind: "reply"; content: string; toolCalls?: { id: string; name: string; arguments: string }[]; usage?: { inputTokens: number; outputTokens: number; costUsd?: number | null } }
+  | { kind: "reply"; content: string; toolCalls?: { id: string; name: string; arguments: string }[]; usage?: { inputTokens: number; outputTokens: number; costUsd?: number | null }; finishReason?: CompletionResponse["finishReason"] }
   | { kind: "error"; error: ProviderError }
   | { kind: "fn"; fn: (request: CompletionRequest, callIndex: number) => CompletionResponse | Promise<CompletionResponse> };
 
@@ -80,7 +80,7 @@ export class ScriptedProvider implements ProviderAdapter {
     const step = queue.shift() ?? this.fallback;
     switch (step.kind) {
       case "reply":
-        return reply(step.content, step.usage?.inputTokens ?? 10, step.usage?.outputTokens ?? 5, step.usage?.costUsd ?? null, step.toolCalls);
+        return reply(step.content, step.usage?.inputTokens ?? 10, step.usage?.outputTokens ?? 5, step.usage?.costUsd ?? null, step.toolCalls, step.finishReason);
       case "error":
         throw step.error;
       case "fn":
