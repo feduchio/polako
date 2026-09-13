@@ -247,6 +247,7 @@ function treadmillSample(size: number): PathologySample {
       knownRunUsd: 0,
       unknownCostCalls: [],
       perTask: {},
+      perRole: {},
       sourceWatermark: null,
       usageConflict: false,
       elapsedMs: 0,

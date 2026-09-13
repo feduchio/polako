@@ -68,6 +68,12 @@ export interface CanonicalBudgetUsage {
   knownRunUsd: number;
   unknownCostCalls: string[];
   perTask: Record<string, number>;
+  /**
+   * Tokens of calls carrying no `taskId`, keyed by `payload.role`, `"unknown"` when absent.
+   * Disjoint from `perTask`, and deliberately not merged into it: `exhaustedDimensions` enforces
+   * every `perTask` key as a task budget. Attribution, not a limit.
+   */
+  perRole: Record<string, number>;
   sourceWatermark: { seq: number; eventId: string } | null;
   usageConflict: boolean;
 }

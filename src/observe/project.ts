@@ -62,7 +62,7 @@ export function projectRunStatus(run: Run, events: readonly Event[], now: number
     },
     resources: {
       tokens: tokenUsage(ordered),
-      usd: usdUsage(ordered),
+      ...usdUsage(ordered),
       runtime: null,
     },
     warning,
@@ -465,19 +465,28 @@ function tokenUsage(events: readonly Event[]): number | null {
   return any ? tokens : null;
 }
 
-function usdUsage(events: readonly Event[]): number | null {
+/**
+ * A partially priced run summed to a bare number is a lower bound presented as a total, so the
+ * count of what was left out travels with it. A call with no `usage` at all consumed nothing and is
+ * not unpriced spend — only a priced-call-shaped one missing its `costUsd` is.
+ */
+function usdUsage(events: readonly Event[]): { usd: number | null; unpricedCalls: number } {
   let usd = 0;
   let any = false;
+  let unpricedCalls = 0;
   for (const event of events) {
     if (event.type !== "model.call") continue;
     const usage = asRecord(event.payload["usage"]);
-    const cost = number(usage?.["costUsd"]);
-    if (cost !== null) {
-      any = true;
-      usd += cost;
+    if (usage === null) continue;
+    const cost = number(usage["costUsd"]);
+    if (cost === null) {
+      unpricedCalls += 1;
+      continue;
     }
+    any = true;
+    usd += cost;
   }
-  return any ? usd : null;
+  return { usd: any ? usd : null, unpricedCalls };
 }
 
 export function summarize(event: Event): string {

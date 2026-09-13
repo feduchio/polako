@@ -28,6 +28,7 @@ import {
   eventsThroughBoundary,
   foldModelCallUsage,
   foldPrefix,
+  liveBudgetLimits,
   hashPathologySample,
   isObservationBoundary,
   pendingEnsembleOverride,
@@ -37,6 +38,7 @@ import {
   selectEligibleEnsemble,
   selectStrategy,
 } from "./index.js";
+import { exhaustedDimensions } from "./budget.js";
 import { PATHOLOGY_SAMPLE_VERSION, type CanonicalProgressVector, type PathologySample, type TaskWorkClassRecord } from "./types.js";
 
 const NOW = 1_700_000_000_000;
@@ -88,6 +90,7 @@ function sample(index: number, overrides: Partial<PathologySample> = {}): Pathol
       knownRunUsd: 0,
       unknownCostCalls: [],
       perTask: {},
+      perRole: {},
       sourceWatermark: null,
       usageConflict: false,
       elapsedMs: index,
@@ -356,6 +359,65 @@ describe("C2 budget fold", () => {
     expect(fold.unknownCostCalls).toEqual(["c2"]);
     expect(fold.perTask).toEqual({ t1: 19 });
     expect(fold.usageConflict).toBe(false);
+  });
+
+  it("buckets untasked spend by role, with two distinct roles in one fold", () => {
+    const events = [
+      call(0, { callId: "c1", taskId: "t1", role: "worker", usage: { inputTokens: 10, outputTokens: 0, costUsd: 0 } }),
+      call(1, { callId: "c2", taskId: null, role: "reviewer", usage: { inputTokens: 7, outputTokens: 1, costUsd: 0 } }),
+      call(2, { callId: "c3", taskId: null, role: "judge", usage: { inputTokens: 2, outputTokens: 3, costUsd: 0 } }),
+      call(3, { callId: "c4", taskId: null, role: "reviewer", usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } }),
+    ];
+    const fold = foldModelCallUsage(events);
+    expect(fold.perRole).toEqual({ reviewer: 10, judge: 5 });
+    expect(fold.perTask).toEqual({ t1: 10 });
+  });
+
+  it("keeps role buckets out of perTask entirely", () => {
+    const events = [
+      call(0, { callId: "c1", taskId: null, role: "reviewer", usage: { inputTokens: 5, outputTokens: 5, costUsd: 0 } }),
+      call(1, { callId: "c2", taskId: null, usage: { inputTokens: 5, outputTokens: 5, costUsd: 0 } }),
+    ];
+    const fold = foldModelCallUsage(events);
+    expect(Object.keys(fold.perTask)).toEqual([]);
+    expect(fold.runTokens).toBe(20);
+  });
+
+  it("buckets a call with an absent or non-string role as unknown rather than dropping it", () => {
+    const events = [
+      call(0, { callId: "c1", taskId: null, usage: { inputTokens: 4, outputTokens: 0, costUsd: 0 } }),
+      call(1, { callId: "c2", taskId: null, role: 7, usage: { inputTokens: 3, outputTokens: 0, costUsd: 0 } }),
+      call(2, { callId: "c3", taskId: null, role: "", usage: { inputTokens: 2, outputTokens: 0, costUsd: 0 } }),
+    ];
+    const fold = foldModelCallUsage(events);
+    expect(fold.perRole).toEqual({ unknown: 9 });
+    expect(fold.runTokens).toBe(9);
+  });
+
+  it("attributes every token: perTask plus perRole equals runTokens", () => {
+    const events = [
+      call(0, { callId: "c1", taskId: "t1", role: "worker", usage: { inputTokens: 11, outputTokens: 2, costUsd: 0 } }),
+      call(1, { callId: "c2", taskId: "t2", role: "worker", usage: { inputTokens: 3, outputTokens: 4, costUsd: null } }),
+      call(2, { callId: "c3", taskId: null, role: "reviewer", usage: { inputTokens: 20, outputTokens: 6, costUsd: 0 } }),
+      call(3, { callId: "c4", taskId: null, role: "judge", usage: { inputTokens: 1, outputTokens: 0, costUsd: 0 } }),
+      call(4, { callId: "c5", taskId: null, usage: { inputTokens: 9, outputTokens: 1, costUsd: 0 } }),
+      call(5, { callId: "c5", taskId: null, usage: { inputTokens: 9, outputTokens: 1, costUsd: 0 } }),
+    ];
+    const fold = foldModelCallUsage(events);
+    const sum = (record: Record<string, number>): number => Object.values(record).reduce((a, b) => a + b, 0);
+    expect(sum(fold.perTask) + sum(fold.perRole)).toBe(fold.runTokens);
+    expect(fold.runTokens).toBe(57);
+  });
+
+  it("does not enforce a role bucket as a task budget", () => {
+    const config = defaultConfig();
+    config.budget.maxTaskTokens = 10;
+    const usage = foldModelCallUsage([
+      call(0, { callId: "c1", taskId: null, role: "reviewer", usage: { inputTokens: 500, outputTokens: 0, costUsd: 0 } }),
+    ]);
+    const dimensions = exhaustedDimensions(usage, liveBudgetLimits(config), 0);
+    expect(dimensions.filter((d) => d.startsWith("task_tokens:"))).toEqual([]);
+    expect(usage.perRole).toEqual({ reviewer: 500 });
   });
 
   it("flags conflicting duplicate usage and still does not double-count", () => {

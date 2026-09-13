@@ -192,6 +192,32 @@ describe("RunObserver projection", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  /**
+   * A partially priced run is the common case on the free tier, and a bare total there is a lower
+   * bound the operator cannot tell from a real one.
+   */
+  it("reports how many calls were left out of the USD total", () => {
+    const run = baseRun({ phase: "REVIEWING", control: "RUNNING" });
+    const view = projectRunStatus(run, [
+      evt(0, "model.call", { callId: "c1", usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.25 } }, NOW - 9_000),
+      evt(1, "model.call", { callId: "c2", usage: { inputTokens: 4, outputTokens: 1, costUsd: null } }, NOW - 8_000),
+      evt(2, "model.call", { callId: "c3", usage: null }, NOW - 7_000),
+    ], NOW);
+    expect(view.resources.usd).toBe(0.25);
+    // c3 reported no usage at all: it spent nothing, so it is not unpriced spend.
+    expect(view.resources.unpricedCalls).toBe(1);
+    expect(renderRunStatus(view)).toContain("(+1 unpriced)");
+  });
+
+  it("says nothing about unpriced calls when every call carried a price", () => {
+    const run = baseRun({ phase: "REVIEWING", control: "RUNNING" });
+    const view = projectRunStatus(run, [
+      evt(0, "model.call", { callId: "c1", usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.25 } }, NOW - 9_000),
+    ], NOW);
+    expect(view.resources.unpricedCalls).toBe(0);
+    expect(renderRunStatus(view)).not.toContain("unpriced");
+  });
 });
 
 function baseRun(patch: Partial<Run> = {}): Run {

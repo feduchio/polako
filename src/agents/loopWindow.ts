@@ -43,6 +43,16 @@ interface DigestEntry {
    */
   readonly seq: number;
   readonly text: string;
+  /**
+   * A failing command's output, carried apart from `text` so demotion can drop it by setting this
+   * to `null`. Re-parsing the rendered line cannot: an argv containing `: ` is indistinguishable
+   * from the separator, and the exit code goes with the tail.
+   */
+  readonly tail: string | null;
+}
+
+function renderEntry(entry: DigestEntry): string {
+  return entry.tail === null ? entry.text : `${entry.text}: ${entry.tail}`;
 }
 
 const SECTION_LABEL: Record<Section, string> = {
@@ -72,9 +82,9 @@ export function buildLoopDigest(history: readonly AgentTurn[], cap: number): str
   const entries = collectEntries(history);
   // An entry whose own rendering exceeds the cap can only be evicted whole: arguments such as an
   // argv or a search query have no shortened form, unlike paths and output tails.
-  const survivable = entries.filter((entry) => estimateTokens(entry.text) <= cap);
+  const survivable = entries.filter((entry) => estimateTokens(renderEntry(entry)) <= cap);
   const ordered = [...survivable].sort(
-    (a, b) => a.priority - b.priority || b.seq - a.seq || a.text.localeCompare(b.text),
+    (a, b) => a.priority - b.priority || b.seq - a.seq || renderEntry(a).localeCompare(renderEntry(b)),
   );
 
   for (let kept = ordered.length; kept > 0; kept -= 1) {
@@ -87,7 +97,7 @@ export function buildLoopDigest(history: readonly AgentTurn[], cap: number): str
 function render(entries: readonly DigestEntry[], turns: number): string {
   const lines = [`## Earlier in this loop (turns 1-${turns})`];
   for (const section of SECTION_ORDER) {
-    const texts = entries.filter((entry) => entry.section === section).map((entry) => entry.text);
+    const texts = entries.filter((entry) => entry.section === section).map(renderEntry);
     if (texts.length === 0) continue;
     lines.push(`${SECTION_LABEL[section]}: ${texts.join("; ")}`);
   }
@@ -104,7 +114,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
 
   for (const turn of history) {
     if (turn.assistant.content.trim() !== "") {
-      entries.push({ section: "note", priority: PRIORITY.note, seq: seq += 1, text: head(turn.assistant.content.trim()) });
+      entries.push({ section: "note", priority: PRIORITY.note, seq: seq += 1, text: head(turn.assistant.content.trim()), tail: null });
     }
     const args = new Map((turn.assistant.toolCalls ?? []).map((call) => [call.id, call.arguments]));
     for (const result of turn.toolResults) {
@@ -126,7 +136,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
         const key = `${shortPath(pathOf(result.output, parsed))} (${tag})`;
         if (!seenChanged.has(key)) {
           seenChanged.add(key);
-          entries.push({ section: "changed", priority: PRIORITY.changed, seq, text: key });
+          entries.push({ section: "changed", priority: PRIORITY.changed, seq, text: key, tail: null });
         }
         continue;
       }
@@ -139,9 +149,8 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
           section: failed ? "failedCommand" : "command",
           priority: failed ? PRIORITY.failedCommand : PRIORITY.command,
           seq,
-          text: failed
-            ? `${argv} -> exit ${String(exitCode)}: ${tail(outputOf(result.output))}`
-            : `${argv} -> exit ${exitCode === null ? "?" : String(exitCode)}`,
+          text: `${argv} -> exit ${exitCode === null ? "?" : String(exitCode)}`,
+          tail: failed ? tail(outputOf(result.output)) : null,
         });
         continue;
       }
@@ -149,7 +158,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
       const key = `${result.name} ${identity}`;
       if (!seenToolCall.has(key)) {
         seenToolCall.add(key);
-        entries.push({ section: "toolCall", priority: PRIORITY.toolCall, seq, text: key });
+        entries.push({ section: "toolCall", priority: PRIORITY.toolCall, seq, text: key, tail: null });
       }
     }
   }
@@ -160,7 +169,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
   // which lint does not flag as a redundant assertion.
   const demoted: DigestEntry[] = entries.map((entry) =>
     entry.section === "failedCommand" && entry.seq !== failedCommandSeq
-      ? { ...entry, section: "command", priority: PRIORITY.command, text: entry.text.replace(/: [\s\S]*$/, "") }
+      ? { ...entry, section: "command", priority: PRIORITY.command, tail: null }
       : entry,
   );
 
@@ -170,6 +179,7 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
       priority: PRIORITY.error,
       seq: at,
       text: count > 1 ? `${key} (x${String(count)})` : key,
+      tail: null,
     });
   }
   return demoted;

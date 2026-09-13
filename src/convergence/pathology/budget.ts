@@ -43,9 +43,16 @@ function taskIdOf(event: Event): string | null {
   return typeof taskId === "string" && taskId.length > 0 ? taskId : null;
 }
 
+/** Untasked spend is attributed by role; a call whose role is absent is bucketed, never dropped. */
+function roleOf(event: Event): string {
+  const payload = asRecord(event.payload);
+  const role = payload?.["role"];
+  return typeof role === "string" && role.length > 0 ? role : "unknown";
+}
+
 /** Fold unique completed `model.call` usage once. Conflicting duplicates fail closed. */
 export function foldModelCallUsage(events: readonly Event[]): CanonicalBudgetUsage {
-  const byCall = new Map<string, { tokens: number; costUsd: number | null; taskId: string | null }>();
+  const byCall = new Map<string, { tokens: number; costUsd: number | null; taskId: string | null; role: string }>();
   let usageConflict = false;
   let sourceWatermark: { seq: number; eventId: string } | null = null;
 
@@ -62,7 +69,7 @@ export function foldModelCallUsage(events: readonly Event[]): CanonicalBudgetUsa
       if (existing.tokens !== tokens || existing.costUsd !== usage.costUsd) usageConflict = true;
       continue;
     }
-    byCall.set(callId, { tokens, costUsd: usage.costUsd, taskId });
+    byCall.set(callId, { tokens, costUsd: usage.costUsd, taskId, role: roleOf(event) });
     sourceWatermark = { seq: event.seq, eventId: event.id };
   }
 
@@ -70,13 +77,17 @@ export function foldModelCallUsage(events: readonly Event[]): CanonicalBudgetUsa
   let knownRunUsd = 0;
   const unknownCostCalls: string[] = [];
   const perTask: Record<string, number> = {};
+  const perRole: Record<string, number> = {};
   for (const callId of [...byCall.keys()].sort()) {
     const row = byCall.get(callId);
     if (row === undefined) continue;
     runTokens += row.tokens;
     if (row.costUsd === null) unknownCostCalls.push(callId);
     else knownRunUsd += row.costUsd;
+    // Disjoint by construction, so `sum(perTask) + sum(perRole) === runTokens`. Roles stay out of
+    // `perTask` because `exhaustedDimensions` enforces every key there as a task budget.
     if (row.taskId !== null) perTask[row.taskId] = (perTask[row.taskId] ?? 0) + row.tokens;
+    else perRole[row.role] = (perRole[row.role] ?? 0) + row.tokens;
   }
 
   return {
@@ -84,6 +95,7 @@ export function foldModelCallUsage(events: readonly Event[]): CanonicalBudgetUsa
     knownRunUsd,
     unknownCostCalls,
     perTask,
+    perRole,
     sourceWatermark,
     usageConflict,
   };

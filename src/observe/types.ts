@@ -73,6 +73,8 @@ export interface RunStatusView {
   resources: {
     tokens: number | null;
     usd: number | null;
+    /** Calls that reported usage but no price. `usd` is a lower bound whenever this is non-zero. */
+    unpricedCalls: number;
     runtime: string | null;
   };
   warning: string | null;

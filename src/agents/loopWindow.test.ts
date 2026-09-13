@@ -422,6 +422,58 @@ describe("buildWireWindow", () => {
   });
 });
 
+describe("demotion of older failing commands", () => {
+  /**
+   * The demoted entry used to be produced by re-parsing the rendered line, and the separator it
+   * looked for is a sequence an argv is free to contain.
+   */
+  it("keeps the exit code when the argv itself contains a colon and a space", () => {
+    const digest = buildLoopDigest(
+      [
+        turn(1, [ok("run_command", { argv: ["git", "commit", "-m", "fix: x"] }, { exitCode: 1, stderr: "nothing to commit" })]),
+        turn(2, [ok("run_command", { argv: ["node", "newer-broke.js"] }, { exitCode: 3, stderr: "later failure" })]),
+      ],
+      400,
+    );
+    expect(digest).toContain("git commit -m fix: x -> exit 1");
+    // Demoted, so its output is gone while the newest failure keeps its own.
+    expect(digest).not.toContain("nothing to commit");
+    expect(digest).toContain("later failure");
+  });
+
+  it("demotes by dropping the output, not by truncating the line", () => {
+    const digest = buildLoopDigest(
+      [
+        turn(1, [ok("run_command", { argv: ["node", "older.js"] }, { exitCode: 4, stderr: "older output" })]),
+        turn(2, [ok("run_command", { argv: ["node", "newer.js"] }, { exitCode: 5, stderr: "newer output" })]),
+      ],
+      400,
+    );
+    expect(digest).toContain("node older.js -> exit 4");
+    expect(digest).not.toContain("older output");
+    expect(digest).toContain("node newer.js -> exit 5: newer output");
+  });
+
+  /**
+   * The cap must be measured on the string that is emitted. Measuring `text` alone does not
+   * overflow the digest — the outer eviction loop still refuses it — it silently empties it,
+   * because the oversized entry sorts first and eviction only drops from the end.
+   */
+  it("evicts an entry whose tail overflows the cap without taking the rest with it", () => {
+    const cap = 40;
+    const digest = buildLoopDigest(
+      [
+        turn(1, [ok("run_command", { argv: ["node", "huge.js"] }, { exitCode: 1, stderr: "T".repeat(4_000) })]),
+        turn(2, [ok("run_command", { argv: ["node", "small.js"] }, { exitCode: 0, stdout: "" })]),
+      ],
+      cap,
+    );
+    expect(digest).toContain("node small.js -> exit 0");
+    expect(digest).not.toContain("TTTT");
+    expect(estimateTokens(digest)).toBeLessThanOrEqual(cap);
+  });
+});
+
 function turn(n: number, results: AgentToolResult[]): AgentTurn {
   return {
     turn: n,

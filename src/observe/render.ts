@@ -40,7 +40,9 @@ export function renderRunStatus(view: RunStatusView): string {
     "",
     "RESOURCES",
     `Tokens   ${view.resources.tokens ?? DASH}`,
-    `USD      ${view.resources.usd === null ? DASH : view.resources.usd.toFixed(4)}`,
+    `USD      ${view.resources.usd === null ? DASH : view.resources.usd.toFixed(4)}${
+      view.resources.unpricedCalls > 0 ? ` (+${String(view.resources.unpricedCalls)} unpriced)` : ""
+    }`,
     `Runtime  ${view.resources.runtime ?? DASH}`,
   ];
   if (view.warning !== null) {
