@@ -495,12 +495,12 @@ seven review rounds. Every finding below has exactly one disposition. None is dr
 | 3, 4, 5, 6, 7, 8, 9 | ACCEPTED; historical |
 | 10 | ACCEPTED as `B-bootstrap-cost-eligibility` (lifted out of this list) |
 | 11 | ACCEPTED with 32+34+44 at `78a3378` |
-| 12 | **`docs/PLAN.md` P1.3** (spend restore) + **P1.7** (settings restore). Split because the halves are independent: limits without spend still bind, spend without limits binds the wrong number |
+| 12 | Settings half **ACCEPTED** at `0c69901` as P1.7: one resolver owns a run's config, limits and overrides. Spend half remains **P1.3**, now unblocked. Split because the halves are independent: limits without spend still bind, spend without limits binds the wrong number |
 | 13 | **P1.12** — daemon coding E2E for `NEEDS_HUMAN`, STOP/RESUME, crash recovery |
 | 14 | **DROPPED.** Requires real paid provider APIs, which policy forbids. Transport-layer cassettes if the need returns |
 | 15 | **P1.13** — `runtime=required` happy path; depends on P1.6 and P1.8 |
 | 16 | **ACCEPTED** at `e45aebc` as P1.6. The missing `off` early return in `corpusRuntimeEvidenceAllowsDone` is added; one round, both lanes clean. Run record `docs/ledger/P1.6-run.md` |
-| 17, 21, 22, 25 | **P1.7** — one seam, one rewrite: `DaemonService.runConfig`, `withRuntimeValidationMode`, the two budget merge sites |
+| 17, 21, 22, 25 | **ACCEPTED** at `0c69901` as P1.7. 17: neither boundary defaults an omitted `--runtime`, so `polish.toml` is effective. 21: `run.settings_fallback`, once per run, per dimension. 22: both source-grep pins retired for behavioural isolation checks. 25: one merge site. Run record `docs/ledger/P1.7-run.md` |
 | 18 | ACCEPTED at `8ea156d`; 15 rounds |
 | 19 | ACCEPTED at `9e157e1` |
 | 20, 24 | **DEFERRED until after P2.** Auditioning models against a review layer that P3 may change discards the observations. Finding 24 (probes bypassing the budget guard) rides with 20, since the audition producer is what issues probes |

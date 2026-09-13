@@ -216,9 +216,19 @@ No architecture. Each item independently revertible. Order free.
 - Estimate: 3 h.
 - Deletes: the unbounded tail.
 
-### P1.3 Durable spend across restart — G2 — **BLOCKED, run P1.7 first**
+### P1.3 Durable spend across restart — G2 — **UNBLOCKED at `0c69901`**
 
-**Blocker, 2026-09-13.** The production change is one loop after `engine.recover()` calling
+**The blocker below is resolved, and the anomaly it describes was a misreading.** P1.7 is accepted at
+`0c69901`. While reading that seam the coordinator found the explanation: the test
+*"keeps the sound half of a run's persisted budget when the other half is corrupt"* writes `facade.json`
+**twice**, and its second write is `{ ...metadata, budgetTokens: "lots" }` over the *original*
+metadata — so `budgetUsd: 1` is restored and is the **sound** half. `limit: 1` is correct, not
+mysterious; the previous session read the first write while reasoning about the second scenario. The
+real obstacle is the one already given for the other three cases: these tests restart repeatedly on one
+run and rely on spend resetting to zero. The original note is kept below as the record of what was
+believed at the time.
+
+**Blocker as recorded 2026-09-13, superseded.** The production change is one loop after `engine.recover()` calling
 `broker.restore(run.id)` for each run in `listActive()` — the same predicate `engine.tick` drives, so
 the restored set and the ticked set cannot drift. It is committed on `task/P1.3-wip` (`98d07b2`) and is
 believed correct.
@@ -334,7 +344,12 @@ becomes explainable.
   (c) two `runConfig` calls on a run with a corrupt `facade.json` emit one
   `run.settings_fallback`, not two. Name the retired cases from `service.runtime-mode.test.ts` and
   `service.budget-override.test.ts` in the commit message.
-- Estimate: 1 day. Deletes: one merge site, the pin, ~⅓ of a 982-line test file.
+- Estimate: 1 day. Deletes: one merge site and both source-grep pins.
+- **Measured after acceptance at `0c69901`, correcting the prediction above:** the 982-line test file
+  did **not** shrink by a third — it grew to 1105. Three cases were retired (finding 17's inverted
+  expectation and the two pins) and nine added, because MC9 forbids retiring behavioural isolation and
+  the new clauses need new cases. Recorded at the round-3 reviewer's request so **P1.3 does not expect
+  a slimmer file**. Run record `docs/ledger/P1.7-run.md`.
 
 ### P1.8 Executable Mission Acceptance Corpus — G2, invariant repair
 
