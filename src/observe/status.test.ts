@@ -197,17 +197,31 @@ describe("RunObserver projection", () => {
    * A partially priced run is the common case on the free tier, and a bare total there is a lower
    * bound the operator cannot tell from a real one.
    */
-  it("reports how many calls were left out of the USD total", () => {
+  /**
+   * MC2 defines "unpriced" as: `usage` present **and** `costUsd` not a finite number. Both halves
+   * need distinguishable counts, or a classifier that swaps them — or that only recognises a
+   * literal `null` price — reports the same number as the right one.
+   */
+  it("counts a call as unpriced only when it reported usage without a finite price", () => {
     const run = baseRun({ phase: "REVIEWING", control: "RUNNING" });
+    const usage = (costUsd: unknown): Record<string, unknown> =>
+      ({ inputTokens: 4, outputTokens: 1, ...(costUsd === "absent" ? {} : { costUsd }) });
     const view = projectRunStatus(run, [
-      evt(0, "model.call", { callId: "c1", usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.25 } }, NOW - 9_000),
-      evt(1, "model.call", { callId: "c2", usage: { inputTokens: 4, outputTokens: 1, costUsd: null } }, NOW - 8_000),
-      evt(2, "model.call", { callId: "c3", usage: null }, NOW - 7_000),
+      evt(0, "model.call", { callId: "priced", usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.25 } }, NOW - 9_000),
+      // Five shapes of "reported usage, no usable price". Each must count.
+      evt(1, "model.call", { callId: "u-null", usage: usage(null) }, NOW - 8_900),
+      evt(2, "model.call", { callId: "u-absent", usage: usage("absent") }, NOW - 8_800),
+      evt(3, "model.call", { callId: "u-nan", usage: usage(Number.NaN) }, NOW - 8_700),
+      evt(4, "model.call", { callId: "u-inf", usage: usage(Number.POSITIVE_INFINITY) }, NOW - 8_600),
+      evt(5, "model.call", { callId: "u-str", usage: usage("0.5") }, NOW - 8_500),
+      // Two calls that reported no usage at all. They spent nothing, so they are not unpriced
+      // spend. The count differs from the class above, so swapping the two is visible.
+      evt(6, "model.call", { callId: "no-usage-a", usage: null }, NOW - 8_400),
+      evt(7, "model.call", { callId: "no-usage-b" }, NOW - 8_300),
     ], NOW);
     expect(view.resources.usd).toBe(0.25);
-    // c3 reported no usage at all: it spent nothing, so it is not unpriced spend.
-    expect(view.resources.unpricedCalls).toBe(1);
-    expect(renderRunStatus(view)).toContain("(+1 unpriced)");
+    expect(view.resources.unpricedCalls).toBe(5);
+    expect(renderRunStatus(view)).toContain("(+5 unpriced)");
   });
 
   it("says nothing about unpriced calls when every call carried a price", () => {
