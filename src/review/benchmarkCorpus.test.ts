@@ -79,4 +79,21 @@ describe("reviewer benchmark corpus", () => {
     };
     expect(() => changedLineSpan(twoDefects)).toThrow("must change exactly one line");
   });
+
+  it("executes sibling invariants instead of assuming they pass", () => {
+    const first = REVIEWER_BENCHMARK_PAIRS[0];
+    if (first === undefined) throw new Error("missing first pair");
+    const twoSemanticDefects = {
+      ...first,
+      mutantSource: first.mutantSource.replace(
+        "spent <= cap",
+        "spent <= cap || spent > cap",
+      ),
+    };
+    expect(runInvariants(twoSemanticDefects, "mutant")).toEqual([
+      { name: "equal cap rejected", passed: false },
+      { name: "below cap accepted", passed: true },
+      { name: "above cap rejected", passed: false },
+    ]);
+  });
 });
