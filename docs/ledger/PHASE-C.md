@@ -60,7 +60,7 @@ absorbed into 32 because both reopen production COMPARING; 28 rides with 31's `l
 then 0/96, and disabled reasoning reduced output tokens from 87,090 to 20,653 on the original-model
 transport A/B. It did not improve raw gating: strict false positives remained 72.7–85.7% and pair
 discrimination was 5.9–9.5%. Denominators differed because free transport failures were 21–36/96,
-so no semantic quality win is claimed. This is why 35+23 remains next.
+so no semantic quality win is claimed. This is why 35+23 ran next; it is now accepted.
 
 **Order changed 2026-09-12 on measurement, not on preference.** Item 29 — run economics as a derived record — goes ahead of 11–15 because the remaining sequence was ordered by finding number while the tokens are somewhere else: over the six real runs in the store the review swarm is **78.7%** of spend at a 5:1 output-to-input ratio, the worker loop **17.2%**, the council **4.1%**. Item 18 was accepted on a turn-count model whose net is **5.8% of a run if an untested assumption holds**; its ceiling was 10.7%. Nothing in items 11–15 touches the 78.7%, and no claim about it can be checked until the spend is a record rather than a throwaway script. The A/B of the fixture corpus on the same two free models follows item 29 and tests item 18's assumption directly.
 
