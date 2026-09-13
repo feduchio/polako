@@ -496,7 +496,7 @@ seven review rounds. Every finding below has exactly one disposition. None is dr
 | 20, 24 | **DEFERRED until after P2.** Auditioning models against a review layer that P3 may change discards the observations. Finding 24 (probes bypassing the budget guard) rides with 20, since the audition producer is what issues probes |
 | 23 | Reviewer half ACCEPTED at `9e157e1`; detector half ACCEPTED with 35+23 at `4c5bb63` |
 | 26 | **OPEN, UNSCHEDULED.** Known weakness: a reviewer-authored claim reaches a worker as unfenced instruction via `task.description` (`src/engine/reviewDrivers.ts:532-533`, `src/findings/validator.ts:156`). Its structural closure was the reviewer-supplied-reproduction design, which the council rejected twice and plan v2 withdrew. Recorded, not fixed |
-| 27 | **P1.10** — startup diagnostic naming the offending protocol file |
+| 27 | **ACCEPTED** at `44d4256` as P1.10. Every escape from `ProtocolRegistry.load` carries the offending `SKILL.md` path or the root, including two failure classes the plan did not name; the eager load in `buildProductionDeps` is wrapped and fails closed. Run record `docs/ledger/P1.10-run.md`. Spawned findings 48 and 49 |
 | 28 | **P1.9** — one-line `DigestEntry` tail field |
 | 29 | ACCEPTED at `3d71831` |
 | 30 | **P1.9** — the two folds that lose unpriced calls and untasked spend |
