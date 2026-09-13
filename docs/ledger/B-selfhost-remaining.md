@@ -507,9 +507,9 @@ seven review rounds. Every finding below has exactly one disposition. None is dr
 | 23 | Reviewer half ACCEPTED at `9e157e1`; detector half ACCEPTED with 35+23 at `4c5bb63` |
 | 26 | **OPEN, UNSCHEDULED.** Known weakness: a reviewer-authored claim reaches a worker as unfenced instruction via `task.description` (`src/engine/reviewDrivers.ts:532-533`, `src/findings/validator.ts:156`). Its structural closure was the reviewer-supplied-reproduction design, which the council rejected twice and plan v2 withdrew. Recorded, not fixed |
 | 27 | **ACCEPTED** at `44d4256` as P1.10. Every escape from `ProtocolRegistry.load` carries the offending `SKILL.md` path or the root, including two failure classes the plan did not name; the eager load in `buildProductionDeps` is wrapped and fails closed. Run record `docs/ledger/P1.10-run.md`. Spawned findings 48 and 49 |
-| 28 | **P1.9** — one-line `DigestEntry` tail field |
+| 28 | **ACCEPTED** at `485132b` as P1.9. `DigestEntry` carries the output tail as its own field and the demotion regex is deleted, so a failing command keeps its exit code whatever its argv contains |
 | 29 | ACCEPTED at `3d71831` |
-| 30 | **P1.9** — the two folds that lose unpriced calls and untasked spend |
+| 30 | **ACCEPTED** at `485132b` as P1.9. `usdUsage` reports `unpricedCalls` and the operator sees it; `foldModelCallUsage` attributes untasked spend by role in its own `perRole` field. Spawned finding 50 |
 | 31 | **P1.11 — ACCEPTED RISK.** See the entry below |
 | 32, 34, 43, 44 | ACCEPTED at `78a3378` |
 | 33, 36, 38, 40 | SUPERSEDED by later measurement; historical. 33 was self-corrected the day it was written; 36's diagnosis was replaced by 41; 38's three readings were settled by 41; 40's logprob path was probed and found unreachable on the free tier |
@@ -606,8 +606,9 @@ otherwise look like unfinished work.
     instead of creating an own key and records **no** tokens. `assertWithin` then reads
     `(s.perTask[taskId] ?? 0)` (`:142`), gets the prototype object rather than a count, and
     `>= maxTaskTokens` compares an object to a number, which is `false`. The task spends without
-    limit. `"constructor"` has the analogous shape: the read returns a function, the comparison is
-    `false`, and the write may throw or be ignored depending on the key. **Found 2026-09-13** by the
+    limit. `"constructor"` has the analogous shape and was executed to confirm it: the read returns
+    `Object`, the comparison is `false`, and the write does not throw — it concatenates, leaving
+    `perTask.constructor` as the string `"function Object() { [native code] }100"`. **Found 2026-09-13** by the
     GPT-5.6-sol lane in round 2 of P1.9, while attacking that item's fix for the *same* hazard in
     `foldModelCallUsage`. Pre-existing and unchanged from base; `quota.ts` is not in P1.9's diff.
     Reachability is the open question and is why this is recorded rather than assumed harmless: task
