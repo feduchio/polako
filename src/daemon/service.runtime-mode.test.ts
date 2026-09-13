@@ -163,13 +163,25 @@ describe("B-selfhost-7 per-run runtime mode", () => {
     expect(observed.modesFor(run.id)).toEqual(["required"]);
   });
 
-  it("still rejects a non-string runtime that is not null", async () => {
+  /**
+   * Only `null` and absence mean unspecified. The falsy values are listed because `if (!value)`
+   * is the natural simplification and it would turn each of them into the configured mode.
+   */
+  it("rejects a falsy runtime that is not null, rather than reading it as unspecified", async () => {
     const fixture = await daemonFixture({ configuredMode: "required" });
-    await expect(fixture.service.handle("run", {
-      project: fixture.repoDir,
-      mission: "noop",
-      runtime: 7,
-    })).rejects.toThrow(/runtime must be a string/);
+    for (const [runtime, message] of [
+      [7, /runtime must be a string/],
+      [false, /runtime must be a string/],
+      [0, /runtime must be a string/],
+      ["", /runtime must be one of/],
+    ] as const) {
+      await expect(fixture.service.handle("run", {
+        project: fixture.repoDir,
+        mission: "noop",
+        runtime,
+      })).rejects.toThrow(message);
+    }
+    await expect(fixture.service.handle("status", {})).resolves.toEqual([]);
   });
 
   it("lets an explicit runtime argument override the configured mode", async () => {
@@ -337,4 +349,3 @@ async function daemonFixture(options: {
     },
   };
 }
-

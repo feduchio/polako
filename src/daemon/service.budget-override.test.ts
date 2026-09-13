@@ -1103,4 +1103,3 @@ function buildFixture(dir: string, home: string, repoDir: string, costUsd: numbe
   };
   return fixture;
 }
-
