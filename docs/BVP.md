@@ -159,6 +159,17 @@ integrated codebase.
 - **A round produces commits that touch no non-test file, while findings keep arriving.** This is
   the signal that was missing and that cost 26 rounds on B-selfhost-8 and 15 on B-selfhost-18; it is
   now Process v2 §7's abandonment clause rather than a signal to interpret.
+- **A check that asserts a number where the clause states a predicate.** From the P1.9 re-check, which
+  found **eight** wrong classifiers passing one aggregate assertion while the production code was
+  correct throughout. Two lessons, both now in `docs/ledger/P1.9.md`: *a predicate is observed only by
+  inputs that sit on each side of every boundary it draws*, and *an aggregate assertion over several
+  boundaries observes none of them individually, because errors on different boundaries can sum to the
+  right answer*. The remedy that worked was one single-input fixture per shape. The remedy that did not
+  was widening the aggregate, three times.
+- **A reviewer confirming that the code matches the clause.** That is not review; it is re-reading.
+  What a reviewer adds is the second question — *would a wrong implementation fail a check?* The Grok
+  lane's own account of why it passed `485132b` is in `docs/ledger/P1.9-run.md` and is the clearest
+  statement of the difference in this ledger.
 - **Test volume growing out of proportion to the production change.** B-selfhost-8: 982 test lines
   against +109/−20 production lines. Test volume is a cost carried by all future work on that seam,
   not evidence of rigour.
