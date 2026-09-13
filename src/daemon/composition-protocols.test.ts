@@ -1,0 +1,151 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { defaultConfig } from "../domain/config.js";
+import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { FakeClock } from "../shared/clock.js";
+import { PolishError } from "../shared/errors.js";
+import { openStore, type Store } from "../store/index.js";
+import { buildProductionDeps } from "./composition.js";
+
+const dirs: string[] = [];
+
+function tmp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  dirs.push(dir);
+  return dir;
+}
+
+function brokenProtocols(): { root: string; skillPath: string } {
+  const root = tmp("polish-broken-protocols-");
+  mkdirSync(join(root, "bugfix"), { recursive: true });
+  const skillPath = join(root, "bugfix", "SKILL.md");
+  writeFileSync(
+    skillPath,
+    `---
+name: feature
+description: declares a name its folder does not have
+applies_to:
+  - worker
+kind: task
+budget_tokens: 10
+resources: []
+---
+
+# feature
+
+body
+`,
+    "utf8",
+  );
+  return { root, skillPath };
+}
+
+describe("buildProductionDeps protocol load diagnostic", () => {
+  let store: Store;
+  let clock: FakeClock;
+  let home: string;
+  let stderr: MockInstance<typeof process.stderr.write>;
+  let lines: string[];
+
+  beforeEach(() => {
+    home = tmp("polish-deps-home-");
+    store = openStore({ artifactsDir: join(home, "artifacts") });
+    clock = new FakeClock(1_700_000_000_000);
+    lines = [];
+    stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    stderr.mockRestore();
+    store.close();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function build(protocolsRoot: string): void {
+    buildProductionDeps({
+      store,
+      clock,
+      config: defaultConfig(),
+      home,
+      providers: [new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }])],
+      protocolsRoot,
+    });
+  }
+
+  it("throws a PolishError naming the code and the offending absolute SKILL.md path", () => {
+    const { root, skillPath } = brokenProtocols();
+    let thrown: unknown;
+    try {
+      build(root);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(PolishError);
+    const error = thrown as PolishError;
+    expect(error.code).toBe("INVARIANT_VIOLATION");
+    expect(error.message).toContain("protocol registry failed to load: INVARIANT_VIOLATION");
+    expect(error.message).toContain(skillPath);
+    expect(error.message).toContain('"feature"');
+  });
+
+  /**
+   * A bare `toThrow()` would also pass for a wrapper that swallowed the failure and threw something
+   * unrelated later, and it would not notice deps being returned with an empty registry.
+   */
+  it("fails closed: no deps are produced", () => {
+    const { root } = brokenProtocols();
+    let produced: unknown = "not assigned";
+    expect(() => {
+      produced = buildProductionDeps({
+        store,
+        clock,
+        config: defaultConfig(),
+        home,
+        providers: [new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }])],
+        protocolsRoot: root,
+      });
+    }).toThrow(PolishError);
+    expect(produced).toBe("not assigned");
+  });
+
+  it("writes exactly one stderr line, equal to the thrown message", () => {
+    const { root } = brokenProtocols();
+    let thrown: unknown;
+    try {
+      build(root);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe(`${(thrown as PolishError).message}\n`);
+  });
+
+  it("reports a missing protocols root against the root path", () => {
+    const root = join(tmp("polish-absent-protocols-"), "absent");
+    let thrown: unknown;
+    try {
+      build(root);
+    } catch (error) {
+      thrown = error;
+    }
+    expect((thrown as PolishError).code).toBe("NOT_FOUND");
+    expect((thrown as PolishError).message).toContain(`protocol registry failed to load: NOT_FOUND at ${root}`);
+  });
+
+  it("writes nothing to stderr and returns deps when the protocols root is sound", () => {
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config: defaultConfig(),
+      home,
+      providers: [new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }])],
+    });
+    expect(lines).toEqual([]);
+    expect(deps.protocols.has("base-engineering-policy")).toBe(true);
+  });
+});

@@ -17,25 +17,29 @@ export class ProtocolRegistry {
   static load(rootDir: string): ProtocolRegistry {
     const abs = resolve(rootDir);
     if (!existsSync(abs) || !statSync(abs).isDirectory()) {
-      throw new PolishError("NOT_FOUND", `protocols root not found: ${abs}`);
+      throw new PolishError("NOT_FOUND", `protocols root not found: ${abs}`, { protocolsRoot: abs });
     }
     const registry = new ProtocolRegistry(abs);
     for (const entry of readdirSync(abs, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const skillPath = join(abs, entry.name, "SKILL.md");
       if (!existsSync(skillPath)) continue;
-      const raw = readFileSync(skillPath, "utf8");
-      const { meta, body } = parseSkillMarkdown(raw);
-      if (meta.name !== entry.name) {
-        throw new PolishError(
-          "INVARIANT_VIOLATION",
-          `protocol name ${JSON.stringify(meta.name)} must match directory ${JSON.stringify(entry.name)}`,
-        );
+      try {
+        const raw = readFileSync(skillPath, "utf8");
+        const { meta, body } = parseSkillMarkdown(raw);
+        if (meta.name !== entry.name) {
+          throw new PolishError(
+            "INVARIANT_VIOLATION",
+            `protocol name ${JSON.stringify(meta.name)} must match directory ${JSON.stringify(entry.name)}`,
+          );
+        }
+        if (registry.byName.has(meta.name)) {
+          throw new PolishError("INVARIANT_VIOLATION", `duplicate protocol ${meta.name}`);
+        }
+        registry.byName.set(meta.name, { meta, body, dir: dirname(skillPath) });
+      } catch (error) {
+        throw protocolEntryError(skillPath, error);
       }
-      if (registry.byName.has(meta.name)) {
-        throw new PolishError("INVARIANT_VIOLATION", `duplicate protocol ${meta.name}`);
-      }
-      registry.byName.set(meta.name, { meta, body, dir: dirname(skillPath) });
     }
     return registry;
   }
@@ -86,6 +90,24 @@ export class ProtocolRegistry {
     }
     return readFileSync(fileReal, "utf8");
   }
+}
+
+/**
+ * The failing `SKILL.md` is a local here and nowhere else, so the path is attached at the throw
+ * rather than re-derived by a caller: a second copy of the name/folder rule can disagree with this
+ * one and then name the wrong directory. `ProtocolFrontmatterSchema.parse` throws a `ZodError`, so
+ * this is also the point where a non-`PolishError` becomes one.
+ */
+function protocolEntryError(skillPath: string, error: unknown): PolishError {
+  if (error instanceof PolishError) {
+    return new PolishError(error.code, error.message, { ...error.details, skillPath }, { cause: error });
+  }
+  return new PolishError(
+    "INVALID_ARGUMENT",
+    error instanceof Error ? error.message : String(error),
+    { skillPath },
+    { cause: error },
+  );
 }
 
 /** Default on-disk protocols root (`<repo>/protocols`). */

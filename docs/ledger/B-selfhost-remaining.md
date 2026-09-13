@@ -563,3 +563,17 @@ otherwise look like unfinished work.
     Closure is either to persist the error *kind* alongside the message, or to widen the message
     patterns — the former, since matching prose is what produced this. Rides with the next item that
     touches this seam.
+
+48. **A daemon that dies at startup tells the operator nothing, because autostart discards its
+    output.** `autostartDaemon` spawns `polishd` with `stdio: "ignore"`
+    (`src/cli/client.ts:28-33`), so everything the daemon writes to stdout or stderr — including any
+    diagnostic it emits before it can open its socket — goes nowhere. The CLI then waits five seconds
+    for `daemon.ping` and reports `polishd did not start: <connection error>` (`client.ts:47`), which
+    names the symptom and never the cause. **Found 2026-09-13** by the coordinator while writing
+    P1.10, whose whole subject is making one such startup failure legible; the diagnostic it adds is
+    observable when `polishd` runs in the foreground and invisible on the path the CLI actually uses.
+    Scope: every constructor-time failure, not just protocol loading — a malformed `polish.toml`, an
+    unreadable store and a bad `secrets.env` are all in the same class. Pre-existing; P1.10 did not
+    cause it and does not fix it. Closure is a daemon log file under `${POLISH_HOME}` with
+    `stdio: ["ignore", fd, fd]`, plus pointing `client.ts:47`'s message at that file — a change with
+    its own contract, since it introduces a log-rotation question this tree has never had.

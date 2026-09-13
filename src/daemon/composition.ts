@@ -65,7 +65,7 @@ import {
 import { CommandPolicy } from "../sandbox/allowlist.js";
 import { WorktreeSandbox, type Sandbox } from "../sandbox/worktree.js";
 import type { Clock } from "../shared/clock.js";
-import { PolishError } from "../shared/errors.js";
+import { PolishError, type PolishErrorCode } from "../shared/errors.js";
 import { hashJson } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import type { Store } from "../store/index.js";
@@ -127,6 +127,8 @@ export interface BuildProductionDepsOptions {
   providers?: ProviderAdapter[];
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
   resolveRunBudget?: (runId: string) => RunBudgetLimits;
+  /** Defaults to `defaultProtocolsRoot()`; `ProtocolRegistry.load` already takes a root. */
+  protocolsRoot?: string;
 }
 
 /** True when a run carries neither budget flag, so it uses the daemon-wide limits. */
@@ -149,6 +151,29 @@ export function applyRunBudgetOverrides(config: PolishConfig, limits: RunBudgetL
 export function parseRuntimeMode(value: string): RuntimeCapabilityMode {
   if (value === "auto" || value === "required" || value === "off") return value;
   throw new PolishError("CONFIG_ERROR", "runtime must be one of auto|required|off");
+}
+
+/**
+ * Fails closed: a daemon with no protocols composes no worker and no reviewer prompt, so continuing
+ * would turn a loud startup failure into a silent behavioural one. The one line goes to stderr and
+ * is the thrown message, not a second formatting of it.
+ */
+function loadProtocolsOrExplain(root: string): ProtocolRegistry {
+  try {
+    return ProtocolRegistry.load(root);
+  } catch (error) {
+    const code: PolishErrorCode = error instanceof PolishError ? error.code : "INVARIANT_VIOLATION";
+    const details = error instanceof PolishError ? error.details : {};
+    const at = typeof details["skillPath"] === "string"
+      ? details["skillPath"]
+      : typeof details["protocolsRoot"] === "string"
+        ? details["protocolsRoot"]
+        : root;
+    const reason = error instanceof Error ? error.message : String(error);
+    const message = `protocol registry failed to load: ${code} at ${at}: ${reason}`;
+    process.stderr.write(`${message}\n`);
+    throw new PolishError(code, message, { ...details, protocolsRoot: root }, { cause: error });
+  }
 }
 
 export function buildProductionDeps(options: BuildProductionDepsOptions): ProductionDeps {
@@ -184,7 +209,7 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     clock: options.clock,
     config: options.config,
     home: options.home,
-    protocols: ProtocolRegistry.load(defaultProtocolsRoot()),
+    protocols: loadProtocolsOrExplain(options.protocolsRoot ?? defaultProtocolsRoot()),
     catalog,
     broker,
     ...(options.resolveRunBudget === undefined ? {} : { resolveRunBudget: options.resolveRunBudget }),
