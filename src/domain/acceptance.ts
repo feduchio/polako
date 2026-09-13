@@ -115,14 +115,15 @@ export function runtimeCorpusAllowsDone(
 
 /**
  * CONVERGENCE_CHECK view of persisted runtime evidence for one checkpoint.
- * `required` needs at least one passing current-hash entry; `auto` fails only on
- * a failed current-hash run.
+ * `off` never blocks, as in the two predicates above; `required` needs at least one
+ * passing current-hash entry; `auto` fails only on a failed current-hash run.
  */
 export function corpusRuntimeEvidenceAllowsDone(
   mode: RuntimeValidationMode,
   corpus: MissionAcceptanceCorpus,
   checkpointHash: string,
 ): boolean {
+  if (mode === "off") return true;
   const evidences = corpus.entries
     .map((entry) => entry.runtimeEvidence)
     .filter((evidence): evidence is RuntimeEvidence => evidence !== undefined);

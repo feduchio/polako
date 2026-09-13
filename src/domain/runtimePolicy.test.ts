@@ -3,6 +3,7 @@ import {
   corpusRuntimeEvidenceAllowsDone,
   isStaleRuntimeEvidence,
   runtimeAllowsDone,
+  runtimeCorpusAllowsDone,
   type MissionAcceptanceCorpus,
   type RuntimeEvidence,
 } from "./acceptance.js";
@@ -97,5 +98,47 @@ describe("corpusRuntimeEvidenceAllowsDone", () => {
     expect(corpusRuntimeEvidenceAllowsDone("auto", corpus({ status: "passed", hash: A }), A)).toBe(true);
     expect(corpusRuntimeEvidenceAllowsDone("auto", corpus({ status: "failed", hash: A }), A)).toBe(false);
     expect(corpusRuntimeEvidenceAllowsDone("auto", corpus({ status: "failed", hash: B }), A)).toBe(true);
+  });
+
+  it("off never blocks, including on a failed entry for the current checkpoint", () => {
+    expect(corpusRuntimeEvidenceAllowsDone("off", corpus({ status: "failed", hash: A }), A)).toBe(true);
+    expect(corpusRuntimeEvidenceAllowsDone("off", corpus({ status: "failed", hash: A }, { status: "passed", hash: A }), A)).toBe(true);
+    expect(corpusRuntimeEvidenceAllowsDone("off", corpus({ status: "failed", hash: B }), A)).toBe(true);
+    expect(corpusRuntimeEvidenceAllowsDone("off", corpus(), A)).toBe(true);
+  });
+});
+
+/**
+ * The three predicates are separate functions over the same policy, and the defect this
+ * check exists for was one of them missing the `off` short-circuit the other two had.
+ */
+describe("runtime policy predicates agree on off", () => {
+  const failedHere = evidence("failed", A);
+
+  it("all three allow DONE under off with a failed current-checkpoint entry", () => {
+    expect(runtimeAllowsDone("off", failedHere, A)).toBe(true);
+    expect(runtimeCorpusAllowsDone("off", [failedHere], A, ["s"])).toBe(true);
+    expect(
+      corpusRuntimeEvidenceAllowsDone(
+        "off",
+        {
+          missionId: "msn_0000000000abcdefghjkmn",
+          entries: [{
+            id: "cae_0000000000abcdefghjkmn",
+            missionId: "msn_0000000000abcdefghjkmn",
+            sourceRunId: "run_0000000000abcdefghjkmn",
+            requirementRef: "runtime.s",
+            kind: "runtime_evidence",
+            summary: "failed",
+            evidenceRefs: [],
+            artifactHashes: [],
+            metadata: {},
+            runtimeEvidence: failedHere,
+            createdAt: 1,
+          }],
+        },
+        A,
+      ),
+    ).toBe(true);
   });
 });

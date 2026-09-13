@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeEvidence, RuntimeValidationMode } from "../domain/acceptance.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { defaultConfig } from "../domain/config.js";
@@ -142,6 +143,42 @@ describe("B6 production CONVERGENCE_CHECK driver", () => {
     await engine.tickRun(runId);
     expect(store.repos.runs.get(runId)?.phase).toBe("REVIEWING");
   });
+
+  it("blocks DONE when runtime=auto and a current-checkpoint scenario failed", async () => {
+    engine = engineWithRuntimeMode("auto");
+    const { runId } = seedConvergenceRun(store, clock, fixture, {
+      withProductionEvidence: true,
+      cleanRounds: 3,
+      withRuntimeEvidence: true,
+      runtimeEvidenceStatus: "failed",
+    });
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("REVIEWING");
+  });
+
+  it("reaches DONE when runtime=off and a current-checkpoint scenario failed", async () => {
+    engine = engineWithRuntimeMode("off");
+    const { runId } = seedConvergenceRun(store, clock, fixture, {
+      withProductionEvidence: true,
+      cleanRounds: 3,
+      withRuntimeEvidence: true,
+      runtimeEvidenceStatus: "failed",
+    });
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("DONE");
+  });
+
+  function engineWithRuntimeMode(mode: RuntimeValidationMode): RunEngine {
+    const config = defaultConfig();
+    config.runtimeValidation.mode = mode;
+    const built = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of ["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "PLANNING", "EXECUTING", "GATING", "COMPARING", "INTEGRATING", "REVIEWING"] as const) {
+      built.registerPhase(phase, stubDriverFor(phase));
+    }
+    built.registerPhase("VALIDATING", createValidatingDriver());
+    built.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver());
+    return built;
+  }
 });
 
 interface Fixture {
@@ -170,6 +207,7 @@ function seedConvergenceRun(
     withProductionEvidence: boolean;
     cleanRounds?: number;
     withRuntimeEvidence?: boolean;
+    runtimeEvidenceStatus?: RuntimeEvidence["status"];
   },
 ): { runId: string } {
   const runId = id("run", clock.now());
@@ -299,8 +337,8 @@ function seedConvergenceRun(
         scenarioId: "project-runtime",
         validator: "fixture",
         kind: "node_script",
-        status: "passed",
-        summary: "runtime passed",
+        status: options.runtimeEvidenceStatus ?? "passed",
+        summary: `runtime ${options.runtimeEvidenceStatus ?? "passed"}`,
         observations: {},
         checkpointHash: fixture.integrated,
         sideEffects: { policy: "safe", destructiveExternalEffectsAllowed: false },
