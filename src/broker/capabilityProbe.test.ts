@@ -92,14 +92,17 @@ describe("probeModelCapabilities", () => {
       ...FAKE_CAPABILITIES.strong,
       supportsStrictReviewSchema: true,
       supportsStrictScoreSchema: true,
+      supportsStrictProgressSchema: true,
     }), {
       runId: RUN,
       strictComplete: () => Promise.reject(new ProviderError("p", "timeout", "timed out")),
     });
     expect(result.checks.strictReview.verdict).toBe("inconclusive");
     expect(result.checks.strictScore.verdict).toBe("inconclusive");
+    expect(result.checks.strictProgress.verdict).toBe("inconclusive");
     expect(result.info.capabilities.supportsStrictReviewSchema).toBe(false);
     expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+    expect(result.info.capabilities.supportsStrictProgressSchema).toBe(false);
   });
 
   it.each([
@@ -115,14 +118,17 @@ describe("probeModelCapabilities", () => {
       ...FAKE_CAPABILITIES.strong,
       supportsStrictReviewSchema: true,
       supportsStrictScoreSchema: true,
+      supportsStrictProgressSchema: true,
     }), {
       runId: RUN,
       strictComplete: () => Promise.reject(error),
     });
     expect(result.checks.strictReview.verdict).toBe(verdict);
     expect(result.checks.strictScore.verdict).toBe(verdict);
+    expect(result.checks.strictProgress.verdict).toBe(verdict);
     expect(result.info.capabilities.supportsStrictReviewSchema).toBe(false);
     expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
+    expect(result.info.capabilities.supportsStrictProgressSchema).toBe(false);
   });
 
   it("reuses cached strict probe results without another strict call", async () => {

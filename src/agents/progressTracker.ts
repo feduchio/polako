@@ -145,7 +145,7 @@ export function shouldAbandonProgress(
 function renderStep(turn: AgentTurn): string {
   const raw = JSON.stringify({
     turn: turn.turn,
-    narration: turn.assistant.content,
+    narration: boundTokens(turn.assistant.content, 60),
     actions: (turn.assistant.toolCalls ?? []).map((call) => call.name),
     results: turn.toolResults.map((result) => ({
       name: result.name,

@@ -6,6 +6,12 @@ import { detectTestOnlyTreadmill, runDetectors } from "./detectors.js";
 import { selectStrategy } from "./strategy.js";
 import { buildPathologySample } from "./sample.js";
 import type { Event } from "../../domain/event.js";
+import {
+  decisionEvent,
+  decisionState,
+  effectLifecycleEvent,
+} from "./persist.js";
+import type { PathologyDecision } from "./types.js";
 
 describe("checkpoint path classification", () => {
   it.each([
@@ -59,6 +65,14 @@ describe("test-only verification treadmill", () => {
     expect(decision.targetEnsemble).toBeNull();
   });
 
+  it("accepts RESOLVED as the current linked blocking status", () => {
+    const sample = treadmillSample(3);
+    for (const finding of sample.findingObservations) finding.status = "RESOLVED";
+    expect(detectTestOnlyTreadmill([sample], 3)?.kind).toBe(
+      "test_only_verification_treadmill",
+    );
+  });
+
   it.each([
     ["production change", (sample: PathologySample) => { sample.checkpointChanges![1]!.classification = "production"; }],
     ["metadata-only change", (sample: PathologySample) => { sample.checkpointChanges![1]!.classification = "metadata_only"; }],
@@ -91,6 +105,34 @@ describe("test-only verification treadmill", () => {
       causalEventId: "finding-rejected",
     });
     expect(detectTestOnlyTreadmill([sample], 3)).toBeNull();
+  });
+
+  it("persists the treadmill NEEDS_HUMAN lifecycle through the generic idempotent state", () => {
+    const decision: PathologyDecision = {
+      version: 1,
+      runId: "run",
+      boundaryEventId: "boundary",
+      decisionVersion: 1,
+      findings: [{
+        kind: "test_only_verification_treadmill",
+        sampleKeys: ["run:boundary"],
+        evidenceRefs: ["event-1", "task-1", "finding-1"],
+        reason: "tests only",
+      }],
+      action: "NEEDS_HUMAN",
+      reason: "tests only",
+      budget: treadmillSample(3).budget,
+      targetCheckpointHash: null,
+      targetEnsemble: null,
+      targetReviewRoundIndex: null,
+      causalEventIds: ["event-1", "task-1", "finding-1"],
+    };
+    const decided = asEvent(decisionEvent(decision, 10, []), 1);
+    const started = asEvent(effectLifecycleEvent("pathology.effect_started", decision, 11, [decided.id]), 2);
+    const completed = asEvent(effectLifecycleEvent("pathology.effect_completed", decision, 12, [started.id]), 3);
+    expect(decisionState([decided], "run", "boundary")).toBe("decided");
+    expect(decisionState([decided, started], "run", "boundary")).toBe("effect_started");
+    expect(decisionState([decided, started, completed], "run", "boundary")).toBe("effect_completed");
   });
 
   it("builds v2 id/seq/origin/change links from the event prefix", () => {
@@ -244,4 +286,8 @@ function event(seq: number, type: Event["type"], payload: Record<string, unknown
     actor: { kind: "system" },
     artifacts: [],
   };
+}
+
+function asEvent(value: Omit<Event, "seq" | "schemaVersion">, seq: number): Event {
+  return { ...value, schemaVersion: 1, seq };
 }

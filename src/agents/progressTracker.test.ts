@@ -25,7 +25,7 @@ describe("progress packet", () => {
   it("pins bounded oldest-step eviction and never includes a future step", () => {
     const packet = buildProgressPacket({
       task: task(),
-      turns: turns(12, 1_400),
+      turns: turns(24, 1_400),
       state: {
         diffHash: "a".repeat(64),
         changedPaths: Array.from({ length: 200 }, (_, index) => `src/very-long-path-${index}.ts`),
@@ -39,9 +39,12 @@ describe("progress packet", () => {
       state: { changedPaths: { paths: string[]; omittedCount: number; pathsHash: string } };
       steps: string[];
     };
-    expect(parsed.steps.length).toBeLessThan(12);
-    expect(parsed.steps.at(-1)).toContain('"turn":12');
-    expect(parsed.steps.join(" ")).not.toContain("FUTURE-13");
+    expect(parsed.steps.length).toBeLessThan(24);
+    expect(parsed.steps.at(-1)).toContain('"turn":24');
+    expect(parsed.steps.at(-1)).toContain('"actions":["read"]');
+    expect(parsed.steps.at(-1)).toContain('"results":[{"name":"read","ok":true');
+    expect(parsed.steps.at(-1)).toContain("observed-24");
+    expect(parsed.steps.join(" ")).not.toContain("FUTURE-25");
     expect(parsed.steps.every((step) => estimateTokens(step) <= 300)).toBe(true);
     expect(parsed.state.changedPaths.omittedCount).toBeGreaterThan(0);
     expect(estimateTokens(JSON.stringify(parsed.state.changedPaths))).toBeLessThanOrEqual(400);
