@@ -6,6 +6,7 @@ import type { ModelCallRecord } from "../broker/broker.js";
 import type { ProviderAdapter, CompletionRequest, CompletionResponse, ModelInfo, ProviderHealth } from "../broker/types.js";
 import { isBudgetError } from "../broker/quota.js";
 import type { PathologyBudgetSnapshot, PathologySample } from "../convergence/pathology/types.js";
+import { isKnownEventType } from "../domain/event.js";
 import { id } from "../shared/ids.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import { Git } from "../sandbox/git.js";
@@ -850,6 +851,10 @@ describe("B-selfhost-8 per-run budget overrides", () => {
       expect(fallbackEvents(restarted, runId)[0]).toMatchObject({
         reason: "runtime_invalid,budget_tokens_invalid,budget_usd_invalid",
       });
+    });
+
+    it("is a known event type, so isKnownEventType and every consumer of it agree", () => {
+      expect(isKnownEventType("run.settings_fallback")).toBe(true);
     });
 
     it("says nothing when the facade is sound", async () => {

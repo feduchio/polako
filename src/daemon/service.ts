@@ -157,7 +157,9 @@ export class DaemonService implements RpcHandler {
           mission: optionalString(params, "mission") ?? "",
           // `null`, not `"auto"`: whether the caller named a mode is the information finding 17
           // lost, and it has to survive this boundary for `polish.toml` to ever be effective.
-          runtime: optionalString(params, "runtime") ?? null,
+          // An explicit `null` means the same as an absent key, so a non-CLI client can say
+          // "unspecified" without having to omit the field.
+          runtime: nullableString(params, "runtime"),
           budgetTokens: optionalNumber(params, "budgetTokens"),
           budgetUsd: optionalNumber(params, "budgetUsd"),
         });
@@ -591,6 +593,14 @@ export class DaemonService implements RpcHandler {
 function requiredString(params: Record<string, unknown>, key: string): string {
   const value = params[key];
   if (typeof value !== "string" || value === "") throw new PolishError("CONFIG_ERROR", `${key} is required`);
+  return value;
+}
+
+/** Absent and explicit `null` both mean "not specified"; anything else must still be a string. */
+function nullableString(params: Record<string, unknown>, key: string): string | null {
+  const value = params[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new PolishError("CONFIG_ERROR", `${key} must be a string`);
   return value;
 }
 

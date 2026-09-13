@@ -150,6 +150,28 @@ describe("B-selfhost-7 per-run runtime mode", () => {
     expect(observed.modesFor(runId)).toEqual(["required"]);
   });
 
+  it("treats an explicit null runtime the same as an omitted one", async () => {
+    const fixture = await daemonFixture({ configuredMode: "required" });
+    const observed = observeCreatedPhase(fixture.service);
+
+    const run = (await fixture.service.handle("run", {
+      project: fixture.repoDir,
+      mission: "noop",
+      runtime: null,
+    })) as { id: string };
+
+    expect(observed.modesFor(run.id)).toEqual(["required"]);
+  });
+
+  it("still rejects a non-string runtime that is not null", async () => {
+    const fixture = await daemonFixture({ configuredMode: "required" });
+    await expect(fixture.service.handle("run", {
+      project: fixture.repoDir,
+      mission: "noop",
+      runtime: 7,
+    })).rejects.toThrow(/runtime must be a string/);
+  });
+
   it("lets an explicit runtime argument override the configured mode", async () => {
     const fixture = await daemonFixture({ configuredMode: "required" });
     const observed = observeCreatedPhase(fixture.service);
@@ -277,7 +299,7 @@ function scriptedProvider(): ScriptedProvider {
 async function daemonFixture(options: {
   configuredMode: "auto" | "required" | "off";
   configuredLevel?: "smoke" | "affected" | "full";
-}): Promise<{ service: DaemonService; home: string; createRun: (runtime: string | undefined) => Promise<string> }> {
+}): Promise<{ service: DaemonService; home: string; repoDir: string; createRun: (runtime: string | undefined) => Promise<string> }> {
   const dir = mkdtempSync(join(tmpdir(), "polish-b7-runtime-mode-"));
   dirs.push(dir);
   const repoDir = join(dir, "repo");
@@ -304,6 +326,7 @@ async function daemonFixture(options: {
   return {
     service,
     home,
+    repoDir,
     createRun: async (runtime) => {
       const run = (await service.handle("run", {
         project: repoDir,

@@ -81,6 +81,9 @@ describe("operator CLI presentation", () => {
       expect(spy).toHaveBeenCalledTimes(1);
       expect(spy.mock.calls[0]?.[0]?.runId).toBe(run.id);
       expect(mocked.mock.calls.map((call) => call[0])).toEqual(["run"]);
+      // Finding 17's CLI half. An omitted `--runtime` must leave the daemon free to read
+      // `polish.toml`; defaulting it here is invisible to any check of the RPC boundary.
+      expect(mocked.mock.calls[0]?.[1]).not.toHaveProperty("runtime");
 
       spy.mockClear();
       mocked.mockClear();
@@ -96,6 +99,11 @@ describe("operator CLI presentation", () => {
       mocked.mockClear();
       await runCli(["run", "/tmp/p", "fix it", "--json"]);
       expect(spy).not.toHaveBeenCalled();
+
+      mocked.mockClear();
+      await runCli(["run", "/tmp/p", "fix it", "--runtime", "required"]);
+      expect(mocked.mock.calls[0]?.[1]).toMatchObject({ runtime: "required" });
+      spy.mockClear();
 
       Object.defineProperty(stdout, "isTTY", { configurable: true, value: false });
       mocked.mockClear();
