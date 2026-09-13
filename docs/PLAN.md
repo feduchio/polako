@@ -675,15 +675,46 @@ strong form, so the economy is kept where the data allows it.
 2. Implement.
 3. Coordinator runs the gate. A failure returns to step 2 with no reviewer involvement.
 4. Reviewers, each in its own worktree at the commit under review, receiving diff plus frozen
-   contract only:
-   - touches **no** production file → **one** reviewer, family other than the coordinator's;
-   - touches **any** production file → **two** reviewers, different families.
-5. Budget: three reviews, meaning initial plus two fix rounds.
-6. A production-relevant finding on the third review is a **fix**, not an abandonment. That fix gets
-   **one confirming review**, the fourth and final.
-7. If the confirming review reports a production-relevant finding, the task terminates as
-   `deferred(unconfirmed_fix)` with the finding recorded, and at most one successor is enqueued at
-   `depth+1`, refused at `depth ≥ 2`.
+   contract only. **Both lanes review every item, including documentation-only ones.**
+
+### Process v3 — review order and termination. User decision 2026-09-14, supersedes v2 §4–§7.
+
+**The order is fixed, not a matter of scheduling.**
+
+5. **GPT-5.6-sol reviews first.** Always. It is the entry gate.
+6. **A finding from GPT is fixed immediately, and GPT reviews again.** Repeat until GPT returns a
+   clean verdict. There is **no cap** on this loop.
+7. **Grok reviews second, and only on a commit GPT has already passed.** Grok is never run on a
+   commit GPT has not cleared.
+8. **If Grok finds anything, the fix goes back to step 5.** GPT must clear the fixed commit before
+   Grok sees it again. A verdict is only worth what it was given on: a pass on an earlier commit is
+   not a pass on this one.
+9. **The item is accepted when both lanes have returned clean on the *same* commit.** Not on
+   adjacent commits, not one on the code and the other on a predecessor.
+
+**There is no maximum number of reviews.** v2's budget of three, and its `deferred(unconfirmed_fix)`
+escape at the fourth, are withdrawn. An item runs until it is clean from both lanes.
+
+**Why the order, and why it is not arbitrary.** Over P1.6–P1.7 the two lanes were run in parallel on
+the same commit and the record is lopsided: GPT raised the blocking finding in P1.10 round 1, P1.9
+rounds 1 and 2, P1.7 rounds 1 and 2, and P1.3 round 1 — including every defect Grok had passed over in
+the same round. Grok passed commits that GPT then failed four separate times. Serialising with GPT
+first spends the cheaper, more productive check before the second one, and stops Grok reviewing code
+that is already known to need changing.
+
+**Consequence, applied retroactively 2026-09-14.** Under v2's budget, four accepted items ended with
+their final commit reviewed by only one lane, because the budget expired or a confirming review was
+substituted for a second opinion:
+
+| Item | Accepted at | Lane that never saw the accepted commit |
+|---|---|---|
+| P1.10 | `44d4256` | **Grok** — its last look was `cfab2d6`, which it failed |
+| P1.9 | `485132b` | **GPT** — its last look was `72bc940`, which it failed |
+| P1.7 | `0c69901` | **GPT** — its last look was `e3dda5f`, which it failed |
+| P1.11 | `8fed854` | **GPT** — v2 assigned one reviewer to a documentation-only item |
+
+Each is re-reviewed by the missing lane under v3, and re-accepted only on a clean verdict. **P1.6 is
+not in the table**: both lanes returned clean on `e45aebc` itself, which is what §9 now requires.
 
 **Per block.** Two reviewers of different families, once, against the block contract and G1/G2. Two
 clean verdicts accept the block.

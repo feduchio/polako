@@ -9,7 +9,34 @@ The Build Verification Protocol operates on two mandatory levels:
 
 ---
 
-## Process v2 — supersedes Level 1 from 2026-09-13
+## Process v3 — supersedes v2's review ordering and bound, from 2026-09-14
+
+User decision 2026-09-14. `docs/PLAN.md` §9 is the authoritative text; this is the summary.
+
+1. **GPT-5.6-sol first, always.** It is the entry gate.
+2. **Fix, then re-run GPT. Repeat until clean. No cap.**
+3. **Grok second, and only on a commit GPT has passed.**
+4. **Any Grok finding sends the fix back to GPT first.** Grok never re-reviews until GPT has cleared
+   the new commit.
+5. **Accepted only when both lanes are clean on the same commit.** Both lanes review every item,
+   including documentation-only ones.
+
+**What this replaces.** v2 §5's budget of three reviews and §6–§7's `deferred(unconfirmed_fix)` escape
+are withdrawn: there is no maximum. v2 also allowed one reviewer for an item touching no production
+file; v3 requires both.
+
+**Why.** v2 ran the lanes in parallel on the same commit, and over P1.6–P1.7 the outcome was lopsided:
+GPT produced the blocking finding in P1.10 round 1, P1.9 rounds 1 and 2, P1.7 rounds 1 and 2, and P1.3
+round 1, four times catching a defect Grok had passed in the same round. Running the more productive
+check first, to completion, stops the second lane reviewing code already known to need changing.
+
+**Retroactive consequence.** Four accepted items had their final commit seen by only one lane and are
+re-reviewed under v3: P1.10 (Grok missing), P1.9, P1.7 and P1.11 (GPT missing). P1.6 already had both
+lanes clean on the accepted commit.
+
+---
+
+## Process v2 — superseded by v3 above for ordering and bound; the rest stands
 
 User decision 2026-09-13, recorded in `docs/PLAN.md` §9, which is the authoritative text. Level 1
 below is retained as the historical protocol and as the source of the clauses v2 keeps.
