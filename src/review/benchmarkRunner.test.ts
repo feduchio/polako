@@ -121,6 +121,7 @@ describe("review benchmark runner", () => {
     expect(summary).toContain("undefined output tokens/hit");
     expect(summary).toContain("schema=0/96 (0.0%)");
     expect(summary).toContain("transport=96/96 (100.0%)");
+    expect(summary).toContain("team: undefined primary recall, undefined strict-id recall");
 
     nex.calls.length = 0;
     nvidia.calls.length = 0;
