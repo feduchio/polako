@@ -38,7 +38,7 @@ describe("CLI parsing", () => {
     const daemonCall = <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
       calls.push({ method, params });
       return Promise.resolve({
-        summary: "Reviewer benchmark: 96/96 cells\n",
+        summary: "Reviewer benchmark: 71/96 completed cells\n",
         report: { requested: 96 },
         artifacts: {},
       } as T);
@@ -51,7 +51,13 @@ describe("CLI parsing", () => {
       params: { seed: 7, liveAbort: true },
     }]);
     expect(write.mock.calls.map((call) => String(call[0])).join(""))
-      .toBe("Reviewer benchmark: 96/96 cells\n");
+      .toBe("Reviewer benchmark: 71/96 completed cells\n");
+    write.mockClear();
+    await runCli(["benchmark-review", "--json"], { callDaemon: daemonCall });
+    const json = JSON.parse(write.mock.calls.map((call) => String(call[0])).join("")) as {
+      report: { requested: number };
+    };
+    expect(json.report.requested).toBe(96);
     write.mockRestore();
   });
 

@@ -33,6 +33,8 @@ describe("review benchmark scorer", () => {
     expect(strictIdHit([finding("inv-01", "a/src/subject.ts", 8)], ORACLE)).toBe(true);
     expect(strictIdHit([finding("INV-010", "src/subject.ts", 8)], ORACLE)).toBe(false);
     expect(strictIdHit([finding("xINV-01", "src/subject.ts", 8)], ORACLE)).toBe(false);
+    expect(strictIdHit([finding("INV-01", "src/other.ts", 8)], ORACLE)).toBe(false);
+    expect(strictIdHit([finding("INV-01", "src/subject.ts", 9)], ORACLE)).toBe(false);
   });
 
   it("requires one blocking evidence ref to match both path and range", () => {
@@ -76,8 +78,17 @@ describe("review benchmark scorer", () => {
       cell("clean", "completed_with_findings", [finding("c", "src/subject.ts", 8)], 1),
       cell("clean", "completed_empty", [], 1),
       cell("clean", "schema_failure", [], 1),
+      cell("mutant", "completed_with_findings", [finding("INV-01", "src/subject.ts", 8)], 1),
+      cell("mutant", "completed_with_findings", [finding("paraphrase", "src/subject.ts", 8)], 1),
+      cell("mutant", "completed_empty", [], 1),
     ];
-    expect(scoreQuality(cells).falsePositiveRate).toBe(0.5);
+    const score = scoreQuality(cells);
+    expect(score.cleanCompleted).toBe(2);
+    expect(score.mutantCompleted).toBe(3);
+    expect(score.falsePositiveRate).toBe(0.5);
+    expect(score.primaryRecall).toBe(2 / 3);
+    expect(score.strictIdRecall).toBe(1 / 3);
+    expect(score.falsePositiveWilson95).toEqual(wilson95(1, 2));
   });
 
   it("scores matched discrimination per model and as a two-model team", () => {
@@ -99,10 +110,14 @@ describe("review benchmark scorer", () => {
     const cells = [
       cell("mutant", "completed_with_findings", [hit], 1, "m1", 1, "pair-a"),
       cell("clean", "completed_empty", [], 1, "m1", 1, "pair-a"),
-      cell("mutant", "completed_with_findings", [hit], 1, "m1", 1, "pair-b"),
-      cell("clean", "transport_failure", [], null, "m1", 1, "pair-b"),
+      cell("mutant", "completed_empty", [], 1, "m1", 1, "pair-b"),
+      cell("clean", "completed_empty", [], 1, "m1", 1, "pair-b"),
+      cell("mutant", "completed_empty", [], 1, "m1", 2, "pair-a"),
+      cell("clean", "completed_empty", [], 1, "m1", 2, "pair-a"),
+      cell("mutant", "completed_with_findings", [hit], 1, "m1", 3, "pair-failed"),
+      cell("clean", "transport_failure", [], null, "m1", 3, "pair-failed"),
     ];
-    expect(scorePerModelDiscrimination(cells)).toEqual({ eligible: 1, discriminated: 1, rate: 1 });
+    expect(scorePerModelDiscrimination(cells)).toEqual({ eligible: 3, discriminated: 1, rate: 1 / 3 });
   });
 
   it("uses OR across completed team models without hiding their failures", () => {
@@ -119,6 +134,20 @@ describe("review benchmark scorer", () => {
     expect(team.completed).toBe(3);
     expect(team.transportFailures).toBe(1);
     expect(team.outputTokens).toBe(15);
+    expect(team.outputTokensPerPrimaryHit).toBe(15);
+    expect(scoreTeamDiscrimination(cells)).toEqual({ eligible: 1, discriminated: 1, rate: 1 });
+    expect(scoreQuality([cell("mutant", "completed_empty", [], 5)])
+      .outputTokensPerPrimaryHit).toBeNull();
+    expect(scoreTeamQuality([cell("mutant", "completed_empty", [], 5)])
+      .outputTokensPerPrimaryHit).toBeNull();
+    const splitFailures = scoreTeamQuality([
+      cell("mutant", "schema_failure", [], 3, "m1"),
+      cell("mutant", "transport_failure", [], null, "m2"),
+      cell("clean", "completed_empty", [], 4, "m1"),
+      cell("clean", "completed_empty", [], 5, "m2"),
+    ]);
+    expect(splitFailures.schemaFailures).toBe(1);
+    expect(splitFailures.transportFailures).toBe(1);
   });
 
   it("uses the published Wilson literals and null at zero denominator", () => {

@@ -37,6 +37,8 @@ export interface WilsonInterval {
 export interface QualityMetrics {
   scheduled: number;
   completed: number;
+  mutantCompleted: number;
+  cleanCompleted: number;
   primaryHits: number;
   strictIdHits: number;
   falsePositives: number;
@@ -127,6 +129,8 @@ export function scoreQuality(cells: readonly BenchmarkCellResult[]): QualityMetr
   return {
     scheduled: cells.length,
     completed,
+    mutantCompleted,
+    cleanCompleted,
     primaryHits,
     strictIdHits,
     falsePositives,

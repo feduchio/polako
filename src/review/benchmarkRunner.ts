@@ -60,6 +60,7 @@ export interface ReviewerBenchmarkReport {
   partial: boolean;
   cells: RecordedBenchmarkCell[];
   byModel: Record<string, QualityMetrics>;
+  byModelDiscrimination: Record<string, PairDiscrimination>;
   team: QualityMetrics;
   perModelDiscrimination: PairDiscrimination;
   teamDiscrimination: PairDiscrimination;
@@ -181,7 +182,7 @@ export function renderReviewerBenchmark(report: ReviewerBenchmarkReport): string
   const lines = [
     `Reviewer benchmark: ${String(report.team.completed)}/${String(report.requested)} completed cells${report.partial ? " (partial)" : ""}`,
     ...Object.entries(report.byModel).map(([model, score]) =>
-      `${model}: ${formatRate(score.primaryRecall)} primary recall, ${formatRate(score.strictIdRecall)} strict-id recall, ${formatRate(score.falsePositiveRate)} false positives, ${String(score.inputTokens)} input + ${String(score.outputTokens)} output tokens, ${formatNumber(score.outputTokensPerPrimaryHit)} output tokens/hit`),
+      `${model}: ${formatRate(score.primaryRecall)} primary recall, ${formatRate(score.strictIdRecall)} strict-id recall, ${formatRate(score.falsePositiveRate)} false positives, ${formatRate(report.byModelDiscrimination[model]?.rate ?? null)} pair discrimination, ${String(score.inputTokens)} input + ${String(score.outputTokens)} output tokens, ${formatNumber(score.outputTokensPerPrimaryHit)} output tokens/hit`),
     `team: ${formatRate(report.team.primaryRecall)} primary recall, ${formatRate(report.team.strictIdRecall)} strict-id recall, ${formatRate(report.team.falsePositiveRate)} false positives, ${formatRate(report.teamDiscrimination.rate)} pair discrimination`,
     `team tokens: ${String(report.team.inputTokens)} input + ${String(report.team.outputTokens)} output, ${formatNumber(report.team.outputTokensPerPrimaryHit)} output tokens/hit`,
     `failures: schema=${String(report.team.schemaFailures)}/${String(report.team.scheduled)} (${schemaRate}), transport=${String(report.team.transportFailures)}/${String(report.team.scheduled)} (${transportRate})`,
@@ -308,6 +309,12 @@ function buildReport(
       scoreQuality(cells.filter((cell) => modelKey(cell.model) === key)),
     ]),
   );
+  const byModelDiscrimination = Object.fromEntries(
+    Object.keys(byModel).map((key) => [
+      key,
+      scorePerModelDiscrimination(cells.filter((cell) => modelKey(cell.model) === key)),
+    ]),
+  );
   const packetJsonl = cells.map((cell) =>
     canonicalJsonLine(exportedPacket(cell.oracle.cellId, cell.request?.messages ?? []))).join("");
   const oracleJsonl = cells.map((cell) => canonicalJsonLine(cell.oracle)).join("");
@@ -317,6 +324,7 @@ function buildReport(
     partial,
     cells,
     byModel,
+    byModelDiscrimination,
     team: scoreTeamQuality(cells),
     perModelDiscrimination: scorePerModelDiscrimination(cells),
     teamDiscrimination: scoreTeamDiscrimination(cells),

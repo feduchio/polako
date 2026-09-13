@@ -6,6 +6,7 @@ import type {
   ProviderAdapter,
 } from "../broker/types.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
+import { sha256Hex } from "../shared/hash.js";
 import { canonicalJsonLine } from "./benchmark.js";
 import { REVIEWER_BENCHMARK_PAIRS } from "./benchmarkCorpus.js";
 import {
@@ -113,7 +114,12 @@ describe("review benchmark runner", () => {
     const summary = renderReviewerBenchmark(full);
     expect(summary).toContain("0/96 completed cells");
     expect(summary).toContain("undefined primary recall");
+    expect(summary).toContain("undefined strict-id recall");
+    expect(summary).toContain("undefined false positives");
+    expect(summary).toContain("undefined pair discrimination");
     expect(summary).toContain("0 input + 0 output tokens");
+    expect(summary).toContain("undefined output tokens/hit");
+    expect(summary).toContain("schema=0/96 (0.0%)");
     expect(summary).toContain("transport=96/96 (100.0%)");
 
     nex.calls.length = 0;
@@ -122,6 +128,7 @@ describe("review benchmark runner", () => {
     expect(partial.partial).toBe(true);
     expect(partial.cells).toHaveLength(20);
     expect(nex.calls.length + nvidia.calls.length).toBe(20);
+    expect(renderReviewerBenchmark(partial)).toContain("(partial)");
   });
 
   it("does not hide one family's failures behind its sibling's completion", async () => {
@@ -188,6 +195,8 @@ describe("review benchmark runner", () => {
     const nvidia = provider("other", "unused", () => reply('{"findings":[]}'));
     const selected = selectBenchmarkReviewers([
       { provider: nex, models: [
+        info("openrouter", "nex-agi/00-paid", "nex-agi", { inputCostPerM: 1 }),
+        info("openrouter", "nex-agi/00-no-json", "nex-agi", { supportsJson: false }),
         info("openrouter", "nex-agi/z:free", "nex-agi"),
         info("openrouter", "nex-agi/a:free", "nex-agi"),
       ] },
@@ -259,6 +268,47 @@ describe("review benchmark runner", () => {
       family: "external",
       seed: 12,
     })).rejects.toThrow(/schema mismatch/);
+
+    await expect(rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: original.packetJsonl,
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl,
+      packetSha256: "0".repeat(64),
+      oracleSha256: original.oracleSha256,
+      model: { provider: "external", model: "flagship" },
+      family: "external",
+      seed: 12,
+    })).rejects.toThrow("packet hash mismatch");
+
+    const firstResponse = responseJsonl.split("\n")[0];
+    await expect(rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: original.packetJsonl,
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl: `${responseJsonl}${firstResponse}\n`,
+      packetSha256: original.packetSha256,
+      oracleSha256: original.oracleSha256,
+      model: { provider: "external", model: "flagship" },
+      family: "external",
+      seed: 12,
+    })).rejects.toThrow("duplicate benchmark cell");
+
+    const packets = original.packetJsonl.trimEnd().split("\n").map((line) =>
+      JSON.parse(line) as { cellId: string; system: string; user: string });
+    packets[0] = { ...packets[0]!, user: `${packets[0]!.user}\nTAMPERED` };
+    const tamperedPacket = packets.map(canonicalJsonLine).join("");
+    await expect(rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: tamperedPacket,
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl,
+      packetSha256: sha256Hex(tamperedPacket),
+      oracleSha256: original.oracleSha256,
+      model: { provider: "external", model: "flagship" },
+      family: "external",
+      seed: 12,
+    })).rejects.toThrow("packet messages differ");
   });
 });
 
@@ -295,7 +345,12 @@ function reviewer(value: TestProvider, family: string): BenchmarkReviewer {
   return { provider: value, model: { provider: value.id, model: listed }, family };
 }
 
-function info(providerId: string, model: string, family: string): ModelInfo {
+function info(
+  providerId: string,
+  model: string,
+  family: string,
+  overrides: Partial<ModelInfo["capabilities"]> = {},
+): ModelInfo {
   return {
     ref: { provider: providerId, model },
     displayName: model,
@@ -308,6 +363,7 @@ function info(providerId: string, model: string, family: string): ModelInfo {
       outputCostPerM: 0,
       tier: "fast",
       family,
+      ...overrides,
     },
     source: "provider",
   };
