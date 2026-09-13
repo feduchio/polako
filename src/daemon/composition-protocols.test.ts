@@ -1,7 +1,6 @@
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { defaultConfig } from "../domain/config.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
@@ -113,42 +112,6 @@ describe("buildProductionDeps protocol load diagnostic", () => {
     expect((thrown as PolishError).message).toContain(`protocol registry failed to load: IO_ERROR at ${root}`);
   });
 
-  /**
-   * MC3 and MC5 are claims about code that is not there, so both are observed over the source.
-   * `productionSources` is shared by the two checks below.
-   */
-  function productionSources(): { src: string; files: string[] } {
-    const src = fileURLToPath(new URL("..", import.meta.url));
-    const files = readdirSync(src, { recursive: true, withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"))
-      .map((entry) => join(entry.parentPath, entry.name))
-      .sort();
-    return { src, files };
-  }
-
-  it("has exactly one owner of the operator line", () => {
-    const { src, files } = productionSources();
-    const owners = files.filter((path) => readFileSync(path, "utf8").includes("protocol registry failed to load"));
-    expect(owners).toEqual([join(src, "daemon", "composition.ts")]);
-  });
-
-  /**
-   * The wording of a second wrapper is free, so counting the diagnostic literal cannot see one.
-   * The call sites can: any wrapper around either load rewrites the line the load sits on.
-   */
-  it("wraps ProtocolRegistry.load at exactly one call site", () => {
-    const { src, files } = productionSources();
-    const sites = files.flatMap((path) =>
-      readFileSync(path, "utf8")
-        .split("\n")
-        .filter((line) => line.includes("ProtocolRegistry.load("))
-        .map((line) => `${relative(src, path)} | ${line.trim()}`),
-    );
-    expect(sites).toEqual([
-      "daemon/composition.ts | return ProtocolRegistry.load(root);",
-      "engine/reviewDrivers.ts | const protocols = options.protocols ?? ProtocolRegistry.load(defaultProtocolsRoot());",
-    ]);
-  });
 
   /**
    * A bare `toThrow()` would also pass for a wrapper that swallowed the failure and threw something

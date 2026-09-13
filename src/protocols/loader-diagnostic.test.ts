@@ -63,9 +63,10 @@ describe("ProtocolRegistry.load names the offending file", () => {
     expect(error.message).toContain('"bugfix"');
   });
 
-  it("names the second folder on a duplicate protocol name", () => {
+  // AC2': the *mismatch* branch, not the duplicate one. A folder claiming a name that belongs to
+  // another folder is a mismatch first, so `byName.has` is unreachable — recorded as finding 49.
+  it("names the folder whose SKILL.md claims another folder's name", () => {
     const dir = root();
-    // `readdirSync` is lexicographic here, so `b-dup` is the entry being processed when it throws.
     writeRaw(dir, "a-dup", skill("a-dup"));
     const second = writeRaw(dir, "b-dup", skill("a-dup"));
     const error = loadError(dir);
