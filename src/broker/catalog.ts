@@ -126,10 +126,11 @@ export class ModelCatalog {
   }
 
   upsert(info: ModelInfo): CatalogEntry {
-    const key = modelRefKey(info.ref);
+    const normalized = stripUnprobedStrictCapabilities(info);
+    const key = modelRefKey(normalized.ref);
     const existing = this.entries.get(key);
     const entry: CatalogEntry = {
-      info,
+      info: normalized,
       stats: existing?.stats ?? { calls: 0, failures: 0, latencyMs: 0, quality: null, lastErrorKind: null, lastUsedAt: null },
       available: this.isModelAvailable(info.ref),
     };
@@ -201,4 +202,14 @@ export class ModelCatalog {
     const q = Math.min(1, Math.max(0, quality));
     e.stats.quality = e.stats.quality === null ? q : e.stats.quality * (1 - EMA) + q * EMA;
   }
+}
+
+function stripUnprobedStrictCapabilities(info: ModelInfo): ModelInfo {
+  if (info.source === "probe") return info;
+  const {
+    supportsStrictReviewSchema: _review,
+    supportsStrictScoreSchema: _score,
+    ...capabilities
+  } = info.capabilities;
+  return { ...info, capabilities };
 }

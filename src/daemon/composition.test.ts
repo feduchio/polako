@@ -32,7 +32,7 @@ import { id } from "../shared/ids.js";
 import type { PhaseContext } from "../engine/types.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ModelObservationRepository } from "../broker/observations.js";
-import { EMPIRICAL_SCORE_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { EMPIRICAL_SCORE_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 import { hashJson } from "../shared/hash.js";
 
 describe("production composition", () => {
@@ -88,10 +88,16 @@ describe("production composition", () => {
     };
     const provider = new ScriptedProvider(
       "scripted",
-      Array.from({ length: 6 }, (_, index) => ({
-        name: `rev-${index + 1}`,
-        capabilities: { ...freeJson, family: `fam-${index + 1}` },
-      })),
+      [
+        {
+          name: "unprobed",
+          capabilities: { ...freeJson, family: "fam-0" },
+        },
+        ...Array.from({ length: 6 }, (_, index) => ({
+          name: `rev-${index + 1}`,
+          capabilities: { ...freeJson, family: `fam-${index + 1}` },
+        })),
+      ],
     );
     const deps = buildProductionDeps({
       store,
@@ -101,8 +107,20 @@ describe("production composition", () => {
       providers: [provider],
     });
     await deps.catalog.discover();
+    const reviewObservations = new ModelObservationRepository(store);
+    const reviewSchemaHash = hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA);
+    for (let index = 1; index <= 6; index++) {
+      reviewObservations.recordStrictProbe({ provider: "scripted", model: `rev-${index}` }, {
+        schema: "review",
+        schemaHash: reviewSchemaHash,
+        supported: true,
+        at: clock.now(),
+      });
+    }
+    reviewObservations.restoreCatalog(deps.catalog);
     const options = resolveEnsembleAlternatives(deps);
     expect(options.length).toBeGreaterThanOrEqual(2);
+    expect(options.flatMap((option) => option.ensemble).some((ref) => ref.model === "unprobed")).toBe(false);
     const alternative = selectEligibleEnsemble({
       options,
       previous: [],
@@ -162,6 +180,17 @@ describe("production composition", () => {
       providers: [provider],
     });
     await deps.catalog.discover();
+    const scoreObservations = new ModelObservationRepository(store);
+    const scoreSchemaHash = hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA);
+    for (const model of ["a", "b", "z"]) {
+      scoreObservations.recordStrictProbe({ provider: "scores", model }, {
+        schema: "score",
+        schemaHash: scoreSchemaHash,
+        supported: true,
+        at: clock.now(),
+      });
+    }
+    scoreObservations.restoreCatalog(deps.catalog);
     deps.catalog.recordQuality({ provider: "scores", model: "z" }, 1);
     deps.catalog.recordQuality({ provider: "scores", model: "a" }, 0);
     const engine = new RunEngine({
@@ -196,11 +225,15 @@ describe("production composition", () => {
         id: "a",
         diff: "diff --git a/a b/a\n+x\n",
         metrics: { candidateId: "a", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] },
+        diffSummary: { files: 1, insertions: 1, deletions: 0 },
+        gateReport: { passed: true, checks: [{ name: "test", kind: "test", status: "passed" }] },
       },
       {
         id: "b",
         diff: "diff --git a/b b/b\n+y\n",
         metrics: { candidateId: "b", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] },
+        diffSummary: { files: 1, insertions: 1, deletions: 0 },
+        gateReport: { passed: true, checks: [{ name: "test", kind: "test", status: "passed" }] },
       },
     ];
     const context = {
@@ -215,6 +248,10 @@ describe("production composition", () => {
     expect(result?.backend).toBe("empirical");
     expect(result?.requestedEvaluations).toBe(8);
     expect(provider.calls).toHaveLength(8);
+    const firstWire = provider.calls[0]?.messages[1]?.content ?? "";
+    expect(firstWire).toContain("diff --git a/a b/a\\n+x\\n");
+    expect(firstWire).toContain('"checksPassed":1');
+    expect(firstWire).toContain('"gateReport":{"passed":true');
     const calls = store.events.list(run.id, { types: ["model.call"] });
     expect(calls).toHaveLength(8);
     expect(calls.every((event) =>
@@ -272,6 +309,17 @@ describe("production composition", () => {
     ]);
     const deps = buildProductionDeps({ store, clock, config, home: join(dir, "home"), providers: [provider] });
     await deps.catalog.discover();
+    const observations = new ModelObservationRepository(store);
+    const schemaHash = hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA);
+    for (const model of ["a", "b"]) {
+      observations.recordStrictProbe({ provider: "scores", model }, {
+        schema: "score",
+        schemaHash,
+        supported: true,
+        at: clock.now(),
+      });
+    }
+    observations.restoreCatalog(deps.catalog);
     const engine = new RunEngine({
       store,
       clock,

@@ -10,6 +10,9 @@ import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import { Git } from "../sandbox/git.js";
 import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
+import { ModelObservationRepository } from "../broker/observations.js";
+import { REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { hashJson } from "../shared/hash.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
@@ -95,6 +98,14 @@ describe("production REVIEWING cost-eligible routing", () => {
       providers: [provider],
     });
     await deps.catalog.discover();
+    const observations = new ModelObservationRepository(store);
+    observations.recordStrictProbe({ provider: "openrouter", model: "free-reviewer" }, {
+      schema: "review",
+      schemaHash: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
+      supported: true,
+      at: clock.now(),
+    });
+    observations.restoreCatalog(deps.catalog);
     installProductionDrivers(engine, deps);
 
     const listed = (await provider.listModels()).map((model) => model.ref.model);

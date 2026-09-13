@@ -249,6 +249,21 @@ describe("probeModelCapabilities", () => {
 });
 
 describe("bounded catalog discovery", () => {
+  it("strips strict capability advertisements until a probe or observation supplies them", () => {
+    const catalog = new ModelCatalog();
+    const advertised = model("m", {
+      ...FAKE_CAPABILITIES.strong,
+      supportsStrictReviewSchema: true,
+      supportsStrictScoreSchema: true,
+    });
+    catalog.upsert(advertised);
+    expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictReviewSchema).toBeUndefined();
+    expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictScoreSchema).toBeUndefined();
+    catalog.upsert({ ...advertised, source: "probe" });
+    expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictReviewSchema).toBe(true);
+    expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictScoreSchema).toBe(true);
+  });
+
   it("probes only the shortlist cap, not every listed model", async () => {
     const models: ScriptedModel[] = Array.from({ length: 50 }, (_, index) => ({
       name: `model-${String(index).padStart(2, "0")}`,

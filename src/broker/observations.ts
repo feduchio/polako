@@ -222,6 +222,7 @@ export class ModelObservationRepository {
       if (entry === undefined) continue;
       catalog.upsert({
         ...entry.info,
+        source: "probe",
         capabilities: {
           ...entry.info.capabilities,
           ...(observation.schema === "review"
