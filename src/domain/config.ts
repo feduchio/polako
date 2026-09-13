@@ -49,6 +49,15 @@ export const ReviewStrategySchema = z.object({
    * 2,300 of them rate-limited.
    */
   maxAxisAttemptsPerRound: z.number().int().min(1).default(6),
+  /**
+   * Skip the `adversarial` axis in a round where every already-completed axis returned no findings.
+   * `adversarial` is 64.4% of every token this tool has spent (`docs/ledger/g1-baseline.md`), and it
+   * runs last, so the earlier axes' verdicts are known when it is reached.
+   *
+   * Default `false`: `docs/PLAN.md` §1 forbids enabling a cost-reducing behaviour by default while
+   * the quality gate is not `pass`. Flip it in its own commit when P2.2 passes.
+   */
+  skipAdversarialWhenClean: z.boolean().default(false),
 });
 
 export const ConvergenceStrategySchema = z.object({

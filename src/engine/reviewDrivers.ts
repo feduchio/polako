@@ -41,6 +41,7 @@ import {
   currentReviewRoundIndex,
   isReviewRoundComplete,
   reviewAxesForRound,
+  reviewRoundExecutions,
   type ReviewExecution,
 } from "../domain/review.js";
 import type { TerminalReason } from "../domain/run.js";
@@ -170,6 +171,17 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
 
       const rateLimited = new Set<string>();
       for (const axis of missingAxes(axes, roundExecutions, required)) {
+        const preferredIndex = Math.max(0, axes.indexOf(axis));
+        // Re-read: `roundExecutions` is a pre-loop snapshot, so an earlier axis that reported a
+        // finding during this same pass is invisible to it.
+        const skipReviewer = reviewers[preferredIndex % reviewers.length];
+        if (
+          skipReviewer !== undefined &&
+          adversarialSkipApplies(ctx, hash, roundIndex, axis)
+        ) {
+          skipExecution(ctx, hash, roundIndex, axis, skipReviewer, "no_prior_findings");
+          continue;
+        }
         const outcome = await reviewAxisWithFallback(ctx, {
           hash,
           roundIndex,
@@ -1072,6 +1084,55 @@ function finishExecution(
   };
   assertExecutionCheckpoint(finished, started.checkpointHash);
   appendReviewEvent(ctx, "review.finished", finished);
+}
+
+/**
+ * True when `adversarial` may be skipped for this round: the flag is on, this is that axis, and every
+ * already-completed other axis of the round reported nothing.
+ *
+ * Reads the store rather than the caller's pre-loop snapshot. An empty set of completed other axes is
+ * not "clean" — with nothing observed yet there is no basis to skip.
+ */
+function adversarialSkipApplies(
+  ctx: PhaseContext,
+  checkpointHash: string,
+  roundIndex: number,
+  axis: ReviewAxis,
+): boolean {
+  if (!ctx.config.review.skipAdversarialWhenClean) return false;
+  if (axis !== "adversarial") return false;
+  const others = reviewRoundExecutions(
+    ctx.store.repos.reviewExecutions.listByRun(ctx.run.id),
+    checkpointHash,
+    roundIndex,
+  ).filter((execution) => execution.completed && execution.axis !== "adversarial");
+  if (others.length === 0) return false;
+  return others.every((execution) => execution.findings.length === 0);
+}
+
+/**
+ * A completed execution that made no provider call. `completed: true` is required: `missingAxes` and
+ * `isReviewRoundComplete` count only completed executions, so a skip recorded as incomplete would be
+ * requeued on every tick.
+ */
+function skipExecution(
+  ctx: PhaseContext,
+  checkpointHash: string,
+  roundIndex: number,
+  axis: ReviewAxis,
+  reviewer: ReviewProvider,
+  reason: string,
+): void {
+  const started = startExecution(ctx, checkpointHash, roundIndex, axis, reviewer);
+  const skipped: ReviewExecution = {
+    ...started,
+    completed: true,
+    findings: [],
+    error: reason,
+    finishedAt: ctx.clock.now(),
+  };
+  assertExecutionCheckpoint(skipped, checkpointHash);
+  appendReviewEvent(ctx, "review.finished", skipped);
 }
 
 function failExecution(ctx: PhaseContext, started: ReviewExecution, error: string): void {
