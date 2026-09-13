@@ -99,6 +99,17 @@ because of the 429 storm. The metric is the **fraction of rounds issuing at leas
 
 **Baseline rate 1.0 — 6 of 6 rounds issued at least one.**
 
+**Reviewer call classes, needed to reproduce the token figure.** Of 209 reviewer `model.call` events,
+**83 carry `usage: null`** — the failed calls behind finding 37's 429 storm — and **126** carry tokens.
+That 126 is the same number finding 29 recorded. A null-usage call contributes 0 tokens and is counted
+as `nullUsageCalls`; it must not be dropped from its round, or the attribution will not reproduce.
+
+**Missions and contracts for the pinned arm.** The two runs whose rounds form the baseline are
+`run_01m1my3pdwwqxr1pe45z91` (checkpoint `c011b6e8…`, rounds 1-3) and `run_01m1p013kghsprxj7atb6w`
+(checkpoint `b35fe739…`, rounds 1-3). Both are fixture runs on `fixtures/resume-dup-fetch`. The
+post-change arm must replay these same missions and task contracts and reproduce all six round
+identities; five of six is not admissible.
+
 ## Two consequences
 
 ### 1. P1.1's ceiling is measurable, and it is the whole 64.4%

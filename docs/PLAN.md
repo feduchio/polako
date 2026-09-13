@@ -58,22 +58,35 @@ they need different denominators.
 | **Median** | **87,984** |
 | Mean | 139,106 |
 
-*Attribution rule, so two implementers get the same number from the same database.* A reviewer token
-belongs to the round identified by the **most recent preceding `review.started` event in the same
-`runId` whose `payload.execution.axis` equals the call's `payload.purpose` with the `review_` prefix
-removed**. Sum `payload.usage.inputTokens + outputTokens` over `type = 'model.call'` events with
-`payload.role == 'reviewer'`. This rule attributes 834,635 of 834,635 baseline reviewer tokens with
-none left over; an implementation that leaves tokens unattributed has the join wrong.
+*Attribution rule, so two implementers get the same number from the same database.*
 
-*Guard 1 — the arm is pinned, not sampled.* The post-change arm must be the **same round identities**
-as the baseline, compared **pairwise**. Both reviewers showed why: nothing else stops the median moving
-on round composition. Dropping only the baseline's most expensive round (368,681) takes the median of
-the remaining five to 38,807, a 56% "improvement" with no per-round saving at all. New rounds created
-by P1.12 or P1.13 are **not** admitted to the cost arm.
+1. Scan `events` **ordered by `(run_id, seq)`** — the projection's own order, not `ts`, which can tie.
+2. Maintain, per `(runId, axis)`, the round of the most recent preceding `review.started`, taking the
+   round from `payload.execution.checkpointHash` and `payload.execution.roundIndex`.
+3. For each `type = 'model.call'` with `payload.role == 'reviewer'`, derive its axis as
+   `payload.purpose` with the `review_` prefix removed, and attribute it to that axis's current round.
+4. **A call whose `payload.usage` is `null` contributes 0 tokens** and is counted separately as
+   `nullUsageCalls`. In the baseline, **83 of 209** reviewer calls are in this class — they are the
+   failed calls behind finding 37's 429 storm — leaving **126** that carry tokens. An implementation
+   that treats `null` as an error, or that silently drops those calls from the round, will not
+   reproduce the baseline.
+5. Sum `payload.usage.inputTokens + outputTokens`.
 
-*Guard 2 — aggregate spend must not rise.* Over the pinned workload, **total** reviewer tokens must
-not increase. This catches the case where the median falls because missed findings ended a run earlier
-while total spend went up.
+This rule attributes 834,635 of 834,635 baseline reviewer tokens with none left over. An
+implementation that leaves tokens unattributed has the join wrong.
+
+*Guard 1 — the arm is pinned, not sampled.* The post-change arm must be **all six baseline round
+identities, every one of them**, compared **pairwise**, produced by replaying the **same missions and
+task contracts** named in `docs/ledger/g1-baseline.md`. Both reviewers showed why: nothing else stops
+the median moving on round composition. Dropping only the baseline's most expensive round (368,681)
+takes the median of the remaining five to 38,807 — a 56% "improvement" with no per-round saving.
+New rounds created by P1.12 or P1.13 are **not** admitted to the cost arm.
+
+*Guard 2 — aggregate spend must not rise, at equal round incidence.* Over the pinned workload,
+**total** reviewer tokens must not increase, and **both arms must report their total round count, which
+must be equal**. This catches the case where the median falls because missed findings ended a run
+earlier while total spend rose. Unequal round incidence is `inconclusive`, not a pass: it means the
+workload was not actually matched.
 
 *Guard 3 — companion count, immune to the 77× spread.* Defined precisely, because the obvious
 definitions are both wrong: counting **completed** adversarial executions shows no drop, since P1.1
@@ -84,8 +97,10 @@ Baseline **1.0 — 6 of 6 rounds**. Raw per-round call counts, retries included,
 A "matching drop" means a fall in that rate. A median improvement without one is reported as
 **`unexplained`** and is not a pass.
 
-*Floors.* At least **5 pinned round pairs**. Below that, or on an undefined median, the outcome is
-**`inconclusive`** — neither a pass nor a trigger for the revert.
+*Floor.* **All 6 baseline rounds must be present and paired** — not "at least 5", which would have
+permitted dropping exactly the expensive round Guard 1 exists to protect. A missing pair, an unequal
+round count between arms, or an undefined median is **`inconclusive`** — neither a pass nor a trigger
+for the revert.
 
 **Quality coupling — this is the binding clause, not an aspiration.** G1 in the user's words is
 *cheaper **without losing quality***, and an `inconclusive` quality gate is not evidence of preserved
