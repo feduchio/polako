@@ -118,6 +118,12 @@ export class DaemonService implements RpcHandler {
     }, false);
     installProductionDrivers(this.engine, this.productionDeps);
     this.engine.recover();
+    // Spend is not in the event-sourced projections the engine rebuilds, so without this a restarted
+    // daemon believes every run has spent nothing and a run can spend its whole budget again. Uses
+    // the same predicate `engine.tick` drives, so the restored set and the ticked set cannot drift.
+    for (const run of this.store.repos.runs.listActive()) {
+      this.productionDeps.broker.restore(run.id);
+    }
   }
 
   start(): void {

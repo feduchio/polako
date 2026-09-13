@@ -139,8 +139,8 @@ export class BudgetTracker {
     if (limits.maxRunTokens !== null && s.runTokens >= limits.maxRunTokens) {
       throw new PolishError("CONFLICT", "run token budget exhausted", { runId, spent: s.runTokens, limit: limits.maxRunTokens, budget: "run_tokens" });
     }
-    if (taskId !== undefined && limits.maxTaskTokens !== null && (s.perTask[taskId] ?? 0) >= limits.maxTaskTokens) {
-      throw new PolishError("CONFLICT", "task token budget exhausted", { runId, taskId, spent: s.perTask[taskId], limit: limits.maxTaskTokens, budget: "task_tokens" });
+    if (taskId !== undefined && limits.maxTaskTokens !== null && taskTokens(s.perTask, taskId) >= limits.maxTaskTokens) {
+      throw new PolishError("CONFLICT", "task token budget exhausted", { runId, taskId, spent: taskTokens(s.perTask, taskId), limit: limits.maxTaskTokens, budget: "task_tokens" });
     }
   }
 
@@ -160,10 +160,24 @@ export class BudgetTracker {
     } else {
       s.runUsd += usage.costUsd;
     }
-    if (taskId !== undefined) s.perTask[taskId] = (s.perTask[taskId] ?? 0) + tokens;
+    if (taskId !== undefined) s.perTask = withTaskTokens(s.perTask, taskId, tokens);
     this.runs.set(runId, s);
     return s;
   }
+}
+
+/**
+ * A task id reaches here from an event payload, and `perTask[taskId]` on a plain object is unsafe
+ * for two of them: `__proto__` assigns the prototype and records nothing, while `constructor` reads
+ * back as a function, so `>= maxTaskTokens` compares an object to a number and is always false —
+ * the task would spend without limit. Finding 50.
+ */
+function taskTokens(perTask: Record<string, number>, taskId: string): number {
+  return Object.hasOwn(perTask, taskId) ? perTask[taskId] ?? 0 : 0;
+}
+
+function withTaskTokens(perTask: Record<string, number>, taskId: string, tokens: number): Record<string, number> {
+  return Object.fromEntries([...Object.entries(perTask), [taskId, taskTokens(perTask, taskId) + tokens]]);
 }
 
 export function isBudgetError(err: unknown): boolean {

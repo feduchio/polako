@@ -282,14 +282,23 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
   it("still enforces each run's own override after a daemon restart", async () => {
     const fixture = await daemonFixture({ maxRunTokens: 50 });
-    const tight = await fixture.createRun({ budgetTokens: 1 });
-    const loose = await fixture.createRun({ budgetTokens: 10_000 });
+    // A pair per iteration rather than one pair reused. Spend now survives a restart, so a reused
+    // run carries the previous iteration's calls and would be exhausted before this one starts.
+    // The subject is the touch order, not the run identity.
+    const pairs = [];
+    for (const _ of [0, 1]) {
+      pairs.push({
+        tight: await fixture.createRun({ budgetTokens: 1 }),
+        loose: await fixture.createRun({ budgetTokens: 10_000 }),
+      });
+    }
     await fixture.service.close();
     services.splice(services.indexOf(fixture.service), 1);
 
     // Both touch orders, each over its own restart: a resolver keyed by anything but the run,
     // or one caching the last override it saw, survives only one of the two.
-    for (const looseFirst of [true, false]) {
+    for (const [index, looseFirst] of [true, false].entries()) {
+      const { tight, loose } = pairs[index]!;
       const restarted = fixture.restart();
       if (looseFirst) await callTimes(restarted, loose, 8);
       await callTimes(restarted, tight, 1);
@@ -548,54 +557,57 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
   it("falls back to the daemon-wide limit when a run's persisted budget is corrupt", async () => {
     const fixture = await daemonFixture({ maxRunTokens: 50 });
-    const corrupt = await fixture.createRun({ budgetTokens: 10_000 });
-    await fixture.service.close();
-    services.splice(services.indexOf(fixture.service), 1);
-
-    const facade = join(fixture.home, "runs", corrupt, "facade.json");
-    const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
-    expect(metadata["budgetTokens"]).toBe(10_000);
-
     // "lots" reaches the guard as a NaN comparison and never fires, so the run would carry no
     // cap at all; the rest would bind a nonsense cap of their own. Every one must give way to
     // the daemon's, and none of these can be written by `handle("run", …)` in the first place.
-    for (const budgetTokens of ["lots", 0, -5, 1.5, null]) {
-      writeFileSync(facade, JSON.stringify({ ...metadata, budgetTokens }));
+    // `"{ not json"` is last: unreadable, not merely wrong.
+    const shapes: unknown[] = ["lots", 0, -5, 1.5, null, "UNREADABLE"];
+    // One run per shape. Spend survives a restart now, so reusing a run would exhaust the
+    // daemon-wide cap during the second shape and stop observing the fallback at all.
+    const runs = await Promise.all(shapes.map(async () => fixture.createRun({ budgetTokens: 10_000 })));
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    for (const [index, budgetTokens] of shapes.entries()) {
+      const runId = runs[index]!;
+      const facade = join(fixture.home, "runs", runId, "facade.json");
+      const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+      expect(metadata["budgetTokens"]).toBe(10_000);
+      writeFileSync(
+        facade,
+        budgetTokens === "UNREADABLE" ? "{ not json" : JSON.stringify({ ...metadata, budgetTokens }),
+      );
       const restarted = fixture.restart();
-      await callTimes(restarted, corrupt, 5);
-      expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ limit: 50 });
+      await callTimes(restarted, runId, 5);
+      expect((await budgetErrorOf(restarted.call(runId))).details).toMatchObject({ limit: 50 });
       await restarted.service.close();
       services.splice(services.indexOf(restarted.service), 1);
     }
-
-    // Unreadable, not merely wrong: the fallback must survive a file that does not parse.
-    writeFileSync(facade, "{ not json");
-    const restarted = fixture.restart();
-    await callTimes(restarted, corrupt, 5);
-    expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ limit: 50 });
   });
 
   it("falls back to the daemon-wide USD limit when a run's persisted USD budget is corrupt", async () => {
     // The token twin of this runs above. The guard treats the two dimensions differently on
     // purpose -- a fractional USD budget is legal -- so each needs driving on its own.
     const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 4, costUsd: 0.5 });
-    const corrupt = await fixture.createRun({ budgetUsd: 1 });
-    await fixture.service.close();
-    services.splice(services.indexOf(fixture.service), 1);
-
-    const facade = join(fixture.home, "runs", corrupt, "facade.json");
-    const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
-    expect(metadata["budgetUsd"]).toBe(1);
-
     // Written as raw JSON text, because `1e999` overflows to Infinity on parse and cannot be
     // produced by stringifying a value. For tokens the integer check rejects it; for USD, where
     // fractions are legal, the finiteness check is the only thing standing between an
     // overflowing literal and a run with no USD cap at all.
-    for (const literal of ['"lots"', "0", "-5", "null", "1e999"]) {
+    const literals = ['"lots"', "0", "-5", "null", "1e999"];
+    // One run per literal, for the reason given in the token twin above.
+    const runs = await Promise.all(literals.map(async () => fixture.createRun({ budgetUsd: 1 })));
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    for (const [index, literal] of literals.entries()) {
+      const runId = runs[index]!;
+      const facade = join(fixture.home, "runs", runId, "facade.json");
+      const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+      expect(metadata["budgetUsd"]).toBe(1);
       writeFileSync(facade, JSON.stringify({ ...metadata, budgetUsd: "PLACEHOLDER" }).replace('"PLACEHOLDER"', literal));
       const restarted = fixture.restart();
-      await callTimes(restarted, corrupt, 8);
-      expect((await budgetErrorOf(restarted.call(corrupt))).details).toMatchObject({ budget: "run_usd", limit: 4 });
+      await callTimes(restarted, runId, 8);
+      expect((await budgetErrorOf(restarted.call(runId))).details).toMatchObject({ budget: "run_usd", limit: 4 });
       await restarted.service.close();
       services.splice(services.indexOf(restarted.service), 1);
     }
@@ -603,28 +615,34 @@ describe("B-selfhost-8 per-run budget overrides", () => {
 
   it("keeps the sound half of a run's persisted budget when the other half is corrupt", async () => {
     const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 4, costUsd: 0.5 });
-    const mixed = await fixture.createRun({ budgetTokens: 30, budgetUsd: 1 });
+    // One run per polarity. The previous shape reused a single run and corrupted its facade twice;
+    // with spend surviving a restart the second polarity inherited the first's calls. It also made
+    // the second scenario read as an anomaly, because the second write restores `budgetUsd: 1` from
+    // the original metadata and that `limit: 1` looked unexplained. See `docs/ledger/P1.3.md`.
+    const corruptUsd = await fixture.createRun({ budgetTokens: 30, budgetUsd: 1 });
+    const corruptTokens = await fixture.createRun({ budgetTokens: 30, budgetUsd: 1 });
     await fixture.service.close();
     services.splice(services.indexOf(fixture.service), 1);
 
-    const facade = join(fixture.home, "runs", mixed, "facade.json");
-    const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
-    writeFileSync(facade, JSON.stringify({ ...metadata, budgetUsd: "lots" }));
+    const facadeOf = (runId: string): string => join(fixture.home, "runs", runId, "facade.json");
+    const metadataOf = (runId: string): Record<string, unknown> =>
+      JSON.parse(readFileSync(facadeOf(runId), "utf8")) as Record<string, unknown>;
 
     // Discarding the whole budget would leave this run on the daemon's `null` token cap, so
     // the throw that arrives says which half survived.
+    writeFileSync(facadeOf(corruptUsd), JSON.stringify({ ...metadataOf(corruptUsd), budgetUsd: "lots" }));
     const restarted = fixture.restart();
-    await callTimes(restarted, mixed, 3);
-    expect((await budgetErrorOf(restarted.call(mixed))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
+    await callTimes(restarted, corruptUsd, 3);
+    expect((await budgetErrorOf(restarted.call(corruptUsd))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
     await restarted.service.close();
     services.splice(services.indexOf(restarted.service), 1);
 
     // The other polarity, since dropping the sound half is a per-dimension decision and either
     // side of it can be got wrong on its own.
-    writeFileSync(facade, JSON.stringify({ ...metadata, budgetTokens: "lots" }));
+    writeFileSync(facadeOf(corruptTokens), JSON.stringify({ ...metadataOf(corruptTokens), budgetTokens: "lots" }));
     const reversed = fixture.restart();
-    await callTimes(reversed, mixed, 2);
-    expect((await budgetErrorOf(reversed.call(mixed))).details).toMatchObject({ budget: "run_usd", limit: 1 });
+    await callTimes(reversed, corruptTokens, 2);
+    expect((await budgetErrorOf(reversed.call(corruptTokens))).details).toMatchObject({ budget: "run_usd", limit: 1 });
   });
 
   it("reports a recovered run's own limits to C2, not only to the broker", async () => {

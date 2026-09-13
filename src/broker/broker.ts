@@ -6,6 +6,7 @@ import { PolishError, errorToString, isAbortError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import type { ModelCatalog } from "./catalog.js";
 import { foldModelCallUsage, budgetSnapshotFromUsage } from "../convergence/pathology/budget.js";
+import type { BudgetSnapshot } from "./quota.js";
 import type { BudgetTracker, QuotaTracker } from "./quota.js";
 import type { SecretStore } from "./secrets.js";
 import { ProviderError, type CompletionRequest, type CompletionResponse } from "./types.js";
@@ -272,6 +273,11 @@ export class ModelBroker {
     };
     const [stored] = store.events.append([event]);
     return stored?.id ?? event.id;
+  }
+
+  /** A run's current spend, as the tracker holds it. The read companion to `restore`. */
+  budgetSnapshot(runId: string): BudgetSnapshot {
+    return this.deps.budget.snapshot(runId);
   }
 
   /** Rebuild budget usage and catalog stats for a run from its `model.call` events. */
