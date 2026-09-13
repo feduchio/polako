@@ -1,6 +1,6 @@
 # B-selfhost-35 + 23 — prefix progress and test-only treadmill stop
 
-**Status:** DRAFT, revision 2. Not frozen. Base `889b62d`.
+**Status:** DRAFT, revision 3. Not frozen. Base `889b62d`.
 
 ## Scope
 
@@ -8,8 +8,8 @@ Two bounded early-stop mechanisms:
 
 1. abandon a worker candidate whose observed state has stopped changing and whose prefix receives a
    unanimous minimum progress score;
-2. stop a review/fix run after three accepted test-only checkpoints driven by validated blocking
-   findings.
+2. stop a review/fix run after the configured window of accepted test-only checkpoints driven by
+   validated blocking findings.
 
 The first acts inside one worker rollout. The second acts across integrated checkpoints. Neither
 changes review-quality semantics.
@@ -33,6 +33,12 @@ protected; whole oldest steps are evicted first until the cap fits, and the late
 always retained. It includes the task, acceptance, current diff hash, changed paths and live
 loop-evidence counts (`writes + patches + commandOutputRefs`) at that turn. It never contains a
 later turn.
+
+Exact task+acceptance JSON is capped at 800 tokens; if it exceeds that cap, the checkpoint makes no
+provider call and cannot abandon. Changed paths sort by code-unit order and
+fit a 400-token whole-path budget; overflow is one bounded `{omittedCount,pathsHash}` record.
+Protected metadata plus the latest step is checked before every call; if it still exceeds 2,400,
+the checkpoint makes no provider call and cannot abandon. Packet overflow never fails the worker.
 
 **MC3 — score only a deterministic plateau.** The runner records deterministic state snapshots at
 turns 4, 8 and 12. A provider score is requested at turn 8 only when the turn-4 and turn-8 state
@@ -64,7 +70,8 @@ them. Transcript stores checkpoint turn, both model refs/scores, mean, state fin
 decision. Emit `worker.progress_scored` and, only on stop, `worker.progress_abandoned`; model calls
 remain first-class economics rows.
 
-Turns 13 through the configured maximum are deliberately unscored after the four-call cap.
+Turns 13 through the configured maximum are deliberately unscored because the bounded tracker has
+no checkpoints after turn 12, regardless of how many earlier score calls occurred.
 
 **MC7 — production wiring.** `createWorkerFactory` injects the tracker built from the same catalog,
 broker and protocols as the worker. Progress is enabled by default for normal/complex coding tasks,
@@ -96,19 +103,21 @@ Empty or unavailable path evidence is `unknown`, never `test_only`.
 
 **MC10 — pathology sample v2.** `PATHOLOGY_SAMPLE_VERSION` becomes 2. New samples carry all
 checkpoint-change records through the boundary; task-origin records include `originFindingId`; and
-finding observations include `findingId`, allowing sample-only id-to-status resolution. Historical
-v1 samples remain readable but cannot satisfy the new detector because they have no change records.
+finding observations include `findingId` and source event `seq`, allowing sample-only latest-status
+resolution. `PathologySample.version` accepts 1 or 2 while new builders emit 2. Historical v1
+samples remain readable but cannot satisfy the new detector because they have no change records.
 
 **MC11 — test-only treadmill detector.** Add convergence knob
 `testOnlyCheckpointWindow`, default/minimum 3. The detector fires only when the last
 `testOnlyCheckpointWindow` distinct checkpoint changes are all `test_only`, each task origin is
 `valid_finding`, and each linked finding
 is blocking and currently `VALID` or `RESOLVED`. Production, metadata-only, unknown, mission,
-investigation, missing-link or duplicate-checkpoint entries reset/prevent the window.
+`mission_requirement`, investigation, missing-link or duplicate-checkpoint entries reset/prevent
+the window.
 
 **MC12 — stop action.** Pathology kind `test_only_verification_treadmill` orders before ordinary
 `no_progress` and maps directly to `NEEDS_HUMAN`; no ensemble change or rollback is attempted.
-Evidence refs include the three checkpoint event ids, task ids and finding ids. The persisted
+Evidence refs include the selected window's checkpoint event ids, task ids and finding ids. The persisted
 decision/effect path is the existing C2 path and remains replay-idempotent.
 
 ## PHASE_REQUIRED
@@ -128,7 +137,8 @@ unprobed progress flag is stripped at catalog ingress and cannot satisfy selecti
 
 **AC2.** Prefix fixtures with adversarial narration and oversized outputs assert exact 300/2,400
 caps, whole-oldest-step eviction, latest-step retention, fence, task/acceptance and absence of future
-markers.
+markers. Oversized protected metadata produces zero progress calls, no abandon and no worker error;
+changed-path overflow pins the bounded count/hash record.
 
 **AC3.** Plateau fixture asserts no progress calls before turn 8, exactly two at turn 8, two distinct
 free probed families, exact strict/reasoning/max/retry metadata and both raw scores. One-family,
@@ -159,8 +169,8 @@ Top-level `fixtures/**` is deliberately production; only `__fixtures__` is test.
 `checkpoint.created.payload.change`; deriving classification from candidate `diffRef`, task kind or
 gate names fails.
 
-**AC10.** Sample v2 fixture pins `findingId`, origin-finding link, sample-only current status
-resolution and chronological checkpoint-change records.
+**AC10.** Sample v2 fixture pins `findingId`, source seq, origin-finding link, sample-only latest
+status resolution by seq and chronological checkpoint-change records.
 Historical v1 and missing change records remain readable and do not trigger.
 
 **AC11.** Detector positives use knob values 3 and 4 with that many distinct test-only checkpoints
@@ -184,6 +194,7 @@ trackers; trivial and investigation tasks receive none and emit zero progress ca
 | model failure becomes zero | AC4 |
 | rejected `finish` disables abandon | AC4 |
 | tracker sees a future step | AC2 |
+| packet overflow fails the worker | AC2 |
 | progress calls bypass broker | AC7 |
 | progress cost omitted from task budget | AC7 |
 | trivial/investigation receives tracker | AC13 |
@@ -208,6 +219,14 @@ trackers; trivial and investigation tasks receive none and emit zero progress ca
 - task-id budget attribution and task eligibility are acceptance checks;
 - the treadmill window uses its knob rather than a hardcoded three;
 - catalog stripping, packet eviction and the unscored post-turn-12 region are explicit.
+
+**Revision 2 → 3**, after the second independent review:
+
+- task/acceptance and changed-path protected metadata are bounded; irreducible overflow skips
+  scoring and cannot fail or abandon the worker;
+- detector evidence refs use the configured window, not a hardcoded three;
+- finding observations carry event seq for deterministic latest-status resolution;
+- v1/v2 readability and the literal `mission_requirement` origin are explicit.
 
 ## Out of scope
 
