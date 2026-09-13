@@ -51,6 +51,8 @@ describe("reviewer benchmark corpus", () => {
     for (const pair of REVIEWER_BENCHMARK_PAIRS) {
       const cleanDiff = addedFileDiff(pair, "clean");
       const mutantDiff = addedFileDiff(pair, "mutant");
+      expect(pair.cleanSource.split("\n")[0]).toBe(`// ${pair.criterionId}: ${pair.property}`);
+      expect(pair.mutantSource.split("\n")[0]).toBe(`// ${pair.criterionId}: ${pair.property}`);
       expect(/^\+\+\+ b\/(.+)$/m.exec(cleanDiff)?.[1]).toBe(BENCHMARK_PATH);
       expect(/^\+\+\+ b\/(.+)$/m.exec(mutantDiff)?.[1]).toBe(BENCHMARK_PATH);
       for (const label of ["clean", "mutant"] as const) {
@@ -58,7 +60,23 @@ describe("reviewer benchmark corpus", () => {
         expect(diff).toContain(`// ${pair.criterionId}: ${pair.property}`);
         expect(diff).not.toMatch(/\b(clean|mutant|defect|injected)\b/i);
         expect(diff).not.toContain("expectedLine");
+        for (const family of REVIEWER_BENCHMARK_PAIRS.map((item) => item.family)) {
+          expect(diff).not.toContain(family);
+        }
       }
     }
+  });
+
+  it("rejects a pair whose clean and mutant sources differ on two lines", () => {
+    const first = REVIEWER_BENCHMARK_PAIRS[0];
+    if (first === undefined) throw new Error("missing first pair");
+    const twoDefects = {
+      ...first,
+      mutantSource: first.mutantSource.replace(
+        `// ${first.criterionId}: ${first.property}`,
+        `// ${first.criterionId}: altered property`,
+      ),
+    };
+    expect(() => changedLineSpan(twoDefects)).toThrow("must change exactly one line");
   });
 });
