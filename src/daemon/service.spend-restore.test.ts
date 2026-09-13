@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { budgetSnapshotFromUsage, foldModelCallUsage } from "../convergence/pathology/index.js";
-import { BudgetTracker } from "../broker/quota.js";
+import { BudgetTracker, type BudgetSnapshot } from "../broker/quota.js";
 import type { Run } from "../domain/run.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import { Git } from "../sandbox/git.js";
@@ -32,11 +32,11 @@ describe("P1.3 spend restored across a daemon restart", () => {
     const runId = await fixture.createRun({});
     await fixture.call(runId);
     await fixture.call(runId);
-    const spentBefore = fixture.spendOf(runId);
+    const spentBefore = fixture.spendOf(runId).runTokens;
     expect(spentBefore).toBeGreaterThan(0);
 
     const restarted = await fixture.restart();
-    expect(restarted.spendOf(runId)).toBe(spentBefore);
+    expect(restarted.spendOf(runId).runTokens).toBe(spentBefore);
   });
 
   it("makes the restored spend bind: the next call over the cap is rejected", async () => {
@@ -45,7 +45,7 @@ describe("P1.3 spend restored across a daemon restart", () => {
     const probe = await daemonFixture({ maxRunTokens: 1_000_000 });
     const probeRun = await probe.createRun({});
     await probe.call(probeRun);
-    const perCall = probe.spendOf(probeRun);
+    const perCall = probe.spendOf(probeRun).runTokens;
     expect(perCall).toBeGreaterThan(0);
 
     const fixture = await daemonFixture({ maxRunTokens: perCall * 2 });
@@ -66,7 +66,7 @@ describe("P1.3 spend restored across a daemon restart", () => {
     fixture.setPhase(runId, "DONE");
 
     const restarted = await fixture.restart();
-    expect(restarted.spendOf(runId)).toBe(0);
+    expect(restarted.spendOf(runId).runTokens).toBe(0);
   });
 
   /**
@@ -80,7 +80,7 @@ describe("P1.3 spend restored across a daemon restart", () => {
     fixture.setControl(runId, "STOPPED");
 
     const restarted = await fixture.restart();
-    expect(restarted.spendOf(runId)).toBe(0);
+    expect(restarted.spendOf(runId).runTokens).toBe(0);
   });
 
   it("restores a snapshot equal to the fold of the run's own model.call events", async () => {
@@ -94,6 +94,23 @@ describe("P1.3 spend restored across a daemon restart", () => {
       foldModelCallUsage(restarted.service.store.events.list(runId, { types: ["model.call"] })),
     );
     expect(restarted.snapshotOf(runId)).toEqual(expected);
+  });
+
+  /**
+   * The whole path, not one hop of it: a `model.call` event carrying a prototype-colliding task id
+   * has to survive the fold, `budgetSnapshotFromUsage`, `restore` and `record` and still be capped.
+   * Each hop copies `perTask` differently, and `Object.assign` — the natural alternative to a
+   * spread — loses the key silently at any one of them.
+   */
+  it("carries a prototype-colliding task id from the event log through to enforcement", async () => {
+    const fixture = await daemonFixture({ maxRunTokens: 1_000 });
+    const runId = await fixture.createRun({});
+    await fixture.call(runId, "__proto__");
+    await fixture.call(runId, "__proto__");
+    const spent = fixture.spendOf(runId).runTokens;
+
+    const restarted = await fixture.restart();
+    expect(Object.entries(restarted.snapshotOf(runId).perTask)).toEqual([["__proto__", spent]]);
   });
 
   it("is idempotent: restoring twice leaves the same snapshot", async () => {
@@ -133,6 +150,21 @@ describe("BudgetTracker per-task keys that collide with Object.prototype", () =>
     }
   });
 
+  /**
+   * The snapshot is a view of live enforcement state, and `ModelBroker.budgetSnapshot` makes it
+   * public. Handing back the stored object would let any reader zero a run's spend.
+   */
+  it("cannot be written through to change what assertWithin enforces", () => {
+    const tracker = new BudgetTracker({ maxRunUsd: null, maxRunTokens: 100, maxTaskTokens: null });
+    tracker.record("run_1", { inputTokens: 100, outputTokens: 0, costUsd: null });
+    const snapshot = tracker.snapshot("run_1");
+    snapshot.runTokens = 0;
+    snapshot.perTask["smuggled"] = 0;
+    expect(() => { tracker.assertWithin("run_1"); }).toThrow(PolishError);
+    expect(tracker.snapshot("run_1").runTokens).toBe(100);
+    expect(Object.keys(tracker.snapshot("run_1").perTask)).toEqual([]);
+  });
+
   it("keeps such ids through a restore, so the fold and the tracker agree", () => {
     const tracker = new BudgetTracker(limits);
     tracker.restore("run_1", { runUsd: 0, runTokens: 20, perTask: Object.fromEntries([["__proto__", 20]]), unknownCostCalls: [] });
@@ -146,8 +178,8 @@ interface SpendFixture {
   home: string;
   createRun: (budget: { budgetTokens?: number; budgetUsd?: number }) => Promise<string>;
   call: (runId: string, taskId?: string) => Promise<unknown>;
-  spendOf: (runId: string) => number;
-  snapshotOf: (runId: string) => unknown;
+  spendOf: (runId: string) => BudgetSnapshot;
+  snapshotOf: (runId: string) => BudgetSnapshot;
   setPhase: (runId: string, phase: Run["phase"]) => void;
   setControl: (runId: string, control: Run["control"]) => void;
   restart: () => Promise<SpendFixture>;
@@ -192,7 +224,7 @@ function build(home: string, repoDir: string, maxRunTokens: number): SpendFixtur
         messages: [{ role: "user", content: "go" }],
         metadata: { runId, purpose: "spend", role: "worker", ...(taskId === undefined ? {} : { taskId }) },
       }),
-    spendOf: (runId) => deps.broker.budgetSnapshot(runId).runTokens,
+    spendOf: (runId) => deps.broker.budgetSnapshot(runId),
     snapshotOf: (runId) => deps.broker.budgetSnapshot(runId),
     setPhase: (runId, phase) => {
       const run = service.store.repos.runs.get(runId)!;

@@ -116,8 +116,20 @@ export class BudgetTracker {
     return resolved;
   }
 
+  /**
+   * A copy. The stored object is live enforcement state, so handing out the reference lets any
+   * reader zero a run's spend by assigning to it — and `ModelBroker.budgetSnapshot` makes that
+   * reference public.
+   */
   snapshot(runId: string): BudgetSnapshot {
-    return this.runs.get(runId) ?? { runUsd: 0, runTokens: 0, perTask: {}, unknownCostCalls: [] };
+    const stored = this.runs.get(runId);
+    if (stored === undefined) return { runUsd: 0, runTokens: 0, perTask: {}, unknownCostCalls: [] };
+    return {
+      runUsd: stored.runUsd,
+      runTokens: stored.runTokens,
+      perTask: { ...stored.perTask },
+      unknownCostCalls: [...stored.unknownCostCalls],
+    };
   }
 
   /** Restore from persisted usage (replayed `model.call` events). */
