@@ -73,6 +73,9 @@ describe("review benchmark runner", () => {
     expect(cleanPack).toEqual(mutantPack);
     expect(cleanDiff).not.toBe(mutantDiff);
     expect(JSON.stringify(cleanPack)).not.toMatch(/\b(clean|mutant|defect|injected)\b/i);
+    for (const family of REVIEWER_BENCHMARK_PAIRS.map((item) => item.family)) {
+      expect(JSON.stringify(cleanPack)).not.toContain(family);
+    }
     for (const cell of [clean, mutant]) {
       const request = cell.request;
       if (request === null) throw new Error("missing captured request");
