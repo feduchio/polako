@@ -1,7 +1,7 @@
 # B-selfhost-32 + 34 + 44 (+11) — strict review output and empirical verifier
 
-**Status:** DRAFT, revision 4. Not frozen. Base `ecfd45d`.
-Revisions 1–3 were reviewed independently by Grok and Claude; all rejections were correct.
+**Status:** DRAFT, revision 5. Not frozen. Base `ecfd45d`.
+Revisions 1–4 were reviewed independently by Grok and Claude; all rejections were correct.
 
 ## Facts that constrain the design
 
@@ -56,8 +56,10 @@ retry-1 probes send each frozen schema plus disabled reasoning and persist separ
 validated success is true; reject, timeout, malformed, inconclusive or probe failure are false
 regardless of advertisement. Reviewer selection requires the review flag; empirical selection
 requires the score flag. Neither downgrades to `json_object`. Strict probes use the existing
-per-provider discovery shortlist cap and are reused from persisted model observations; re-probe only
-when model identity/schema hash changes. Other capability probes remain finding 24's scope.
+per-provider discovery shortlist cap during DISCOVERING_MODELS and persist a strict-probe
+observation keyed by model ref + schema hash. A probe epoch is complete when every model in that
+bounded shortlist has a success/failure record; catalog models outside the shortlist are irrelevant.
+Re-probe only when model identity/schema hash changes. Other capability probes remain finding 24.
 
 **MC3 — empirical reward, honestly named.** One evaluation emits strict
 `{scoreA: integer 0..4, scoreB: integer 0..4}` and no prose. Empirical criteria are padded with the
@@ -77,8 +79,9 @@ cannot produce the bounded object resolves unsupported.
 One or zero families falls back before any empirical call. All evaluations use
 `ModelBroker.complete` with retry policy `maxAttempts:1`, `role:"verifier"` and
 `purpose:"empirical_pair_score"`. Per-COMPARING ceiling is 48 logical/provider attempts and
-192,000 estimated input tokens, counted across re-entry for the task from persisted `model.call`
-events. Criteria
+192,000 estimated input tokens, counted across re-entry and candidate attempts for the task from
+persisted `model.call` events. Before each call, exact serialized messages are measured with
+`estimateTokens`; a call that would exceed the estimate cap is not issued. Criteria
 are truncated deterministically to fit while keeping at least two; if two cannot fit, fallback occurs
 before calls. If any pair completes fewer than half its requested evaluations, the **whole empirical
 selection** is abandoned and deterministic fallback ranks the frontier; empirical and deterministic
@@ -113,10 +116,15 @@ Full round-robin is not PPT.
 **MC7 — production wiring, absorbing item 11.** Backend is `ts|sidecar|empirical`, default empirical.
 `installProductionDrivers` injects an empirical strategy built from broker-backed adapters. Missing
 the two-family eligibility gate produces visible deterministic fallback in COMPARING. In REVIEWING,
-zero probed-strict models **after catalog hydration and completed strict probes for the checkpoint**
-terminates the run as `FAILED/providers_unavailable` before an axis call; unprobed catalogs and
-transient/sticky exclusions retain the accepted waiting/exhaustion behavior. There is no schema
-downgrade. `sidecar` and `ts` remain explicit.
+zero review-capable models after a completed bounded probe epoch terminates as
+`FAILED/providers_unavailable` before an axis call. A missing probe record for an in-shortlist model
+is `FAILED/internal_error`, not an unbounded wait. Catalog models outside the shortlist do not block
+completion. Probed-strict models temporarily sticky-excluded retain the accepted wait/exhaustion
+behavior. There is no schema downgrade. `sidecar` and `ts` remain explicit.
+
+`VerifierStrategySchema` keeps sidecar `repeats` (default 2, min 1) and adds
+`empiricalRepeats` (default/min 4, multiple of 4). Production passes the latter to the empirical
+strategy; `FrontierSelectOptions.repeats` remains the sidecar channel.
 
 The empirical prompt composes `base + task(kind) + judge`; `PairwiseContext` carries task kind and
 `ProtocolRegistry` is injected. `protocols/judge` explicitly says a supplied score schema requires
@@ -183,21 +191,24 @@ refs from two distinct families. One-family and zero-family fixtures fall back w
 calls. Failure fixtures assert usage survives; one under-half pair abandons the whole empirical
 selection, with no mixed mass; exact reason/requested/completed counts persist.
 
-**AC6.** Pair-set literals: N=2 one pair; N=3 three; N=5 exact eight listed in MC6; N=8 exact
-seventeen; N=4 adjacent pivots produce six. Assert ring A/B participation, pivots `a,c`, no duplicate provider payment, sigmoid mass
+**AC6.** Pair-set literals: N=2 one pair; N=3 three; N=4 adjacent pivots `a,b` produce six;
+N=5/N=8 use pivots `a,c` and produce the exact eight/seventeen listed in MC6. Assert ring A/B
+participation, no duplicate provider payment, sigmoid mass
 and deterministic ranking. Assert `Ra/Rb/pA/pB` against MC5 literals without calling production
 helpers. A 28-pair implementation fails.
 
 **AC7.** Production COMPARING with two non-dominated candidates invokes broker-backed empirical
 calls. Assert persisted `model.call` rows: two distinct free strict families, real refs,
 `role:verifier`, `purpose:empirical_pair_score`, retry max 1. Assert default backend empirical and no
-providerless judge call before it. Payload contains each candidate's actual CAS diff; missing and
+providerless judge call before it. Default N=2 with one input criterion asserts padding and exactly
+`2 criteria × 4 empiricalRepeats = 8` calls while sidecar repeats remains 2. Payload contains each candidate's actual CAS diff; missing and
 over-cap diffs fall back before calls. Prompt contains composed base/task/judge and score contract.
 
 **AC8.** Phase ceiling fixtures: N=3 / 8 input criteria / 4 repeats truncates to the first 4 criteria
 and issues exactly 48 calls; rate-limit every call still stops at 48 and falls back visibly; N=5 and
 N=8 cannot fit two criteria and fall back before calls. Re-entering COMPARING sees persisted calls
-and cannot issue another 48. Estimated input over 192,000 also stops and falls back. Strict probes
+and cannot issue another 48. A separate fixture persists near-cap estimated input, re-enters and
+proves no reset; the 48-call fixture uses small diffs. Estimated input over 192,000 stops and falls back. Strict probes
 are excluded from COMPARING counts and independently broker-accounted.
 
 **AC9.** Provenance literals independently pin backend empirical, client live, score scheme, both refs, criteria,
@@ -217,8 +228,10 @@ improvement.
 or reasoning options differ; both fields are visible in persisted evidence.
 
 **AC13.** REVIEWING with hydrated/probed catalog and zero strict reviewers returns
-`FAILED/providers_unavailable` with zero axis calls. Unprobed catalog waits; sticky-excluded models
-follow existing wait/exhaustion behavior. No `CONFIG_ERROR` crash and no `json_object` downgrade.
+`FAILED/providers_unavailable` with zero axis calls even when unprobed catalog models exist outside
+the bounded shortlist. Missing a strict-probe record for an in-shortlist model returns
+`FAILED/internal_error`; sticky-excluded probed models follow existing wait/exhaustion behavior. No
+`CONFIG_ERROR` crash, silent wait or `json_object` downgrade.
 
 **AC14.** Production EXECUTING→GATING persists a non-null `candidate_diff` artifact for each
 implemented candidate; COMPARING loads those exact bytes. Missing, wrong-base and >2,000-token
@@ -288,6 +301,14 @@ fixtures fall back before empirical calls.
 - pivots are fixed at two and N=4/N=5 bounds are reconciled;
 - phase attempt/token ceilings persist across COMPARING re-entry;
 - strict-probe caching/fan-out is bounded.
+
+**Revision 4 → 5**, after Grok froze and Claude found two remaining gaps:
+
+- strict probing is a bounded DISCOVERING_MODELS epoch; missing in-shortlist records fail visibly
+  instead of waiting forever, while out-of-shortlist models are irrelevant;
+- production empirical calls receive `empiricalRepeats=4`; sidecar retains its independent
+  `repeats=2`;
+- token-cap persistence and N=4 pivot identities are explicitly observed.
 
 ## Out of scope
 
