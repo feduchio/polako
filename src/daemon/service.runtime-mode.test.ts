@@ -1,7 +1,6 @@
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PolishConfig } from "../domain/config.js";
 import type { PhaseDriver } from "../engine/types.js";
@@ -47,17 +46,23 @@ describe("B-selfhost-7 per-run runtime mode", () => {
     expect(fixture.service.getConfig()).toBe(fixture.service.productionComposition().config);
   });
 
-  it("never assigns runtimeValidation anywhere in non-test source", () => {
-    const offenders: string[] = [];
-    for (const file of sourceFiles(fileURLToPath(new URL("../", import.meta.url)))) {
-      if (file.endsWith(".test.ts")) continue;
-      const lines = readFileSync(file, "utf8").split("\n");
-      for (const [index, line] of lines.entries()) {
-        // `=(?!=)` so a wrapped assignment ending the line still counts, while `===` does not.
-        if (/\.runtimeValidation(\.\w+)?\s*=(?!=)/.test(line)) offenders.push(`${file}:${index + 1}`);
-      }
-    }
-    expect(offenders).toEqual([]);
+  /**
+   * Replaces the source grep this file used to carry. A regex over `.runtimeValidation =` is
+   * evaded by `config["runtimeValidation"].mode = x` and by `Object.assign`, so it never
+   * established what it claimed. `withRuntimeValidationMode` copying unconditionally is what
+   * makes the property true; the behavioural checks around this one are what observe it.
+   */
+  it("hands out a fresh config even when the run's mode equals the configured one", async () => {
+    const fixture = await daemonFixture({ configuredMode: "auto" });
+    const observed = observeCreatedPhase(fixture.service);
+
+    const runId = await fixture.createRun("auto");
+
+    const base = fixture.service.getConfig();
+    const runConfig = observed.configFor(runId);
+    expect(runConfig.runtimeValidation.mode).toBe("auto");
+    expect(runConfig).not.toBe(base);
+    expect(runConfig.runtimeValidation).not.toBe(base.runtimeValidation);
   });
 
   it("gives each run its own mode at the PhaseContext boundary", async () => {
@@ -132,14 +137,53 @@ describe("B-selfhost-7 per-run runtime mode", () => {
     expect({ ...runConfig, runtimeValidation: base.runtimeValidation }).toEqual(base);
   });
 
-  it("resolves an omitted runtime argument to auto rather than the configured mode", async () => {
-    const fixture = await daemonFixture({ configuredMode: "off" });
+  /**
+   * Finding 17. An omitted `--runtime` used to become `"auto"` at two independent boundaries,
+   * before anything could tell it had been omitted, so `polish.toml` could never take effect.
+   */
+  it("resolves an omitted runtime argument to the configured mode", async () => {
+    const fixture = await daemonFixture({ configuredMode: "required" });
     const observed = observeCreatedPhase(fixture.service);
 
     const runId = await fixture.createRun(undefined);
 
-    expect(observed.modesFor(runId)).toEqual(["auto"]);
-    expect(fixture.service.getConfig().runtimeValidation.mode).toBe("off");
+    expect(observed.modesFor(runId)).toEqual(["required"]);
+  });
+
+  it("lets an explicit runtime argument override the configured mode", async () => {
+    const fixture = await daemonFixture({ configuredMode: "required" });
+    const observed = observeCreatedPhase(fixture.service);
+
+    const runId = await fixture.createRun("off");
+
+    expect(observed.modesFor(runId)).toEqual(["off"]);
+    expect(fixture.service.getConfig().runtimeValidation.mode).toBe("required");
+  });
+
+  /**
+   * A run's mode is a property of the run, resolved once at creation and persisted. Reading it
+   * from the configuration on every resolution would move a run that is already going.
+   */
+  it("freezes an unspecified mode at creation, so editing polish.toml cannot move the run", async () => {
+    const fixture = await daemonFixture({ configuredMode: "required" });
+    observeCreatedPhase(fixture.service);
+    const runId = await fixture.createRun(undefined);
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+
+    writeFileSync(join(fixture.home, "polish.toml"), `[runtimeValidation]\nmode = "off"\nlevel = "smoke"\n`);
+    const restarted = new DaemonService({
+      home: fixture.home,
+      clock: new FakeClock(1_700_000_100_000),
+      providers: [scriptedProvider()],
+      tickMs: 1,
+    });
+    services.push(restarted);
+    const observed = observeCreatedPhase(restarted);
+    await restarted.engine.tick();
+
+    expect(restarted.getConfig().runtimeValidation.mode).toBe("off");
+    expect(observed.modesFor(runId)).toEqual(["required"]);
   });
 
   it("rejects an invalid runtime before creating a run or touching the config", async () => {
@@ -271,12 +315,3 @@ async function daemonFixture(options: {
   };
 }
 
-function sourceFiles(root: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(root)) {
-    const path = join(root, entry);
-    if (statSync(path).isDirectory()) out.push(...sourceFiles(path));
-    else if (path.endsWith(".ts")) out.push(path);
-  }
-  return out;
-}

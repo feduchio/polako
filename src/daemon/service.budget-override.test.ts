@@ -1,7 +1,6 @@
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelCallRecord } from "../broker/broker.js";
 import type { ProviderAdapter, CompletionRequest, CompletionResponse, ModelInfo, ProviderHealth } from "../broker/types.js";
@@ -116,18 +115,21 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect((await budgetErrorOf(fixture.call(plain))).details).toMatchObject({ limit: 50 });
   });
 
-  it("never assigns a budget or limits field in non-test source", () => {
-    const offenders: string[] = [];
-    for (const file of sourceFiles(fileURLToPath(new URL("../", import.meta.url)))) {
-      if (file.endsWith(".test.ts")) continue;
-      const lines = readFileSync(file, "utf8").split("\n");
-      for (const [index, line] of lines.entries()) {
-        if (/\.(budget|limits)(\.\w+)?\s*=(?!=)/.test(line)) offenders.push(`${file}:${index + 1}`);
-      }
-    }
-    expect(offenders).toEqual([]);
-    const quota = readFileSync(fileURLToPath(new URL("../broker/quota.ts", import.meta.url)), "utf8");
-    expect(quota).toContain("private readonly limits: BudgetLimits");
+  /**
+   * Replaces the source grep this file used to carry, which a bracket-notation assignment or an
+   * `Object.assign` evaded. What it was reaching for — a run's limits never reach another run or
+   * the shared config — is what the isolation checks above and below actually drive.
+   */
+  it("leaves the daemon-wide budget untouched after a run resolves its own", async () => {
+    const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4 });
+    const before = { ...fixture.service.getConfig().budget };
+    const overridden = await fixture.createRun({ budgetTokens: 30, budgetUsd: 1 });
+    await callTimes(fixture, overridden, 1);
+    expect(fixture.service.getConfig().budget).toEqual(before);
+
+    const plain = await fixture.createRun({});
+    await callTimes(fixture, plain, 5);
+    expect((await budgetErrorOf(fixture.call(plain))).details).toMatchObject({ limit: 50 });
   });
 
   it("treats a null configured limit as unlimited when a run has no override", async () => {
@@ -763,7 +765,133 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(fixture.service.getConfig()).toBe(fixture.service.productionComposition().config);
     expect(before.budget.maxRunTokens).toBe(50);
   });
+
+  /**
+   * Finding 21. A corrupt facade used to downgrade a run silently. It still falls back, per
+   * dimension, but now it says so — once per run, not once per resolution.
+   */
+  describe("run.settings_fallback", () => {
+    it("emits one event for an unreadable facade, however many times the run resolves", async () => {
+      const fixture = await daemonFixture({ maxRunTokens: 50 });
+      const runId = await fixture.createRun({ budgetTokens: 30 });
+      await fixture.service.close();
+      services.splice(services.indexOf(fixture.service), 1);
+
+      writeFileSync(join(fixture.home, "runs", runId, "facade.json"), "{ not json");
+      const restarted = fixture.restart();
+      await callTimes(restarted, runId, 5);
+      await restarted.service.engine.tick();
+
+      const events = fallbackEvents(restarted, runId);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ reason: "facade_unreadable", requestedMode: null });
+      // The daemon-wide cap is in force, which is the fallback the event is reporting.
+      expect((await budgetErrorOf(restarted.call(runId))).details).toMatchObject({ limit: 50 });
+    });
+
+    it("names the mode it kept when only a budget half is corrupt", async () => {
+      const fixture = await daemonFixture({ maxRunTokens: null, maxRunUsd: 4, costUsd: 0.5 });
+      const runId = await fixture.createRun({ budgetTokens: 30, budgetUsd: 1, runtime: "required" });
+      await fixture.service.close();
+      services.splice(services.indexOf(fixture.service), 1);
+
+      const facade = join(fixture.home, "runs", runId, "facade.json");
+      const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+      writeFileSync(facade, JSON.stringify({ ...metadata, budgetUsd: "lots" }));
+
+      const restarted = fixture.restart();
+      await callTimes(restarted, runId, 3);
+
+      const events = fallbackEvents(restarted, runId);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        reason: "budget_usd_invalid",
+        requestedMode: "required",
+        effectiveMode: "required",
+      });
+      // The sound half still binds: the event records what was discarded, not more.
+      expect((await budgetErrorOf(restarted.call(runId))).details).toMatchObject({ budget: "run_tokens", limit: 30 });
+    });
+
+    it("reports an unparseable runtime with a null requested mode", async () => {
+      const fixture = await daemonFixture({ maxRunTokens: 50 });
+      const runId = await fixture.createRun({ budgetTokens: 30 });
+      await fixture.service.close();
+      services.splice(services.indexOf(fixture.service), 1);
+
+      const facade = join(fixture.home, "runs", runId, "facade.json");
+      const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+      writeFileSync(facade, JSON.stringify({ ...metadata, runtime: "sometimes" }));
+
+      const restarted = fixture.restart();
+      await callTimes(restarted, runId, 1);
+
+      const events = fallbackEvents(restarted, runId);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ reason: "runtime_invalid", requestedMode: null });
+      // The budget half was sound and is untouched by the runtime half falling back.
+      await callTimes(restarted, runId, 2);
+      expect((await budgetErrorOf(restarted.call(runId))).details).toMatchObject({ limit: 30 });
+    });
+
+    it("joins every reason when more than one field is corrupt", async () => {
+      const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4, costUsd: 0.5 });
+      const runId = await fixture.createRun({ budgetTokens: 30, budgetUsd: 1 });
+      await fixture.service.close();
+      services.splice(services.indexOf(fixture.service), 1);
+
+      const facade = join(fixture.home, "runs", runId, "facade.json");
+      const metadata = JSON.parse(readFileSync(facade, "utf8")) as Record<string, unknown>;
+      writeFileSync(facade, JSON.stringify({ ...metadata, runtime: "sometimes", budgetTokens: 0, budgetUsd: "lots" }));
+
+      const restarted = fixture.restart();
+      await callTimes(restarted, runId, 1);
+
+      expect(fallbackEvents(restarted, runId)[0]).toMatchObject({
+        reason: "runtime_invalid,budget_tokens_invalid,budget_usd_invalid",
+      });
+    });
+
+    it("says nothing when the facade is sound", async () => {
+      const fixture = await daemonFixture({ maxRunTokens: 50 });
+      const runId = await fixture.createRun({ budgetTokens: 30 });
+      await fixture.service.close();
+      services.splice(services.indexOf(fixture.service), 1);
+
+      const restarted = fixture.restart();
+      await callTimes(restarted, runId, 2);
+      await restarted.service.engine.tick();
+
+      expect(fallbackEvents(restarted, runId)).toEqual([]);
+    });
+  });
+
+  /**
+   * `unusedCliMetadata` records whether the operator asked, which resolved limits cannot express:
+   * an override equal to the configured cap resolves to the same limits as no override at all.
+   */
+  it("distinguishes an override that matches the configured cap from no override", async () => {
+    const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4 });
+    const asked = await fixture.createRun({ budgetTokens: 50 });
+    const silent = await fixture.createRun({});
+
+    await driveToConvergence(fixture, asked);
+    await driveToConvergence(fixture, silent);
+
+    expect(persistedSampleBudget(fixture, asked).unusedCliMetadata)
+      .toEqual({ budgetTokens: 50, budgetUsd: null, applied: true });
+    expect(persistedSampleBudget(fixture, silent).unusedCliMetadata)
+      .toEqual({ budgetTokens: null, budgetUsd: null, applied: false });
+    expect(persistedSampleBudget(fixture, asked).limits.maxRunTokens)
+      .toBe(persistedSampleBudget(fixture, silent).limits.maxRunTokens);
+  });
 });
+
+function fallbackEvents(fixture: Fixture, runId: string): Record<string, unknown>[] {
+  return fixture.service.store.events
+    .list(runId, { types: ["run.settings_fallback"] })
+    .map((event) => event.payload);
+}
 
 interface Fixture {
   service: DaemonService;
@@ -971,12 +1099,3 @@ function buildFixture(dir: string, home: string, repoDir: string, costUsd: numbe
   return fixture;
 }
 
-function sourceFiles(root: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(root)) {
-    const path = join(root, entry);
-    if (statSync(path).isDirectory()) out.push(...sourceFiles(path));
-    else if (path.endsWith(".ts")) out.push(path);
-  }
-  return out;
-}

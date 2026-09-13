@@ -21,8 +21,10 @@ export async function runCli(
       return;
     case "run": {
       const mission = flag(args, "--mission");
-      const runtime = flag(args, "--runtime") ?? "auto";
-      if (runtime !== "auto" && runtime !== "required" && runtime !== "off") {
+      // Not defaulted here: an omitted flag has to reach the daemon as omitted, or
+      // `polish.toml`'s `runtimeValidation.mode` can never take effect.
+      const runtime = flag(args, "--runtime");
+      if (runtime !== undefined && runtime !== "auto" && runtime !== "required" && runtime !== "off") {
         throw new Error("--runtime must be one of auto|required|off");
       }
       const budgetTokens = flag(args, "--budget-tokens");
@@ -38,7 +40,7 @@ export async function runCli(
       const run = await callDaemon<Run>("run", {
         project: positional[0] ?? process.cwd(),
         mission: mission ?? positional.slice(1).join(" "),
-        runtime,
+        ...(runtime === undefined ? {} : { runtime }),
         ...(budgetTokens === undefined ? {} : { budgetTokens: positiveInteger(budgetTokens, "--budget-tokens") }),
         ...(budgetUsd === undefined ? {} : { budgetUsd: Number(budgetUsd) }),
       });

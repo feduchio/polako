@@ -35,6 +35,7 @@ import {
   buildProductionDeps,
   hasNoRunBudget,
   type RunBudgetLimits,
+  type ResolvedRunSettings,
   installProductionDrivers,
   parseRuntimeMode,
   type ProductionDeps,
@@ -60,6 +61,13 @@ export interface DaemonServiceOptions {
   productionDeps?: ProductionDeps;
 }
 
+type SettingsFallbackReason = "facade_unreadable" | "runtime_invalid" | "budget_tokens_invalid" | "budget_usd_invalid";
+
+interface SettingsFallback {
+  reasons: SettingsFallbackReason[];
+  requestedMode: RuntimeCapabilityMode | null;
+}
+
 export class DaemonService implements RpcHandler {
   readonly store: Store;
   readonly scheduler: Scheduler;
@@ -69,10 +77,12 @@ export class DaemonService implements RpcHandler {
   private readonly tickMs: number;
   private readonly config: PolishConfig;
   private readonly productionDeps: ProductionDeps;
-  /** Requested runtime mode per run; facade metadata is the durable source. */
-  private readonly runtimeModes = new Map<string, RuntimeCapabilityMode>();
-  /** Requested budget overrides per run; facade metadata is the durable source. */
-  private readonly runBudgets = new Map<string, RunBudgetLimits>();
+  /**
+   * One resolution per run, shared by every consumer. Two caches keyed on the same id and filled
+   * on different paths is how the mode and the budget came to disagree in the first place.
+   * Facade metadata is the durable source.
+   */
+  private readonly runSettings = new Map<string, ResolvedRunSettings>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
 
@@ -96,7 +106,7 @@ export class DaemonService implements RpcHandler {
       clock: this.clock,
       config: this.config,
       home: this.home,
-      resolveRunBudget: (runId) => this.runBudget(runId),
+      resolveRunSettings: (runId) => this.resolveRunSettings(runId),
       ...(options.providers === undefined ? {} : { providers: options.providers }),
     });
     this.engine = new RunEngine({
@@ -104,7 +114,7 @@ export class DaemonService implements RpcHandler {
       clock: this.clock,
       scheduler: this.scheduler,
       config: this.config,
-      resolveRunConfig: (run) => this.runConfig(run.id),
+      resolveRunConfig: (run) => this.resolveRunSettings(run.id).config,
     }, false);
     installProductionDrivers(this.engine, this.productionDeps);
     this.engine.recover();
@@ -145,7 +155,9 @@ export class DaemonService implements RpcHandler {
         return this.createRun({
           project: requiredString(params, "project"),
           mission: optionalString(params, "mission") ?? "",
-          runtime: optionalString(params, "runtime") ?? "auto",
+          // `null`, not `"auto"`: whether the caller named a mode is the information finding 17
+          // lost, and it has to survive this boundary for `polish.toml` to ever be effective.
+          runtime: optionalString(params, "runtime") ?? null,
           budgetTokens: optionalNumber(params, "budgetTokens"),
           budgetUsd: optionalNumber(params, "budgetUsd"),
         });
@@ -261,11 +273,15 @@ export class DaemonService implements RpcHandler {
   private async createRun(input: {
     project: string;
     mission: string;
-    runtime: string;
+    runtime: string | null;
     budgetTokens: number | undefined;
     budgetUsd: number | undefined;
   }): Promise<Run> {
-    const runtime = parseRuntimeMode(input.runtime);
+    // Resolved once, here, and persisted: a run's mode is a property of the run, so editing
+    // polish.toml later cannot move a run that is already going.
+    const runtime = input.runtime === null
+      ? this.config.runtimeValidation.mode
+      : parseRuntimeMode(input.runtime);
     if (input.budgetTokens !== undefined && (!Number.isInteger(input.budgetTokens) || input.budgetTokens < 1)) {
       throw new PolishError("CONFIG_ERROR", "budgetTokens must be a positive integer");
     }
@@ -284,11 +300,10 @@ export class DaemonService implements RpcHandler {
     const run = this.engine.createRun({ projectPath: project.path });
     // Registered before anything can await: `createRun` makes the run tickable, and a timer
     // tick or model call landing before `writeMetadata` must still see this run's own settings.
-    this.runtimeModes.set(run.id, runtime);
-    this.runBudgets.set(run.id, {
+    this.runSettings.set(run.id, this.composeSettings(runtime, {
       ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
       ...(input.budgetUsd === undefined ? {} : { budgetUsd: input.budgetUsd }),
-    });
+    }));
     const mission = createMission({
       id: run.missionId,
       projectPath: project.path,
@@ -406,7 +421,7 @@ export class DaemonService implements RpcHandler {
       return;
     }
 
-    const ctx = { run, store: this.store, clock: this.clock, config: this.runConfig(run.id) };
+    const ctx = { run, store: this.store, clock: this.clock, config: this.resolveRunSettings(run.id).config };
     if (run.phase === "NEEDS_HUMAN") {
       const reason = run.terminalReason ?? {
         code: "product_decision_required" as const,
@@ -444,55 +459,105 @@ export class DaemonService implements RpcHandler {
   }
 
   /**
-   * Per-run configuration for `resolveRunConfig`. The requested runtime mode is already
-   * persisted in the run's facade metadata, so a run recovered after a daemon restart
-   * still resolves its own mode instead of whatever the last run asked for.
+   * The single resolution of a run's settings. Every consumer reads this one — the engine's
+   * `resolveRunConfig`, the broker's budget tracker, and the pathology sample's CLI metadata —
+   * so a mode or a limit cannot differ between what enforces it and what reports it.
+   *
+   * `budget` is what binds; `overrides` is what the user asked for. They are not interchangeable:
+   * an override equal to the configured cap resolves to the same limits as no override at all,
+   * and only `overrides` can tell the two apart.
    */
-  private runConfig(runId: string): PolishConfig {
-    let config = this.config;
-    const mode = this.runtimeModes.get(runId) ?? this.persistedRuntimeMode(runId);
-    if (mode !== null) {
-      this.runtimeModes.set(runId, mode);
-      config = withRuntimeValidationMode(config, mode);
-    }
-    const budget = this.runBudget(runId);
-    if (!hasNoRunBudget(budget)) config = applyRunBudgetOverrides(config, budget);
-    return config;
-  }
-
-  /** A run's own budget overrides, so C2 and the broker's tracker resolve the same numbers. */
-  private runBudget(runId: string): RunBudgetLimits {
-    const cached = this.runBudgets.get(runId);
+  private resolveRunSettings(runId: string): ResolvedRunSettings {
+    const cached = this.runSettings.get(runId);
     if (cached !== undefined) return cached;
-    const persisted = this.persistedRunBudget(runId);
-    if (persisted === null) return {};
-    this.runBudgets.set(runId, persisted);
-    return persisted;
+    const persisted = this.readPersistedSettings(runId);
+    if (persisted.fallback !== null) this.recordSettingsFallback(runId, persisted.fallback);
+    const settings = this.composeSettings(persisted.mode, persisted.overrides);
+    this.runSettings.set(runId, settings);
+    return settings;
   }
 
-  private persistedRunBudget(runId: string): RunBudgetLimits | null {
-    if (!existsSync(this.metadataPath(runId))) return null;
+  private composeSettings(mode: RuntimeCapabilityMode | null, overrides: RunBudgetLimits): ResolvedRunSettings {
+    // The one place either merge happens. Both are unconditional in the sense that matters: a run
+    // with no override still gets its limits from here, so nothing downstream has to decide.
+    let config = mode === null ? this.config : withRuntimeValidationMode(this.config, mode);
+    if (!hasNoRunBudget(overrides)) config = applyRunBudgetOverrides(config, overrides);
+    return {
+      config,
+      budget: {
+        maxRunUsd: config.budget.maxRunUsd,
+        maxRunTokens: config.budget.maxRunTokens,
+        maxTaskTokens: config.budget.maxTaskTokens,
+      },
+      overrides,
+    };
+  }
+
+  /**
+   * A corrupt facade must not silently downgrade a run, so what was discarded is returned rather
+   * than swallowed. Discarding is per dimension: a sound `budgetTokens` survives a corrupt
+   * `budgetUsd`.
+   */
+  private readPersistedSettings(runId: string): {
+    mode: RuntimeCapabilityMode | null;
+    overrides: RunBudgetLimits;
+    fallback: SettingsFallback | null;
+  } {
+    if (!existsSync(this.metadataPath(runId))) return { mode: null, overrides: {}, fallback: null };
+    let metadata: FacadeRunMetadata;
     try {
-      const metadata = this.readMetadata(runId);
-      const tokens = DaemonService.budgetOrUndefined(metadata.budgetTokens, true);
-      const usd = DaemonService.budgetOrUndefined(metadata.budgetUsd, false);
+      metadata = this.readMetadata(runId);
+    } catch {
       return {
+        mode: null,
+        overrides: {},
+        fallback: { reasons: ["facade_unreadable"], requestedMode: null },
+      };
+    }
+    const reasons: SettingsFallbackReason[] = [];
+    let mode: RuntimeCapabilityMode | null = null;
+    if (metadata.runtime !== undefined) {
+      try {
+        mode = parseRuntimeMode(metadata.runtime);
+      } catch {
+        reasons.push("runtime_invalid");
+      }
+    }
+    const tokens = DaemonService.budgetOrUndefined(metadata.budgetTokens, true);
+    const usd = DaemonService.budgetOrUndefined(metadata.budgetUsd, false);
+    if (metadata.budgetTokens !== undefined && tokens === undefined) reasons.push("budget_tokens_invalid");
+    if (metadata.budgetUsd !== undefined && usd === undefined) reasons.push("budget_usd_invalid");
+    return {
+      mode,
+      overrides: {
         ...(tokens === undefined ? {} : { budgetTokens: tokens }),
         ...(usd === undefined ? {} : { budgetUsd: usd }),
-      };
-    } catch {
-      return null;
-    }
+      },
+      fallback: reasons.length === 0 ? null : { reasons, requestedMode: mode },
+    };
   }
 
-  private persistedRuntimeMode(runId: string): RuntimeCapabilityMode | null {
-    if (!existsSync(this.metadataPath(runId))) return null;
-    try {
-      const runtime = this.readMetadata(runId).runtime;
-      return runtime === undefined ? null : parseRuntimeMode(runtime);
-    } catch {
-      return null;
-    }
+  /**
+   * Once per run, because `runSettings` caches the resolution that produced it and this is the
+   * only caller. A second dedupe set would guarantee the same property twice and be observable
+   * from neither side.
+   */
+  private recordSettingsFallback(runId: string, fallback: SettingsFallback): void {
+    const effectiveMode = fallback.requestedMode ?? this.config.runtimeValidation.mode;
+    this.store.events.append([{
+      id: id("evt", this.clock.now()),
+      runId,
+      ts: this.clock.now(),
+      type: "run.settings_fallback",
+      payload: {
+        reason: fallback.reasons.join(","),
+        requestedMode: fallback.requestedMode,
+        effectiveMode,
+      },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
   }
 
   private runDir(runId: string): string {

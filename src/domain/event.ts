@@ -12,6 +12,7 @@ export const KNOWN_EVENT_TYPES = [
   "run.phase_changed",
   "run.control_changed",
   "run.terminated",
+  "run.settings_fallback",
   "mission.recorded",
   "mission.interpreted",
   "project.discovered",

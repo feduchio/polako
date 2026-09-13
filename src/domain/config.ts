@@ -294,6 +294,7 @@ export function withRuntimeValidationMode(
   base: PolishConfig,
   mode: RuntimeValidationConfig["mode"],
 ): PolishConfig {
-  if (base.runtimeValidation.mode === mode) return base;
+  // Unconditional. Returning `base` when the modes happen to match hands the caller the shared
+  // config object, and that case is exactly the one a default-mode run takes.
   return { ...base, runtimeValidation: { ...base.runtimeValidation, mode } };
 }

@@ -17,7 +17,7 @@ import { costEligibilityFromConfig, isCostEligible } from "../broker/costEligibi
 import { ModelObservationRepository } from "../broker/observations.js";
 import { DEFAULT_ROUTER_POLICY, ModelRouter, type Ranked } from "../broker/router.js";
 import type { EnsembleOption } from "../convergence/tracker.js";
-import { BudgetTracker, QuotaTracker } from "../broker/quota.js";
+import { BudgetTracker, QuotaTracker, type BudgetLimits } from "../broker/quota.js";
 import { SecretStore } from "../broker/secrets.js";
 import type { ProviderAdapter } from "../broker/types.js";
 import { createResilientCouncilClient } from "../council/fallback.js";
@@ -115,8 +115,20 @@ export interface ProductionDeps {
   /** Loaded once: `ProtocolRegistry.load` is synchronous file IO over every protocol directory. */
   protocols: ProtocolRegistry;
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
-  /** A run's own `--budget-tokens` / `--budget-usd`, empty when it has none. */
-  resolveRunBudget?: (runId: string) => RunBudgetLimits;
+  /** The daemon's single resolution of a run's settings. See `DaemonService.resolveRunSettings`. */
+  resolveRunSettings?: (runId: string) => ResolvedRunSettings;
+}
+
+/**
+ * What a run's settings resolve to, once, for every consumer. Produced only by
+ * `DaemonService.resolveRunSettings`; declared here because this is where the consumers are.
+ */
+export interface ResolvedRunSettings {
+  config: PolishConfig;
+  /** The limits that bind. */
+  budget: BudgetLimits;
+  /** What the user asked for. `unusedCliMetadata` needs it and `budget` cannot express it. */
+  overrides: RunBudgetLimits;
 }
 
 export interface BuildProductionDepsOptions {
@@ -126,7 +138,7 @@ export interface BuildProductionDepsOptions {
   home: string;
   providers?: ProviderAdapter[];
   resolveSandbox?: (ctx: PhaseContext) => Sandbox;
-  resolveRunBudget?: (runId: string) => RunBudgetLimits;
+  resolveRunSettings?: (runId: string) => ResolvedRunSettings;
   /** Defaults to `defaultProtocolsRoot()`; `ProtocolRegistry.load` already takes a root. */
   protocolsRoot?: string;
 }
@@ -189,13 +201,9 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     clock: options.clock,
     catalog,
     quota: new QuotaTracker(options.clock, { concurrency: options.config.lanes["llm.default"], rpm: null }),
-    // One resolution of a run's overrides feeds both enforcement surfaces: the tracker here
-    // and C2's view through `ctx.config`, which `DaemonService.runConfig` derives the same way.
-    budget: new BudgetTracker(options.config.budget, (runId) => {
-      const overrides = options.resolveRunBudget?.(runId) ?? {};
-      if (hasNoRunBudget(overrides)) return null;
-      return applyRunBudgetOverrides(options.config, overrides).budget;
-    }),
+    // One resolution of a run's settings feeds every surface: the tracker here, C2's view
+    // through `ctx.config`, and the CLI-budget metadata below. No second merge site.
+    budget: new BudgetTracker(options.config.budget, (runId) => options.resolveRunSettings?.(runId).budget ?? null),
     secrets,
     observations,
   });
@@ -212,7 +220,7 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     protocols: loadProtocolsOrExplain(options.protocolsRoot ?? defaultProtocolsRoot()),
     catalog,
     broker,
-    ...(options.resolveRunBudget === undefined ? {} : { resolveRunBudget: options.resolveRunBudget }),
+    ...(options.resolveRunSettings === undefined ? {} : { resolveRunSettings: options.resolveRunSettings }),
     router: new ModelRouter(catalog, {
       ...DEFAULT_ROUTER_POLICY,
       costEligibility: costEligibilityFromConfig(options.config.routing),
@@ -400,7 +408,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
     "CONVERGENCE_CHECK",
     createConvergenceDriver({
       resolveEnsembleAlternatives: (ctx) => resolveEnsembleAlternatives(deps, ctx),
-      resolveCliBudget: (ctx) => deps.resolveRunBudget?.(ctx.run.id),
+      resolveCliBudget: (ctx) => deps.resolveRunSettings?.(ctx.run.id).overrides,
     }),
   );
 }
