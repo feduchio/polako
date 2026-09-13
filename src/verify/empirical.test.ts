@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
-import { ProviderError } from "../broker/types.js";
+import { ProviderError, type ProviderAdapter } from "../broker/types.js";
+import { DISABLED_REASONING, EMPIRICAL_SCORE_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 import { defaultProtocolsRoot, ProtocolRegistry } from "../protocols/loader.js";
 import {
   EmpiricalVerifier,
@@ -105,6 +106,7 @@ describe("EmpiricalVerifier", () => {
       fallback: false,
       rationale: "Empirical PPT: 1 unique pairs, 8 evaluations, 2 criteria.",
     });
+    expect(result.criteria).toEqual(["one criterion", "overall correctness"]);
     expect(first.calls).toHaveLength(4);
     expect(second.calls).toHaveLength(4);
     for (const calls of [first.calls, second.calls]) {
@@ -115,7 +117,45 @@ describe("EmpiricalVerifier", () => {
     expect(system).toContain("Protocol: base");
     expect(system).toContain("Protocol: bugfix");
     expect(system).toContain("Protocol: judge");
+    expect(system).toContain("supplies the empirical pair-score schema");
+    expect(system).toContain("Do not emit rationale");
     expect(system).toContain("scoreA and scoreB");
+    expect(first.calls.every((call) =>
+      call.responseSchema === EMPIRICAL_SCORE_RESPONSE_SCHEMA &&
+      call.reasoning === DISABLED_REASONING)).toBe(true);
+  });
+
+  it("pins the global family schedule instead of merely per-provider call counts", async () => {
+    const order: string[] = [];
+    const provider = (id: string): ProviderAdapter => ({
+      id,
+      kind: "scripted",
+      concurrency: 1,
+      listModels: () => Promise.resolve([]),
+      health: () => Promise.resolve({ ok: true, checkedAt: 1 }),
+      complete: (request) => {
+        order.push(id);
+        const swapped = request.messages[1]?.content.includes('"candidateA":{"id":"b"') === true;
+        return Promise.resolve({
+          message: { role: "assistant", content: JSON.stringify(swapped ? { scoreA: 0, scoreB: 4 } : { scoreA: 4, scoreB: 0 }) },
+          usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+          finishReason: "stop",
+          latencyMs: 1,
+        });
+      },
+    });
+    const strategy = new EmpiricalVerifier({
+      models: [
+        { provider: provider("p0"), model: { provider: "p0", model: "m0" }, family: "family-a" },
+        { provider: provider("p1"), model: { provider: "p1", model: "m1" }, family: "family-b" },
+      ],
+      protocols: PROTOCOLS,
+    });
+    await strategy.selectFrontier(
+      [candidate("a"), candidate("b")],
+      { runId: "run_test", taskKind: "bugfix", task: "one" },
+    );
+    expect(order).toEqual(["p0", "p0", "p1", "p1", "p0", "p0", "p1", "p1"]);
   });
 
   it("pins sigmoid mass to independent literals", () => {
@@ -176,6 +216,57 @@ describe("EmpiricalVerifier", () => {
       ["g", "h"], ["a", "h"], ["a", "d"], ["a", "e"], ["c", "e"], ["a", "f"],
       ["c", "f"], ["a", "g"], ["c", "g"], ["c", "h"], ["a", "c"],
     ]);
+  });
+
+  it("executes the N=4 pivot phase and ranks by mass divided by comparison count", async () => {
+    const calls: string[] = [];
+    const provider = (id: string): ProviderAdapter => ({
+      id,
+      kind: "scripted",
+      concurrency: 1,
+      listModels: () => Promise.resolve([]),
+      health: () => Promise.resolve({ ok: true, checkedAt: 1 }),
+      complete: (request) => {
+        calls.push(id);
+        const content = request.messages[1]?.content ?? "";
+        const packet = JSON.parse(content.slice(content.indexOf("\n") + 1)) as {
+          candidateA: { id: string };
+          candidateB: { id: string };
+        };
+        const preferred = new Set(["a", "c"]);
+        const aPreferred = preferred.has(packet.candidateA.id);
+        const bPreferred = preferred.has(packet.candidateB.id);
+        const scores = aPreferred === bPreferred
+          ? { scoreA: 4, scoreB: 4 }
+          : aPreferred ? { scoreA: 4, scoreB: 0 } : { scoreA: 0, scoreB: 4 };
+        return Promise.resolve({
+          message: { role: "assistant", content: JSON.stringify(scores) },
+          usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+          finishReason: "stop",
+          latencyMs: 1,
+        });
+      },
+    });
+    const strategy = new EmpiricalVerifier({
+      models: [
+        { provider: provider("p0"), model: { provider: "p0", model: "m0" }, family: "family-a" },
+        { provider: provider("p1"), model: { provider: "p1", model: "m1" }, family: "family-b" },
+      ],
+      protocols: PROTOCOLS,
+    });
+    const result = await strategy.selectFrontier(
+      ["a", "b", "c", "d"].map((id) => candidate(id)),
+      { runId: "run_test", taskKind: "bugfix", task: "one" },
+    );
+    expect(result.nComparisons).toBe(5);
+    expect(calls).toHaveLength(40);
+    expect(result.ranking.slice(0, 2)).toEqual(["a", "c"]);
+    expect(result.scores).toEqual({
+      a: 0.6540390524200033,
+      c: 0.6540390524200033,
+      b: 0.2689414213699951,
+      d: 0.2689414213699951,
+    });
   });
 
   it("truncates N=3 to four criteria and hard-stops at 48 calls", async () => {

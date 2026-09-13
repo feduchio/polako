@@ -54,8 +54,10 @@ describe("B-selfhost-3 multi-task DONE", () => {
       fixture = await repositoryFixture();
       store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
       clock = new FakeClock(NOW);
-      const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 60_000 });
-      engine = new RunEngine({ store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined }, false);
+      const config = defaultConfig();
+      config.verifier.backend = "ts";
+      const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+      engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
       for (const phase of [
         "CREATED",
         "DISCOVERING_PROJECT",
@@ -133,9 +135,11 @@ describe("B-selfhost-3 multi-task DONE", () => {
       const fixture = await repositoryFixture();
       const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
       const clock = new FakeClock(NOW);
-      const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 60_000 });
+      const config = defaultConfig();
+      config.verifier.backend = "ts";
+      const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
       const provider = dropAllCouncil();
-      const engine = new RunEngine({ store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined }, false);
+      const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
       for (const phase of [
         "CREATED",
         "DISCOVERING_PROJECT",
@@ -253,10 +257,12 @@ describe("B-selfhost-3 multi-task DONE", () => {
       const fixture = await repositoryFixture();
       const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
       const clock = new FakeClock(NOW);
-      const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 60_000 });
+      const config = defaultConfig();
+      config.verifier.backend = "ts";
+      const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
       const provider = dropAllCouncil();
       const options = passDriverOptions(fixture);
-      const engine = new RunEngine({ store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined }, false);
+      const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
       for (const phase of [
         "CREATED",
         "DISCOVERING_PROJECT",

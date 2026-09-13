@@ -7,6 +7,7 @@ import type { ModelInfo, ProviderAdapter } from "./types.js";
 import { ProviderError } from "./types.js";
 import { id } from "../shared/ids.js";
 import { parseModelRefString } from "../daemon/configLoad.js";
+import { DISABLED_REASONING } from "./responseSchemas.js";
 
 const RUN = id("run");
 
@@ -55,6 +56,7 @@ describe("probeModelCapabilities", () => {
       runId: RUN,
       strictComplete: (request) => {
         purposes.push(request.metadata.purpose);
+        expect(request.reasoning).toEqual(DISABLED_REASONING);
         return Promise.resolve({
           message: {
             role: "assistant",

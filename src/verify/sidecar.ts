@@ -480,7 +480,10 @@ export function createVerifierStrategy(
   options: VerifierSidecarOptions = {},
 ): VerifierStrategy {
   const fallback = options.fallback ?? new PairwiseJudge();
-  if (verifier.backend === "ts" || verifier.backend === "empirical") return fallback;
+  if (verifier.backend === "ts") return fallback;
+  if (verifier.backend === "empirical") {
+    throw new Error("empirical verifier requires production broker and protocol injection");
+  }
   return new VerifierAdapter({
     ...options,
     fallback,

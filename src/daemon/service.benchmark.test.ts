@@ -120,6 +120,26 @@ describe("benchmark.review RPC", () => {
       await service.close();
     }
   });
+
+  it("forwards the legacy transport control through RPC", async () => {
+    const home = mkdtempSync(join(tmpdir(), "polish-benchmark-legacy-"));
+    cleanup.push(home);
+    const nex = benchmarkProvider("nex", "nex-agi/a:free", "nex-agi");
+    const nvidia = benchmarkProvider("nvidia", "nvidia/a:free", "nvidia");
+    const service = new DaemonService({ home, providers: [nex, nvidia] });
+    try {
+      const result = await service.handle("benchmark.review", {
+        seed: 43,
+        transport: "legacy",
+      }) as { report: { transportMode: string } };
+      expect(result.report.transportMode).toBe("legacy_json_object");
+      expect([...nex.calls, ...nvidia.calls].every((call) =>
+        call.responseFormat === "json" &&
+        call.responseSchema === undefined)).toBe(true);
+    } finally {
+      await service.close();
+    }
+  });
 });
 
 interface BenchmarkProvider extends ProviderAdapter {
@@ -136,7 +156,6 @@ function benchmarkProvider(id: string, model: string, family: string): Benchmark
       maxOutputTokens: 2_000,
       supportsTools: false,
       supportsJson: true,
-      supportsStrictReviewSchema: true,
       inputCostPerM: 0,
       outputCostPerM: 0,
       tier: "fast",

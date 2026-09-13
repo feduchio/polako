@@ -71,6 +71,12 @@ function adapter(env: NodeJS.ProcessEnv, timeoutMs = 8_000): VerifierAdapter {
 }
 
 describe("VerifierAdapter", () => {
+  it("refuses to fake empirical scoring without broker/protocol injection", () => {
+    expect(() => createVerifierStrategy(defaultConfig().verifier)).toThrow(
+      "empirical verifier requires production broker and protocol injection",
+    );
+  });
+
   it("falls back to TypeScript pairwise scoring when the sidecar is down", async () => {
     const down = new VerifierAdapter({
       command: "__polish_missing_python__",
@@ -145,6 +151,8 @@ describe("VerifierAdapter real Python child", () => {
     expect(result.fallback).toBe(false);
     expect(result.winnerId).toBe("p4");
     expect(result.client).toBe("scripted");
+    expect(result.claimedLogprobScheme).toBe("direct");
+    expect(result.logprobScheme).toBeUndefined();
     expect(sidecar.lastProvenance.client).toBe("scripted");
     expect(result.nComparisons).toBeGreaterThanOrEqual(frontier.length);
     expect(result.nComparisons).toBeLessThan(frontier.length * (frontier.length - 1));

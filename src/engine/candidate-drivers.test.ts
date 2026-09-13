@@ -49,9 +49,11 @@ describe("B2 production candidate drivers", () => {
     fixture = await repositoryFixture();
     store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
     clock = new FakeClock(1_700_000_000_000);
-    sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: defaultConfig().lanes, leaseMs: 60_000 });
+    const config = defaultConfig();
+    config.verifier.backend = "ts";
+    sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
     driverOptions = buildDriverOptions(fixture);
-    engine = new RunEngine({ store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined }, false);
+    engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
     for (const phase of ["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "PLANNING", "REVIEWING", "VALIDATING", "CONVERGENCE_CHECK"] as const) {
       engine.registerPhase(phase, stubDriverFor(phase));
     }

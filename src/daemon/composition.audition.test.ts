@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultConfig, PolishConfigSchema, type PolishConfig } from "../domain/config.js";
 import type { PhaseContext } from "../engine/types.js";
-import type { ModelCapabilities } from "../broker/types.js";
+import { ProviderError, type ModelCapabilities } from "../broker/types.js";
 import { FAKE_CAPABILITIES, reply, ScriptedProvider } from "../providers/scripted.js";
 import { Scheduler } from "../scheduler/index.js";
 import { FakeClock } from "../shared/clock.js";
@@ -160,6 +160,7 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
     const scoreSchemaHash = hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA);
     const observations = new ModelObservationRepository(store);
     const inside = { provider: provider.id, model: "inside" };
+    expect(strictProbeEpochComplete(deps, ctx)).toBe(false);
     observations.recordStrictProbe(inside, {
       schema: "review",
       schemaHash: reviewSchemaHash,
@@ -186,6 +187,39 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
       schemaHash: scoreSchemaHash,
       supported: false,
       at: clock.now() + 1,
+    });
+    expect(strictProbeEpochComplete(deps, ctx)).toBe(true);
+  });
+
+  it("persists strict probe failures as unsupported and routes from that state", async () => {
+    const config = defaultConfig();
+    const provider = new ScriptedProvider(
+      "scripted",
+      [{ name: "free", capabilities: FREE }],
+      { autoStrictProbes: false },
+    );
+    provider.script("free", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t", name: "probe_ping", arguments: "{}" }] },
+      { kind: "error", error: new ProviderError("scripted", "bad_request", "strict review rejected") },
+      { kind: "error", error: new ProviderError("scripted", "timeout", "strict score timed out") },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+    });
+    const ctx = phaseContext(store, clock, config);
+    await createDiscoveringModelsDriverFromCatalog(deps)(ctx);
+    const strict = new ModelObservationRepository(store).list()
+      .filter((row) => row.kind === "strict_probe");
+    expect(strict).toHaveLength(2);
+    expect(strict.every((row) => !row.supported)).toBe(true);
+    expect(deps.catalog.get({ provider: "scripted", model: "free" })?.info.capabilities).toMatchObject({
+      supportsStrictReviewSchema: false,
+      supportsStrictScoreSchema: false,
     });
     expect(strictProbeEpochComplete(deps, ctx)).toBe(true);
   });

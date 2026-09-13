@@ -83,7 +83,7 @@ describe("review benchmark runner", () => {
         info("p", "z", "family-a", free),
         info("p", "a", "family-a", free),
         info("p", "b", "family-b", free),
-        info("p", "unprobed", "family-c", { ...free, supportsStrictReviewSchema: false }),
+        info("p", "unprobed", "family-0", { ...free, supportsStrictReviewSchema: false }),
       ],
     }]);
     expect(selected.map((item) => item.model.model)).toEqual(["a", "b"]);

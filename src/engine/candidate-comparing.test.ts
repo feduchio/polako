@@ -370,6 +370,9 @@ describe("B3 production comparing driver", () => {
     extra: { resolveVerifierStrategy?: () => VerifierStrategy } = {},
     config: PolishConfig = defaultConfig(),
   ): RunEngine {
+    if (extra.resolveVerifierStrategy === undefined && config.verifier.backend === "empirical") {
+      config.verifier.backend = "ts";
+    }
     const engine = new RunEngine({
       store,
       clock,

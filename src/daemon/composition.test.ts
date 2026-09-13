@@ -31,6 +31,9 @@ import { createInvestigationTask, createTaskFromRequirement } from "../domain/ta
 import { id } from "../shared/ids.js";
 import type { PhaseContext } from "../engine/types.js";
 import { AgentRunner } from "../agents/runner.js";
+import { ModelObservationRepository } from "../broker/observations.js";
+import { EMPIRICAL_SCORE_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { hashJson } from "../shared/hash.js";
 
 describe("production composition", () => {
   let dir: string;
@@ -121,6 +124,14 @@ describe("production composition", () => {
       outputCostPerM: 0,
     };
     const provider = new ScriptedProvider("scores", [
+      {
+        name: "unprobed",
+        capabilities: {
+          ...capabilities,
+          family: "family-0",
+          supportsStrictScoreSchema: false,
+        },
+      },
       { name: "z", capabilities: { ...capabilities, family: "family-a" } },
       { name: "a", capabilities: { ...capabilities, family: "family-a" } },
       { name: "b", capabilities: { ...capabilities, family: "family-b" } },
@@ -135,6 +146,12 @@ describe("production composition", () => {
       kind: "fn",
       fn: () => {
         throw new Error("higher-quality duplicate family model must not replace lexicographic first");
+      },
+    }]);
+    provider.script("unprobed", [{
+      kind: "fn",
+      fn: () => {
+        throw new Error("unprobed score model must not be selected");
       },
     }]);
     const deps = buildProductionDeps({
@@ -209,6 +226,23 @@ describe("production composition", () => {
       `${(event.payload["model"] as { provider: string; model: string }).provider}:${(event.payload["model"] as { provider: string; model: string }).model}`))).toEqual(
       new Set(["scores:a", "scores:b"]),
     );
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId: run.id,
+      ts: clock.now(),
+      type: "model.call",
+      payload: {
+        model: { provider: "scores", model: "a" },
+        role: "probe",
+        purpose: "capability_probe_strict_score",
+        taskId: task.id,
+        attempts: 48,
+        ok: true,
+      },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
 
     for (let iteration = 1; iteration < 6; iteration++) {
       const next = await resolveProductionVerifier(deps, ctx, task);
@@ -301,6 +335,73 @@ describe("production composition", () => {
     ], { runId: run.id, taskId: task.id, taskKind: task.kind, task: task.description, acceptance: task.acceptance });
     expect(result?.fallback).toBe(true);
     expect(provider.calls).toHaveLength(0);
+  });
+
+  it("restores persisted score probes before selecting verifier models after restart", async () => {
+    const config = defaultConfig();
+    const free = {
+      ...FAKE_CAPABILITIES.strong,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const provider = new ScriptedProvider("scores", [
+      { name: "a", capabilities: { ...free, family: "family-a" } },
+      { name: "b", capabilities: { ...free, family: "family-b" } },
+    ]);
+    const responses = Array.from({ length: 4 }, (_, index) => ({
+      kind: "reply" as const,
+      content: JSON.stringify(index % 2 === 0 ? { scoreA: 4, scoreB: 0 } : { scoreA: 0, scoreB: 4 }),
+    }));
+    provider.script("a", responses);
+    provider.script("b", responses);
+    const deps = buildProductionDeps({ store, clock, config, home: join(dir, "home"), providers: [provider] });
+    const observations = new ModelObservationRepository(store);
+    const schemaHash = hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA);
+    observations.recordStrictProbe({ provider: "scores", model: "a" }, {
+      schema: "score",
+      schemaHash,
+      supported: true,
+      at: 1,
+    });
+    observations.recordStrictProbe({ provider: "scores", model: "b" }, {
+      schema: "score",
+      schemaHash,
+      supported: true,
+      at: 2,
+    });
+    const engine = new RunEngine({
+      store,
+      clock,
+      scheduler: new Scheduler(store, clock, { workerId: "w", laneLimits: config.lanes, leaseMs: 60_000 }),
+      config,
+      assertProjectClean: () => undefined,
+    }, false);
+    const run = engine.createRun({ projectPath: dir });
+    const task = createTaskFromRequirement(id("interp", clock.now()), "R1", {
+      id: id("task", clock.now()),
+      runId: run.id,
+      title: "Compare",
+      description: "one",
+      kind: "bugfix",
+      acceptance: ["works"],
+      complexity: "normal",
+      baseCheckpointHash: "a".repeat(40),
+      now: clock.now(),
+    });
+    const ctx = {
+      run,
+      store,
+      scheduler: new Scheduler(store, clock, { workerId: "w2", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock,
+      config,
+    } satisfies PhaseContext;
+    const strategy = await resolveProductionVerifier(deps, ctx, task);
+    const result = await strategy.selectFrontier?.([
+      { id: "a", diff: "+a", metrics: { candidateId: "a", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] } },
+      { id: "b", diff: "+b", metrics: { candidateId: "b", filesChanged: 1, linesChanged: 1, insertions: 1, deletions: 0, checksPassed: 1, checksTotal: 1, newFailures: 0, newFailureKeys: [] } },
+    ], { runId: run.id, taskId: task.id, taskKind: task.kind, task: task.description, acceptance: task.acceptance });
+    expect(result?.fallback).toBe(false);
+    expect(provider.calls).toHaveLength(8);
   });
 
   it("buildProductionDeps discovers models with capability probes", async () => {
