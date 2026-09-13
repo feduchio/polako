@@ -207,21 +207,29 @@ describe("RunObserver projection", () => {
     const usage = (costUsd: unknown): Record<string, unknown> =>
       ({ inputTokens: 4, outputTokens: 1, ...(costUsd === "absent" ? {} : { costUsd }) });
     const view = projectRunStatus(run, [
+      // Three priced calls. `0` and a negative are finite, so MC2 prices them: the free tier
+      // really does report `costUsd: 0`, and the neighbouring fold's `finiteNonnegative` is the
+      // predicate an implementer would reach for by mistake.
       evt(0, "model.call", { callId: "priced", usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.25 } }, NOW - 9_000),
-      // Five shapes of "reported usage, no usable price". Each must count.
-      evt(1, "model.call", { callId: "u-null", usage: usage(null) }, NOW - 8_900),
-      evt(2, "model.call", { callId: "u-absent", usage: usage("absent") }, NOW - 8_800),
-      evt(3, "model.call", { callId: "u-nan", usage: usage(Number.NaN) }, NOW - 8_700),
-      evt(4, "model.call", { callId: "u-inf", usage: usage(Number.POSITIVE_INFINITY) }, NOW - 8_600),
-      evt(5, "model.call", { callId: "u-str", usage: usage("0.5") }, NOW - 8_500),
+      evt(1, "model.call", { callId: "priced-zero", usage: usage(0) }, NOW - 8_950),
+      evt(2, "model.call", { callId: "priced-negative", usage: usage(-0.05) }, NOW - 8_920),
+      // Six events of "reported usage, no usable price". Each must count — including the repeated
+      // `callId`, because `usdUsage` folds events and does not deduplicate the way
+      // `foldModelCallUsage` deliberately does.
+      evt(3, "model.call", { callId: "u-null", usage: usage(null) }, NOW - 8_900),
+      evt(4, "model.call", { callId: "u-null", usage: usage(null) }, NOW - 8_850),
+      evt(5, "model.call", { callId: "u-absent", usage: usage("absent") }, NOW - 8_800),
+      evt(6, "model.call", { callId: "u-nan", usage: usage(Number.NaN) }, NOW - 8_700),
+      evt(7, "model.call", { callId: "u-inf", usage: usage(Number.POSITIVE_INFINITY) }, NOW - 8_600),
+      evt(8, "model.call", { callId: "u-str", usage: usage("0.5") }, NOW - 8_500),
       // Two calls that reported no usage at all. They spent nothing, so they are not unpriced
       // spend. The count differs from the class above, so swapping the two is visible.
-      evt(6, "model.call", { callId: "no-usage-a", usage: null }, NOW - 8_400),
-      evt(7, "model.call", { callId: "no-usage-b" }, NOW - 8_300),
+      evt(9, "model.call", { callId: "no-usage-a", usage: null }, NOW - 8_400),
+      evt(10, "model.call", { callId: "no-usage-b" }, NOW - 8_300),
     ], NOW);
-    expect(view.resources.usd).toBe(0.25);
-    expect(view.resources.unpricedCalls).toBe(5);
-    expect(renderRunStatus(view)).toContain("(+5 unpriced)");
+    expect(view.resources.usd).toBeCloseTo(0.2, 10);
+    expect(view.resources.unpricedCalls).toBe(6);
+    expect(renderRunStatus(view)).toContain("(+6 unpriced)");
   });
 
   it("says nothing about unpriced calls when every call carried a price", () => {
