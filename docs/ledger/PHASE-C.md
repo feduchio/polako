@@ -27,7 +27,8 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | B-selfhost-8 accepted | `14beb802857fde8a5251404dc518301cb5b1a0a4` on `task/B-selfhost-8-integration` | Bounded B finding 8 only. |
 | B-selfhost-9+19 accepted | `9e157e1a0a5d7369f2be905d8c36121789e09087` on `task/B-selfhost-9-19-integration` | Bounded B findings 9 and 19, plus finding 23's reviewer half. |
 | B-selfhost-18 accepted | `8ea156db5207c5b159869b6e8ea2620c628b932f` on `task/B-selfhost-18-integration` | Bounded B finding 18. |
-| B-selfhost-29 accepted (next HOST) | `3d718313e8c341432e2c20d636d55bad2c3282eb` on `task/B-selfhost-29-integration` | Run economics and review productivity report. Phase B not fully closed. Phase C not accepted. |
+| B-selfhost-29 accepted | `3d718313e8c341432e2c20d636d55bad2c3282eb` on `task/B-selfhost-29-integration` | Run economics and review productivity report. |
+| B-selfhost-42 accepted (next HOST) | `b055c81a6f1c42c0b14bede314803ae2f4d32309` on `task/B-selfhost-42-integration` | Blinded reviewer-quality benchmark. Phase B not fully closed. Phase C not accepted. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -40,8 +41,8 @@ Donor C/D files that exist only on `main` (pathology, debate, audition, native C
 
 Source of truth: `docs/ledger/B-selfhost-remaining.md`. Not deferred, not optional, not relabeled as C.
 
-Open order: **42** unbiased reviewer-quality corpus; **31** validated explicit state and A/B against
-item 18; **32 + 34 + 44** verifier scoring/sidecar and structured-output removal; **35 + 23**
+Open order: **31** validated explicit state and A/B against item 18; **32 + 34 + 44** verifier
+scoring/sidecar and structured-output removal; **35 + 23**
 progress/no-progress stopping; **30** repair the two older accounting folds; then **11–15**, plus
 **16, 17, 21, 22, 24, 25** at their existing seams. Findings **26, 27, 28, 43, 45** remain recorded
 inputs to those tasks. Items **3–9, 18, 19, 29, 37, 39, 41** ACCEPTED or fixed.

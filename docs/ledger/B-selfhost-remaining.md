@@ -363,7 +363,9 @@ terminally instead. Advancing to `VALIDATING` with a round nobody reviewed would
 checkpoint into convergence, which is a worse failure than stopping; and `REVIEWING` has no third
 exit. Recorded as a deliberate departure rather than silently satisfied.
 
-**42. Review quality is still unmeasured, and my own probe was contaminated.** The first probe that
+**42. ~~Review quality is still unmeasured, and my own probe was contaminated.~~ ACCEPTED** as
+`docs/ledger/B-selfhost-42.md` at `b055c81a6f1c42c0b14bede314803ae2f4d32309`; live report
+`docs/ledger/B-selfhost-42-run.md`. The first probe that
 "proved" free models find real defects listed, among its acceptance criteria, *"the budget guard
 must not admit a spend equal to the cap when the cap is exclusive elsewhere"* — which is the
 finding. I had written the answer into the question. Re-probed with a single honest criterion
@@ -416,7 +418,9 @@ overconfident. Cite file:line or command evidence."
     already persists `error`, so item 29's report must group failures by cause and show shape
     rejections as their own class rather than burying them in a total.
 
-45. **Finding 42 partly answered, and positively: the reviewers do find real defects.** Given an
+45. **MEASURED by accepted item 42.** The reviewers do find real defects, but the free two-model
+    team is not yet suitable for gating: 82.6% primary recall, 60.0% clean-site false positives and
+    36.8% pair discrimination on the blinded eight-pair corpus. Originally: given an
     honest acceptance criterion -- "remaining must never report a negative amount", which states a
     property without naming the defect -- both free models independently found that
     `remaining(spent, cap) { return cap - spent }` returns a negative value when `spent > cap`, both
