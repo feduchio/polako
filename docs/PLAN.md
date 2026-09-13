@@ -547,6 +547,8 @@ invariant amendment: the `RepositoryIntelligence` seam and `BasicIntel` remain.
 | task ids comparable across runs | ids carry random bytes (`src/shared/ids.ts:17-31`); compare titles |
 | role buckets as reserved keys in `perTask` | a separate `perRole` field; `exhaustedDimensions` iterates every `perTask` key |
 | corpus artifact bytes come from validation evidence | they come from the winning candidate's regression test file after integration |
+| `889b62d` appears nowhere in the ledger | it is the frozen base in `B-selfhost-35-23.md:3` and `B-selfhost-35-23-run.md:7`; what was missing from `PHASE-C.md` was the integrated HOST `4c5bb63` |
+| the stale `916f7f2` base is a repo file | it is a Cursor user rule; every repo occurrence is a legitimate historical record |
 
 ## 9. Verification process v2
 
@@ -592,15 +594,32 @@ found defects in rounds 5, 7, 9 and 11; twelve of item 18's last thirteen findin
 **Machine load.** Reviewers run one at a time. The coordinator runs no gate while a reviewer works.
 Gates use `--maxWorkers=2`, never bare `pnpm check`; `vitest.config.ts` sets `pool: "forks"`.
 
-## 10. Prerequisite checklist — no code, ~2 h
+## 10. Prerequisite checklist — DONE 2026-09-13, no code
 
-1. Reconcile `docs/ledger/PHASE-C.md` with `git log`: HOST is `4c5bb63`; merge commit `889b62d`
-   appears nowhere in the ledger; the reviewer-lane statement contradicts itself between the
-   2026-09-04 header and the item-18 note, and changed again when the coordinator model changed.
-2. Correct the stale user rule naming `916f7f2` as the base; it is nine items behind.
-3. Record process v2 (§9) in `docs/BVP.md`, including that its own two-round bound was never
-   honoured and what replaces it.
-4. Write §11 into `docs/ledger/B-selfhost-remaining.md` in one pass, as an archival appendix.
+1. **DONE.** `docs/ledger/PHASE-C.md` reconciled with `git log`. Added a supersession banner pointing
+   here; added `4c5bb63` as the current HOST with its gate result; recorded the intermediate merge
+   commits `889b62d`, `34c3cd4`, `4c5bb63`, because the trusted-generations table previously listed
+   only candidate-branch commits and the integrated HOST could not be identified from that file;
+   replaced the hardcoded reviewer pair with a family-exclusion rule.
+   **One claim in revision 5 of this document was wrong:** `889b62d` does *not* appear nowhere in the
+   ledger — it is the frozen base cited by `docs/ledger/B-selfhost-35-23.md:3` and
+   `B-selfhost-35-23-run.md:7`. What was missing from `PHASE-C.md` was the integrated HOST `4c5bb63`.
+2. **BLOCKED — requires the user.** The stale base is in a **Cursor user rule**, not in this
+   repository. Every `916f7f2` occurrence in the tree is a legitimate historical record: it is
+   B-selfhost-5's acceptance commit (`PHASE-C.md:24`, `B-selfhost-remaining.md:19`,
+   `B-selfhost-5-run.md`) and a row in `docs/ledger/task-provenance.md`. There is no tool available
+   for editing user rules. The rule text to change is:
+   *"Exact base = latest accepted HOST (currently B-selfhost-5 `916f7f2` until superseded)"* →
+   **`4c5bb63`**. Better still, replace the pinned hash with *"latest accepted HOST per the
+   trusted-generations table in `docs/ledger/PHASE-C.md`"*, so it cannot go stale again. The same rule
+   also names an execution order that this document supersedes.
+3. **DONE.** Process v2 recorded in `docs/BVP.md` as a section preceding Level 1, with Level 1 marked
+   historical, its §6 two-round bound annotated as never honoured (A2 7, A3 7, A6 9, B-selfhost-8 26,
+   B-selfhost-18 15), and two new degeneration signals added: commits touching no non-test file while
+   findings keep arriving, and test volume out of proportion to the production change.
+4. **DONE.** §11 written into `docs/ledger/B-selfhost-remaining.md` as an archival appendix, with the
+   finding-31 accepted-risk entry and a short section on the two findings that changed the plan rather
+   than the code.
 
 ## 11. Disposition of the 45 findings
 

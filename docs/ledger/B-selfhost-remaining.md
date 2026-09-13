@@ -467,3 +467,73 @@ overconfident. Cite file:line or command evidence."
     quality A/B claim. Raw review remains unsuitable for production gating; full provenance is in
     `docs/ledger/B-selfhost-32-34-44-run.md`.
 
+
+---
+
+# ARCHIVAL APPENDIX — disposition of all 45 findings, 2026-09-13
+
+**This file is no longer a schedule.** The finding-number namespace 3–45 is retired. Numbers 3–28
+were assigned in the order defects were *discovered* in the Phase-B re-anchor chat; numbers 29–45
+were minted from measurements on 2026-09-12/13. The execution order built on those numbers was
+rewritten five times, each time "on measurement", which is why the order stopped being legible.
+
+The schedule is now `docs/PLAN.md` (plan v2, revision 8), accepted by Grok and GPT-5.6-sol after
+seven review rounds. Every finding below has exactly one disposition. None is dropped silently.
+
+| Finding | Disposition |
+|---|---|
+| 3, 4, 5, 6, 7, 8, 9 | ACCEPTED; historical |
+| 10 | ACCEPTED as `B-bootstrap-cost-eligibility` (lifted out of this list) |
+| 11 | ACCEPTED with 32+34+44 at `78a3378` |
+| 12 | **`docs/PLAN.md` P1.3** (spend restore) + **P1.7** (settings restore). Split because the halves are independent: limits without spend still bind, spend without limits binds the wrong number |
+| 13 | **P1.12** — daemon coding E2E for `NEEDS_HUMAN`, STOP/RESUME, crash recovery |
+| 14 | **DROPPED.** Requires real paid provider APIs, which policy forbids. Transport-layer cassettes if the need returns |
+| 15 | **P1.13** — `runtime=required` happy path; depends on P1.6 and P1.8 |
+| 16 | **P1.6** — one-line missing `off` early return in `corpusRuntimeEvidenceAllowsDone` |
+| 17, 21, 22, 25 | **P1.7** — one seam, one rewrite: `DaemonService.runConfig`, `withRuntimeValidationMode`, the two budget merge sites |
+| 18 | ACCEPTED at `8ea156d`; 15 rounds |
+| 19 | ACCEPTED at `9e157e1` |
+| 20, 24 | **DEFERRED until after P2.** Auditioning models against a review layer that P3 may change discards the observations. Finding 24 (probes bypassing the budget guard) rides with 20, since the audition producer is what issues probes |
+| 23 | Reviewer half ACCEPTED at `9e157e1`; detector half ACCEPTED with 35+23 at `4c5bb63` |
+| 26 | **OPEN, UNSCHEDULED.** Known weakness: a reviewer-authored claim reaches a worker as unfenced instruction via `task.description` (`src/engine/reviewDrivers.ts:532-533`, `src/findings/validator.ts:156`). Its structural closure was the reviewer-supplied-reproduction design, which the council rejected twice and plan v2 withdrew. Recorded, not fixed |
+| 27 | **P1.10** — startup diagnostic naming the offending protocol file |
+| 28 | **P1.9** — one-line `DigestEntry` tail field |
+| 29 | ACCEPTED at `3d71831` |
+| 30 | **P1.9** — the two folds that lose unpriced calls and untasked spend |
+| 31 | **P1.11 — ACCEPTED RISK.** See the entry below |
+| 32, 34, 43, 44 | ACCEPTED at `78a3378` |
+| 33, 36, 38, 40 | SUPERSEDED by later measurement; historical. 33 was self-corrected the day it was written; 36's diagnosis was replaced by 41; 38's three readings were settled by 41; 40's logprob path was probed and found unreachable on the free tier |
+| 35 | ACCEPTED with 23 at `4c5bb63` |
+| 37, 39, 41 | ACCEPTED; fixed on `task/B-review-plumbing` |
+| 42, 45 | ACCEPTED at `b055c81`; re-measured after 32+34+44 |
+| **new (2026-09-13)** | **Corpus discarded during materialization** → **P1.8**. `createGateDeps` (`src/engine/candidateDrivers.ts:784-786`) takes a corpus-aware callback whose two branches are identical, so the `corpus` parameter is discarded and `verifyAcceptance` drops it too. A Mission Acceptance Corpus entry is recorded as metadata and never injected or executed for later candidates. This is the "corpus is cumulative and first-class" invariant failing in production. Found by the council during plan review, not by the code audit |
+
+## Finding 31 — ACCEPTED RISK, 2026-09-13
+
+Recorded per `docs/PLAN.md` P1.11.
+
+Item 18's bounded-window design belongs to the class SKILL.state (arXiv 2608.26263) measured as
+collapsing at T≥25, and our worker loops run 10–18 turns, mean 14.2 — just below that threshold,
+with item 18's own stated benefit being *more turns per budget*.
+
+Accepted as a risk rather than closed, for two reasons. First, **the worker loop is 17.2% of a run's
+tokens**, so by Amdahl's law nothing in that region can be a headline win; item 18's measured ~5.8%
+net is the ceiling of the region, not a design failure. Second, **no long-horizon fixture exists**:
+testing the claim needs a task that forces a worker past 25 turns, and `fixtures/resume-dup-fetch`
+does not produce one.
+
+**Revisit trigger:** any run, on any project, that produces a worker loop exceeding 25 turns. At that
+point run the arm the finding asks for — bounded window versus full history, compared on task
+outcome, not on tokens.
+
+## Findings that changed the plan rather than the code
+
+Recorded because two of the most consequential entries in this file produced no commit and would
+otherwise look like unfinished work.
+
+- **29** established that the review swarm is 78.7% of all spend at a 5:1 output-to-input ratio, and
+  that `review_adversarial` alone is 64.4%. That measurement is why plan v2's only unconditional cost
+  item is a conditional skip of the adversarial axis.
+- **41** established that the review swarm had never produced a finding because the request asked for
+  a JSON object while the parser demanded an array. Before that fix, every conclusion drawn from
+  "zero findings" was a conclusion about the plumbing.

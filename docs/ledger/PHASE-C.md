@@ -2,13 +2,31 @@
 
 Phase B remains **OPEN**. This file does not accept Phase B and does not accept Phase C.
 
-## Collaboration lanes (user decision 2026-09-04)
+> **Execution order superseded 2026-09-13 by `docs/PLAN.md` (plan v2, revision 8).** The finding-number
+> queue in `docs/ledger/B-selfhost-remaining.md` and the ordering sections of this file are no longer a
+> schedule; they are historical records. `docs/PLAN.md` §11 carries the disposition of all 45 findings,
+> and its §9 supersedes the per-task stopping rule below. The trusted-generations table in this file
+> remains authoritative for what is accepted. Plan v2 was reviewed over seven rounds by Grok and
+> GPT-5.6-sol and accepted by both at revision 8.
 
-Independent implementation and review lanes are **Grok / Claude / Polish**.
+## Collaboration lanes (rule, not a fixed pair — revised 2026-09-13)
 
-Composer is **not** used from this decision onward (implementers, blind compare, or adversarial review). Historical Composer C3 artifacts remain in the ledger as evidence already obtained; they are not a reason to launch Composer again.
+The rule, which does not go stale when the coordinator model changes: **a reviewer must not share the
+coordinator's model family**, and the actual coordinator/reviewer families are recorded per task in
+that task's run record, not here.
 
-Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewers, plus Polish verification when HOST can complete it.
+Permitted families: **Grok**, **Claude**, **GPT-5.6-sol**, plus **Polish** itself as a verifier when
+HOST can complete a run. Forbidden throughout: **Composer**, **Max**, **Ultra**, and paid provider
+APIs. Historical Composer C3 artifacts remain in the ledger as evidence already obtained; they are not
+a reason to launch Composer again.
+
+Why this replaced a hardcoded pair: the earlier text named Grok + Claude in the 2026-09-04 header and
+Grok + GPT-5.6-sol in the item-18 note, and the effective pair changed a third time when the
+coordinator model was swapped on 2026-09-12 — with only the run records of items 29 and 42 reflecting
+it. Three contradictory statements in one file is worse than one rule.
+
+Reviewer count per task is set by `docs/PLAN.md` §9: one reviewer when a task touches no production
+file, two of different families otherwise.
 
 ## Trusted generations
 
@@ -30,7 +48,9 @@ Clean rounds for remaining C work require fresh **Grok** and **Claude** reviewer
 | B-selfhost-29 accepted | `3d718313e8c341432e2c20d636d55bad2c3282eb` on `task/B-selfhost-29-integration` | Run economics and review productivity report. |
 | B-selfhost-42 accepted (next HOST) | `b055c81a6f1c42c0b14bede314803ae2f4d32309` on `task/B-selfhost-42-integration` | Blinded reviewer-quality benchmark. Phase B not fully closed. Phase C not accepted. |
 | B-selfhost-32+34+44+11 accepted (next HOST) | `78a33788c50c7a9aaf851a70d618f6e5df5b450b` on `task/B-selfhost-32-34-44-candidate` | Strict review transport, fail-closed capability probes, empirical verifier/PPT, production tournament wiring. Two clean Grok+Claude rounds; live seed-43 report in the run ledger. |
-| B-selfhost-35+23 accepted (next HOST) | `0dc54b003ee26da3ca04b498f82938aa0a8b930c` on `task/B-selfhost-35-23-candidate` | Bounded worker-prefix progress and test-only verification-treadmill stop. Two clean Grok+Claude rounds. |
+| B-selfhost-35+23 accepted | `0dc54b003ee26da3ca04b498f82938aa0a8b930c`, integrated as **HOST `4c5bb63`** on `phase-c-collab` | Bounded worker-prefix progress and test-only verification-treadmill stop. Two clean Grok+Claude rounds. Candidate branch deleted after integration; `0dc54b0` is reachable from `phase-c-collab` history. |
+| **Current HOST** | **`4c5bb63`** on `phase-c-collab` | Gate at this commit: 860 tests, 85 files, 28.1 s, exit 0 (2026-09-13). This is the base for every item in `docs/PLAN.md`. |
+| Intermediate merge commits | `889b62d` (32+34+44 bundle), `34c3cd4` + `4c5bb63` (35+23 acceptance) | Recorded here because the trusted-generations table previously listed only candidate-branch commits, so the integrated HOST could not be identified from this file. `889b62d` is also the frozen base cited by `docs/ledger/B-selfhost-35-23.md`. |
 | Production `main` | `8d23cfd75d009daf0ad19285cc850f5ec25632e0` | Merge of HOST + untrusted `archive/post-a-wip` C/D donor files. **Not** an accepted C checkpoint. |
 | Development branch | `phase-c-collab` | Branched from HOST, not from `main`'s donor overlay. |
 | TARGET | per-task worktrees from the frozen task-contract commit | Must not be the HOST checkout. |
@@ -150,7 +170,7 @@ The grouping rule is one seam, one rewrite. Five of the seven loose findings sat
 
 Reviewer isolation: from item 8 onward each code reviewer gets its own worktree at the commit under review. Reviewers mutate sources to test assertion strength and restore them with `git checkout --`, so sharing one worktree lets them overwrite each other's probes. See the process note in `docs/ledger/B-selfhost-7-run.md`.
 
-**Reviewer lanes changed 2026-09-12, from item 18 onward.** The coordinator is Claude, so the Claude reviewer lane used for items 3-19 was same-family and not an independent check. Review now runs on **Grok** and **GPT-5.6-sol**, neither of which shares the coordinator's family. Composer, Max, Ultra and paid provider APIs remain out of bounds. Item 18's fifteen rounds are the evidence this mattered: twelve of its last thirteen findings came from a single lane while the other passed, and a same-family reviewer would have been the one passing.
+**Reviewer lanes — superseded 2026-09-13 by the rule in *Collaboration lanes* above.** Kept for its evidence, not its instruction. From item 18 onward the coordinator was Claude, so the Claude reviewer lane used for items 3-19 was same-family and not an independent check; review moved to Grok and GPT-5.6-sol. Item 18's fifteen rounds are the evidence this mattered: twelve of its last thirteen findings came from a single lane while the other passed, and a same-family reviewer would have been the one passing. The pair named in this paragraph is **not** the current pair — the coordinator model was swapped on 2026-09-12 and the effective pair moved again, which is why a hardcoded pair was replaced by a family-exclusion rule.
 
 ## Stopping rule for review rounds (revised 2026-09-11, after B-selfhost-8 reached 24 rounds)
 
