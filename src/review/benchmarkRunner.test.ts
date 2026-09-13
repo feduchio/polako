@@ -200,10 +200,11 @@ describe("review benchmark runner", () => {
         info("openrouter", "nex-agi/00-no-json", "nex-agi", { supportsJson: false }),
         info("openrouter", "nex-agi/z:free", "nex-agi"),
         info("openrouter", "nex-agi/a:free", "nex-agi"),
+        info("openrouter", "nex-agi/Z:free", "nex-agi"),
       ] },
       { provider: nvidia, models: [info("other", "nvidia/x:free", "nvidia")] },
     ]);
-    expect(selected.map((item) => item.model.model)).toEqual(["nex-agi/a:free", "nvidia/x:free"]);
+    expect(selected.map((item) => item.model.model)).toEqual(["nex-agi/Z:free", "nvidia/x:free"]);
     expect(() => selectBenchmarkReviewers([
       { provider: nex, models: [info("openrouter", "nex-agi/a:free", "nex-agi")] },
     ])).toThrow("family nvidia");
@@ -221,6 +222,8 @@ describe("review benchmark runner", () => {
     expect(first).toEqual(second);
     expect(first).not.toEqual(other);
     expect(first).not.toEqual([...first].sort());
+    expect([...new Set(buildBenchmarkSchedule(reviewers, 42).map((cell) => cell.repetition))].sort())
+      .toEqual([1, 2, 3]);
   });
 
   it("rescoring replays raw bodies through the production parser without provider access", async () => {
@@ -243,6 +246,12 @@ describe("review benchmark runner", () => {
     expect(original.team.falsePositiveRate).toBe(0);
     expect(original.cells.filter((cell) => cell.findings.length > 0)
       .every((cell) => cell.findings[0]?.evidenceStrength === "strong")).toBe(true);
+    const summary = renderReviewerBenchmark(original);
+    expect(summary).toContain("Reviewer benchmark: 12/12 completed cells");
+    expect(summary).toContain("nex:nex-agi/nex-n2.5-pro:free: 100.0% primary recall, 100.0% strict-id recall, 0.0% false positives, 100.0% pair discrimination");
+    expect(summary).toContain("team: 100.0% primary recall, 100.0% strict-id recall, 0.0% false positives, 100.0% pair discrimination");
+    expect(summary).toContain("team tokens: 120 input + 150 output, 50.00 output tokens/hit");
+    expect(summary).toContain("failures: schema=0/12 (0.0%), transport=0/12 (0.0%)");
     const rescored = await rescoreReviewerBenchmark({
       protocols: PROTOCOLS,
       packetJsonl: original.packetJsonl,
@@ -257,6 +266,24 @@ describe("review benchmark runner", () => {
     expect(rescored.team).toEqual(original.team);
     expect(rescored.teamDiscrimination).toEqual(original.teamDiscrimination);
     expect(nex.calls.length + nvidia.calls.length).toBe(12);
+
+    const withoutUsage = responseJsonl.trimEnd().split("\n").map((line, index) => {
+      const value = JSON.parse(line) as { cellId: string; raw: string; usage?: unknown };
+      if (index === 0) delete value.usage;
+      return canonicalJsonLine(value);
+    }).join("");
+    const missingUsage = await rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: original.packetJsonl,
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl: withoutUsage,
+      packetSha256: original.packetSha256,
+      oracleSha256: original.oracleSha256,
+      model: { provider: "external", model: "flagship" },
+      family: "external",
+      seed: 12,
+    });
+    expect(missingUsage.cells[0]?.usage).toBeNull();
 
     await expect(rescoreReviewerBenchmark({
       protocols: PROTOCOLS,
@@ -281,6 +308,18 @@ describe("review benchmark runner", () => {
       family: "external",
       seed: 12,
     })).rejects.toThrow("packet hash mismatch");
+
+    await expect(rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: original.packetJsonl,
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl,
+      packetSha256: original.packetSha256,
+      oracleSha256: "0".repeat(64),
+      model: { provider: "external", model: "flagship" },
+      family: "external",
+      seed: 12,
+    })).rejects.toThrow("oracle hash mismatch");
 
     const firstResponse = responseJsonl.split("\n")[0];
     await expect(rescoreReviewerBenchmark({
@@ -310,6 +349,18 @@ describe("review benchmark runner", () => {
       family: "external",
       seed: 12,
     })).rejects.toThrow("packet messages differ");
+
+    await expect(rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: original.packetJsonl.trimEnd(),
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl,
+      packetSha256: sha256Hex(original.packetJsonl.trimEnd()),
+      oracleSha256: original.oracleSha256,
+      model: { provider: "external", model: "flagship" },
+      family: "external",
+      seed: 12,
+    })).rejects.toThrow("must end with a newline");
   });
 });
 

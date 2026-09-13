@@ -69,6 +69,7 @@ describe("review benchmark scorer", () => {
     expect(score.strictIdRecall).toBe(1 / 3);
     expect(score.schemaFailures).toBe(1);
     expect(score.transportFailures).toBe(1);
+    expect(score.inputTokens).toBe(4);
     expect(score.outputTokens).toBe(100);
     expect(score.outputTokensPerPrimaryHit).toBe(50);
   });
@@ -118,6 +119,7 @@ describe("review benchmark scorer", () => {
       cell("clean", "transport_failure", [], null, "m1", 3, "pair-failed"),
     ];
     expect(scorePerModelDiscrimination(cells)).toEqual({ eligible: 3, discriminated: 1, rate: 1 / 3 });
+    expect(scoreTeamDiscrimination(cells)).toEqual({ eligible: 3, discriminated: 1, rate: 1 / 3 });
   });
 
   it("uses OR across completed team models without hiding their failures", () => {

@@ -167,8 +167,11 @@ export function selectBenchmarkReviewers(
         model.capabilities.inputCostPerM === 0 &&
         model.capabilities.outputCostPerM === 0)
         .map((model) => ({ provider, model: model.ref, family })));
-    eligible.sort((a, b) =>
-      `${a.model.provider}:${a.model.model}`.localeCompare(`${b.model.provider}:${b.model.model}`));
+    eligible.sort((a, b) => {
+      const left = `${a.model.provider}:${a.model.model}`;
+      const right = `${b.model.provider}:${b.model.model}`;
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
     const selected = eligible[0];
     if (selected === undefined) throw new Error(`no free JSON benchmark reviewer in family ${family}`);
     return selected;
