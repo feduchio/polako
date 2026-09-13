@@ -198,10 +198,67 @@ describe("RunObserver projection", () => {
    * bound the operator cannot tell from a real one.
    */
   /**
-   * MC2 defines "unpriced" as: `usage` present **and** `costUsd` not a finite number. Both halves
-   * need distinguishable counts, or a classifier that swaps them — or that only recognises a
-   * literal `null` price — reports the same number as the right one.
+   * MC2 defines "unpriced" as: `usage` present **and** `costUsd` not a finite number.
+   *
+   * Driven one shape at a time. An aggregate fixture lets two wrong classifications cancel — the
+   * count that reuses the neighbouring fold was right only because deduplicating one call and
+   * misclassifying one negative price offset each other — and a `usd` **sum** cannot see a priced
+   * zero at all, since zero contributes nothing to it. In isolation neither can hide.
    */
+  describe("usdUsage classifies one call at a time", () => {
+    const withUsage = (costUsd: unknown): Record<string, unknown> =>
+      ({ inputTokens: 4, outputTokens: 1, ...(costUsd === "absent" ? {} : { costUsd }) });
+    const viewOf = (payload: Record<string, unknown>, type = "model.call"): ReturnType<typeof projectRunStatus> =>
+      projectRunStatus(baseRun({ phase: "REVIEWING", control: "RUNNING" }), [evt(0, type, payload, NOW - 9_000)], NOW);
+
+    // Reported usage, no usable price. Each shape on its own, so a predicate that recognises only
+    // some of them cannot be covered for by the others.
+    for (const [name, costUsd] of [
+      ["null", null],
+      ["absent", "absent"],
+      ["NaN", Number.NaN],
+      ["Infinity", Number.POSITIVE_INFINITY],
+      ["a string", "0.5"],
+      ["a boolean", true],
+    ] as const) {
+      it(`counts a call whose price is ${name}`, () => {
+        const view = viewOf({ callId: "c", usage: withUsage(costUsd) });
+        expect(view.resources.unpricedCalls).toBe(1);
+        expect(view.resources.usd).toBeNull();
+      });
+    }
+
+    // Finite prices. `0` is the one a sum cannot observe, and the free tier reports it.
+    for (const [name, costUsd] of [["positive", 0.25], ["zero", 0], ["negative", -0.05]] as const) {
+      it(`prices a call whose cost is ${name}`, () => {
+        const view = viewOf({ callId: "c", usage: withUsage(costUsd) });
+        expect(view.resources.unpricedCalls).toBe(0);
+        expect(view.resources.usd).toBe(costUsd);
+      });
+    }
+
+    // No usage at all: it spent nothing, so it is not unpriced spend.
+    for (const [name, usage] of [["null", null], ["absent", "absent"]] as const) {
+      it(`ignores a call whose usage is ${name}`, () => {
+        const view = viewOf({ callId: "c", ...(usage === "absent" ? {} : { usage }) });
+        expect(view.resources.unpricedCalls).toBe(0);
+        expect(view.resources.usd).toBeNull();
+      });
+    }
+
+    it("counts events, not unique call ids", () => {
+      const view = projectRunStatus(baseRun({ phase: "REVIEWING", control: "RUNNING" }), [
+        evt(0, "model.call", { callId: "same", usage: withUsage(null) }, NOW - 9_000),
+        evt(1, "model.call", { callId: "same", usage: withUsage(null) }, NOW - 8_000),
+      ], NOW);
+      expect(view.resources.unpricedCalls).toBe(2);
+    });
+
+    it("ignores an event that is not a completed model.call", () => {
+      expect(viewOf({ callId: "c", usage: withUsage(null) }, "model.call_started").resources.unpricedCalls).toBe(0);
+    });
+  });
+
   it("counts a call as unpriced only when it reported usage without a finite price", () => {
     const run = baseRun({ phase: "REVIEWING", control: "RUNNING" });
     const usage = (costUsd: unknown): Record<string, unknown> =>
