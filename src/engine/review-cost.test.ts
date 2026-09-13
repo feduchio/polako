@@ -611,6 +611,40 @@ describe("P1.2 reviewer output cap", () => {
     expect(run.phase).toBe("FAILED");
     expect(run.terminalReason?.code).toBe("providers_unavailable");
     expect(run.terminalReason?.summary).toContain("maxOutputTokens");
+    // MC4 requires the value, not just the knob name: an operator who is not told the number does not
+    // know what to raise. A mutant dropping it passed the previous suite.
+    expect(run.terminalReason?.summary).toContain(String(defaultConfig().review.maxOutputTokens));
+  });
+
+  // AC13. MC4 says *every* deterministic exclusion terminates, not only truncation. A mutant that
+  // failed on the truncation string alone passed the previous suite.
+  it("fails visibly when every model is excluded by a schema rejection", async () => {
+    const provider = new ScriptedProvider("reviews", [{ name: "a", capabilities: FAKE_CAPABILITIES.strong }]);
+    for (let i = 0; i < 10; i++) {
+      provider.script("a", [{ kind: "error", error: new ProviderError("reviews", "bad_request", "bad request (400): JSON mode is not enabled") }]);
+    }
+    const all = [{ provider, model: { provider: "reviews", model: "a" } }];
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of NON_REVIEW_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
+    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, (ctx) => {
+      const excluded = new Set(recentlyRateLimitedReviewModels(ctx).map((model) => model.model));
+      return all.filter((entry) => !excluded.has(entry.model.model));
+    })));
+
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    for (let tick = 0; tick < 8; tick++) {
+      if (store.repos.runs.get(runId)?.phase !== "REVIEWING") break;
+      await engine.tickRun(runId);
+    }
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("FAILED");
+    expect(run.terminalReason?.code).toBe("providers_unavailable");
+    // The exact summary matters: the pre-existing empty-pool path also yields FAILED with the same
+    // code, so asserting only phase and code is vacuous -- both branches satisfy it.
+    expect(run.terminalReason?.summary).toBe("every reviewer model failed with a non-retryable error");
   });
 
   // AC8. A rate limit still justifies waiting; only a deterministic exclusion terminates.

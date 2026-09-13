@@ -53,6 +53,8 @@ export interface ScheduledBenchmarkCell {
 }
 
 export interface RecordedBenchmarkCell extends BenchmarkCellResult {
+  /** Live finish reason, so an exported packet replays as the truncation it was. */
+  finishReason?: CompletionResponse["finishReason"] | null;
   request: CompletionRequest | null;
   rawContent: string | null;
   error: string | null;
@@ -383,6 +385,9 @@ async function runCell(
     usage: capture.response?.usage ?? null,
     request: capture.request,
     rawContent: capture.response?.message.content ?? null,
+    // Carried so an exported packet can replay as the truncation it was: without it a parsable
+    // truncated body rescores as a completed cell.
+    finishReason: capture.response?.finishReason ?? null,
     error,
   };
 }

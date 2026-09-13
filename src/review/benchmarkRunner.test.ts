@@ -510,6 +510,44 @@ describe("review benchmark runner", () => {
     expect(all.every((request) => request.maxTokens === cap)).toBe(true);
   });
 
+  // P1.2 MC2, AC11: a caller-supplied cap must be honoured, not silently replaced by the default.
+  // Round 2 found the daemon passed nothing, so a configured value never reached the provider.
+  it("honours a caller-supplied cap over the schema default", async () => {
+    const nex = provider("nex", "nex-agi/a:free", () => reply('{"findings":[]}'));
+    const nvidia = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 7,
+      pairs: [pair],
+      maxOutputTokens: 777,
+    });
+
+    const all = [...nex.calls, ...nvidia.calls];
+    expect(all.length).toBeGreaterThan(0);
+    expect(all.every((request) => request.maxTokens === 777)).toBe(true);
+  });
+
+  // P1.2 MC8a, AC12: the export side must record the live finish reason. Round 2 found only the import
+  // side read it, so a live truncation still rescored as a completed cell.
+  it("records the live finish reason on the recorded cell", async () => {
+    const nex = provider("nex", "nex-agi/a:free", () => ({ ...reply('{"findings":[]}'), finishReason: "length" as const }));
+    const nvidia = provider("nvidia", "nvidia/a:free", () => ({ ...reply('{"findings":[]}'), finishReason: "length" as const }));
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const report = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 12,
+      pairs: [pair],
+    });
+
+    expect(report.cells.length).toBeGreaterThan(0);
+    expect(report.cells.every((cell) => cell.finishReason === "length")).toBe(true);
+  });
+
   // P1.2 MC8/fix 3: replay must not turn a truncation into a completion. Exported packets carry the
   // finish reason; packets recorded before truncation was detected default to "stop".
   it("preserves a truncated finish reason through rescore", async () => {

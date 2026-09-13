@@ -537,3 +537,29 @@ otherwise look like unfinished work.
 - **41** established that the review swarm had never produced a finding because the request asked for
   a JSON object while the parser demanded an array. Before that fix, every conclusion drawn from
   "zero findings" was a conclusion about the plumbing.
+
+46. **Reviewer exclusions never expire, so a universal rate limit waits forever.**
+    `recentlyRateLimitedReviewModels` (`src/engine/reviewDrivers.ts`) has no recency despite its name.
+    A model excluded by a sticky failure stays excluded for the rest of the checkpoint, and the only
+    thing that rehabilitates it is a *completed* execution for that checkpoint — which an excluded model
+    cannot produce, because routing never offers it again. When every model is rate-limited the driver
+    therefore returns `waiting` on every tick indefinitely. There is no `retryAfterMs` honoured and no
+    elapsed-time release. **Found 2026-09-13** by the GPT-5.6-sol lane in round 2 of P1.2, reproduced
+    with a 429 carrying `retryAfterMs: 1` followed by three queued successes: after advancing the clock
+    60 seconds and four further ticks the provider had still been called once and the run was still
+    `REVIEWING`. Pre-existing and untouched by P1.2, which converted the *truncation* case from this
+    same hang into a visible failure. Not scheduled: it rides with the next item that opens the
+    exclusion path.
+
+47. **Sticky classification is lossy across persistence, so three error kinds never bound anything.**
+    `isStickyReviewSkip` accepts `(err, message)` and branches on `ProviderError.kind` for `bad_request`,
+    `auth`, `not_found` and `context_length` — but both production callers pass `undefined` as `err`
+    plus the persisted `execution.error` string, so that branch is dead and only the message patterns
+    apply. `auth failed (401)`, `not found:` and `This model's maximum context length is …` match none
+    of them, so those failures enter neither the exclusion set nor `exhaustedAxes`. `context_length` is
+    deterministic — same prompt, same model, same checkpoint — so such an axis retries forever with no
+    counter advancing and no exclusion forming. **Found 2026-09-13** independently by both lanes in
+    round 2 of P1.2; the Grok lane tabulated every kind against its persisted message. Pre-existing.
+    Closure is either to persist the error *kind* alongside the message, or to widen the message
+    patterns — the former, since matching prose is what produced this. Rides with the next item that
+    touches this seam.

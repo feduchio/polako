@@ -214,6 +214,7 @@ export class DaemonService implements RpcHandler {
       liveAbort,
       transportMode,
       configuration,
+      maxOutputTokens: this.productionDeps.config.review.maxOutputTokens,
     });
     const packet = this.store.artifacts.put(
       report.packetJsonl,
