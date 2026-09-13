@@ -1,7 +1,7 @@
 # B-selfhost-32 + 34 + 44 (+11) — strict review output and empirical verifier
 
-**Status:** DRAFT, revision 2. Not frozen. Base `ecfd45d`.
-Revision 1 was rejected independently by Grok and Claude; both rejections were correct.
+**Status:** DRAFT, revision 3. Not frozen. Base `ecfd45d`.
+Revisions 1 and 2 were rejected independently by Grok and Claude; both rejections were correct.
 
 ## Facts that constrain the design
 
@@ -44,39 +44,52 @@ The schema is frozen:
 - finding: all seven keys required, no additional properties;
 - `criterion`, `claim`: string; `severity`: the five lower-case enum values; `blocking`: boolean;
 - `evidence`: array of objects requiring `path`, `line`, `endLine`; line fields are
-  `integer|null`; no additional properties;
+  `integer|null` with integer minimum 1; no additional properties;
 - `reproduction`: string array; `suggestedCheck`: `string|null`.
 
 Before `RawFindingSchema`, null optional fields are removed. The defensive normaliser remains on the
 same production/replay parser; strict live output is arrays/lower-case/null optionals.
 
-**MC2 — probed capability truth.** `supportsStrictSchema` defaults false. Catalog advertisement is
-only a discovery hint. Capability probing sends the frozen strict schema and marks support true only
-when the response parses and validates; advertise-then-reject resolves false. Reviewer and verifier
-selection require the probed flag and never downgrade to `json_object`.
+**MC2 — probed capability truth.** `supportsStrictReviewSchema` and
+`supportsStrictScoreSchema` default false. Advertisement is only a shortlist hint. Broker-backed,
+retry-1 probes send each frozen schema plus disabled reasoning and persist separate results. Only
+validated success is true; reject, timeout, malformed, inconclusive or probe failure are false
+regardless of advertisement. Reviewer selection requires the review flag; empirical selection
+requires the score flag. Neither downgrades to `json_object`. Other capability probes remain finding
+24's scope.
 
 **MC3 — empirical reward, honestly named.** One evaluation emits strict
-`{scoreA: integer 0..4, scoreB: integer 0..4}` and no prose. At least two criteria are used; maximum
-eight. For criterion index `c` and repeat `r`: slot order swaps when `r` is odd; family index is
-`(r+c) mod 2`. Thus each family sees both slot orders. Reward is the arithmetic mean of completed
-scores divided by 4. Failures are excluded, never zeros. Provenance is
+`{scoreA: integer 0..4, scoreB: integer 0..4}` and no prose. Empirical criteria are padded to at
+least two and capped at eight. Repeats are a positive multiple of 4, default/minimum 4. Per
+criterion: r0 family0 normal, r1 family0 swapped, r2 family1 normal, r3 family1 swapped; later blocks
+of four repeat that schedule. Each family sees both slots for the same criterion. Reward is the
+arithmetic mean of completed scores divided by 4. Failures are excluded, never zeros. Provenance is
 `scoreScheme:"empirical_repeats"`; empirical `logprobScheme` is absent.
 
 Empirical and reviewer calls set `reasoning:{effort:"none",exclude:true}` on providers that support
 it. Capability probing covers the schema+reasoning combination; a model that requires reasoning and
 cannot produce the bounded object resolves unsupported.
 
-**MC4 — hard phase bound and broker accounting.** Exactly two distinct free, probed-strict families
-are required; one or zero falls back before any empirical call. All evaluations use
+**MC4 — hard phase bound and broker accounting.** Eligible entries sort by family then
+`provider:model`; select the first model in the first two distinct free, probed-strict families.
+One or zero families falls back before any empirical call. All evaluations use
 `ModelBroker.complete` with retry policy `maxAttempts:1`, `role:"verifier"` and
 `purpose:"empirical_pair_score"`. Per-COMPARING ceiling is 48 logical/provider attempts. Criteria
 are truncated deterministically to fit while keeping at least two; if two cannot fit, fallback occurs
-before calls. Fewer than half requested evaluations completed for a pair triggers visible
-deterministic fallback. Completed usage remains recorded.
+before calls. If any pair completes fewer than half its requested evaluations, the **whole empirical
+selection** is abandoned and deterministic fallback ranks the frontier; empirical and deterministic
+mass are never mixed. Completed usage remains recorded.
+
+Each candidate payload includes exact verified CAS diff text, gate report and metrics. GATING
+persists `diffRef`; missing or over-8,000-token diff causes whole-selection fallback before empirical
+calls. Candidate text is fenced as untrusted data.
 
 **MC5 — defined empirical pair mass.** Completed normalized rewards `Ra,Rb` produce
 `pA = 1/(1+exp(-(Ra-Rb)))`, `pB=1-pA`. Each unique unordered pair contributes that win mass and one
 comparison count to each candidate. Ranking is descending `winMass/count`, then id.
+
+Independent fixture: `Ra=5/6`, `Rb=1/6`, `pA=0.6607563687658172`,
+`pB=0.3392436312341828`. Expected literals may not call the mass function.
 
 **MC6 — defined PPT pair set.** Candidate ids sort by code-unit order. N=2 evaluates its single
 unordered pair. N=3 ring equals all three pairs. For N>=4:
@@ -93,22 +106,30 @@ Full round-robin is not PPT.
 
 **MC7 — production wiring, absorbing item 11.** Backend is `ts|sidecar|empirical`, default empirical.
 `installProductionDrivers` injects an empirical strategy built from broker-backed adapters. Missing
-the two-family eligibility gate produces visible fallback. `sidecar` and `ts` remain explicit.
-The empirical prompt composes the existing `judge` protocol; it gains a production caller.
+the two-family eligibility gate produces visible deterministic fallback in COMPARING. In REVIEWING,
+zero probed-strict models terminates the run as `FAILED/providers_unavailable` before an axis call;
+there is no schema downgrade. `sidecar` and `ts` remain explicit.
 
-**MC8 — truthful provenance.** `FrontierSelection`, `TournamentSelection`, `candidate.compared` and
+The empirical prompt composes `base + task(kind) + judge`; `PairwiseContext` carries task kind and
+`ProtocolRegistry` is injected. `protocols/judge` explicitly says a supplied score schema requires
+scores only; its body and frozen score contract are asserted on the wire.
+
+**MC8 — truthful provenance.** `VerifierBackend` and every selection/provenance type include
+`empirical`. `FrontierSelection`, `TournamentSelection`, `candidate.compared` and
 rationale artifact carry actual backend, `scoreScheme`, model refs, criteria, requested/completed
 evaluations, unique comparison count and fallback reason. Sidecar claims move to
 `claimedLogprobScheme`; persisted `logprobScheme` remains null unless TypeScript receives and uses
-distributions. Existing scripted direct/two-stage tests assert the claimed field, not observed
-logprobs. Empirical rationale is mechanical; model prose is neither requested nor stored.
+distributions. Existing scripted direct/two-stage tests assert the claimed field; empirical asserts
+`client:"live"`. Empirical rationale is mechanical; model prose is neither requested nor stored.
 
-**MC9 — benchmark feedback without false comparability.** Item 42 remains frozen historical
-evidence. Two seed-43 reruns are reported:
+**MC9 — benchmark feedback without false comparability.** This contract explicitly supersedes item
+42 MC6's transport **for production**; its corpus, scorer, oracle and historical reports remain
+frozen. The benchmark runner retains explicit `legacy_json_object` and `strict_schema` modes so a
+contemporaneous seed-43 A/B is possible. Three reports are published:
 
-1. exact original model refs under strict transport, to measure schema/completion deltas; quality
-   metrics are paired with schema/transport counts and are not compared alone;
-2. operational two-family probed-strict ensemble, labelled as a new configuration.
+1. exact original refs under legacy transport;
+2. exact original refs under strict transport;
+3. operational two-family probed-strict ensemble, labelled as a new configuration.
 
 The accepted corpus/scorer/oracle are unchanged. No threshold is declared success and no claim is
 made that strict schema fixes semantic false positives.
@@ -130,45 +151,55 @@ the same `RawFinding` as replay input with omitted optionals. `json_object`, sin
 string reproduction and title-case severity are not the strict fixture.
 
 **AC2.** Active probe matrix: advertise+accept → true; advertise+400 → false; no advertisement but
-accept → true; malformed response → false. Router, reviewer selection and ensemble alternatives
-require the resolved probed flag and never downgrade.
+accept → true; malformed, timeout, inconclusive and probe-failed → false. Assert persisted probe
+state independently for review and score schemas. Router, reviewer selection and ensemble
+alternatives require the relevant state and never downgrade.
 
 **AC3.** Exact provider payload asserts `json_schema`, name, strict, frozen schema and disabled
 reasoning. Nex and NVIDIA return valid empty findings under that payload; the same NVIDIA request
 without the reasoning option is recorded as an invalid response rather than support.
 
-**AC4.** Two criteria × two repeats assert four calls with schedule:
-`c0r0 family0 normal`, `c0r1 family1 swapped`,
-`c1r0 family1 normal`, `c1r1 family0 swapped`.
-Asymmetric matrices assert slot remap, completed-only mean, exact normalized rewards and sigmoid mass.
+**AC4.** Two criteria × four repeats assert eight calls. For each criterion:
+family0 normal/swapped, then family1 normal/swapped. A one-criterion input is padded to two; repeats
+1/2/3 are rejected by config. Asymmetric matrices assert slot remap, completed-only mean, exact
+normalized rewards and the independent MC5 sigmoid literals.
 
-**AC5.** One-family and zero-family fixtures fall back with zero empirical calls. Failure fixtures
-assert usage survives; fewer than half completed falls back; exact reason/requested/completed counts
-persist.
+**AC5.** Family catalogs with duplicates and mutable quality stats still select deterministic first
+refs from two distinct families. One-family and zero-family fixtures fall back with zero empirical
+calls. Failure fixtures assert usage survives; one under-half pair abandons the whole empirical
+selection, with no mixed mass; exact reason/requested/completed counts persist.
 
 **AC6.** Pair-set literals: N=2 one pair; N=3 three; N=5 exact eight listed in MC6; N=8 exact
 seventeen. Assert ring A/B participation, pivots `a,c`, no duplicate provider payment, sigmoid mass
-and deterministic ranking. A 28-pair implementation fails.
+and deterministic ranking. Assert `Ra/Rb/pA/pB` against MC5 literals without calling production
+helpers. A 28-pair implementation fails.
 
 **AC7.** Production COMPARING with two non-dominated candidates invokes broker-backed empirical
 calls. Assert persisted `model.call` rows: two distinct free strict families, real refs,
 `role:verifier`, `purpose:empirical_pair_score`, retry max 1. Assert default backend empirical and no
-providerless judge call before it.
+providerless judge call before it. Payload contains each candidate's actual CAS diff; missing and
+over-cap diffs fall back before calls. Prompt contains composed base/task/judge and score contract.
 
-**AC8.** Phase ceiling fixtures: maximal production N=3 / 8 criteria / 2 repeats issues exactly 48
-calls; rate-limit every call still stops at 48 and falls back visibly; a synthetic N=8 request cannot
-fit two criteria and falls back before calls.
+**AC8.** Phase ceiling fixtures: N=3 / 8 input criteria / 4 repeats truncates to the first 4 criteria
+and issues exactly 48 calls; rate-limit every call still stops at 48 and falls back visibly; N=5 and
+N=8 cannot fit two criteria and fall back before calls. Strict probes are excluded from COMPARING
+counts and independently broker-accounted.
 
-**AC9.** Provenance literals independently pin backend empirical, score scheme, both refs, criteria,
+**AC9.** Provenance literals independently pin backend empirical, client live, score scheme, both refs, criteria,
 requested/completed, unique pairs and fallback reason. `logprobScheme` is null. Sidecar scripted
-tests pin `claimedLogprobScheme` while observed field remains null.
+tests pin `claimedLogprobScheme` while observed field remains null. Hardcoded `backend:"sidecar"`
+fails.
 
 **AC10.** Strict score schema rejects prose, extra properties, missing keys and values outside 0..4.
 Stored rationale contains only mechanical aggregates.
 
-**AC11.** Scripted item-42 strict rerun covers 96 cells. Live seed-43 runs persist both reports from
-MC9 with packet/oracle/raw/rescore artifacts. Comparison prints completion/schema/transport beside
-quality and never presents changed-denominator recall alone as improvement.
+**AC11.** Scripted item-42 runs cover both transport modes. Live seed-43 persists all three MC9
+reports with packet/oracle/raw/rescore artifacts. Comparison prints exact model refs, transport,
+completion/schema/transport beside quality and never presents changed-denominator recall alone as
+improvement.
+
+**AC12.** Record/replay request keys and broker forensic request artifacts differ when strict schema
+or reasoning options differ; both fields are visible in persisted evidence.
 
 ## Named fakes
 
@@ -179,10 +210,13 @@ quality and never presents changed-denominator recall alone as improvement.
 | Advertise-then-400 remains true | AC2 |
 | Null optionals rejected by Zod | AC1 |
 | Same family evaluates every repetition | AC4 |
+| Family remains coupled to A/B slot | AC4 |
 | A/B reversal without score remap | AC4 |
 | Failed evaluations counted as zeros | AC5 |
+| Deterministic fallback mass mixed into empirical mass | AC5 |
 | Ring pair paid again in pivot phase | AC6 |
 | Full round-robin labelled PPT | AC6 |
+| Candidate scores only metadata, not code diff | AC7 |
 | Production still constructs providerless judge | AC7 |
 | Empirical calls bypass broker | AC7 |
 | Rate-limit storm exceeds 48 attempts | AC8 |
@@ -190,6 +224,7 @@ quality and never presents changed-denominator recall alone as improvement.
 | Sidecar claim stored as observed logprobs | AC9 |
 | Model prose stored as verifier rationale | AC10 |
 | Changed-denominator recall presented as improvement | AC11 |
+| Strict and legacy requests share a replay key | AC12 |
 
 ## Revision history
 
@@ -204,6 +239,19 @@ quality and never presents changed-denominator recall alone as improvement.
 - empirical backend/provenance is distinct from sidecar logprob claims;
 - item-42 feedback is split into exact-model transport A/B and a separately labelled operational
   strict ensemble.
+
+**Revision 2 → 3**, after a second independent rejection:
+
+- strict probing is fail-closed, broker-accounted and persisted;
+- repeats are minimum/multiple four so each family sees both slots per criterion;
+- two-family selection is deterministic and one-family fallback is explicit;
+- verified candidate CAS diffs are part of the score payload;
+- under-half pair failure aborts the whole empirical selection, preventing mixed mass;
+- exact sigmoid literals and N=2/3/5/8 pair sets are independently pinned;
+- reviewer zero-strict case terminates visibly;
+- empirical/sidecar provenance and judge protocol composition are observable;
+- benchmark retains contemporaneous legacy/strict controls;
+- response schema/reasoning enter replay keys and forensic artifacts.
 
 ## Out of scope
 
