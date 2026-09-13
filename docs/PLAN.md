@@ -1,0 +1,635 @@
+# Polish — plan v2, revision 8
+
+Base: HOST `4c5bb63` on `phase-c-collab`. Gate there: 860 tests, 85 files, 28.1 s, exit 0.
+
+Scope: **execution order and acceptance process only.** Supersedes the order in
+`docs/ledger/PHASE-C.md` and the finding-number queue in `docs/ledger/B-selfhost-remaining.md`.
+
+**Architectural invariants are not amended.** User decision 2026-09-13. §7 maps every item onto
+Fable §1 and ADR-0001 as written.
+
+Standing environment for every measurement:
+
+| Name | Value |
+|---|---|
+| Fixture | `fixtures/resume-dup-fetch` |
+| Registered project | `polish-selfhost` → `/Users/fedorsvetlov/polish-selfhost-target` |
+| Model policy | `routing.costEligibility: "free_only"` (`src/domain/config.ts:135`) |
+| Model pinning | each measurement names its two models in its own ledger file; free-tier membership churns |
+| Gate command | `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2` |
+| Blinded corpus | 8 pairs, `src/review/benchmarkCorpus.ts:37-50` |
+| Store | `~/.polish/polish.db`; benchmark reports land in the CAS via `src/daemon/service.ts:210-239` |
+
+Review history: rev 1 → Grok `ACCEPT WITH CHANGES`, GPT `REJECT`. rev 3 → Grok
+`ACCEPT WITH CHANGES` (5), GPT `REJECT`. rev 4 → Grok `ACCEPT WITH CHANGES` (4), GPT `REJECT` (corpus).
+rev 5 → Grok `ACCEPT WITH CHANGES` (3), GPT `ACCEPT WITH CHANGES` (5); no REJECT, the corpus objection
+recorded as resolved. Rev 6 applies both sets. §8 lists corrections.
+
+## 1. Goals, admission test, and the G1 exit criterion
+
+| # | Goal (user's words) |
+|---|---|
+| G1 | удешевить без потери качества выполнение задач |
+| G2 | автономное выполнение задач до качественного результата |
+| G3 | reduce over-engineering without reducing quality (standing constraint) |
+
+Every item states: goal · files · action · verify · estimate · deletion.
+
+**G1 exit criterion.** At the end of P3, median total tokens per completed replay-set task
+(§4 P2.2) must be **at least 20% below** the P1-entry baseline, with unchanged terminal outcomes in
+all repetitions. If not met, the plan reports **G1 unmet** in the ledger and reverts every
+cost-only production change. Added because both reviewers found rev 4's unconditional cost
+reduction to be near zero.
+
+Three guards, because a percentage over an empty set is meaningless: the baseline is recorded at
+**P1 entry**, before any item in P1 lands; the denominator must satisfy P2.2's minimum of 5
+replayable entries with at least 2 reaching `DONE`; and if the denominator is short, or if any
+replay arm produces an undefined median, the outcome is **`inconclusive`**, which is neither a pass
+nor a trigger for the revert.
+
+**The denominator is exactly P2.2's replayable set, cassettes and all.** A set that meets the 5/2
+floor is cassette-backed by construction, and it is the G1 denominator; there is no separate
+"cassette-only is never a pass" rule. Only a short denominator or an undefined median is
+`inconclusive`. This resolves the ambiguity in revision 6, which left three incompatible readings and
+made it impossible to tell whether to compute the percentage, revert, or report inconclusive.
+
+Recorded consequence, so it is not discovered later: because cassettes replay frozen recorded
+completions, this gate measures the **call count and the prompt footprint** a change removes, not a
+change in live model output. P1.1's saving is visible to it — a skipped axis is a call not made.
+A change that only alters the content of a completion is invisible to it and must be judged by its
+own item-level verify clause instead.
+
+This criterion is a project decision recorded here, not a Fable §1 invariant.
+
+## 2. Facts
+
+Verified at `4c5bb63`.
+
+| Fact | Value | Source |
+|---|---|---|
+| Production / test lines in `src/` | 30,347 / 30,116 | `wc -l` |
+| Real runs reaching `DONE` | 2 of 6 | finding 29 |
+| External projects ever targeted | 0 | `~/.polish/projects.json` |
+| Review swarm share of all tokens | 78.7%, 5:1 output:input | finding 29 |
+| `adversarial` axis alone | 64.4% of all spend | finding 29 |
+| Observed reviewer completion tokens | 435–1,107 | finding 43 |
+| Free reviewers: recall / clean-site FP / pair discrimination | 82.6% / 60.0% / 36.8% | item 42 |
+| Historical completed review executions returning findings | 0 of 18 | finding 41 |
+| B-selfhost-8 production change | +109/−20 in **2 behaviour commits**, rounds 1–3 | `B-selfhost-8-run.md:106-108` |
+| B-selfhost-8 after that | 26 rounds, **26 test-only commits** | same |
+| B-selfhost-8 test file | 982 lines | `src/daemon/service.budget-override.test.ts` |
+| `docs/BVP.md` "at most 2 fix rounds" | never honoured: A2 7, A3 7, A6 9 | ledgers |
+| `EmpiricalVerifier` in production | wired | `src/daemon/composition.ts:715` |
+| `detectTestOnlyTreadmill` | shipped with 35+23 | `src/convergence/pathology/detectors.ts:165-211` |
+| `ModelBroker.restore` production callers | none | `src/broker/broker.ts:278` |
+| Benchmark runner axes | **`correctness` only** | `src/review/benchmarkRunner.ts:334` |
+| `reviewersPerRound` | a **count** cycling `DEFAULT_REVIEW_AXES` | `src/domain/review.ts:6-18` |
+| Axis dispatch | **sequential** `for` loop over `missingAxes`, in `DEFAULT_REVIEW_AXES` order, so `adversarial` is last at the default of 3 | `src/engine/reviewDrivers.ts:172`, `:815-828` |
+| `reviewDrivers.ts:905` | **not** dispatch — it is `exhaustedAxes`, counting sticky failures | `src/engine/reviewDrivers.ts:895-915` |
+| `roundExecutions` binding | a snapshot taken at `:118`, **before** the axis loop | `src/engine/reviewDrivers.ts:118` |
+| Reviewer calls today | `reasoning: DISABLED_REASONING`, **no** `maxTokens`, `temperature: 0` | `src/review/swarm.ts:69-88` |
+| `model.call` payload | carries `role` and `purpose` | `src/broker/broker.ts:172`, `swarm.ts:83-86` |
+
+## 3. P1 — Live repairs, cost, and transport bounds
+
+No architecture. Each item independently revertible. Order free.
+
+### P1.1 Conditional adversarial skip — G1, the one unconditional cost cut
+
+- Rationale: review is 78.7% of spend and `adversarial` alone is 64.4%. Axes are dispatched in a
+  **sequential** loop in `DEFAULT_REVIEW_AXES` order (`src/domain/review.ts:6`), so `adversarial` runs
+  last and the earlier axes' executions for the round are already persisted when it is reached.
+  Historically 0 of 18 completed executions returned any finding.
+- Action:
+  1. Edit **only** the dispatch loop at `src/engine/reviewDrivers.ts:172`. Do **not** touch
+     `exhaustedAxes` at `:895-915`; it counts sticky failures and is not dispatch.
+  2. Before deciding, **re-read the round's persisted executions** from the store. The
+     `roundExecutions` binding at `:118` is a snapshot taken before the loop, so on the same tick it
+     always shows zero prior findings and would skip even when `correctness` just reported one.
+  3. Skip `adversarial` when every already-completed axis of that round returned zero findings.
+  4. Persist the skip through the **existing** pair `review.started` / `review.finished` via
+     `appendReviewEvent` (`:1113`), producing a `ReviewExecution` with `completed: true`,
+     `findings: []`, `error: "no_prior_findings"`, and the `requestedModel` that would have been
+     selected for the axis. `completed: true` is required: `missingAxes` (`:823`) and
+     `isReviewRoundComplete` (`src/domain/review.ts:55`) count only completed executions, so
+     `completed: false` would leave the axis missing forever and requeue it.
+  5. Do **not** introduce a `review.axis_skipped` event type. `ReviewExecutionSchema`
+     (`src/domain/review.ts:21-33`) has no `reason` field, and projections write `review_executions`
+     only from `review.started` and `review.finished` (`src/store/projections.ts:234-235`), so a new
+     type would store an event that never becomes a row.
+  6. New config field `review.skipAdversarialWhenClean: boolean` (default `true`) in
+     `ReviewStrategySchema` (`src/domain/config.ts:39-52`).
+- This is a reviewer-count strategy, which ADR-0001 lines 44-48 classify as configurable, not an
+  invariant.
+- Verify: (a) a scripted round where correctness and regression return `[]` issues two provider calls,
+  not three, and the round is complete with three executions of which one has
+  `error: "no_prior_findings"`; (b) a round where correctness returns one finding issues all three
+  calls; (c) the skipped round does not requeue `adversarial` on the next tick.
+- Estimate: 6 h.
+- Deletes: up to 64.4% of review spend on clean rounds.
+
+### P1.2 Reviewer output cap as a tail guard — G1, honest framing
+
+- Observed reviewer completions are 435–1,107 tokens (finding 43), so a cap at 1500 **does not bind
+  in the observed range**. It is a guard against a tail blow-up, not a saving. Both reviewers flagged
+  rev 4 for claiming otherwise.
+- Action: new config field `review.maxOutputTokens: number` (default 1500) in `ReviewStrategySchema`;
+  pass it as `maxTokens` in `src/review/swarm.ts:69-88`. The provider already exposes
+  `finishReason: "length"` (`src/broker/types.ts:90-95`).
+  On truncation, persist a **completed** execution — `review.finished` with `completed: true`,
+  `findings: []`, `error: "truncated_output"`. `completed: true` is required for the same reason as
+  P1.1: `failExecution` writes `completed: false` (`src/engine/reviewDrivers.ts:1077-1085`) and
+  `truncated_output` is not in `isStickyReviewSkip` (`:756-765`), so `missingAxes` would requeue the
+  axis and the stated "no retry" would silently become an unbounded retry loop. No new event type.
+  Rev 3's retry-at-lower-length is withdrawn.
+- Derivation of 1500: 3× the ~115-token rendered size of one finding, times a 4-finding allowance,
+  rounded up. Recorded as an estimate, not a measurement.
+- Verify: (a) a stubbed provider returning `finishReason: "length"` produces `review.finished` with
+  `completed: true` and `error: "truncated_output"`, never a silent empty findings array; (b) the axis
+  is not requeued on the next tick.
+- Estimate: 3 h.
+- Deletes: the unbounded tail.
+
+### P1.3 Durable spend across restart — G2
+
+- Problem: `ModelBroker.restore(runId)` (`src/broker/broker.ts:277-283`) folds a run's `model.call`
+  events back into the budget tracker and has **no production caller**. Recovery ends at
+  `this.engine.recover()` (`src/daemon/service.ts:110`). A restarted daemon believes every run has
+  spent nothing. Finding 12, spend half.
+- Action: **wire it.** After `engine.recover()`, call `productionDeps.broker.restore(run.id)` for
+  every **resumable** run. `store.repos.runs.listActive()` (`src/store/repositories.ts:50-53`) is
+  **not** the right predicate: it excludes `NEEDS_HUMAN` phases and `STOPPED` controls, both of which
+  can resume later and would then restart with zero restored spend. Resumable = any run whose phase
+  is not `DONE` or `FAILED`, regardless of control state.
+- Verify: (a) a run with recorded `model.call` usage, after `engine.recover()`, reports non-zero
+  spend and the next call exceeding the cap is rejected; (b) the same holds for a run recovered in
+  `STOPPED` control and for one in `NEEDS_HUMAN` phase.
+- Estimate: 1 h. Deletes: nothing; the method is correct, only the call site is missing.
+
+### P1.4 Per-axis unique recall — G1, measurement only
+
+- Problem: `src/review/benchmarkRunner.ts:334` hard-codes `axis: "correctness"`, so `regression` and
+  `adversarial` have never been scored.
+- Action: (1) parameterise the axis in the benchmark schedule and run all three per pair;
+  (2) attribute each primary hit to the axes that found it; (3) add `uniqueHits` and
+  `tokensPerUniqueHit` per axis to the report type returned by `runReviewerBenchmark`
+  (`src/review/benchmarkRunner.ts:113-151`), which the daemon already persists as a CAS artifact
+  (`src/daemon/service.ts:210-239`). Repetitions and models: as the existing corpus schedule, named
+  in the run ledger. Ties: report both, do not break them.
+- **Cell identity must become axis-qualified, and this is a prerequisite, not a detail.**
+  `ScheduledBenchmarkCell` (`src/review/benchmarkRunner.ts:43-49`) and `BenchmarkOracle`
+  (`src/review/benchmark.ts:12-20`) carry no axis, and the existing identity is
+  `(seed, pairId, label, provider, model, repetition)` (`:159-172`). Scheduling three axes under that
+  identity produces duplicate `cellId` values, which export and rescore reject or silently collapse,
+  because they require one-to-one packet, oracle and response ids (`:260-272`). Therefore: add `axis`
+  to `ScheduledBenchmarkCell`, to the persisted oracle record, to exported packets, and to rescore
+  reconstruction, and derive `cellId` from
+  `(seed, pairId, label, provider, model, repetition, axis)`.
+- **Aggregation key, which decides P3.1 and must not be left to the implementer:** a hit is unique to
+  an axis when, for a given **pair**, that axis produced a primary hit in **at least one** cell and no
+  other axis produced one in **any** cell. `tokensPerUniqueHit` is that axis's total tokens across all
+  its cells divided by its unique-hit count. When an axis has zero unique hits, report
+  `tokensPerUniqueHit: null`, never infinity, and treat `null` as the worst value in P3.1's ordering.
+- Verify: the persisted report lists, per axis, the pairs on which that axis was the sole finder, and
+  a `null` for any axis with none.
+- Estimate: 6 h. Deletes: nothing; it licenses P3.1.
+
+### P1.5 Reasoning effort beyond reviewers — G1, measurement only
+
+- Problem: the accepted 4.2× reviewer result is recorded as "transport efficiency, not a quality
+  claim" (`B-selfhost-remaining.md:415-429`); it may not be extrapolated.
+- Call sites: worker — `src/daemon/composition.ts` `createWorkerFactory`; council —
+  `CouncilRoleAgent.analyze` (`src/council/roles.ts:19-34`).
+- Action: A/B `reasoning: DISABLED_REASONING` at those two sites, 3 fixture runs per arm, models
+  pinned in the run ledger. Decision predicate, made decidable: **the multiset of task *titles*
+  reaching `INTEGRATING` is identical in all 3 runs of both arms, and total tokens are lower in the
+  disabled arm in all 3.** Titles, not ids: ids contain random bytes (`src/shared/ids.ts:17-31`) and
+  can never compare equal across runs. If the fixture is not that deterministic across 3 runs, the
+  experiment reports "inconclusive — fixture nondeterministic" and the default does not change.
+- Estimate: 4 h. Deletes: nothing yet.
+
+### P1.6 Runtime mode `off` early return — G2
+
+- `corpusRuntimeEvidenceAllowsDone` (`src/domain/acceptance.ts:121-134`) has no early return for
+  `off`; siblings `runtimeAllowsDone` (`:86`) and `runtimeCorpusAllowsDone` (`:107`) do. It is the
+  production DONE helper (`src/engine/convergenceDrivers.ts:440-445`). Finding 16.
+- Action: copy the `mode === "off"` early return from `:86`.
+- Verify: mode `off` with a failed current-hash runtime entry permits `DONE`.
+- Estimate: 20 min.
+
+### P1.7 The `runConfig` seam — G2
+
+- Files: `src/daemon/service.ts:450-459` (`runConfig`), `:487-494` (`persistedRuntimeMode`), `:502`
+  (`facade.json` path), `:458` (budget merge site 1); `src/daemon/composition.ts:169-173` (budget
+  merge site 2; definition at `:138`); `src/domain/config.ts:276-282`
+  (`withRuntimeValidationMode`, still returns `base` when the mode matches).
+- Problems, one seam: settings and runtime mode not restored across restart (finding 12, settings
+  half); `polish.toml`'s `runtimeValidation.mode` never effective because RPC and CLI both default an
+  omitted `--runtime` to `auto` (17); a corrupt `facade.json` silently downgrades a `required` run
+  with no event (21); the static pin misses `config["runtimeValidation"].mode` and `Object.assign`
+  (22); `applyRunBudgetOverrides` applied at two independent sites (25).
+- Action: (1) `resolveRunSettings(runId): { config: PolishConfig; budget: BudgetLimits }` — note
+  `BudgetLimits` from `src/broker/quota.ts:11-15`, not `RunBudgetLimits` — owned by `DaemonService`
+  and called by both consumers; (2) unconditional copy in `withRuntimeValidationMode`, retiring the
+  pin rather than widening it; (3) add `run.settings_fallback` to `KNOWN_EVENT_TYPES`
+  (`src/domain/event.ts:10-74`) with payload `{ reason: string; requestedMode: RuntimeCapabilityMode
+  | null; effectiveMode: RuntimeCapabilityMode }`. `runId` is on the envelope, not the payload.
+  `requestedMode` is **`null`** when `facade.json` is unreadable, because the requested value exists
+  only in that file. Emit **at most once per run**, keyed on `runId`, not once per `runConfig` call.
+  (4) For finding 17, the omission must survive the RPC boundary: `src/daemon/service.ts:145-149`
+  converts an omitted `--runtime` to `"auto"` before `runConfig` can distinguish it, so the RPC
+  payload must carry `runtime: null` for "not specified" and `resolveRunSettings` must resolve `null`
+  to `config.runtimeValidation.mode` from `polish.toml`.
+- Verify: (a) enforcing and reporting surfaces read one resolver, so divergence is unrepresentable;
+  (b) a run created with no `--runtime` and `polish.toml` set to `required` is effectively `required`;
+  (c) two `runConfig` calls on a run with a corrupt `facade.json` emit one
+  `run.settings_fallback`, not two. Name the retired cases from `service.runtime-mode.test.ts` and
+  `service.budget-override.test.ts` in the commit message.
+- Estimate: 1 day. Deletes: one merge site, the pin, ~⅓ of a 982-line test file.
+
+### P1.8 Executable Mission Acceptance Corpus — G2, invariant repair
+
+The council's fatal objection across two rounds. Both reviewers converged on the same fix
+independently; it is written verbatim below.
+
+- Problem: `createGateDeps` (`src/engine/candidateDrivers.ts:785-787`) takes a corpus-aware callback
+  whose two branches are identical, so `corpus` is discarded; `verifyAcceptance` at `:789` drops it
+  too. `CorpusEntry` (`src/domain/acceptance.ts:137-150`) carries `artifactHashes` and no
+  `relativePath`, while `AcceptanceStorage.materialize` (`src/store/acceptance.ts:21-38`) requires
+  `{relativePath, sha256}`. Admission copies hashes from validation evidence
+  (`src/findings/validator.ts:140-149`), which may be command-output blobs rather than executable
+  files. Protected-path inspection (`src/project/checkRunner.ts:650-669`) and canonical verification
+  (`:700-716`, `:782-825`) look only at `AcceptanceArtifact[]`. Net effect: a corpus entry is
+  recorded as metadata and is never injected or executed for later candidates.
+- Action, one path, no fork:
+  0. **Where the bytes come from**, since nothing in the tree produces an executable file today:
+     the artifact is the **winning candidate's own regression test file** for the fixing task, read
+     from the integration workspace after that task passes integration gates. Not
+     `validation.evidenceRefs`, which are command-output blobs (`src/findings/reproduce.ts:170`), and
+     not `suggestedCheck`, which is prose or a command (`:196-204`). `relativePath` is that file's
+     path relative to the repository root; `sha256` is its content hash. If the fixing task's diff
+     contains no test file, no corpus artifact is admitted and the corpus entry stays metadata —
+     record that outcome rather than synthesising a file.
+  1. Persist each executable corpus artifact **as** an `AcceptanceArtifact` with `relativePath` and
+     `sha256`. The corpus entry stores that artifact's id and path, not evidence-output hashes.
+  2. Admit the descriptor **after the fixing task passes integration**, atomically with the corpus
+     entry.
+  3. `materializeAcceptance` and `verifyAcceptance` **union** `acceptance.forTask` with the mission
+     corpus artifacts, and that union feeds pre-materialization protected-path inspection,
+     materialization, and post-materialization canonical hash verification.
+  4. **No backfill.** Legacy hash-only entries stay metadata and are recorded as such; fail closed
+     on any legacy entry that cannot be mapped to a path rather than guessing one.
+- Verify: a corpus artifact admitted for task A is materialized, protected, hash-verified **and
+  executed** in the evaluation checkout of a later candidate for task B; tampering with it fails the
+  gate; a legacy hash-only entry produces an explicit `unmappable_legacy_corpus_entry` failure, not
+  a silent skip.
+- Estimate: 2 days.
+- Deletes: one dead branch and the false claim that the corpus is cumulative.
+- Note, out of scope unless the implementer finds it necessary: admission is not atomic today —
+  validation and task events are appended before `corpus.entry_added`
+  (`src/engine/reviewDrivers.ts:240-248`, `src/store/missionAcceptance.ts:45-58`).
+
+### P1.9 Two folds that lose data — G1
+
+- Files: `src/observe/project.ts:468` (`usdUsage`), `src/convergence/pathology/budget.ts:76-79`
+  (`foldModelCallUsage`), `src/agents/loopWindow.ts:163` (`collectEntries`).
+- Problems, corrected: `usdUsage` sums priced calls and returns `null` when none were priced — it
+  does **not** return 0, which rev 4 claimed; the defect is that a partially priced run reports a
+  number that silently omits the unpriced calls. `foldModelCallUsage` already records
+  `unknownCostCalls` at `:77-78`; it drops `taskId: null` from `perTask` at `:79` only, while
+  `runTokens` at `:76` is correct. `collectEntries` strips a failing command's exit code when the
+  argv contains `: `.
+- Action: `usdUsage` returns `{ usd: number | null; unpricedCalls: number }`; update
+  `src/observe/types.ts:73-76` accordingly. For `perTask`, **bucket untasked spend by
+  `payload.role`** (`src/broker/broker.ts:172`) rather than into one `__council__` key, because
+  council, probes, supervisors and reviewers all omit `taskId` (`src/council/roles.ts:28-33`,
+  `src/review/swarm.ts:86`). **Representation:** a separate `perRole: Record<string, number>` field on
+  the fold result, **not** reserved keys inside `perTask`. Reason: `exhaustedDimensions` iterates every
+  `perTask` key (`src/convergence/pathology/budget.ts:124-127`) and would enforce a role bucket as if
+  it were a task; a separate field makes that inexpressible rather than merely excluded. A `model.call`
+  with an absent or non-string `role` goes to a `"unknown"` bucket and is counted, never dropped.
+  `DigestEntry` (`src/agents/loopWindow.ts:37-46`) carries the output tail as its own field instead of
+  re-parsing rendered text.
+- Verify: five tests — a partially priced run reports non-zero `unpricedCalls`; role buckets appear in
+  `perRole`; `perTask` contains no non-`IdSchema` key; a call with a missing `role` lands in
+  `"unknown"`; a failing `git commit -m "fix: x"` retains `-> exit 1`.
+- Estimate: 5 h. Deletes: one regex.
+
+### P1.10 Protocol load diagnostic — G2
+
+- Problem: `buildProductionDeps` loads the registry eagerly from the `DaemonService` constructor.
+  `ProtocolRegistry.load` throws `NOT_FOUND` for a missing directory and `INVARIANT_VIOLATION` for a
+  duplicate or a name/folder mismatch (`src/protocols/loader.ts:17-38`), and **those errors do not
+  carry the path**. Finding 27.
+- Action: the wrapper supplies the path, because the loader does not. Wrap the eager load; on
+  `PolishError` from the loader, re-scan `protocols/*/SKILL.md`, identify the offending entry by
+  re-applying the loader's own name/folder check, and rethrow a `PolishError` with message
+  `protocol registry failed to load: <code> at <absolute path to the offending SKILL.md, or to the
+  protocols directory when no single entry can be identified>`. Write the same line to stderr. Do
+  not catch and continue.
+- Verify: a protocol directory whose `SKILL.md` name does not match its folder yields a message
+  containing both the code and that folder's absolute `SKILL.md` path.
+- Estimate: 1 h.
+
+### P1.11 Finding 31 — decide, do not dismiss — G3
+
+- Rev 3 closed it with a spend-share argument, which answers the wrong question: finding 31 is an
+  accuracy claim, that item 18's bounded window belongs to the class SKILL.state measured as
+  collapsing at T≥25 while our loops run 10–18 turns.
+- Action, default **(b)**: record finding 31 as an accepted risk in
+  `docs/ledger/B-selfhost-remaining.md` under finding 31, with the reason that the worker loop is
+  17.2% of spend, that no long-horizon fixture exists, and that it is revisited if any run produces
+  a worker loop past 25 turns. Option (a), the long-horizon arm, requires a fixture we do not have
+  and is not scheduled. No file is deleted by this item; rev 5 named a deletion target in §12 that
+  does not exist there, and that instruction is withdrawn.
+- Verify: `docs/ledger/B-selfhost-remaining.md` finding 31 begins with `**ACCEPTED RISK**`, states
+  the 17.2% figure, states the missing-fixture reason, and states the revisit trigger (any worker loop
+  exceeding 25 turns). No other file changes.
+- Estimate: 1 h.
+
+### P1.12 Finding 13 — daemon coding E2E — G2
+
+- Problem: engine and RPC round-trips exist; the daemon coding E2E is `DONE`-only.
+- Files: extend `src/e2e/b10-daemon.test.ts`.
+- Action: three scenarios through `DaemonService` RPC on `fixtures/resume-dup-fetch` with
+  `ScriptedProvider`: (1) a run that reaches `NEEDS_HUMAN` and answers via the RPC answer flow, then
+  resumes to a terminal phase; (2) a run that receives `STOP_REQUESTED` mid-`EXECUTING`, reaches
+  `STOPPED`, then `resume` returns it to `EXECUTING`; (3) a run killed by destroying the service
+  mid-`EXECUTING`, then recovered by a fresh `DaemonService` over the same store.
+- Verify, per scenario, since rev 5's single "terminal phase" clause did not match the three
+  scenarios: (1) asserts phase `NEEDS_HUMAN`, then after the answer asserts phase `DONE`;
+  (2) asserts control `STOPPED` with phase preserved, then after `resume` asserts control `RUNNING`
+  and phase `EXECUTING`; (3) asserts the recovered run's phase equals the pre-kill phase, its job set
+  is restored, and — after P1.3 — its spend is non-zero. All three additionally assert event causality
+  is unbroken and no worktree is left behind.
+- Estimate: 1 day.
+
+### P1.13 Finding 15 — `runtime=required` happy path — G2
+
+- Depends on P1.6 and P1.8.
+- Files: `src/e2e/`, `fixtures/resume-dup-fetch`, `src/runtime/fixtureRunner.ts`.
+- Action: one scripted E2E with `--runtime required` that reaches `DONE`. "Persisted corpus
+  identity" means: the `RuntimeEvidence` recorded for the accepted checkpoint references a corpus
+  entry whose artifact id and `relativePath` are stable across a daemon restart, asserted by
+  reloading the store and re-reading the entry.
+- Verify: the run reaches `DONE`; removing the runtime evidence makes the same run fail to reach
+  `DONE`; the corpus entry survives a restart with the same identity.
+- Estimate: 1 day.
+
+**P1 exit:** gate green. Baseline recorded for the G1 exit criterion. P1.4 report persisted.
+Findings 12, 13, 15, 16, 17, 21, 22, 25, 27, 28, 30, 31 and the corpus defect closed or explicitly
+accepted.
+
+## 4. P2 — Measurements that gate P3
+
+No production change.
+
+### P2.1 Post-validation yield — gates P3.1
+
+- The 60.0% clean-site false-positive figure is measured on **raw reviewer output**. Production runs
+  findings through triage and reproduction (`src/findings/validator.ts:82-161`,
+  `src/engine/checkpointCheckout.ts:88-104`, `src/engine/reviewDrivers.ts:206-249`). What survives
+  has never been counted.
+- Council correction: this measures **attrition, not precision**; a count cannot say which survivors
+  are false positives. And `ReviewExecution` (`src/domain/review.ts:21-33`) has no token fields, so
+  tokens must come from `model.call` events joined on `purpose: review_<axis>`.
+- Action: query `review_executions`, `findings`, `finding_validations`, `tasks` and `model.call` in
+  `~/.polish/polish.db`. Report per axis: raw findings, surviving triage, surviving reproduction,
+  tasks spawned, tokens. Then hand-adjudicate the survivors; the row count makes this tractable.
+- Estimate: 4 h.
+
+### P2.2 Non-inferiority baseline — gates P3.2, P3.3, and the G1 exit criterion
+
+- Action: write `docs/ledger/replay-set.md` containing the fixture mission plus every task in
+  `~/.polish/polish.db` that reached `INTEGRATING`, each with run id, task id, checkpoint hash and
+  recorded token cost, and the two model names pinned. Runner: the scripted E2E harness under
+  `src/e2e/`. Repetitions: 3 per arm.
+- Reconstruction rule, since historical runs cannot be replayed verbatim: a replay-set entry is
+  reproduced by re-running its **mission and task contract** against the fixture with
+  `ScriptedProvider` cassettes where they exist, and is otherwise recorded as
+  `not_replayable(reason)` and excluded from the gate. State the excluded count in the file.
+- **Minimum denominator, so the gate cannot become vacuous:** the replay set must contain **at least
+  5 replayable entries**, of which at least 2 reached `DONE`. `completed` means the entry's terminal
+  phase is `DONE`. If fewer, P2.2 reports **`inconclusive — insufficient replay corpus`**, and every
+  gate that depends on it (P3.2, P3.3, the §1 G1 exit criterion) reports `inconclusive` rather than
+  passing. A set that **does** meet the floor is evaluated normally, cassettes included — see §1,
+  which states the single procedure. There is no separate cassette-only prohibition.
+- Gate: a change may replace an existing path only if every replayable entry reaches the same
+  terminal state at equal or lower cost in all 3 repetitions.
+- Estimate: 6 h.
+
+### P2.3 Discovery smoke on a second repository — G2
+
+- Action: `polish run <repo> --runtime off`, stop after `DISCOVERING_PROJECT` and `BASELINING`.
+  Repository: named by the user at execution time; if unnamed, a clean clone of a small public
+  TypeScript repo with a working `pnpm test`.
+- Not Fable D1. The full external run is not scheduled in this document.
+- Estimate: 1 h.
+
+**P2 exit:** P2.1 report, `docs/ledger/replay-set.md`, and the smoke record exist.
+
+## 5. P3 — Conditional, gated
+
+Starts only after P2. Each item lands behind a config flag with the existing path retained, and must
+pass P2.2 before the old path may be removed.
+
+### P3.1 Drop the weakest axis — G1
+
+- Gated on **P2.1**, not P1.4 alone: rev 4 was corrected for deciding G1 by the raw metric P2.1
+  exists to replace.
+- Mechanism: `reviewersPerRound` is a **count** cycling `DEFAULT_REVIEW_AXES`
+  (`src/domain/review.ts:6-18`), so lowering it drops `adversarial` regardless of measurement.
+  Dropping a named axis requires changing `DEFAULT_REVIEW_AXES` **and** the
+  `axes.length < DEFAULT_REVIEW_AXES.length` guard at `:10-11` in the same change.
+- Criterion: lowest **VALID findings per token** from P2.1; ties broken in favour of higher unique
+  raw recall from P1.4.
+- Void if P1.1's conditional skip already reduced the axis to near-zero use; check the skip rate
+  first.
+- Verify: recall on the 8 pairs must not fall; P2.2 replay set unchanged.
+- Estimate: 4 h.
+
+### P3.2 Adversarial axis as falsifier — G1
+
+- Void if P3.1 dropped `adversarial`. The axis sees only the diff and the other axes' findings and
+  may only refute, bounding its output by the number of existing findings.
+- Verify: P2.2 replay set unchanged; recall on the 8 pairs must not fall.
+- Estimate: 1 day.
+
+### P3.3 Fail-to-pass on the corpus — G2
+
+- Depends on P1.8, without which corpus entries are never executed at all.
+- Check first whether admission already requires the artifact to have failed before the change;
+  baseline-relative gates compare check results, which is not the same requirement. If absent, add
+  it. Touches neither `src/verify/` nor convergence accounting.
+- Estimate: 1 day including the check.
+
+### Withdrawn, with reasons
+
+| Withdrawn | Reason |
+|---|---|
+| **Reviewer-supplied reproduction** | Rejected by both reviewers over two rounds. Not a change of author: today `ProjectFindingEvidenceWorker` infers a command from prose and runs it one-sidedly, fail⇒`VALID` (`src/findings/reproduce.ts:28-38,115-167`), so a two-sided discriminating test is a new oracle and a new pre-VALID filter. It also required corpus materialization, which was broken. And it added a second reproduction mechanism while keeping prose review and the Evidence Agent, deleting nothing — fails G3. **Unscheduled option**; revisit only after P1.8 ships and P2.1 shows validation does not already filter the false positives. |
+| Delete `src/verify/` | `EmpiricalVerifier` wired at `composition.ts:715`, accepted 2026-09-13 at `78a3378`. Only the unread key `verifier.empiricalPivots` goes. |
+| Delete pathology, re-implement no-progress | `detectTestOnlyTreadmill` shipped with accepted 35+23. |
+| One clean round instead of N | `B-selfhost-8-run.md:8-14`: accepted after rounds 14–15, wrongly; five further rounds reopened it. |
+| `git checkout --` replacing `ProtectedChangeWaiver` | The invariant expressly permits mission-authorised test and config changes under independent validation. |
+| Delete `NEEDS_HUMAN` | Termination is not success. |
+| Workers over ACP / subscription CLI | Contradicted the Amdahl argument: worker loop is 17.2% of spend. Also blamed workers for the 429 storm, which finding 37 records as 2,465 rate-limited **review** executions. User authorisation for personal local use is recorded and unused. |
+| Full external run as Fable D1 | Reduced to P2.3. |
+| Review cache | Withdrawn; key was incomplete and the win is unquantified. |
+| Retry truncated reviewer calls at a lower length | Withdrawn; fail closed instead. |
+
+## 6. P4 — Confirmed dead code
+
+Grep-confirmed unused at `4c5bb63`. Delete outright; git history is the backup.
+
+| Target | Lines | Evidence |
+|---|---|---|
+| `src/context/facts.ts:FactsService` | 187 | no production instantiation |
+| `src/intel/codegraphCli.ts` + `composite.ts` | 378 | not imported by `composition.ts`; production uses `new BasicIntel` at `src/agents/runner.ts:52` |
+| `CleanRoundTracker` class | ~60 of `tracker.ts`'s 110 | superseded by `hasConverged` / `recordCleanRoundEvent`; **keep** `preferRotatedEnsemble`, live at `pathology/ensemble.ts:17` |
+| `buildSupervisorView`, `ProtocolRegistry.readResource`, `executionEvidenceIsSufficient` | ~120 | test-only callers |
+| `protocols/typescript`, `protocols/react-native` | 34 | no selector; `ProjectProfile.framework` is a test-runner hint |
+| Unread config fields | ~40 | `review.rotateEnsembles`, `retry.freshWorkerAttempts`, `retry.escalateTierFromAttempt`, `contextBudget.workerPackFraction`, `supervisorViewFraction`, `verifier.empiricalPivots`, `sandbox.backend`, unused lane limits |
+| Duplicate `RunHead` | 8 | `engine/integration.ts:16`, `convergence/rollback.ts:7` |
+
+Total ≈ 830 lines, about 2.7% of `src/`. Estimate: 1 day including gate.
+
+**Struck:** `ModelObservationRepository.recordQuality` — called in production at
+`src/broker/observations.ts:206` and `:211` inside `restoreCatalog`.
+**Separate task, not a janitor item:** `TASK_TABLE` / `CANDIDATE_TABLE` / `validateTable` are unused
+because they were never wired, while `FINDING_TABLE` **is** wired (`reviewDrivers.ts:542-543`).
+Deleting them removes a specification without adding enforcement. Decide explicitly: wire or delete.
+
+CodeGraph is named in ADR-0001. Deleting the CLI backend needs a one-paragraph ADR note, not an
+invariant amendment: the `RepositoryIntelligence` seam and `BasicIntel` remain.
+
+## 7. How this plan stays inside the invariants
+
+| Invariant | Status |
+|---|---|
+| Task origin ∈ `valid_finding \| mission_requirement \| investigation` | Untouched. The only item that pressured it is withdrawn. Shape enforced by `TaskStrictSchema` (`src/store/projections.ts:104-108`); the finding/validation relationship by the factory (`src/domain/task.ts:197-233`), not the store. |
+| Clean rounds bound to `checkpoint_hash`, invalidated by any code change | Untouched. Accounting stays (`src/convergence/record.ts:99-157`). No item changes `required_clean_rounds` from its default of 3 (`src/domain/config.ts:55`). |
+| Mission Acceptance Corpus cumulative and first-class | **Violated in production today**; repaired by P1.8, which is the plan's answer to the council's fatal objection. |
+| ProtectedChangeWaiver | Kept. |
+| Deterministic evidence before opinion | Unchanged. Gates precede review. |
+| No model names in core | Unchanged. ACP withdrawn. |
+| Reviewer counts / axes | ADR-0001 lines 44-48 classify these as configurable strategy, which is what P1.1 and P3.1 change. |
+
+## 8. Corrections carried from earlier revisions
+
+| Earlier claim | Correct value |
+|---|---|
+| intel backends ~700 lines | 378 |
+| `src/` 29,852 / 29,187 | 30,347 / 30,116 |
+| `CleanRoundTracker` ~80 lines | ~60 of 110 |
+| B-selfhost-8 test file 955 lines | 982 |
+| B-selfhost-8 "3 commits, 24 test-only" | 2 behaviour commits, 26 test-only |
+| `src/verify/` deletable | wired in production |
+| `recordQuality` test-only | called at `observations.ts:206,211` |
+| findings 17, 21, 22, 25 dead machinery | live behaviour defects, now P1.7 |
+| finding 16 settled by an external run | one-line early return, now P1.6 |
+| finding 31 closed by a spend-share argument | accepted risk, P1.11 |
+| `service.ts:355-373` for the seam | `:450-459`, `:487-494`, `:502` |
+| `config.ts:266` for `withRuntimeValidationMode` | `:276-282` |
+| `composition.ts:139-141` as merge consumer | definition; consumers are `composition.ts:169-173` and `service.ts:458` |
+| `config.ts:121` for `costEligibility` | `:135` |
+| "drop an axis by config" | `reviewersPerRound` is a count; `DEFAULT_REVIEW_AXES` is the lever |
+| `usdUsage` "returns 0" on unpriced calls | returns `null` when none priced; the defect is silent omission in partially priced runs |
+| all `taskId: null` is council spend | probes, supervisors and reviewers also omit it; bucket by `role` |
+| 1500-token cap is a saving | observed completions are 435–1,107; it is a tail guard |
+| review cache, truncation retry | withdrawn |
+| "§6 states how" | §7 |
+| "seven blocks" | four phases |
+| `reviewDrivers.ts:905` is a dispatch site | it is `exhaustedAxes`; dispatch is `:172` with axis order at `:815-828` |
+| a `review.axis_skipped` row is representable | it is not; projections write `review_executions` only from `review.started` / `review.finished` (`projections.ts:234-235`) |
+| `completed: false` implements "no retry" | it requeues the axis via `missingAxes`; skips and truncations must be `completed: true` |
+| `listActive()` is the set of runs to restore spend for | it excludes `NEEDS_HUMAN` and `STOPPED`, both resumable |
+| task ids comparable across runs | ids carry random bytes (`src/shared/ids.ts:17-31`); compare titles |
+| role buckets as reserved keys in `perTask` | a separate `perRole` field; `exhaustedDimensions` iterates every `perTask` key |
+| corpus artifact bytes come from validation evidence | they come from the winning candidate's regression test file after integration |
+
+## 9. Verification process v2
+
+User instruction: one reviewer per task, two at block completion. Our own run records falsify the
+strong form, so the economy is kept where the data allows it.
+
+**Per task**
+
+1. Freeze and content-hash the contract in `docs/ledger/<task>.md` before any code.
+2. Implement.
+3. Coordinator runs the gate. A failure returns to step 2 with no reviewer involvement.
+4. Reviewers, each in its own worktree at the commit under review, receiving diff plus frozen
+   contract only:
+   - touches **no** production file → **one** reviewer, family other than the coordinator's;
+   - touches **any** production file → **two** reviewers, different families.
+5. Budget: three reviews, meaning initial plus two fix rounds.
+6. A production-relevant finding on the third review is a **fix**, not an abandonment. That fix gets
+   **one confirming review**, the fourth and final.
+7. If the confirming review reports a production-relevant finding, the task terminates as
+   `deferred(unconfirmed_fix)` with the finding recorded, and at most one successor is enqueued at
+   `depth+1`, refused at `depth ≥ 2`.
+
+**Per block.** Two reviewers of different families, once, against the block contract and G1/G2. Two
+clean verdicts accept the block.
+
+**Reviewer rules.** `NONE` is a valid verdict. Blocking is a user-visible behaviour change or an
+invariant violation with an accepted reproduction — not file classification, and not a survivable
+mutant. Test-strength observations are notes and do not reopen a round.
+
+**Abandonment.** A task ends when a round produces neither a production change nor a
+production-relevant finding. Accepted 35+23 already detects this shape.
+
+**The compulsory-axis instruction.** "Name an axis none of these covers" is a **coordinator**
+instruction at `docs/ledger/PHASE-C.md:159` and `B-selfhost-8-run.md:191`. It is not in
+`src/review/reviewerProtocol.ts` or `protocols/reviewer-*/SKILL.md`, which already permit an empty
+findings array. It is deleted from this process document and nowhere else.
+
+**Why not one reviewer everywhere.** `B-selfhost-18-run.md:99-106`: one lane passed while the other
+found defects in rounds 5, 7, 9 and 11; twelve of item 18's last thirteen findings came from one lane.
+
+**Why not a hard two-round cap.** Item 18 found production defects in rounds 2 **and** 3.
+
+**Machine load.** Reviewers run one at a time. The coordinator runs no gate while a reviewer works.
+Gates use `--maxWorkers=2`, never bare `pnpm check`; `vitest.config.ts` sets `pool: "forks"`.
+
+## 10. Prerequisite checklist — no code, ~2 h
+
+1. Reconcile `docs/ledger/PHASE-C.md` with `git log`: HOST is `4c5bb63`; merge commit `889b62d`
+   appears nowhere in the ledger; the reviewer-lane statement contradicts itself between the
+   2026-09-04 header and the item-18 note, and changed again when the coordinator model changed.
+2. Correct the stale user rule naming `916f7f2` as the base; it is nine items behind.
+3. Record process v2 (§9) in `docs/BVP.md`, including that its own two-round bound was never
+   honoured and what replaces it.
+4. Write §11 into `docs/ledger/B-selfhost-remaining.md` in one pass, as an archival appendix.
+
+## 11. Disposition of the 45 findings
+
+| Findings | Disposition |
+|---|---|
+| 3–9, 11, 18, 19, 23, 29, 32, 34, 35, 37, 39, 41–45 | ACCEPTED; historical |
+| 10 | ACCEPTED as `B-bootstrap-cost-eligibility` |
+| 12 | P1.3 (spend) + P1.7 (settings) |
+| 13 | P1.12 |
+| 14 | dropped: needs paid provider APIs, forbidden |
+| 15 | P1.13 |
+| 16 | P1.6 |
+| 17, 21, 22, 25 | P1.7 |
+| 20, 24 | deferred until after P2 |
+| 26 | open, unscheduled. Known weakness: a reviewer-authored claim reaches a worker as unfenced instruction via `task.description`. Closed only by the withdrawn reviewer-reproduction item |
+| 27 | P1.10 |
+| 28, 30 | P1.9 |
+| 31 | P1.11, accepted risk |
+| 33, 36, 38, 40 | superseded by measurement; historical |
+| **new** | corpus discarded during materialization → P1.8 |
+
+## 12. Out of scope
+
+- Durable-execution products (Temporal, Restate, DBOS, LangGraph): each adds Postgres, a non-MIT
+  server, or a second daemon, and none removes the phase machine, the gating logic, or the baseline
+  comparison.
+- A summariser or compactor: FIFO truncation matches LLM summarisation at every budget except the
+  most extreme, and re-compaction compounds the loss.
+- A learned progress score: process reward models respond to formatting artifacts and can be driven
+  above 0.9 reward at under 4% ground-truth accuracy.
+- paperclip as a product.
+- Phase D. No widening of Fable's architectural scope.
