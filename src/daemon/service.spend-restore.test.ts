@@ -155,9 +155,14 @@ describe("BudgetTracker per-task keys that collide with Object.prototype", () =>
    * public. Handing back the stored object would let any reader zero a run's spend.
    */
   it("cannot be written through to change what assertWithin enforces", () => {
-    const tracker = new BudgetTracker({ maxRunUsd: null, maxRunTokens: 100, maxTaskTokens: null });
-    tracker.record("run_1", { inputTokens: 100, outputTokens: 0, costUsd: null });
+    const tracker = new BudgetTracker({ maxRunUsd: 9, maxRunTokens: 100, maxTaskTokens: null });
+    // Two calls: one priced so `runUsd` is non-zero and assigning 0 to it is a real change, one
+    // unpriced so `unknownCostCalls` is non-empty. A field left at its zero value cannot be
+    // observed by writing its zero value back.
+    tracker.record("run_1", { inputTokens: 40, outputTokens: 0, costUsd: 2.5 });
+    tracker.record("run_1", { inputTokens: 60, outputTokens: 0, costUsd: null });
     const snapshot = tracker.snapshot("run_1");
+    expect(snapshot.runUsd).toBe(2.5);
     snapshot.runTokens = 0;
     snapshot.perTask["smuggled"] = 0;
     snapshot.runUsd = 0;
@@ -166,6 +171,7 @@ describe("BudgetTracker per-task keys that collide with Object.prototype", () =>
 
     const after = tracker.snapshot("run_1");
     expect(after.runTokens).toBe(100);
+    expect(after.runUsd).toBe(2.5);
     expect(Object.keys(after.perTask)).toEqual([]);
     expect(after.unknownCostCalls).toEqual(["unknown:0"]);
   });
@@ -175,12 +181,24 @@ describe("BudgetTracker per-task keys that collide with Object.prototype", () =>
    * surface. Fixing one and leaving the other is what MC11's rewrite exists to stop.
    */
   it("cannot be written through via the object record returns either", () => {
-    const tracker = new BudgetTracker({ maxRunUsd: null, maxRunTokens: 100, maxTaskTokens: null });
-    const returned = tracker.record("run_1", { inputTokens: 100, outputTokens: 0, costUsd: null });
+    const tracker = new BudgetTracker({ maxRunUsd: 9, maxRunTokens: 100, maxTaskTokens: 40 });
+    tracker.record("run_1", { inputTokens: 40, outputTokens: 0, costUsd: 2.5 }, "task_a");
+    const returned = tracker.record("run_1", { inputTokens: 60, outputTokens: 0, costUsd: null }, "task_a");
+    // The same four fields as above. A partial copy that refreshes the outer object and the array
+    // while leaving `perTask` aliased is the plausible half-fix, and it is per-task enforcement
+    // that it breaks.
     returned.runTokens = 0;
+    returned.runUsd = 0;
     returned.unknownCostCalls.length = 0;
+    returned.perTask["task_a"] = 0;
     expect(() => { tracker.assertWithin("run_1"); }).toThrow(PolishError);
-    expect(tracker.snapshot("run_1").unknownCostCalls).toEqual(["unknown:0"]);
+    expect(() => { tracker.assertWithin("run_1", "task_a"); }).toThrow(PolishError);
+
+    const after = tracker.snapshot("run_1");
+    expect(after.runTokens).toBe(100);
+    expect(after.runUsd).toBe(2.5);
+    expect(after.perTask["task_a"]).toBe(100);
+    expect(after.unknownCostCalls).toEqual(["unknown:0"]);
   });
 
   it("keeps such ids through a restore, so the fold and the tracker agree", () => {
