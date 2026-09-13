@@ -63,7 +63,41 @@ Every one of the six ran **all three axes to completion**.
 Execution counts per axis, all rounds: `correctness` 2,393 incomplete / 6 complete; `adversarial` 144
 / 6; `regression` 45 / 6. The incomplete rows are the 429 storm finding 37 describes and bounded.
 
-**Baseline for a per-round metric:** 834,635 reviewer tokens over 6 rounds, mean 139,106 per round.
+**Baseline for the per-round metric, all 834,635 reviewer tokens attributed, none left over:**
+
+| Run | Checkpoint | Round | Reviewer tokens |
+|---|---|---|---|
+| `run_01m1my3p…` | `c011b6e8` | 1 | 12,264 |
+| `run_01m1my3p…` | `c011b6e8` | 2 | 38,807 |
+| `run_01m1my3p…` | `c011b6e8` | 3 | 4,788 |
+| `run_01m1p013…` | `b35fe739` | 1 | 137,161 |
+| `run_01m1p013…` | `b35fe739` | 2 | 272,934 |
+| `run_01m1p013…` | `b35fe739` | 3 | 368,681 |
+
+**Median 87,984. Mean 139,106. Spread 77×** (4,788 to 368,681).
+
+The spread is why the accepted metric carries three guards, specified in `docs/PLAN.md` §1: the
+post-change arm is the **same six round identities compared pairwise** rather than any five rounds
+(dropping only the 368,681 round takes the median of the rest to 38,807 — a 56% "improvement" with no
+saving); **aggregate** reviewer tokens over that pinned workload must not rise; and a **companion
+count** immune to the spread.
+
+**Companion baseline.** Two obvious definitions are wrong and were rejected in council review:
+counting *completed* adversarial executions shows no drop, because P1.1 persists its skip as
+`completed: true`; counting `review.started` gives 2, 5, 2, 29, 46, 66 per round rather than a rate,
+because of the 429 storm. The metric is the **fraction of rounds issuing at least one provider
+`model.call` with `payload.purpose == "review_adversarial"`**:
+
+| Run | Checkpoint | Round | Adversarial provider calls | All reviewer calls |
+|---|---|---|---|---|
+| `run_01m1my3p…` | `c011b6e8` | 1 | 2 | 13 |
+| `run_01m1my3p…` | `c011b6e8` | 2 | 4 | 23 |
+| `run_01m1my3p…` | `c011b6e8` | 3 | 2 | 5 |
+| `run_01m1p013…` | `b35fe739` | 1 | 29 | 34 |
+| `run_01m1p013…` | `b35fe739` | 2 | 46 | 56 |
+| `run_01m1p013…` | `b35fe739` | 3 | 66 | 78 |
+
+**Baseline rate 1.0 — 6 of 6 rounds issued at least one.**
 
 ## Two consequences
 
@@ -95,5 +129,16 @@ is refuse to report a percentage over a corpus too small to carry one. It is a d
 denominator: completed tasks are the scarcest object in the store, and the change P1 actually makes is
 a **call not issued**, which does not need a completed task to be observed.
 
-Recorded here rather than resolved unilaterally, because §1's criterion was accepted by both reviewers
-and changing it is a plan change, not plan execution.
+**Resolved 2026-09-13, user decision, then re-reviewed by Grok and GPT-5.6-sol.** The cost denominator
+becomes the review round; P2.2's replay set keeps the quality gate only. The two were conflated and
+need different denominators: quality needs replayable tasks, cost needs observable calls.
+
+Both reviewers returned `ACCEPT WITH CHANGES` on the first draft of the new criterion and converged on
+four defects, all applied: the arm was sampled rather than pinned; aggregate spend was unguarded; the
+companion count was defined in a way that P1.1's own implementation would defeat; and the quality gate
+still carried a cost comparison. The fifth, and the one that changes what ships: a cost pass while the
+quality gate is `inconclusive` cannot close G1, and marking the verdict `inconclusive` is not enough,
+because a default-enabled change is already in production. **P1.1 therefore ships with
+`review.skipAdversarialWhenClean` defaulting to `false`** and is switched on only when P2.2 reaches
+`pass`. `docs/PLAN.md` §1 carries the criterion, the attribution rule, three guards and the coupling
+clause.

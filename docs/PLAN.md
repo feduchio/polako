@@ -35,29 +35,77 @@ recorded as resolved. Rev 6 applies both sets. §8 lists corrections.
 
 Every item states: goal · files · action · verify · estimate · deletion.
 
-**G1 exit criterion.** At the end of P3, median total tokens per completed replay-set task
-(§4 P2.2) must be **at least 20% below** the P1-entry baseline, with unchanged terminal outcomes in
-all repetitions. If not met, the plan reports **G1 unmet** in the ledger and reverts every
-cost-only production change. Added because both reviewers found rev 4's unconditional cost
-reduction to be near zero.
+**G1 exit criterion — denominator changed 2026-09-13 on measurement, user decision.**
 
-Three guards, because a percentage over an empty set is meaningless: the baseline is recorded at
-**P1 entry**, before any item in P1 lands; the denominator must satisfy P2.2's minimum of 5
-replayable entries with at least 2 reaching `DONE`; and if the denominator is short, or if any
-replay arm produces an undefined median, the outcome is **`inconclusive`**, which is neither a pass
-nor a trigger for the revert.
+Revisions 5–8 measured *median total tokens per completed replay-set task*. That criterion cannot be
+evaluated: the store holds **2** tasks that reached `INTEGRATED`, against P2.2's floor of 5, so the
+gate reported `inconclusive` before P1 began, and at n=2 its two values differ by **7.8×**
+(115,475 and 902,060). The guards worked; the denominator was wrong. Completed tasks are the scarcest
+object in the store, while the thing P1 changes is a **call not issued**, which needs no completed
+task to observe. Full baseline in `docs/ledger/g1-baseline.md`.
 
-**The denominator is exactly P2.2's replayable set, cassettes and all.** A set that meets the 5/2
-floor is cassette-backed by construction, and it is the G1 denominator; there is no separate
-"cassette-only is never a pass" rule. Only a short denominator or an undefined median is
-`inconclusive`. This resolves the ambiguity in revision 6, which left three incompatible readings and
-made it impossible to tell whether to compute the percentage, revert, or report inconclusive.
+**Cost is now measured per review round, quality separately.** The two gates are decoupled, because
+they need different denominators.
 
-Recorded consequence, so it is not discovered later: because cassettes replay frozen recorded
-completions, this gate measures the **call count and the prompt footprint** a change removes, not a
-change in live model output. P1.1's saving is visible to it — a skipped axis is a call not made.
-A change that only alters the content of a completion is invisible to it and must be judged by its
-own item-level verify clause instead.
+*Cost gate, primary.* A round is `(runId, checkpointHash, roundIndex)`. At the end of P3, the
+**median reviewer tokens per review round** must be at least **20% below** the P1-entry baseline.
+
+| P1-entry baseline | Value |
+|---|---|
+| Rounds | 6 |
+| Reviewer tokens attributed | 834,635, none unattributed |
+| Per round | 4,788 · 12,264 · 38,807 · 137,161 · 272,934 · 368,681 |
+| **Median** | **87,984** |
+| Mean | 139,106 |
+
+*Attribution rule, so two implementers get the same number from the same database.* A reviewer token
+belongs to the round identified by the **most recent preceding `review.started` event in the same
+`runId` whose `payload.execution.axis` equals the call's `payload.purpose` with the `review_` prefix
+removed**. Sum `payload.usage.inputTokens + outputTokens` over `type = 'model.call'` events with
+`payload.role == 'reviewer'`. This rule attributes 834,635 of 834,635 baseline reviewer tokens with
+none left over; an implementation that leaves tokens unattributed has the join wrong.
+
+*Guard 1 — the arm is pinned, not sampled.* The post-change arm must be the **same round identities**
+as the baseline, compared **pairwise**. Both reviewers showed why: nothing else stops the median moving
+on round composition. Dropping only the baseline's most expensive round (368,681) takes the median of
+the remaining five to 38,807, a 56% "improvement" with no per-round saving at all. New rounds created
+by P1.12 or P1.13 are **not** admitted to the cost arm.
+
+*Guard 2 — aggregate spend must not rise.* Over the pinned workload, **total** reviewer tokens must
+not increase. This catches the case where the median falls because missed findings ended a run earlier
+while total spend went up.
+
+*Guard 3 — companion count, immune to the 77× spread.* Defined precisely, because the obvious
+definitions are both wrong: counting **completed** adversarial executions shows no drop, since P1.1
+deliberately persists its skip as `completed: true`; counting `review.started` gives 2, 5, 2, 29, 46,
+66 per round rather than a rate, because of the 429 storm. The metric is the **fraction of rounds that
+issued at least one provider `model.call` with `payload.purpose == "review_adversarial"`**.
+Baseline **1.0 — 6 of 6 rounds**. Raw per-round call counts, retries included, are 2, 4, 2, 29, 46, 66.
+A "matching drop" means a fall in that rate. A median improvement without one is reported as
+**`unexplained`** and is not a pass.
+
+*Floors.* At least **5 pinned round pairs**. Below that, or on an undefined median, the outcome is
+**`inconclusive`** — neither a pass nor a trigger for the revert.
+
+**Quality coupling — this is the binding clause, not an aspiration.** G1 in the user's words is
+*cheaper **without losing quality***, and an `inconclusive` quality gate is not evidence of preserved
+quality. Therefore: **while the quality gate (P2.2) is not `pass`, no cost-reducing production
+behaviour may be enabled by default, and no existing path may be removed.** Making the overall G1
+verdict `inconclusive` is not sufficient on its own, because a default-enabled change would still be
+in production.
+
+Direct consequence, stated so it is not discovered during implementation: **P1.1 ships with
+`review.skipAdversarialWhenClean` defaulting to `false`.** The mechanism lands, is tested, and is
+measurable; it is switched on only once P2.2 reaches `pass`. The quality corpus currently holds 2 of
+the required 5 entries and grows from P1.12 and P1.13.
+
+*If the cost gate is not met*, the plan reports **G1 unmet** in the ledger and reverts every
+cost-only production change.
+
+Recorded consequence, so it is not discovered later: rounds replayed from cassettes carry frozen
+recorded completions, so this gate observes **calls issued and prompt footprint**, not a change in
+live model output. P1.1's saving is visible to it. A change that only alters the content of a
+completion is invisible to it and must be judged by its own item-level verify clause.
 
 This criterion is a project decision recorded here, not a Fable §1 invariant.
 
@@ -117,8 +165,11 @@ No architecture. Each item independently revertible. Order free.
      (`src/domain/review.ts:21-33`) has no `reason` field, and projections write `review_executions`
      only from `review.started` and `review.finished` (`src/store/projections.ts:234-235`), so a new
      type would store an event that never becomes a row.
-  6. New config field `review.skipAdversarialWhenClean: boolean` (default `true`) in
-     `ReviewStrategySchema` (`src/domain/config.ts:39-52`).
+  6. New config field `review.skipAdversarialWhenClean: boolean` in `ReviewStrategySchema`
+     (`src/domain/config.ts:39-52`), **default `false`**. The default is `false`, not `true`, because
+     §1's quality-coupling clause forbids enabling a cost-reducing behaviour by default while the
+     quality gate is not `pass`, and it currently is not. Flip the default to `true` in a separate
+     one-line commit once P2.2 reaches `pass`.
 - This is a reviewer-count strategy, which ADR-0001 lines 44-48 classify as configurable, not an
   invariant.
 - Verify: (a) a scripted round where correctness and regression return `[]` issues two provider calls,
@@ -398,7 +449,12 @@ No production change.
   tasks spawned, tokens. Then hand-adjudicate the survivors; the row count makes this tractable.
 - Estimate: 4 h.
 
-### P2.2 Non-inferiority baseline — gates P3.2, P3.3, and the G1 exit criterion
+### P2.2 Non-inferiority baseline — gates P3.2 and P3.3 (quality only)
+
+Scope narrowed 2026-09-13: this set governs **quality non-inferiority**, not the cost metric. The
+cost denominator is the review round, defined in §1, because only 2 tasks in the store reached
+`INTEGRATED` and the 5/2 floor could never be met. If this set stays short, the **quality** gate
+reports `inconclusive` and P3.2/P3.3 do not proceed; the cost gate is unaffected.
 
 - Action: write `docs/ledger/replay-set.md` containing the fixture mission plus every task in
   `~/.polish/polish.db` that reached `INTEGRATING`, each with run id, task id, checkpoint hash and
@@ -411,11 +467,16 @@ No production change.
 - **Minimum denominator, so the gate cannot become vacuous:** the replay set must contain **at least
   5 replayable entries**, of which at least 2 reached `DONE`. `completed` means the entry's terminal
   phase is `DONE`. If fewer, P2.2 reports **`inconclusive — insufficient replay corpus`**, and every
-  gate that depends on it (P3.2, P3.3, the §1 G1 exit criterion) reports `inconclusive` rather than
-  passing. A set that **does** meet the floor is evaluated normally, cassettes included — see §1,
-  which states the single procedure. There is no separate cassette-only prohibition.
-- Gate: a change may replace an existing path only if every replayable entry reaches the same
-  terminal state at equal or lower cost in all 3 repetitions.
+  gate that depends on it (P3.2, P3.3) reports `inconclusive` rather than passing. A set that **does**
+  meet the floor is evaluated normally, cassettes included. There is no separate cassette-only
+  prohibition. **Measured 2026-09-13: the store holds 2 such tasks, so this floor is currently unmet
+  and the quality gate is `inconclusive` until the corpus grows.** The corpus grows as a by-product of
+  P1.12 and P1.13, which create daemon and runtime E2E runs; no run is scheduled solely to feed it.
+- Gate, quality only: a change may replace an existing path only if every replayable entry reaches the
+  **same terminal state** in all 3 repetitions. The phrase "at equal or lower cost" is **removed**:
+  cost is §1's gate on its own denominator, and leaving a cost comparison here re-imported the retired
+  task-based metric into a quality-only section, where it was also unevaluable at n=2. Token cost stays
+  in `replay-set.md` as metadata for §1's use, not as a condition of this gate.
 - Estimate: 6 h.
 
 ### P2.3 Discovery smoke on a second repository — G2
