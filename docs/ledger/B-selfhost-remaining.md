@@ -495,7 +495,7 @@ seven review rounds. Every finding below has exactly one disposition. None is dr
 | 3, 4, 5, 6, 7, 8, 9 | ACCEPTED; historical |
 | 10 | ACCEPTED as `B-bootstrap-cost-eligibility` (lifted out of this list) |
 | 11 | ACCEPTED with 32+34+44 at `78a3378` |
-| 12 | Settings half **ACCEPTED** at `0c69901` as P1.7: one resolver owns a run's config, limits and overrides. Spend half remains **P1.3**, now unblocked. Split because the halves are independent: limits without spend still bind, spend without limits binds the wrong number |
+| 12 | **ACCEPTED**, both halves. Settings at `0c69901` as P1.7: one resolver owns a run's config, limits and overrides. Spend at `4ad342c` as P1.3: a restarted daemon restores each active run's spend from its own `model.call` events and the restored number binds. Split because the halves are independent: limits without spend still bind, spend without limits binds the wrong number |
 | 13 | **P1.12** — daemon coding E2E for `NEEDS_HUMAN`, STOP/RESUME, crash recovery |
 | 14 | **DROPPED.** Requires real paid provider APIs, which policy forbids. Transport-layer cassettes if the need returns |
 | 15 | **P1.13** — `runtime=required` happy path; depends on P1.6 and P1.8 |
@@ -608,7 +608,9 @@ otherwise look like unfinished work.
     `>= maxTaskTokens` compares an object to a number, which is `false`. The task spends without
     limit. `"constructor"` has the analogous shape and was executed to confirm it: the read returns
     `Object`, the comparison is `false`, and the write does not throw — it concatenates, leaving
-    `perTask.constructor` as the string `"function Object() { [native code] }100"`. **Found 2026-09-13** by the
+    `perTask.constructor` as the string `"function Object() { [native code] }100"`.
+    **CLOSED** at `4ad342c` as part of P1.3: `record` accumulates through `Object.fromEntries` and
+    `assertWithin` reads through `Object.hasOwn`. **Found 2026-09-13** by the
     GPT-5.6-sol lane in round 2 of P1.9, while attacking that item's fix for the *same* hazard in
     `foldModelCallUsage`. Pre-existing and unchanged from base; `quota.ts` is not in P1.9's diff.
     Reachability is the open question and is why this is recorded rather than assumed harmless: task
@@ -616,3 +618,18 @@ otherwise look like unfinished work.
     enforcement bypass rather than a live one. Closure is the same one-line shape P1.9 applied —
     accumulate in a `Map` — and it belongs with the next item that touches the tracker, which is
     **P1.3**, since that item already restores spend into it.
+
+51. **Restoring spend replays the whole observation catalog once per active run.**
+    `ModelBroker.restore(runId)` calls `observations.restoreCatalog(catalog)` before folding that
+    run's spend (`src/broker/broker.ts`), and `restoreCatalog` is a global operation: it rebuilds the
+    observation projection with a `DELETE` plus a replay of every `model.observation.recorded` event,
+    resets call stats, resets quality per observed model, then replays. P1.3 gave `restore` its first
+    production caller and calls it once per run in `listActive()`, so daemon startup now does
+    **N full catalog rebuilds** for N active runs where one would do. **Found 2026-09-14** by the Grok
+    lane in the second-lane review of P1.3, and independently consistent with what the GPT lane
+    established about `restoreCatalog` being reset-then-replay. **Not a behaviour defect** — both
+    lanes confirmed the operation is idempotent, which is exactly what P1.3's MC4 required before
+    accepting the N-times replay, so the result is correct at any N. It is a startup cost, O(N·|obs|),
+    that became live with P1.3. Closure is to hoist the catalog restore out of the per-run loop, which
+    is a change to `ModelBroker`'s interface rather than to P1.3's seam; both lanes advised against
+    adding a hoist clause to this item. Rides with the next item that touches broker recovery.
