@@ -122,8 +122,12 @@ function protocolEntryError(skillPath: string, error: unknown): PolishError {
   if (error instanceof PolishError) {
     return new PolishError(error.code, error.message, { ...error.details, skillPath }, { cause: error });
   }
+  // An errno means the file could not be read; anything else here is the content being wrong.
+  // The root scan already draws that line, and an operator told INVALID_ARGUMENT about a
+  // permission error looks for the wrong problem.
+  const code = typeof (error as NodeJS.ErrnoException | null)?.code === "string" ? "IO_ERROR" : "INVALID_ARGUMENT";
   return new PolishError(
-    "INVALID_ARGUMENT",
+    code,
     error instanceof Error ? error.message : String(error),
     { skillPath },
     { cause: error },

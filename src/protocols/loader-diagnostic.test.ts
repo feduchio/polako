@@ -108,6 +108,26 @@ describe("ProtocolRegistry.load names the offending file", () => {
     expect(error.message.split(missing)).toHaveLength(2);
   });
 
+  /**
+   * The per-entry catch has two arms: what `parseSkillMarkdown` and the name checks throw, and what
+   * the native `readFileSync` throws. Only the first had an input. Moving the read above the `try`,
+   * or converting only `PolishError` and `ZodError`, leaves every other check green while a raw
+   * `EACCES` escapes.
+   */
+  it("converts a native read failure on one SKILL.md into a PolishError naming that file", () => {
+    const dir = root();
+    const path = writeRaw(dir, "bugfix", skill("bugfix"));
+    chmodSync(path, 0o000);
+    try {
+      const error = loadError(dir);
+      expect(error.code).toBe("IO_ERROR");
+      expect(error.details["skillPath"]).toBe(path);
+      expect(error.cause).toBeInstanceOf(Error);
+    } finally {
+      chmodSync(path, 0o644);
+    }
+  });
+
   it("converts a native scandir failure into a PolishError naming the root", () => {
     const dir = root();
     const locked = join(dir, "locked");
