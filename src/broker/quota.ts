@@ -174,7 +174,8 @@ export class BudgetTracker {
     }
     if (taskId !== undefined) s.perTask = withTaskTokens(s.perTask, taskId, tokens);
     this.runs.set(runId, s);
-    return s;
+    // A copy, for the same reason `snapshot` returns one: `s` is now live enforcement state.
+    return this.snapshot(runId);
   }
 }
 

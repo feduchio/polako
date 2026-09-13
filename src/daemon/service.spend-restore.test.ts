@@ -160,9 +160,27 @@ describe("BudgetTracker per-task keys that collide with Object.prototype", () =>
     const snapshot = tracker.snapshot("run_1");
     snapshot.runTokens = 0;
     snapshot.perTask["smuggled"] = 0;
+    snapshot.runUsd = 0;
+    snapshot.unknownCostCalls.push("smuggled");
     expect(() => { tracker.assertWithin("run_1"); }).toThrow(PolishError);
-    expect(tracker.snapshot("run_1").runTokens).toBe(100);
-    expect(Object.keys(tracker.snapshot("run_1").perTask)).toEqual([]);
+
+    const after = tracker.snapshot("run_1");
+    expect(after.runTokens).toBe(100);
+    expect(Object.keys(after.perTask)).toEqual([]);
+    expect(after.unknownCostCalls).toEqual(["unknown:0"]);
+  });
+
+  /**
+   * `record` returns the object it stores, so the same write-through exists on a second public
+   * surface. Fixing one and leaving the other is what MC11's rewrite exists to stop.
+   */
+  it("cannot be written through via the object record returns either", () => {
+    const tracker = new BudgetTracker({ maxRunUsd: null, maxRunTokens: 100, maxTaskTokens: null });
+    const returned = tracker.record("run_1", { inputTokens: 100, outputTokens: 0, costUsd: null });
+    returned.runTokens = 0;
+    returned.unknownCostCalls.length = 0;
+    expect(() => { tracker.assertWithin("run_1"); }).toThrow(PolishError);
+    expect(tracker.snapshot("run_1").unknownCostCalls).toEqual(["unknown:0"]);
   });
 
   it("keeps such ids through a restore, so the fold and the tracker agree", () => {
