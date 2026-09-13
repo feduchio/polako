@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { defaultConfig } from "../domain/config.js";
@@ -114,16 +114,40 @@ describe("buildProductionDeps protocol load diagnostic", () => {
   });
 
   /**
-   * MC5 forbids a second wrapper at `reviewDrivers.ts:102`. The clause is about code that is not
-   * there, so the observation is over the source: one production file owns the operator line.
+   * MC3 and MC5 are claims about code that is not there, so both are observed over the source.
+   * `productionSources` is shared by the two checks below.
    */
-  it("has exactly one protocol-load wrapper in production source", () => {
+  function productionSources(): { src: string; files: string[] } {
     const src = fileURLToPath(new URL("..", import.meta.url));
-    const owners = readdirSync(src, { recursive: true, withFileTypes: true })
+    const files = readdirSync(src, { recursive: true, withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"))
       .map((entry) => join(entry.parentPath, entry.name))
-      .filter((path) => readFileSync(path, "utf8").includes("protocol registry failed to load"));
+      .sort();
+    return { src, files };
+  }
+
+  it("has exactly one owner of the operator line", () => {
+    const { src, files } = productionSources();
+    const owners = files.filter((path) => readFileSync(path, "utf8").includes("protocol registry failed to load"));
     expect(owners).toEqual([join(src, "daemon", "composition.ts")]);
+  });
+
+  /**
+   * The wording of a second wrapper is free, so counting the diagnostic literal cannot see one.
+   * The call sites can: any wrapper around either load rewrites the line the load sits on.
+   */
+  it("wraps ProtocolRegistry.load at exactly one call site", () => {
+    const { src, files } = productionSources();
+    const sites = files.flatMap((path) =>
+      readFileSync(path, "utf8")
+        .split("\n")
+        .filter((line) => line.includes("ProtocolRegistry.load("))
+        .map((line) => `${relative(src, path)} | ${line.trim()}`),
+    );
+    expect(sites).toEqual([
+      "daemon/composition.ts | return ProtocolRegistry.load(root);",
+      "engine/reviewDrivers.ts | const protocols = options.protocols ?? ProtocolRegistry.load(defaultProtocolsRoot());",
+    ]);
   });
 
   /**
