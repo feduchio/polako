@@ -443,12 +443,15 @@ independently; it is written verbatim below.
 - Action, default **(b)**: record finding 31 as an accepted risk in
   `docs/ledger/B-selfhost-remaining.md` under finding 31, with the reason that the worker loop is
   17.2% of spend, that no long-horizon fixture exists, and that it is revisited if any run produces
-  a worker loop past 25 turns. Option (a), the long-horizon arm, requires a fixture we do not have
+  a worker loop of 25 turns or more. Option (a), the long-horizon arm, requires a fixture we do not have
   and is not scheduled. No file is deleted by this item; rev 5 named a deletion target in §12 that
   does not exist there, and that instruction is withdrawn.
 - Verify: `docs/ledger/B-selfhost-remaining.md` finding 31 begins with `**ACCEPTED RISK**`, states
   the 17.2% figure, states the missing-fixture reason, and states the revisit trigger (any worker loop
-  exceeding 25 turns). No other file changes.
+  of **25 turns or more**). No other file changes.
+- **Trigger bound corrected 2026-09-14**, from "exceeding 25 turns". The collapse the finding cites
+  begins at **T≥25**, so exactly 25 is inside the region and the exclusive wording would have let the
+  one value the trigger most needs to catch pass unnoticed. Found in the process-v3 re-check.
 - Estimate: 1 h.
 
 ### P1.12 Finding 13 — daemon coding E2E — G2

@@ -113,9 +113,10 @@ on silently, and one of them is about an item that is already accepted.
 31. **ACCEPTED RISK, 2026-09-13, as P1.11.** Not closed and not dismissed. The payoff is bounded:
     the worker loop is **17.2%** of a run's tokens (finding 29), so by Amdahl's law nothing in that
     region can be a headline win. The experiment is not scheduled because **no long-horizon fixture
-    exists** — testing the claim needs a task that forces a worker past 25 turns, and
+    exists** — testing the claim needs a task that drives a worker to 25 turns, and
     `fixtures/resume-dup-fetch` does not produce one. **Revisit trigger:** any run, on any project,
-    that produces a worker loop exceeding **25 turns**; at that point run the arm the finding asks
+    that produces a worker loop of **25 turns or more** — inclusive, because the measured collapse
+    begins at T≥25, so a loop of exactly 25 is already in the region; at that point run the arm the finding asks
     for, compared on task outcome rather than on tokens. Full record, including why plan revision 3's
     spend-share dismissal answered the wrong question, in *Finding 31 — ACCEPTED RISK* below. The
     original analysis follows unchanged, because it is the reason the risk is worth naming.
@@ -529,12 +530,19 @@ with item 18's own stated benefit being *more turns per budget*.
 Accepted as a risk rather than closed, for two reasons. First, **the worker loop is 17.2% of a run's
 tokens**, so by Amdahl's law nothing in that region can be a headline win; item 18's measured ~5.8%
 net is the ceiling of the region, not a design failure. Second, **no long-horizon fixture exists**:
-testing the claim needs a task that forces a worker past 25 turns, and `fixtures/resume-dup-fetch`
+testing the claim needs a task that drives a worker to 25 turns, and `fixtures/resume-dup-fetch`
 does not produce one.
 
-**Revisit trigger:** any run, on any project, that produces a worker loop exceeding 25 turns. At that
-point run the arm the finding asks for — bounded window versus full history, compared on task
+**Revisit trigger:** any run, on any project, that produces a worker loop of **25 turns or more**. At
+that point run the arm the finding asks for — bounded window versus full history, compared on task
 outcome, not on tokens.
+
+**The bound is inclusive, corrected 2026-09-14.** It first read "exceeding 25 turns", which excluded
+exactly 25 — a value the measurement it is derived from puts *inside* the collapse region (`T≥25`).
+A loop of exactly 25 would have sat in the region the trigger exists to detect and not tripped it.
+Found by the GPT-5.6-sol lane in the process-v3 re-check of P1.11, which rejected the earlier decision
+to carry the mismatch as inherited: the disposition was newly written text, and repeating an
+imprecision does not make it someone else's.
 
 ## Findings that changed the plan rather than the code
 
