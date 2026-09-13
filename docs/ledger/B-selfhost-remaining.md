@@ -110,7 +110,17 @@ Purdue), and **LLM-as-a-Verifier**, github.com/llm-as-a-verifier/llm-as-a-verifi
 arXiv 2607.05391. The four findings below are the divergences. They are recorded rather than acted
 on silently, and one of them is about an item that is already accepted.
 
-31. **Item 18's design is the class of runtime the SKILL.state paper measured and found to
+31. **ACCEPTED RISK, 2026-09-13, as P1.11.** Not closed and not dismissed. The payoff is bounded:
+    the worker loop is **17.2%** of a run's tokens (finding 29), so by Amdahl's law nothing in that
+    region can be a headline win. The experiment is not scheduled because **no long-horizon fixture
+    exists** — testing the claim needs a task that forces a worker past 25 turns, and
+    `fixtures/resume-dup-fetch` does not produce one. **Revisit trigger:** any run, on any project,
+    that produces a worker loop exceeding **25 turns**; at that point run the arm the finding asks
+    for, compared on task outcome rather than on tokens. Full record, including why plan revision 3's
+    spend-share dismissal answered the wrong question, in *Finding 31 — ACCEPTED RISK* below. The
+    original analysis follows unchanged, because it is the reason the risk is worth naming.
+
+    **Item 18's design is the class of runtime the SKILL.state paper measured and found to
     collapse.** The paper's Experiment 5 exists for exactly this question -- "whether SKILL.state's
     performance gains stem merely from shorter prompts or from structured state representation" --
     and answers it with budget-matched controls at T=100, all pinned to SKILL.state's ~1,800-token
