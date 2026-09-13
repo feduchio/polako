@@ -216,7 +216,30 @@ No architecture. Each item independently revertible. Order free.
 - Estimate: 3 h.
 - Deletes: the unbounded tail.
 
-### P1.3 Durable spend across restart — G2
+### P1.3 Durable spend across restart — G2 — **BLOCKED, run P1.7 first**
+
+**Blocker, 2026-09-13.** The production change is one loop after `engine.recover()` calling
+`broker.restore(run.id)` for each run in `listActive()` — the same predicate `engine.tick` drives, so
+the restored set and the ticked set cannot drift. It is committed on `task/P1.3-wip` (`98d07b2`) and is
+believed correct.
+
+Restoring spend broke four pre-existing tests in `src/daemon/service.budget-override.test.ts` that had
+encoded the defect as expected behaviour: they restart repeatedly on the same run and relied on spend
+resetting to zero. Three were restructured correctly. The fourth, *"keeps the sound half of a run's
+persisted budget when the other half is corrupt"*, hits an anomaly that is **not explained**:
+
+- the on-disk facade contains `"budgetUsd":"lots"`;
+- the resolved daemon-wide budget prints `maxRunUsd: 100`;
+- the guard nevertheless rejects with `{budget: "run_usd", limit: 1, spent: 1.5}`;
+- the first three calls pass and only the fourth sees limit 1.
+
+That is the signature of a cached resolution, but `DaemonService.runBudget`'s cache is per instance and
+the service is freshly constructed. The source of the `1` is neither the config nor the corrupted file.
+
+This is the two-merge-site seam that findings 17, 21, 22 and 25 describe and that **P1.7 rewrites into
+a single resolver**. Diagnosing it inside P1.3 would be guessing. User decision 2026-09-13: **do P1.7
+first**, then rebase `task/P1.3-wip` onto the cleaned seam and either the anomaly disappears or it
+becomes explainable.
 
 - Problem: `ModelBroker.restore(runId)` (`src/broker/broker.ts:277-283`) folds a run's `model.call`
   events back into the budget tracker and has **no production caller**. Recovery ends at
