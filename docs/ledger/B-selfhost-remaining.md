@@ -577,3 +577,15 @@ otherwise look like unfinished work.
     cause it and does not fix it. Closure is a daemon log file under `${POLISH_HOME}` with
     `stdio: ["ignore", fd, fd]`, plus pointing `client.ts:47`'s message at that file — a change with
     its own contract, since it introduces a log-rotation question this tree has never had.
+
+49. **`ProtocolRegistry.load`'s duplicate-protocol guard is unreachable.** `src/protocols/loader.ts`
+    throws `INVARIANT_VIOLATION` when `registry.byName.has(meta.name)` — but the preceding branch
+    already requires `meta.name === entry.name`, and `readdirSync` returns distinct `entry.name`
+    values, so no input can reach the duplicate throw. Two folders "claiming the same name" is a
+    *mismatch* for at least one of them and dies at the earlier branch. **Found 2026-09-13** by the
+    GPT-5.6-sol lane in round 1 of P1.10, which also observed that P1.10's revision-1 AC2 claimed to
+    test this branch while its fixture exercised the mismatch branch instead — the fourth vacuous
+    assertion found across three items. Pre-existing; the guard is dead at every commit in this
+    history. Not deleted by P1.10, whose MC6 confines it to diagnostics: removing a defensive guard
+    needs its own argument about whether the invariant could become reachable. Rides with the next
+    item that touches the loader.

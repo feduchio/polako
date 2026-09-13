@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -105,6 +105,21 @@ describe("ProtocolRegistry.load names the offending file", () => {
     expect(error.details["protocolsRoot"]).toBe(missing);
     expect(error.details["skillPath"]).toBeUndefined();
     expect(error.message.split(missing)).toHaveLength(2);
+  });
+
+  it("converts a native scandir failure into a PolishError naming the root", () => {
+    const dir = root();
+    const locked = join(dir, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0o000);
+    try {
+      const error = loadError(locked);
+      expect(error.code).toBe("IO_ERROR");
+      expect(error.details["protocolsRoot"]).toBe(locked);
+      expect(error.cause).toBeInstanceOf(Error);
+    } finally {
+      chmodSync(locked, 0o755);
+    }
   });
 
   it("still loads a well-formed directory", () => {

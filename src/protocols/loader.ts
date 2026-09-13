@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, type Dirent } from "node:fs";
 import { dirname, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PolishError } from "../shared/errors.js";
@@ -16,11 +16,17 @@ export class ProtocolRegistry {
 
   static load(rootDir: string): ProtocolRegistry {
     const abs = resolve(rootDir);
-    if (!existsSync(abs) || !statSync(abs).isDirectory()) {
-      throw new PolishError("NOT_FOUND", `protocols root not found: ${abs}`, { protocolsRoot: abs });
+    let entries: Dirent[];
+    try {
+      if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+        throw new PolishError("NOT_FOUND", `protocols root not found: ${abs}`, { protocolsRoot: abs });
+      }
+      entries = readdirSync(abs, { withFileTypes: true });
+    } catch (error) {
+      throw protocolRootError(abs, error);
     }
     const registry = new ProtocolRegistry(abs);
-    for (const entry of readdirSync(abs, { withFileTypes: true })) {
+    for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const skillPath = join(abs, entry.name, "SKILL.md");
       if (!existsSync(skillPath)) continue;
@@ -90,6 +96,20 @@ export class ProtocolRegistry {
     }
     return readFileSync(fileReal, "utf8");
   }
+}
+
+/**
+ * `statSync` and `readdirSync` fail natively on an unreadable root: `EACCES` is an `Error`, not a
+ * `PolishError`, and nothing downstream could tell which directory it meant.
+ */
+function protocolRootError(protocolsRoot: string, error: unknown): PolishError {
+  if (error instanceof PolishError) return error;
+  return new PolishError(
+    "IO_ERROR",
+    error instanceof Error ? error.message : String(error),
+    { protocolsRoot },
+    { cause: error },
+  );
 }
 
 /**

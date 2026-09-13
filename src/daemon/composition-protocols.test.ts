@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { defaultConfig } from "../domain/config.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
@@ -88,9 +89,41 @@ describe("buildProductionDeps protocol load diagnostic", () => {
     expect(thrown).toBeInstanceOf(PolishError);
     const error = thrown as PolishError;
     expect(error.code).toBe("INVARIANT_VIOLATION");
-    expect(error.message).toContain("protocol registry failed to load: INVARIANT_VIOLATION");
-    expect(error.message).toContain(skillPath);
-    expect(error.message).toContain('"feature"');
+    // Equality, not containment: `toContain` of the prefix and of the path separately leaves the
+    // text between them free, so a wrapper that wrote `near <path>` would satisfy both.
+    expect(error.message).toBe(
+      `protocol registry failed to load: INVARIANT_VIOLATION at ${skillPath}: `
+      + 'protocol name "feature" must match directory "bugfix"',
+    );
+  });
+
+  it("reports an unreadable protocols root as IO_ERROR against the root path", () => {
+    const root = tmp("polish-unreadable-protocols-");
+    chmodSync(root, 0o000);
+    let thrown: unknown;
+    try {
+      build(root);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      chmodSync(root, 0o755);
+    }
+    expect(thrown).toBeInstanceOf(PolishError);
+    expect((thrown as PolishError).code).toBe("IO_ERROR");
+    expect((thrown as PolishError).message).toContain(`protocol registry failed to load: IO_ERROR at ${root}`);
+  });
+
+  /**
+   * MC5 forbids a second wrapper at `reviewDrivers.ts:102`. The clause is about code that is not
+   * there, so the observation is over the source: one production file owns the operator line.
+   */
+  it("has exactly one protocol-load wrapper in production source", () => {
+    const src = fileURLToPath(new URL("..", import.meta.url));
+    const owners = readdirSync(src, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"))
+      .map((entry) => join(entry.parentPath, entry.name))
+      .filter((path) => readFileSync(path, "utf8").includes("protocol registry failed to load"));
+    expect(owners).toEqual([join(src, "daemon", "composition.ts")]);
   });
 
   /**
