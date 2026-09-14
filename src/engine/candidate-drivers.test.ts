@@ -742,7 +742,7 @@ describe("B2 production candidate drivers", () => {
     expect(store.events.list(runId, { types: ["acceptance.recorded"] })).toEqual([]);
   });
 
-  it("does not admit runtime evidence for an integration that failed runtime validation", async () => {
+  it("keeps failed runtime diagnostics without admitting a protected executable", async () => {
     const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-failing-runtime", "pass", {
       "runtime/check.mjs": "process.exit(1);\n",
     });
@@ -754,7 +754,11 @@ describe("B2 production candidate drivers", () => {
     const finished = store.events.list(runId, { types: ["integration.finished"] })[0];
     expect(finished?.payload["advanced"]).toBe(false);
     expect(finished?.payload["status"]).toBe("failed_runtime");
-    expect(runtimeEvidenceEntries(store, run.missionId)).toEqual([]);
+    const evidence = runtimeEvidenceEntries(store, run.missionId);
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.status).toBe("failed");
+    expect(evidence[0]?.checkpointHash).toBe(finished?.payload["integratedCommit"]);
+    expect(store.events.list(runId, { types: ["acceptance.recorded"] })).toEqual([]);
   });
 });
 

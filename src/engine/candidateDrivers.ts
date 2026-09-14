@@ -404,6 +404,12 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       integratedCommit: result.integratedCommit,
     }, [startedId]);
 
+    if (!integrated && result.status === "failed_runtime" && result.integratedCommit !== null) {
+      // Executed failure evidence is diagnostic and checkpoint-bound even though the run head
+      // does not advance. It must not admit a protected executable; stale-head captures persist
+      // nothing because another integration won the CAS.
+      persistRuntimeCapture(ctx, result.integratedCommit, runtimeCapture, false);
+    }
     if (!integrated) {
       const failed = patchTask(ctx, {
         ...integrating,
@@ -920,6 +926,7 @@ function persistRuntimeCapture(
   ctx: PhaseContext,
   integratedCommit: string,
   capture: RuntimeValidationCapture,
+  admitExecutables = true,
 ): void {
   const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
   for (const record of capture.records) {
@@ -930,7 +937,7 @@ function persistRuntimeCapture(
       evidence,
       expectedCheckpointHash: integratedCommit,
     });
-    if (record.executable === undefined) continue;
+    if (!admitExecutables || record.executable === undefined) continue;
     const sha256 = ctx.store.acceptance.putContent(
       record.executable.bytes,
       `runtime:${evidence.id}:${record.executable.relativePath}`,
