@@ -746,7 +746,16 @@ otherwise look like unfinished work.
     `src/domain/checks.ts:197-211` hashes `kind` and `status` alongside it. Equal-fingerprint
     matching is therefore coarser than the specific failure, and more candidate outcomes collide
     with this baseline than the wording above would suggest.
-    **Not scheduled here.** P2.3's contract is a two-phase smoke with no production change, so this
-    is recorded rather than repaired. It is a prerequisite for any external run: Fable D1 cannot
-    mean anything while an external project's baseline can record the environment's failure as the
-    project's.
+    **Not scheduled in P2.3.** That contract is a two-phase smoke with no production change, so
+    this was recorded rather than repaired there.
+    **HALF FIXED 2026-09-14 by F54** (`docs/ledger/F54.md`, run record `docs/ledger/F54-run.md`).
+    The refuse-to-record half is done: a failure produced where the project's packages are not
+    installed is recorded as `error` rather than `fail` and carries **no** `failureFingerprint`,
+    and `BASELINING` appends no `baseline.snapshotted` at all, taking the run to `NEEDS_HUMAN` with
+    the new terminal reason `environment_not_ready`. The predicate has one definition
+    (`src/shared/projectDependencies.ts`), used by the check runner and the reproduction path.
+    **The other half is not done and is not scheduled**: nothing installs dependencies, so an
+    external project still cannot produce a *trusted* baseline — it now refuses to produce an
+    untrustworthy one instead. That needs an allowlist entry for `pnpm install`, a network policy
+    and a timeout budget, and it is a separate decision. Fable D1 still cannot proceed, but it now
+    fails loudly rather than on a false baseline.
