@@ -665,3 +665,21 @@ otherwise look like unfinished work.
     patch: these prompts are edited deliberately and often, so a byte pin turns every intended
     wording change into a failing test. That trade is why this is recorded rather than added to a
     measurement-only item. Rides with the next item that changes what a prompt says.
+
+53. **No code anywhere emits `acceptance.recorded`, so `acceptance_artifacts` is always empty.**
+    The table is projected from that one event type (`src/store/projections.ts:239`), the type is
+    declared (`src/domain/event.ts:33`) and read (`src/convergence/pathology/sample.ts:215`), and
+    **nothing appends it** — not production, not a single test. So
+    `ctx.store.repos.acceptance.forTask(...)` (`src/engine/candidateDrivers.ts:784`) returns `[]`
+    in every run that has ever executed, and everything downstream of it runs over an empty list:
+    protected-path inspection (`src/project/checkRunner.ts:650-669`), materialization (`:703-705`),
+    canonical hash verification (`:715`), and the `ProtectedChangeWaiver` path that exists to
+    authorise changes to those artifacts.
+    **Found 2026-09-14** by the coordinator while mapping P1.8's surface.
+    This is not a second defect beside the corpus one; it is the same hole seen from the other
+    end. `docs/PLAN.md` §7 records the Mission Acceptance Corpus invariant as violated because
+    corpus entries are never materialized, and the reason they cannot be is that the artifact
+    mechanism they would use **has no producer at all**. So P1.8's corpus artifact is the first
+    `AcceptanceArtifact` the system will ever create, and P1.8 must add the producer, not only the
+    union. Recorded here rather than only in P1.8's contract because it also explains why no run
+    has ever exercised protected paths or a waiver: there was nothing to protect.
