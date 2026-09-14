@@ -437,13 +437,19 @@ function totals(population) {
   return { findingsRaised, survivedTriage, survivedReproduction };
 }
 
+/**
+ * MC3's verdict is the one for an empty eligible SET, and MC1 defines that set as executions. An
+ * eligible execution that completed with an empty findings array is not an empty set: it is a
+ * measured zero, which is yield data. Reporting it as "empty" would be the same error MC3 forbids
+ * in the other direction — a yield of zero dressed up as an absence of rows.
+ */
 function verdict(report) {
   const eligible = report.populations.eligible;
   const sums = totals(eligible);
-  if (eligible.executions === 0 || sums.findingsRaised === 0) {
+  if (eligible.executions === 0) {
     return {
       verdict: "inconclusive — no post-plumbing production findings",
-      eligibleExecutions: eligible.executions,
+      eligibleExecutions: 0,
       eligibleFindings: sums.findingsRaised,
       eligibleTableReported: false,
     };
@@ -677,6 +683,12 @@ function buildSelfcheckStore(path) {
   validation("fval_4", "fnd_ambiguous", "VALID");
   event(1500, "finding.raised", { finding: { id: "fnd_ambiguous" } }, ["rex_elig", "rex_inelig"]);
 
+  // A finding reproduction REJECTED. It survived triage and did not survive reproduction; a rule
+  // that counted any validation row as reproduction survival would say otherwise.
+  finding("fnd_rejected", "correctness", "REJECTED");
+  validation("fval_5", "fnd_rejected", "REJECTED");
+  event(1500, "finding.raised", { finding: { id: "fnd_rejected" } }, ["rex_elig"]);
+
   finding("fnd_elig_valid", "correctness", "VALID");
   validation("fval_1", "fnd_elig_valid", "VALID");
   event(1500, "finding.raised", { finding: { id: "fnd_elig_valid" } }, ["rex_elig"]);
@@ -709,9 +721,37 @@ function buildSelfcheckStore(path) {
   return CUTOFF;
 }
 
+/**
+ * The shape the store will actually have first: one post-cut-off execution that completed and
+ * parsed to an empty findings array — what `finishExecution` writes for a reviewer that found
+ * nothing, and what `skipExecution` writes for P1.1's skip. That is a measured zero, not an empty
+ * eligible set, and it must not be reported through MC3.
+ */
+function buildEmptyParseStore(path) {
+  const db = new DatabaseSync(path);
+  db.exec(SELFCHECK_SCHEMA);
+  const RUN = "run_empty_parse";
+  const CUTOFF = 1000;
+  db.prepare("INSERT INTO runs VALUES (?,?,?,?,?,?)").run(RUN, "msn_x", "REVIEWING", "RUNNING", 2000, "{}");
+  const value = { id: "rex_empty", runId: RUN, checkpointHash: "c0ffee", roundIndex: 1, axis: "correctness", requestedModel: {}, completed: true, findings: [], startedAt: 1400, finishedAt: 1500 };
+  db.prepare("INSERT INTO review_executions VALUES (?,?,?,?,?,?,?)").run("rex_empty", RUN, "c0ffee", 1, "correctness", 1, JSON.stringify(value));
+  let seq = 0;
+  const event = (ts, type, payload) => {
+    seq += 1;
+    const id = `evt_${seq}`;
+    db.prepare("INSERT INTO events VALUES (?,?,?,?,?,?,?)").run(id, RUN, seq, ts, type, "system", JSON.stringify({ id, runId: RUN, seq, ts, type, payload, causedBy: [], actor: { kind: "system" }, artifacts: [] }));
+  };
+  event(1400, "review.started", { execution: value });
+  event(1450, "model.call", { callId: "call_1", role: "reviewer", purpose: "review_correctness", usage: { inputTokens: 30, outputTokens: 10 } });
+  event(1500, "review.finished", { execution: value });
+  db.close();
+  return CUTOFF;
+}
+
 function selfcheck() {
   const dir = mkdtempSync(join(tmpdir(), "p2-1-selfcheck-"));
   const path = join(dir, "polish.db");
+  const emptyParsePath = join(dir, "empty-parse.db");
   try {
     const cutoff = buildSelfcheckStore(path);
     const data = read(path);
@@ -726,6 +766,10 @@ function selfcheck() {
     for (const bucket of BUCKETS) {
       for (const row of Object.values(p[bucket].axes)) bucketedCalls += row.reviewerCalls;
     }
+    const emptyParseCutoff = buildEmptyParseStore(emptyParsePath);
+    const emptyParseReport = measure(read(emptyParsePath), emptyParseCutoff);
+    const emptyParseVerdict = verdict(emptyParseReport);
+    const emptyParseRender = render(emptyParseReport);
     const checks = [
       ["executions that finished after the cut-off are eligible", p.eligible.executions, 5],
       ["an execution with no review.finished is never eligible", p.unfinished.executions, 1],
@@ -733,8 +777,8 @@ function selfcheck() {
       ["a finding follows its execution, not its own ts", axis("ineligible", "regression").findingsRaised, 1],
       ["that late-raised finding is not eligible", axis("eligible", "regression").findingsRaised, 0],
       ["its VALID validation is not eligible either", axis("eligible", "regression").survivedReproduction, 0],
-      ["eligible findings are counted", axis("eligible", "correctness").findingsRaised, 2],
-      ["a RAW finding has not survived triage", axis("eligible", "correctness").survivedTriage, 1],
+      ["eligible findings are counted", axis("eligible", "correctness").findingsRaised, 3],
+      ["a RAW finding has not survived triage", axis("eligible", "correctness").survivedTriage, 2],
       ["a VALID validation is reproduction survival", axis("eligible", "correctness").survivedReproduction, 1],
       ["a task from a valid finding is counted", axis("eligible", "correctness").tasksSpawned, 1],
       ["a call follows its execution, not its own ts", axis("eligible", "correctness").reviewerTokens, 10],
@@ -743,7 +787,7 @@ function selfcheck() {
       ["a call with no open execution is unattributed", axis("unattributed", "ghost").reviewerCalls, 1],
       ["a finding with no execution cause is unattributed", p.unattributed.findingStatuses.VALID, 2],
       ["an axis outside the three defaults is eligible too", axis("eligible", "architecture").findingsRaised, 1],
-      ["the verdict sums every eligible axis, not a fixed three", v.eligibleFindings, 3],
+      ["the verdict sums every eligible axis, not a fixed three", v.eligibleFindings, 4],
       ["a non-empty eligible set is measured, not inconclusive", v.verdict, "measured"],
       ["a non-empty eligible set reports its table", v.eligibleTableReported, true],
       ["an execution row with no events is not unfinished", axis("unfinished", "performance").executions, 0],
@@ -769,10 +813,20 @@ function selfcheck() {
       ["a review event naming no known execution is counted", report.inconsistencies.reviewEventUnknownExecution, 1],
       ["a review event from another run is counted", report.inconsistencies.reviewEventRunMismatch, 1],
       ["and that foreign execution is left unclassified", axis("unattributed", "correctness").executions, 1],
-      ["a finding citing two buckets is not assigned to either", axis("eligible", "correctness").findingsRaised, 2],
+      ["a finding citing two buckets is not assigned to either", axis("eligible", "correctness").findingsRaised, 3],
       ["it is unattributed", axis("unattributed", "correctness").findingsRaised, 2],
       ["and the ambiguity is counted", report.inconsistencies.ambiguousFindingCause, 1],
       ["every reviewer call is accounted for in some bucket", bucketedCalls, report.reproduction.reviewerCalls.measured],
+      ["a REJECTED reproduction survived triage", axis("eligible", "correctness").survivedTriage, 2],
+      ["but it did not survive reproduction", axis("eligible", "correctness").survivedReproduction, 1],
+      ["and it is counted as rejected", axis("eligible", "correctness").rejectedByReproduction, 1],
+      // MC3 is about an empty eligible SET of executions. A completed eligible execution that
+      // parsed to no findings is a measured zero and must be reported as yield, not as absence.
+      ["an eligible execution with an empty parse is not an empty set", emptyParseVerdict.eligibleExecutions, 1],
+      ["so it is measured, not the MC3 verdict", emptyParseVerdict.verdict, "measured"],
+      ["its per-axis table is reported", emptyParseVerdict.eligibleTableReported, true],
+      ["and the report does not call it empty", emptyParseRender.includes("Eligible population: empty"), false],
+      ["its tokens are attributed to it", emptyParseReport.populations.eligible.axes.correctness.reviewerTokens, 40],
     ];
     const failures = checks.filter(([, actual, expected]) => actual !== expected);
     for (const [name, actual, expected] of checks) {
