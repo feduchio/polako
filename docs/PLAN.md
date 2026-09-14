@@ -112,15 +112,36 @@ in production.
 Direct consequence, stated so it is not discovered during implementation: **P1.1 ships with
 `review.skipAdversarialWhenClean` defaulting to `false`.** The mechanism lands, is tested, and is
 measurable; it is switched on only once P2.2 reaches `pass`. The quality corpus currently holds 2 of
-the required 5 entries and grows from P1.12 and P1.13.
+the required 5 entries; how it grows is corrected in P2.2 below, because the mechanism named here in
+revision 8 does not exist.
 
 *If the cost gate is not met*, the plan reports **G1 unmet** in the ledger and reverts every
 cost-only production change.
 
 Recorded consequence, so it is not discovered later: rounds replayed from cassettes carry frozen
-recorded completions, so this gate observes **calls issued and prompt footprint**, not a change in
-live model output. P1.1's saving is visible to it. A change that only alters the content of a
-completion is invisible to it and must be judged by its own item-level verify clause.
+recorded completions, so this gate observes **calls issued**, not a change in live model output.
+P1.1's saving is visible to it. A change that only alters the content of a completion is invisible to
+it and must be judged by its own item-level verify clause.
+
+**Corrected 2026-09-14: it does not observe prompt footprint.** Revision 8 said "calls issued and
+prompt footprint". A replayed response carries the **recorded** `usage`, so a replayed round's token
+numbers are the ones the original call reported and do not move when the prompt does. Prompt size is
+observable under replay only if it is recomputed from the request the arm actually built, which is a
+separate instrument this gate does not have. Until it does, the cost gate is a claim about **call
+incidence** at equal round identity.
+
+**Where the replay material is, and the pair identity, added 2026-09-14.** Guard 1 requires the same
+six round identities in both arms, and replay mints new run ids, so "the same round" cannot be a run
+id. Two facts settle this. The broker persists a `model_request` artifact for every call and a
+`model_response` artifact for every successful one (`src/broker/broker.ts:226-269`), so the baseline's
+requests and completions **already exist in the CAS** and no new capture item is needed — finding 14
+stays dropped and no paid provider is implied. And a round is paired across arms by the **logical**
+key `(mission hash, task contract, axis, roundIndex)`, taken from `docs/ledger/g1-baseline.md`, never
+by `runId`. An implementation that pairs on run id will find zero pairs and must report
+`inconclusive`, not a pass. `RecordReplayProvider` keys on the request's messages, reasoning and
+`maxTokens` (`src/providers/recordReplay.ts:31-60`), so any item that changes those fields — P1.2 and
+P3.2 both do — misses the baseline entries; a reconstruction must report its key-coverage rate, and a
+gate evaluated at partial coverage is `inconclusive`.
 
 This criterion is a project decision recorded here, not a Fable §1 invariant.
 
@@ -503,6 +524,17 @@ No production change.
 - Action: query `review_executions`, `findings`, `finding_validations`, `tasks` and `model.call` in
   `~/.polish/polish.db`. Report per axis: raw findings, surviving triage, surviving reproduction,
   tasks spawned, tokens. Then hand-adjudicate the survivors; the row count makes this tractable.
+- **Eligibility, added 2026-09-14, because without it this item measures the wrong thing.** Only
+  review executions **after finding 41's plumbing fix** are admissible. Finding 41 established that
+  the request asked for a JSON object while the parser demanded an array, so every earlier execution's
+  recorded emptiness is discarded parser output, not yield. Measured 2026-09-14: the store holds 2,600
+  review executions, 18 of them completed, and **all 2,600 belong to the two runs last updated
+  2026-09-04** — so the eligible set is currently **empty**, and it is empty for a reason that has
+  nothing to do with review quality. The correct statement is "no eligible rows", never "zero
+  findings".
+- **Verdict when the eligible set is empty:** P2.1 reports
+  **`inconclusive — no post-plumbing production findings`**, and the report states the eligible count
+  and the cut-off it applied. It does not report a yield of zero.
 - Estimate: 4 h.
 
 ### P2.2 Non-inferiority baseline — gates P3.2 and P3.3 (quality only)
@@ -526,8 +558,20 @@ reports `inconclusive` and P3.2/P3.3 do not proceed; the cost gate is unaffected
   gate that depends on it (P3.2, P3.3) reports `inconclusive` rather than passing. A set that **does**
   meet the floor is evaluated normally, cassettes included. There is no separate cassette-only
   prohibition. **Measured 2026-09-13: the store holds 2 such tasks, so this floor is currently unmet
-  and the quality gate is `inconclusive` until the corpus grows.** The corpus grows as a by-product of
-  P1.12 and P1.13, which create daemon and runtime E2E runs; no run is scheduled solely to feed it.
+  and the quality gate is `inconclusive` until the corpus grows.**
+- **How the corpus grows — corrected 2026-09-14, because revision 8's mechanism does not exist.**
+  Revision 8 said the corpus grows as a by-product of P1.12 and P1.13. It cannot. Every E2E builds its
+  own `home` with `mkdtempSync` and deletes it in `afterEach` (`src/e2e/b10-daemon.test.ts:141-150`,
+  `:200-201`, `:286-289`), so no scripted run has ever inserted a row into `~/.polish/polish.db` and
+  none ever will. Since P2.2's runner is already the scripted harness, the entry — not the row — is
+  what matters: **a replay-set entry may be a committed scripted scenario**, a fixture mission plus
+  task contract that the harness takes to a named terminal state, recorded in
+  `docs/ledger/replay-set.md` with that state, and it counts toward the 5/2 floor even though its
+  store was deleted. Two consequences, both binding. Such an entry is **not** admitted to §1's cost
+  arm: `ScriptedProvider` does not report real spend. And frozen completions test **orchestration**,
+  not model output, so a set made only of them can establish that a change did not break the pipeline
+  and can **never** discharge quality non-inferiority for a change that alters what a model is asked
+  or what it returns; such a change is `inconclusive` here regardless of the floor.
 - Gate, quality only: a change may replace an existing path only if every replayable entry reaches the
   **same terminal state** in all 3 repetitions. The phrase "at equal or lower cost" is **removed**:
   cost is §1's gate on its own denominator, and leaving a cost comparison here re-imported the retired
@@ -569,6 +613,13 @@ pass P2.2 before the old path may be removed.
   80.0%, and the best pair discrimination by a wide margin is `regression` at 70.6% against
   `adversarial`'s 26.7% and `correctness`'s 17.6%. `adversarial` is the weakest on raw recall
   (65.0%), which is what the plan expected. Full record in `docs/ledger/P1.4-run.md`.
+- **When P2.1 is `inconclusive`, P3.1 reports `inconclusive — no post-validation yield data` and
+  drops no axis. Added 2026-09-14, with two bounds on what that means.** First, it is **not** a
+  licence to re-point this item at the blinded corpus: that criterion was moved off raw recall in
+  revision 4 on purpose, and P1.4 has already reported the raw numbers. An undecidable P3.1 stays
+  undecided. Second, it does **not** cascade. P3.2 is void only if P3.1 *drops* `adversarial`, which
+  an undecided P3.1 does not do, and P3.3 depends on P1.8 and P2.2 and not on P2.1 at all. Both remain
+  gated exactly as written below.
 - Void if P1.1's conditional skip already reduced the axis to near-zero use; check the skip rate
   first.
 - Verify: recall on the 8 pairs must not fall; P2.2 replay set unchanged.
@@ -675,6 +726,12 @@ invariant amendment: the `RepositoryIntelligence` seam and `BasicIntel` remain.
 | corpus artifact bytes come from validation evidence | they come from the winning candidate's regression test file after integration |
 | `889b62d` appears nowhere in the ledger | it is the frozen base in `B-selfhost-35-23.md:3` and `B-selfhost-35-23-run.md:7`; what was missing from `PHASE-C.md` was the integrated HOST `4c5bb63` |
 | the stale `916f7f2` base is a repo file | it is a Cursor user rule; every repo occurrence is a legitimate historical record |
+| the quality corpus grows from P1.12 and P1.13 | it cannot: every E2E deletes its `home` in `afterEach`, so no scripted run ever writes `~/.polish/polish.db`. A replay-set entry is a committed scripted scenario, and such entries are barred from §1's cost arm |
+| cassette replay observes calls issued **and prompt footprint** | only calls issued; a replayed response carries the recorded `usage`, which does not move when the prompt does |
+| Guard 1's "same six rounds" needs no pair key | replay mints new run ids; the pair key is `(mission hash, task contract, axis, roundIndex)`, and key coverage must be reported |
+| §1 needs a cassette-capture item | it does not: the CAS already holds `model_request` and `model_response` for every baseline call (`src/broker/broker.ts:226-269`). Finding 14 stays dropped |
+| P2.1 has no input rows | it has 2,600 review executions and no **eligible** ones: all predate finding 41's fix, so their emptiness is discarded parser output |
+| an undecidable P3.1 stops P3.2 and P3.3 | it stops neither: P3.2 is void only if P3.1 *drops* `adversarial`, and P3.3 depends on P1.8 and P2.2 |
 
 ## 9. Verification process v2
 
