@@ -707,12 +707,22 @@ otherwise look like unfinished work.
     defect is present by construction. The one baseline in the store with all checks passing is the
     oldest, `run_01m1mfzvkb` at `4ae18472`. A wrong all-fail baseline and a right one are
     indistinguishable in the store: both are `status: "fail"` with a fingerprint.
-    **Consequence, stated as a risk rather than a demonstrated bypass**, because the coordinator did
-    not trace `compareToBaseline` (`src/project/checkRunner.ts:88-89`) to its conclusion: an
-    all-fail baseline is the permissive extreme for any baseline-relative verdict, so a candidate
-    that leaves everything failing has nothing to regress against. Whether the gate has other
-    absolute floors that would still stop it is unverified and is the first thing a fix should
-    establish.
+    **Consequence, traced in code at the GPT lane's insistence, and worse than first recorded.**
+    The first draft called it a risk because `compareToBaseline` had not been followed to its
+    conclusion. It has been now. `compareToBaseline` (`src/domain/checks.ts:104-130`) treats a
+    check that fails in both baseline and candidate as **unchanged** when the two
+    `failureFingerprint` values are equal — it records a `diagnosticChange` only when a fingerprint
+    is missing or differs. `runIndependentGates` then computes
+    `passed = evaluation.passed && acceptanceProblems.length === 0 && silencing.length === 0`
+    (`src/project/checkRunner.ts:783`), and candidate and integration decisions read that
+    `passed`; mandatory-check failures reach the report rather than that boolean.
+    `src/project/project.test.ts:1081-1085` asserts this behaviour deliberately for the legitimate
+    case — a pre-existing failure must not block an unrelated fix.
+    So with an all-fail baseline, a candidate that reproduces the same three
+    command-not-found failures has **no regression, no silencing and no acceptance problem**, and
+    the deterministic gate passes. The coordinator has not run a candidate through it end to end,
+    so this is a code-traced consequence rather than an observed run; that is the one step a fix
+    should close first.
     **Not scheduled here.** P2.3's contract is a two-phase smoke with no production change, so this
     is recorded rather than repaired. It is a prerequisite for any external run: Fable D1 cannot
     mean anything while the baseline of an external project is an artifact of a missing install.
