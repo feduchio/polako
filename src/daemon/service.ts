@@ -438,6 +438,13 @@ export class DaemonService implements RpcHandler {
         artifacts: [],
       },
     ]);
+    const resumed = this.requireRun(runId);
+    enqueueBudgetDeadlineJob({
+      scheduler: this.scheduler,
+      store: this.store,
+      run: resumed,
+      config: this.resolveRunSettings(runId).config,
+    });
     await this.tick();
     return { accepted: true, runId, phase: this.requireRun(runId).phase };
   }

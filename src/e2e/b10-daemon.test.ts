@@ -494,11 +494,17 @@ describe("B10 daemon path – production RPC E2E", () => {
     const runId = (created as { id: string }).id;
     await driveToPhase(service, runId, "NEEDS_HUMAN");
     expect(service.store.repos.runs.get(runId)?.phase).toBe("NEEDS_HUMAN");
+    const originalDeadline = service.store.repos.jobs.listByRun(runId)
+      .find((job) => job.type === "budget.evaluate")?.dueAt;
 
     await service.handle("answer", {
       runId,
       answer: "Preserve the public API exactly.",
     });
+    const resumedDeadlines = service.store.repos.jobs.listByRun(runId)
+      .filter((job) => job.type === "budget.evaluate" && job.state !== "CANCELLED");
+    expect(resumedDeadlines).toHaveLength(1);
+    expect(resumedDeadlines[0]?.dueAt).toBe(originalDeadline);
     const resumedCouncilCalls = provider.calls
       .filter((call) => call.metadata.purpose.startsWith("council_decompose_"))
       .slice(-3);
