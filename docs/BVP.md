@@ -159,6 +159,12 @@ integrated codebase.
 - **A round produces commits that touch no non-test file, while findings keep arriving.** This is
   the signal that was missing and that cost 26 rounds on B-selfhost-8 and 15 on B-selfhost-18; it is
   now Process v2 §7's abandonment clause rather than a signal to interpret.
+- **Inherited inaccuracy, repeated in new prose.** From the P1.11 re-check. **The line is authorship,
+  not pedigree:** if an item's *own new text* restates an inaccuracy as current fact, that is
+  blocking, even when the plan and a pre-existing record already said the same wrong thing. If the
+  inaccuracy lives only in text the item did not rewrite, it is a recorded finding. *"Verbatim
+  compliance with a stale plan is a consistency constraint, not a truth constraint"* — so the fix for
+  a wrong number that the plan and the ledger agree on is **both** files, not neither.
 - **A check that asserts a number where the clause states a predicate.** From the P1.9 re-check, which
   found **eight** wrong classifiers passing one aggregate assertion while the production code was
   correct throughout. Two lessons, both now in `docs/ledger/P1.9.md`: *a predicate is observed only by
