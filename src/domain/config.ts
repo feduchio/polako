@@ -153,6 +153,19 @@ export const RoutingConfigSchema = z.object({
   /** Used when costEligibility = "ceiling". 0/0 is equivalent to free_only. */
   maxInputCostPerM: z.number().nonnegative().default(0),
   maxOutputCostPerM: z.number().nonnegative().default(0),
+  /**
+   * Send `reasoning: { effort: "none", exclude: true }` on worker and council calls.
+   *
+   * The accepted 4.2x reviewer result is transport efficiency, not a quality claim, and it was
+   * measured on reviewers only; P1.5 measures whether the saving exists at these two sites rather
+   * than extrapolating. Default `false` -- today neither site sets the field at all, and
+   * `docs/PLAN.md` §1 forbids enabling a cost-reducing behaviour by default while the quality gate
+   * is not `pass`.
+   *
+   * Reviewers (`src/review/swarm.ts`) and the progress tracker disable reasoning unconditionally
+   * and are deliberately not routed through this flag.
+   */
+  disableReasoning: z.boolean().default(false),
 });
 export type RoutingConfig = z.infer<typeof RoutingConfigSchema>;
 

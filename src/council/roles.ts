@@ -1,4 +1,5 @@
-import type { CompletionRequest, CompletionResponse } from "../broker/types.js";
+import { withConfiguredReasoning } from "../broker/responseSchemas.js";
+import type { CompletionResponse } from "../broker/types.js";
 import { outputContractError } from "./interpretationSchema.js";
 import type { CouncilRole, CouncilRoleConfig, RoleOpinion } from "./types.js";
 import { RoleOpinionSchema } from "./types.js";
@@ -17,7 +18,7 @@ export class CouncilRoleAgent {
   ) {}
 
   async analyze(context: RoleCallContext): Promise<{ opinion: RoleOpinion; proposal: unknown; modelEventId?: string }> {
-    const request: CompletionRequest = {
+    const request = withConfiguredReasoning({
       model: this.config.model,
       messages: [
         { role: "system", content: systemPrompt(this.role) },
@@ -31,7 +32,7 @@ export class CouncilRoleAgent {
         role: this.role,
         ...(context.causedBy === undefined ? {} : { causedBy: context.causedBy }),
       },
-    };
+    }, this.config.disableReasoning === true);
     const raw = await this.config.client.complete(request);
     const response = isBrokerResponse(raw) ? raw.response : raw;
     let parsed: unknown;

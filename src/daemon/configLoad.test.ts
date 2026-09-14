@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SecretStore } from "../broker/secrets.js";
+import { CouncilRoleAgent } from "../council/roles.js";
 import { PolishError } from "../shared/errors.js";
 import { loadConfiguredProviders, resolveCouncilRoles, buildProductionDeps } from "./composition.js";
 import { loadPolishConfig, parseModelRefString } from "./configLoad.js";
@@ -312,5 +313,48 @@ model = "scripted:judge"
     expect(roles.judge.model).toEqual({ provider: "scripted", model: "judge" });
     expect(deps.router.select({ role: "supervisor", count: 10, requireJson: true })).toEqual([]);
     expect(deps.router.select({ role: "judge", count: 10, requireJson: true })).toEqual([]);
+  });
+
+  /**
+   * P1.5 AC4. Every council role, by iteration rather than by naming one: wiring one of the three
+   * and leaving the other two on the default arm is a schedule that balances and is still wrong.
+   * Observed on what the provider received, so a helper that is correct and unwired fails here.
+   */
+  it.each([
+    { arm: "default", disableReasoning: false, expected: undefined },
+    { arm: "disabled", disableReasoning: true, expected: { effort: "none", exclude: true } },
+  ])("sends $arm reasoning on every council role's calls", async ({ disableReasoning, expected }) => {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const config = loadPolishConfig(home);
+    // The default arm reads the default rather than setting it, or flipping the default to `true`
+    // passes both arms.
+    if (disableReasoning) config.routing.disableReasoning = true;
+    else expect(config.routing.disableReasoning).toBe(false);
+    const provider = new ScriptedProvider("scripted", [
+      { name: "council", capabilities: { ...FAKE_CAPABILITIES.strong, supportsJson: true, inputCostPerM: 0, outputCostPerM: 0 } },
+    ]);
+    provider.script("council", Array.from({ length: 6 }, () => ({
+      kind: "reply" as const,
+      content: JSON.stringify({ decision: "approve", rationale: "ok", concerns: [] }),
+    })));
+    const deps = buildProductionDeps({ store, clock, config, home, providers: [provider] });
+    await deps.catalog.discover();
+    const roles = resolveCouncilRoles(deps);
+
+    const seen: Record<string, unknown> = {};
+    for (const role of ["planner", "scope_guardian", "judge"] as const) {
+      provider.calls.length = 0;
+      await new CouncilRoleAgent(role, roles[role]).analyze({
+        runId: id("run", clock.now()),
+        purpose: `council_${role}_probe`,
+        payload: { note: "probe" },
+      });
+      const call = provider.calls[0];
+      if (call === undefined) throw new Error(`no provider call for ${role}`);
+      seen[role] = call.reasoning;
+      expect("reasoning" in call).toBe(expected !== undefined);
+    }
+    expect(seen).toEqual({ planner: expected, scope_guardian: expected, judge: expected });
   });
 });

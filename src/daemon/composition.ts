@@ -74,6 +74,7 @@ import {
   EMPIRICAL_SCORE_RESPONSE_SCHEMA,
   PROGRESS_SCORE_RESPONSE_SCHEMA,
   REVIEW_FINDINGS_RESPONSE_SCHEMA,
+  withConfiguredReasoning,
 } from "../broker/responseSchemas.js";
 import { EmpiricalVerifier, type EmpiricalModel } from "../verify/empirical.js";
 import { createVerifierStrategy } from "../verify/sidecar.js";
@@ -802,7 +803,11 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
     };
     const client = brokerCouncilClient(deps.broker);
     return new AgentRunner({
-      complete: (request) => client.complete(request).then((record) => ("response" in record ? record.response : record)),
+      // The one seam between the worker loop and the broker, so `routing.disableReasoning` is
+      // applied here rather than inside `AgentRunner`, which constructs no reasoning field.
+      complete: (request) =>
+        client.complete(withConfiguredReasoning(request, deps.config.routing.disableReasoning))
+          .then((record) => ("response" in record ? record.response : record)),
       artifacts: deps.store.artifacts,
       model,
       commandPolicy: commandPolicyFor(ctx, profile),
@@ -949,7 +954,7 @@ export function resolveCouncilRoles(deps: ProductionDeps, ctx?: PhaseContext): C
       retry: deps.config.council,
       eventSink: sink,
     });
-    return { client, model, models: chain };
+    return { client, model, models: chain, disableReasoning: deps.config.routing.disableReasoning };
   };
   return {
     planner: resolveRole("planner", "supervisor"),

@@ -1,3 +1,5 @@
+import type { CompletionRequest } from "./types.js";
+
 export const REVIEW_FINDINGS_RESPONSE_SCHEMA = {
   name: "review_findings",
   strict: true,
@@ -78,3 +80,16 @@ export const DISABLED_REASONING = {
   effort: "none",
   exclude: true,
 } as const;
+
+/**
+ * Applies `routing.disableReasoning` to one request. The worker loop and the council both call
+ * this, so the two sites cannot drift on what the flag means.
+ *
+ * A request that already carries a `reasoning` of its own is returned untouched. The reviewers and
+ * the progress tracker disable it deliberately and unconditionally; a policy flag that overwrote an
+ * explicit choice would make a future disagreement between the two invisible.
+ */
+export function withConfiguredReasoning(request: CompletionRequest, disable: boolean): CompletionRequest {
+  if (!disable || request.reasoning !== undefined) return request;
+  return { ...request, reasoning: DISABLED_REASONING };
+}

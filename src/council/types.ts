@@ -17,6 +17,8 @@ export interface CouncilRoleConfig {
   model: ModelRef;
   /** Preference chain; defaults to `[model]` when omitted. */
   models?: readonly ModelRef[];
+  /** `routing.disableReasoning`. Omitted is the default arm: the field is not sent at all. */
+  disableReasoning?: boolean;
 }
 
 export type CouncilRoleConfigs = Record<CouncilRole, CouncilRoleConfig>;

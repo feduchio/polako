@@ -1087,6 +1087,93 @@ describe("production composition", () => {
     }
   });
 
+  /**
+   * P1.5 AC1/AC3. The seam is the `complete` wrapper in `createWorkerFactory`, and what matters is
+   * what the **provider** received: a helper that is correct and unwired looks identical from the
+   * helper's own test. Both arms, because the default arm is the one the item must not disturb.
+   */
+  it.each([
+    { arm: "default", disableReasoning: false, expected: undefined },
+    { arm: "disabled", disableReasoning: true, expected: { effort: "none", exclude: true } },
+  ])("sends $arm reasoning on worker calls", async ({ disableReasoning, expected }) => {
+    const provider = new ScriptedProvider("scripted", [
+      { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 } },
+    ]);
+    provider.script("worker", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "finish", arguments: '{"summary":"done"}' }] },
+    ]);
+    const config = defaultConfig();
+    // The default arm reads the default rather than setting it, or flipping the default to `true`
+    // passes both arms.
+    if (disableReasoning) config.routing.disableReasoning = true;
+    else expect(config.routing.disableReasoning).toBe(false);
+    config.agent.maxTurns = 1;
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+    });
+    await deps.catalog.discover();
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-worker-reasoning-"));
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "demo" }));
+    const git = await Git.init(repoDir);
+    await git.commitAll("init");
+    const head = await git.revParse("HEAD");
+    const runId = id("run", clock.now());
+    const interpretationId = id("interp", clock.now());
+    const ctx = {
+      run: {
+        id: runId,
+        missionId: id("msn", clock.now()),
+        projectPath: repoDir,
+        runBranch: "polish/run",
+        phase: "EXECUTING",
+        control: "RUNNING",
+        currentCheckpointHash: head,
+        baselineId: null,
+        interpretationId,
+        createdAt: clock.now(),
+        updatedAt: clock.now(),
+        terminalReason: null,
+      },
+      store,
+      scheduler: new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock,
+      config,
+    } satisfies PhaseContext;
+    const task = createTaskFromRequirement(interpretationId, "R1", {
+      id: id("task", clock.now()),
+      runId,
+      title: "noop",
+      description: "WHAT: noop",
+      kind: "bugfix",
+      acceptance: ["noop"],
+      complexity: "trivial",
+      baseCheckpointHash: head,
+      now: clock.now(),
+    });
+    const sandbox = await new WorktreeSandbox(repoDir, join(dir, "worktrees", runId), config.sandbox).create({
+      id: id("cand", clock.now()),
+      baseCommit: head,
+      policy: CommandPolicy.forProject([], null, false, { packageScripts: [], search: true }),
+    });
+    try {
+      await createWorkerFactory(deps, ctx)(0).runLoop(task, sandbox);
+      expect(provider.calls.length).toBeGreaterThan(0);
+      for (const call of provider.calls) {
+        expect(call.reasoning).toEqual(expected);
+        // A key present with an undefined value serialises differently through the payload
+        // builder, which forwards `reasoning` whenever it is not `undefined`.
+        expect("reasoning" in call).toBe(expected !== undefined);
+      }
+    } finally {
+      await sandbox.destroy();
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("promotes PENDING tasks with satisfied dependencies to READY", () => {
     const runId = id("run", clock.now());
     const interpretationId = id("interp", clock.now());
