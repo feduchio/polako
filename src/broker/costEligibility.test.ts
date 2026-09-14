@@ -5,6 +5,7 @@ import {
   FREE_ONLY_COST_ELIGIBILITY,
   isCostEligible,
   isExplicitlyFree,
+  type CostEligibilityPolicy,
 } from "./costEligibility.js";
 import { DEFAULT_ROUTER_POLICY, ModelRouter } from "./router.js";
 import { FAKE_CAPABILITIES, ScriptedProvider, type ScriptedModel } from "../providers/scripted.js";
@@ -24,6 +25,19 @@ describe("cost eligibility", () => {
     expect(isCostEligible({ inputCostPerM: 0, outputCostPerM: null }, FREE_ONLY_COST_ELIGIBILITY)).toBe(false);
     expect(isCostEligible({ inputCostPerM: null, outputCostPerM: null }, FREE_ONLY_COST_ELIGIBILITY)).toBe(false);
     expect(isCostEligible({ inputCostPerM: 0, outputCostPerM: 0.01 }, FREE_ONLY_COST_ELIGIBILITY)).toBe(false);
+  });
+
+  it("admits no unstated price under a ceiling, and a negative advertised price is unstated", () => {
+    const ceiling: CostEligibilityPolicy = { mode: "ceiling", maxInputCostPerM: 0.3, maxOutputCostPerM: 1.2 };
+    expect(isCostEligible({ inputCostPerM: 0.3, outputCostPerM: 1.2 }, ceiling)).toBe(true);
+    expect(isCostEligible({ inputCostPerM: 0, outputCostPerM: 0 }, ceiling)).toBe(true);
+    expect(isCostEligible({ inputCostPerM: 0.31, outputCostPerM: 1.2 }, ceiling)).toBe(false);
+    expect(isCostEligible({ inputCostPerM: null, outputCostPerM: 1.2 }, ceiling)).toBe(false);
+    // OpenRouter's "-1" for a route whose price depends on where it routes. `<=` used to pass it,
+    // and openrouter/fusion then billed $0.003825 for 745 input tokens — 17x this ceiling.
+    expect(isCostEligible({ inputCostPerM: -1_000_000, outputCostPerM: -1_000_000 }, ceiling)).toBe(false);
+    expect(isCostEligible({ inputCostPerM: -1_000_000, outputCostPerM: -1_000_000 }, FREE_ONLY_COST_ELIGIBILITY)).toBe(false);
+    expect(isCostEligible({ inputCostPerM: Number.NaN, outputCostPerM: 0 }, ceiling)).toBe(false);
   });
 
   it("does not let a paid higher-tier model beat a free lower-tier model under free_only", () => {

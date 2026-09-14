@@ -52,6 +52,30 @@ describe("OpenRouterProvider", () => {
     expect(seen[0]?.headers["authorization"]).toBe("Bearer sk-or-test-key-12345678");
   });
 
+  it("reports no price for a route that advertises the variable-price sentinel", async () => {
+    const provider = new OpenRouterProvider({
+      id: "openrouter",
+      apiKey: "test-key",
+      baseUrl: "https://openrouter.test/api/v1",
+      fetch: fakeFetch(() => ({
+        status: 200,
+        body: {
+          data: [
+            { id: "openrouter/fusion", pricing: { prompt: "-1", completion: "-1" }, context_length: 1_048_576 },
+            { id: "vendor/priced", pricing: { prompt: "0.00000015", completion: "0.0000005" }, context_length: 131_072 },
+            { id: "vendor/free", pricing: { prompt: "0", completion: "0" }, context_length: 131_072 },
+          ],
+        },
+      })),
+    });
+    const priced = Object.fromEntries(
+      (await provider.listModels()).map((m) => [m.ref.model, [m.capabilities.inputCostPerM, m.capabilities.outputCostPerM]]),
+    );
+    expect(priced["openrouter/fusion"]).toEqual([null, null]);
+    expect(priced["vendor/priced"]).toEqual([0.15, 0.5]);
+    expect(priced["vendor/free"]).toEqual([0, 0]);
+  });
+
   it("sends strict JSON Schema and reasoning options as distinct request fields", async () => {
     const payloads: CapturedPayload[] = [];
     const provider = new OpenRouterProvider({

@@ -52,7 +52,18 @@ export function isCostEligible(
   if (policy.mode === "unrestricted") return true;
   const input = capabilities.inputCostPerM;
   const output = capabilities.outputCostPerM;
-  if (input === null || output === null) return false;
+  if (!isStatedPrice(input) || !isStatedPrice(output)) return false;
   if (policy.mode === "free_only") return input === 0 && output === 0;
   return input <= policy.maxInputCostPerM && output <= policy.maxOutputCostPerM;
+}
+
+/**
+ * A price below zero is not a price. `free_only` rejected such a value by asking for exactly 0,
+ * so the gap only opened when `ceiling` compared it with `<=` and every negative passed every
+ * ceiling. The adapter that produced the sentinel now reports `null`
+ * (`src/providers/openaiCompat.ts`); this is the invariant that does not depend on which adapter
+ * asked.
+ */
+function isStatedPrice(value: number | null): value is number {
+  return value !== null && Number.isFinite(value) && value >= 0;
 }

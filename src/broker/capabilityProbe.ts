@@ -38,9 +38,18 @@ const PROBE_TOOL = {
 
 const DEFAULT_PROBE_MAX_TOKENS = 256;
 
+/** One provider invocation, at most, per probe: a probe answers a capability question or it does not. */
+const PROBE_RETRY_POLICY = { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 };
+
 /**
  * Actively verify health/tools/json for one model. Declared capabilities are preserved when
  * probes are inconclusive or fail without an explicit denial.
+ *
+ * Every probe call goes through `ctx.complete` when the caller supplies one. Production supplies
+ * `ModelBroker.complete`, which is what charges the run's budget and emits `model.call`; the two
+ * probes that used to call `adapter.complete` directly were spend that no budget could see and no
+ * economics query could count. Harmless while every probed model was free, not once a ceiling
+ * admits paid ones.
  */
 export async function probeModelCapabilities(
   adapter: ProviderAdapter,
@@ -50,11 +59,12 @@ export async function probeModelCapabilities(
     signal?: AbortSignal;
     maxTokens?: number;
     skipHealth?: boolean;
-    strictComplete?: ProviderAdapter["complete"];
+    complete?: ProviderAdapter["complete"];
     cachedStrict?: { review?: boolean; score?: boolean; progress?: boolean };
   },
 ): Promise<CapabilityProbeResult> {
   const probeMaxTokens = ctx.maxTokens ?? DEFAULT_PROBE_MAX_TOKENS;
+  const complete: ProviderAdapter["complete"] = ctx.complete ?? ((request) => adapter.complete(request));
   const checks: CapabilityProbeChecks = {
     health: { ok: false, verdict: "unsupported" },
     tools: { ok: false, verdict: "probe_failed" },
@@ -88,10 +98,10 @@ export async function probeModelCapabilities(
       tools: [PROBE_TOOL],
       maxTokens: probeMaxTokens,
       temperature: 0,
-      metadata: { runId: ctx.runId, purpose: "capability_probe_tools", role: "probe" },
+      metadata: { runId: ctx.runId, purpose: "capability_probe_tools", role: "probe", retryPolicy: PROBE_RETRY_POLICY },
     };
     if (ctx.signal !== undefined) toolsRequest.signal = ctx.signal;
-    const tools = await adapter.complete(toolsRequest);
+    const tools = await complete(toolsRequest);
     const hasToolCalls = tools.finishReason === "tool_calls" || (tools.message.toolCalls?.length ?? 0) > 0;
     toolsVerdict = hasToolCalls ? "supported" : "inconclusive";
     checks.tools = {
@@ -104,9 +114,9 @@ export async function probeModelCapabilities(
     checks.tools = { ok: false, verdict: toolsVerdict, detail: probeErrorDetail(err) };
   }
 
-  const strictReviewVerdict = ctx.cachedStrict?.review === undefined && ctx.strictComplete !== undefined
+  const strictReviewVerdict = ctx.cachedStrict?.review === undefined && ctx.complete !== undefined
     ? await strictProbe(
-        ctx.strictComplete,
+        ctx.complete,
         model,
         ctx,
         probeMaxTokens,
@@ -117,9 +127,9 @@ export async function probeModelCapabilities(
     : ctx.cachedStrict?.review === undefined ? "probe_failed" : ctx.cachedStrict.review ? "supported" : "unsupported";
   checks.strictReview = checkFromStrictVerdict(strictReviewVerdict);
 
-  const strictScoreVerdict = ctx.cachedStrict?.score === undefined && ctx.strictComplete !== undefined
+  const strictScoreVerdict = ctx.cachedStrict?.score === undefined && ctx.complete !== undefined
     ? await strictProbe(
-        ctx.strictComplete,
+        ctx.complete,
         model,
         ctx,
         probeMaxTokens,
@@ -133,9 +143,9 @@ export async function probeModelCapabilities(
     : ctx.cachedStrict?.score === undefined ? "probe_failed" : ctx.cachedStrict.score ? "supported" : "unsupported";
   checks.strictScore = checkFromStrictVerdict(strictScoreVerdict);
 
-  const strictProgressVerdict = ctx.cachedStrict?.progress === undefined && ctx.strictComplete !== undefined
+  const strictProgressVerdict = ctx.cachedStrict?.progress === undefined && ctx.complete !== undefined
     ? await strictProbe(
-        ctx.strictComplete,
+        ctx.complete,
         model,
         ctx,
         probeMaxTokens,
@@ -158,10 +168,10 @@ export async function probeModelCapabilities(
       responseFormat: "json",
       maxTokens: probeMaxTokens,
       temperature: 0,
-      metadata: { runId: ctx.runId, purpose: "capability_probe_json", role: "probe" },
+      metadata: { runId: ctx.runId, purpose: "capability_probe_json", role: "probe", retryPolicy: PROBE_RETRY_POLICY },
     };
     if (ctx.signal !== undefined) jsonRequest.signal = ctx.signal;
-    const json = await adapter.complete(jsonRequest);
+    const json = await complete(jsonRequest);
     if (looksLikeJson(json.message.content)) {
       jsonVerdict = "supported";
     } else if (isInconclusiveJsonResult(json.finishReason, json.message.content)) {

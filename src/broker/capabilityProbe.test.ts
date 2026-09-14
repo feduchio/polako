@@ -20,6 +20,23 @@ function model(name: string, caps: ModelInfo["capabilities"] = FAKE_CAPABILITIES
   };
 }
 
+/**
+ * Stands in for the `ModelBroker.complete` production injects: it sees every probe call and answers
+ * the strict-schema ones itself, passing the rest to the adapter as the broker would.
+ */
+function brokered(
+  provider: ProviderAdapter,
+  strict: ProviderAdapter["complete"],
+  seen?: string[],
+): ProviderAdapter["complete"] {
+  return (request) => {
+    seen?.push(request.metadata.purpose);
+    return request.metadata.purpose.startsWith("capability_probe_strict")
+      ? strict(request)
+      : provider.complete(request);
+  };
+}
+
 function manyModels(count: number): ModelInfo[] {
   return Array.from({ length: count }, (_, index) =>
     model(`model-${String(index).padStart(2, "0")}`, FAKE_CAPABILITIES.fast, index + 1),
@@ -54,8 +71,7 @@ describe("probeModelCapabilities", () => {
     const purposes: string[] = [];
     const result = await probeModelCapabilities(provider, model("m"), {
       runId: RUN,
-      strictComplete: (request) => {
-        purposes.push(request.metadata.purpose);
+      complete: brokered(provider, (request) => {
         expect(request.reasoning).toEqual(DISABLED_REASONING);
         return Promise.resolve({
           message: {
@@ -68,18 +84,49 @@ describe("probeModelCapabilities", () => {
           finishReason: "stop",
           latencyMs: 1,
         });
-      },
+      }, purposes),
     });
+    // Every probe call, not only the strict three: the two that once went straight to the adapter
+    // were spend the run's budget never saw.
     expect(purposes).toEqual([
+      "capability_probe_tools",
       "capability_probe_strict_review",
       "capability_probe_strict_score",
       "capability_probe_strict_progress",
+      "capability_probe_json",
     ]);
     expect(result.checks.strictReview.verdict).toBe("supported");
     expect(result.checks.strictScore.verdict).toBe("unsupported");
     expect(result.info.capabilities.supportsStrictReviewSchema).toBe(true);
     expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);
     expect(result.info.capabilities.supportsStrictProgressSchema).toBe(false);
+  });
+
+  it("sends no probe to the adapter behind the injected completion function", async () => {
+    const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("m", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const seen: string[] = [];
+    const result = await probeModelCapabilities(provider, model("m"), {
+      runId: RUN,
+      skipHealth: true,
+      complete: (request) => {
+        seen.push(request.metadata.purpose);
+        expect(request.metadata.retryPolicy?.maxAttempts).toBe(1);
+        return Promise.resolve({
+          message: { role: "assistant", content: '{"findings":[]}', toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+          usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+          finishReason: "tool_calls",
+          latencyMs: 1,
+        });
+      },
+    });
+    expect(seen).toHaveLength(5);
+    // The adapter is where the money is spent and where the broker's budget check is not.
+    expect(provider.calls).toHaveLength(0);
+    expect(result.checks.tools.verdict).toBe("supported");
   });
 
   it("does not inherit strict support from advertisements on timeout", async () => {
@@ -95,7 +142,7 @@ describe("probeModelCapabilities", () => {
       supportsStrictProgressSchema: true,
     }), {
       runId: RUN,
-      strictComplete: () => Promise.reject(new ProviderError("p", "timeout", "timed out")),
+      complete: brokered(provider, () => Promise.reject(new ProviderError("p", "timeout", "timed out"))),
     });
     expect(result.checks.strictReview.verdict).toBe("inconclusive");
     expect(result.checks.strictScore.verdict).toBe("inconclusive");
@@ -121,7 +168,7 @@ describe("probeModelCapabilities", () => {
       supportsStrictProgressSchema: true,
     }), {
       runId: RUN,
-      strictComplete: () => Promise.reject(error),
+      complete: brokered(provider, () => Promise.reject(error)),
     });
     expect(result.checks.strictReview.verdict).toBe(verdict);
     expect(result.checks.strictScore.verdict).toBe(verdict);
@@ -141,10 +188,10 @@ describe("probeModelCapabilities", () => {
     const result = await probeModelCapabilities(provider, model("m"), {
       runId: RUN,
       cachedStrict: { review: true, score: false, progress: true },
-      strictComplete: () => {
+      complete: brokered(provider, () => {
         strictCalls++;
         throw new Error("must not run");
-      },
+      }),
     });
     expect(strictCalls).toBe(0);
     expect(result.info.capabilities.supportsStrictReviewSchema).toBe(true);
@@ -160,7 +207,7 @@ describe("probeModelCapabilities", () => {
     ]);
     const result = await probeModelCapabilities(provider, model("m"), {
       runId: RUN,
-      strictComplete: (request) => Promise.resolve({
+      complete: brokered(provider, (request) => Promise.resolve({
         message: {
           role: "assistant",
           content: request.metadata.purpose.endsWith("review")
@@ -172,7 +219,7 @@ describe("probeModelCapabilities", () => {
         usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
         finishReason: "stop",
         latencyMs: 1,
-      }),
+      })),
     });
     expect(result.info.capabilities.supportsStrictReviewSchema).toBe(true);
     expect(result.info.capabilities.supportsStrictScoreSchema).toBe(false);

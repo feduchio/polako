@@ -162,8 +162,8 @@ export class OpenAICompatProvider implements ProviderAdapter {
 
   private toModelInfo(row: OpenAIModelRow): ModelInfo {
     const hint = this.opts.capabilityHints?.[row.id] ?? {};
-    const input = row.pricing?.prompt !== undefined ? Number(row.pricing.prompt) * 1_000_000 : null;
-    const output = row.pricing?.completion !== undefined ? Number(row.pricing.completion) * 1_000_000 : null;
+    const input = advertisedPricePerM(row.pricing?.prompt);
+    const output = advertisedPricePerM(row.pricing?.completion);
     const supported = new Set(row.supported_parameters ?? []);
     const contextWindow = row.context_length ?? 8192;
     const capabilities: ModelInfo["capabilities"] = {
@@ -171,14 +171,27 @@ export class OpenAICompatProvider implements ProviderAdapter {
       maxOutputTokens: row.top_provider?.max_completion_tokens ?? null,
       supportsTools: supported.size === 0 ? true : supported.has("tools"),
       supportsJson: supported.size === 0 ? true : supported.has("response_format") || supported.has("structured_outputs"),
-      inputCostPerM: input !== null && Number.isFinite(input) ? input : null,
-      outputCostPerM: output !== null && Number.isFinite(output) ? output : null,
+      inputCostPerM: input,
+      outputCostPerM: output,
       tier: inferTier(row.id, input, contextWindow),
       family: inferFamily(row.id),
       ...hint,
     };
     return { ref: { provider: this.id, model: row.id }, displayName: row.name ?? row.id, capabilities, source: "provider" };
   }
+}
+
+/**
+ * USD per 1M tokens, or `null` when the provider is not stating a price. OpenRouter advertises
+ * `"-1"` for routes whose price depends on where they route (`openrouter/auto-beta`,
+ * `openrouter/fusion`); a negative number is that sentinel, not a discount. Returning it as a
+ * number made those routes satisfy every cost ceiling, and the first one selected billed $0.003825
+ * for 745 input tokens — 17x the ceiling that admitted it (`docs/ledger/R0-run.md`).
+ */
+function advertisedPricePerM(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const perM = Number(raw) * 1_000_000;
+  return Number.isFinite(perM) && perM >= 0 ? perM : null;
 }
 
 function toOpenAIMessage(m: ChatMessage): Record<string, unknown> {

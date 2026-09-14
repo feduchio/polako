@@ -496,7 +496,7 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
           runId: ctx.run.id,
           maxTokens: deps.config.discovery.probeMaxTokens,
           skipHealth: true,
-          strictComplete: async (request) => (await deps.broker.complete(request)).response,
+          complete: async (request) => (await deps.broker.complete(request)).response,
           cachedStrict: {
             ...(review === null ? {} : { review: review.supported }),
             ...(score === null ? {} : { score: score.supported }),
