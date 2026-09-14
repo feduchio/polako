@@ -53,6 +53,20 @@ function parseArgs(argv) {
   return out;
 }
 
+/**
+ * Every dictionary keyed by data — axis, purpose, status, error kind, phase — has a null
+ * prototype. With a plain object, an axis literally named `constructor` reads back Object's
+ * constructor instead of undefined and its counts vanish, and `__proto__` never becomes an own
+ * property at all. The keys here come from event payloads, so they are not ours to trust.
+ */
+function bag() {
+  return Object.create(null);
+}
+
+function bump(dictionary, key, amount = 1) {
+  dictionary[key] = (dictionary[key] ?? 0) + amount;
+}
+
 function emptyAxisRow() {
   return {
     executions: 0,
@@ -66,17 +80,30 @@ function emptyAxisRow() {
     tasksSpawned: 0,
     reviewerCalls: 0,
     nullUsageCalls: 0,
+    malformedUsageCalls: 0,
     reviewerTokens: 0,
   };
 }
 
 function emptyPopulation() {
-  return { axes: {}, executionIds: new Set(), runIds: new Set(), findingStatuses: {} };
+  return { axes: bag(), executionIds: new Set(), runIds: new Set(), findingStatuses: bag() };
 }
 
 function rowFor(population, axis) {
   population.axes[axis] ??= emptyAxisRow();
   return population.axes[axis];
+}
+
+/**
+ * Tokens for one call. `usage: null` is a failed call and contributes 0 by docs/PLAN.md §1's rule.
+ * A usage object whose fields are not finite numbers is malformed, contributes 0, and is counted —
+ * never added, because `"oops" + 2` is `"oops2"` and one such row turns every total into a string.
+ */
+function tokensOf(usage) {
+  if (usage === null || usage === undefined) return { tokens: 0, nullUsage: true, malformed: false };
+  const ok = (value) => value === undefined || value === null || (typeof value === "number" && Number.isFinite(value));
+  if (!ok(usage.inputTokens) || !ok(usage.outputTokens)) return { tokens: 0, nullUsage: false, malformed: true };
+  return { tokens: (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0), nullUsage: false, malformed: false };
 }
 
 function read(storePath) {
@@ -127,15 +154,47 @@ function measure(data, cutoff) {
   // 1. Execution buckets. MC1: the deciding timestamp is the review.finished event's. An execution
   // with no review.finished was never parsed, so it is `unfinished` and can never be eligible —
   // falling back to review.started would admit an execution whose response does not exist.
+  // The projection row is the identity, not the event payload. A review event is only allowed to
+  // speak for an execution when it names a row that exists and belongs to the same run; the axis
+  // then comes from the row. Otherwise the event and the row could disagree and the disagreement
+  // would be invisible. Mismatches are counted and reported, never quietly followed.
+  const executionById = new Map(data.executions.map((execution) => [execution.id, execution]));
+  const inconsistencies = { reviewEventUnknownExecution: 0, reviewEventRunMismatch: 0, reviewEventAxisMismatch: 0, ambiguousFindingCause: 0 };
+
+  // Resolved once per event, not once per pass, or the inconsistency counters would report the
+  // same malformed event as many times as the code happens to look at it.
+  const rowOfReviewEvent = new Map();
+  for (const event of data.events) {
+    if (event.type !== "review.started" && event.type !== "review.finished") continue;
+    const payload = event.value.payload?.execution;
+    if (payload === undefined || typeof payload.id !== "string") {
+      rowOfReviewEvent.set(event.id, null);
+      continue;
+    }
+    const row = executionById.get(payload.id);
+    if (row === undefined) {
+      inconsistencies.reviewEventUnknownExecution += 1;
+      rowOfReviewEvent.set(event.id, null);
+      continue;
+    }
+    if (row.runId !== event.runId) {
+      inconsistencies.reviewEventRunMismatch += 1;
+      rowOfReviewEvent.set(event.id, null);
+      continue;
+    }
+    if (payload.axis !== row.axis) inconsistencies.reviewEventAxisMismatch += 1;
+    rowOfReviewEvent.set(event.id, row);
+  }
+
   const finishedTs = new Map();
   const startedTs = new Map();
   for (const event of data.events) {
-    const execution = event.value.payload?.execution;
-    if (execution === undefined || typeof execution.id !== "string") continue;
     const map = event.type === "review.finished" ? finishedTs : event.type === "review.started" ? startedTs : null;
     if (map === null) continue;
-    const prior = map.get(execution.id);
-    if (prior === undefined || event.ts < prior) map.set(execution.id, event.ts);
+    const row = rowOfReviewEvent.get(event.id) ?? null;
+    if (row === null) continue;
+    const prior = map.get(row.id);
+    if (prior === undefined || event.ts < prior) map.set(row.id, event.ts);
   }
 
   // Duplicate review.finished events resolve to the EARLIEST, above: the parse happened at the
@@ -183,8 +242,12 @@ function measure(data, cutoff) {
     const finding = event.value.payload?.finding;
     if (finding === undefined || typeof finding.id !== "string") continue;
     if (executionOfFinding.has(finding.id)) continue;
-    const executionId = (causesByEvent.get(event.id) ?? []).find((cause) => bucketOfExecution.has(cause));
-    if (executionId !== undefined) executionOfFinding.set(finding.id, executionId);
+    // Exactly one execution cause, or none. raiseFinding passes exactly one
+    // (src/engine/reviewDrivers.ts:866-867), so two is a store we do not understand; picking the
+    // first would silently choose a bucket.
+    const executionCauses = [...new Set(causesByEvent.get(event.id) ?? [])].filter((cause) => bucketOfExecution.has(cause));
+    if (executionCauses.length === 1) executionOfFinding.set(finding.id, executionCauses[0]);
+    else if (executionCauses.length > 1) inconsistencies.ambiguousFindingCause += 1;
   }
 
   const validationsByFinding = new Map();
@@ -212,8 +275,8 @@ function measure(data, cutoff) {
     const bucket = executionId === undefined ? "unattributed" : bucketOfExecution.get(executionId);
     const population = populations[bucket];
     population.runIds.add(finding.runId);
-    population.findingStatuses[finding.status] = (population.findingStatuses[finding.status] ?? 0) + 1;
-    const row = rowFor(population, finding.value.axis ?? "unknown");
+    bump(population.findingStatuses, finding.status);
+    const row = rowFor(population, typeof finding.value.axis === "string" ? finding.value.axis : "unknown");
     row.findingsRaised += 1;
     const validations = validationsByFinding.get(finding.id) ?? [];
     if (validations.length > 0 || !NOT_TRIAGE_SURVIVOR.includes(finding.status)) row.survivedTriage += 1;
@@ -227,15 +290,13 @@ function measure(data, cutoff) {
   // events in (run_id, seq) order and attribute each reviewer model.call to the execution opened by
   // the most recent preceding review.started for that (runId, axis). Null usage contributes 0
   // tokens and is counted separately. A call with no preceding review.started is `unattributed`.
-  const whole = { reviewerCalls: 0, nullUsageCalls: 0, tokens: 0, byPurpose: {} };
+  const whole = { reviewerCalls: 0, nullUsageCalls: 0, malformedUsageCalls: 0, tokens: 0, byPurpose: bag() };
   const baselineRunsOnly = { reviewerCalls: 0, nullUsageCalls: 0, tokens: 0 };
   const openExecution = new Map();
   for (const event of data.events) {
     if (event.type === "review.started") {
-      const execution = event.value.payload?.execution;
-      if (execution !== undefined && typeof execution.id === "string") {
-        openExecution.set(`${event.runId}\u0000${execution.axis}`, execution.id);
-      }
+      const row = rowOfReviewEvent.get(event.id) ?? null;
+      if (row !== null) openExecution.set(`${row.runId}\u0000${row.axis}`, row.id);
       continue;
     }
     if (event.type !== "model.call") continue;
@@ -247,23 +308,24 @@ function measure(data, cutoff) {
     const purpose = typeof payload.purpose === "string" ? payload.purpose : "unknown";
     const attributable = purpose.startsWith("review_") && purpose.length > "review_".length;
     const axis = attributable ? purpose.slice("review_".length) : `purpose:${purpose}`;
-    const usage = payload.usage ?? null;
-    const tokens = usage === null ? 0 : (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+    const { tokens, nullUsage, malformed } = tokensOf(payload.usage);
     whole.reviewerCalls += 1;
     whole.tokens += tokens;
-    if (usage === null) whole.nullUsageCalls += 1;
-    whole.byPurpose[purpose] = (whole.byPurpose[purpose] ?? 0) + tokens;
+    if (nullUsage) whole.nullUsageCalls += 1;
+    if (malformed) whole.malformedUsageCalls += 1;
+    bump(whole.byPurpose, purpose, tokens);
     if (BASELINE_RUNS.includes(event.runId)) {
       baselineRunsOnly.reviewerCalls += 1;
       baselineRunsOnly.tokens += tokens;
-      if (usage === null) baselineRunsOnly.nullUsageCalls += 1;
+      if (nullUsage) baselineRunsOnly.nullUsageCalls += 1;
     }
     const executionId = attributable ? openExecution.get(`${event.runId}\u0000${axis}`) : undefined;
     const bucket = executionId === undefined ? "unattributed" : bucketOfExecution.get(executionId) ?? "unattributed";
     const row = rowFor(populations[bucket], axis);
     row.reviewerCalls += 1;
     row.reviewerTokens += tokens;
-    if (usage === null) row.nullUsageCalls += 1;
+    if (nullUsage) row.nullUsageCalls += 1;
+    if (malformed) row.malformedUsageCalls += 1;
   }
 
   // 4. Run accounting. An empty eligible set has two very different explanations — nothing ran, or
@@ -285,15 +347,15 @@ function measure(data, cutoff) {
       if (outcome === undefined || outcome.ok !== false) continue;
       const kind = typeof outcome.errorKind === "string" ? outcome.errorKind : "unknown";
       const phase = phaseNow.get(event.runId) ?? "unknown";
-      const counts = failuresByRun.get(event.runId) ?? { byErrorKind: {}, byPhase: {} };
-      counts.byErrorKind[kind] = (counts.byErrorKind[kind] ?? 0) + 1;
-      counts.byPhase[phase] = (counts.byPhase[phase] ?? 0) + 1;
+      const counts = failuresByRun.get(event.runId) ?? { byErrorKind: bag(), byPhase: bag() };
+      bump(counts.byErrorKind, kind);
+      bump(counts.byPhase, phase);
       failuresByRun.set(event.runId, counts);
     }
   }
   const runAccounting = data.runs.map((run) => {
     const span = spanByRun.get(run.id);
-    const failures = failuresByRun.get(run.id) ?? { byErrorKind: {}, byPhase: {} };
+    const failures = failuresByRun.get(run.id) ?? { byErrorKind: bag(), byPhase: bag() };
     return {
       runId: run.id,
       phase: run.phase,
@@ -307,14 +369,14 @@ function measure(data, cutoff) {
     };
   });
   const postCutoff = runAccounting.filter((run) => run.startedAfterCutoff);
-  const postCutoffFailures = { total: 0, byErrorKind: {}, byPhase: {} };
+  const postCutoffFailures = { total: 0, byErrorKind: bag(), byPhase: bag() };
   for (const run of postCutoff) {
     for (const [kind, count] of Object.entries(run.failedCalls.byErrorKind)) {
-      postCutoffFailures.byErrorKind[kind] = (postCutoffFailures.byErrorKind[kind] ?? 0) + count;
+      bump(postCutoffFailures.byErrorKind, kind, count);
       postCutoffFailures.total += count;
     }
     for (const [phase, count] of Object.entries(run.failedCalls.byPhase)) {
-      postCutoffFailures.byPhase[phase] = (postCutoffFailures.byPhase[phase] ?? 0) + count;
+      bump(postCutoffFailures.byPhase, phase, count);
     }
   }
 
@@ -322,7 +384,8 @@ function measure(data, cutoff) {
     cutoff,
     cutoffCommit: CUTOFF_COMMIT,
     cutoffIso: new Date(cutoff).toISOString(),
-    populations: {},
+    populations: bag(),
+    inconsistencies: { ...inconsistencies, malformedUsageCalls: whole.malformedUsageCalls },
     reproduction: {
       reviewerCalls: { expected: EXPECTED.reviewerCalls, measured: whole.reviewerCalls },
       reviewerNullUsageCalls: { expected: EXPECTED.reviewerNullUsageCalls, measured: whole.nullUsageCalls },
@@ -411,13 +474,13 @@ function renderAxisTable(axes) {
   const order = axisOrder(axes);
   if (order.length === 0) return "(no rows)";
   const lines = [
-    "| axis | execs | completed | raw items | findings | triage | reproduced | rejected | uncertain | tasks | calls | null usage | tokens |",
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    "| axis | execs | completed | raw items | findings | triage | reproduced | rejected | uncertain | tasks | calls | null usage | bad usage | tokens |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
   ];
   for (const axis of order) {
     const r = axes[axis];
     lines.push(
-      `| ${axis} | ${r.executions} | ${r.completedExecutions} | ${r.rawFindingItems} | ${r.findingsRaised} | ${r.survivedTriage} | ${r.survivedReproduction} | ${r.rejectedByReproduction} | ${r.uncertain} | ${r.tasksSpawned} | ${r.reviewerCalls} | ${r.nullUsageCalls} | ${r.reviewerTokens} |`,
+      `| ${axis} | ${r.executions} | ${r.completedExecutions} | ${r.rawFindingItems} | ${r.findingsRaised} | ${r.survivedTriage} | ${r.survivedReproduction} | ${r.rejectedByReproduction} | ${r.uncertain} | ${r.tasksSpawned} | ${r.reviewerCalls} | ${r.nullUsageCalls} | ${r.malformedUsageCalls} | ${r.reviewerTokens} |`,
     );
   }
   return lines.join("\n");
@@ -466,6 +529,13 @@ function render(report) {
     out.push(`finding statuses: ${JSON.stringify(population.findingStatuses)}`);
     out.push("");
   }
+  const badStore = Object.entries(report.inconsistencies).filter(([, count]) => count > 0);
+  out.push(
+    badStore.length === 0
+      ? "Store consistency: no unknown or mismatched review events, no ambiguous finding cause, no malformed usage."
+      : `STORE INCONSISTENCIES (counted, never followed): ${JSON.stringify(report.inconsistencies)}`,
+  );
+  out.push("");
   out.push("MC5 reproduction of figures recorded before this instrument existed:");
   out.push("| figure | expected | measured | agrees |");
   out.push("|---|---|---|---|");
@@ -574,6 +644,39 @@ function buildSelfcheckStore(path) {
   // open. It must not land in that execution's tokens.
   call(1500, "correctness", { inputTokens: 3, outputTokens: 2 });
 
+  // An execution whose review events claim a different axis than its row. The row decides, and the
+  // disagreement is counted rather than followed.
+  const liar = execution("rex_liar", "coupling", 900, 1500, true, []);
+  event(900, "review.started", { execution: { ...liar, axis: "performance" } });
+  event(1500, "review.finished", { execution: { ...liar, axis: "performance" } });
+  call(1500, "review_performance", { inputTokens: 100, outputTokens: 100 });
+
+  // Malformed usage. One string field would turn every total into a concatenated string.
+  call(1500, "review_coupling", { inputTokens: "oops", outputTokens: 2 });
+
+  // Axis names that collide with Object.prototype. In a plain-object dictionary these vanish.
+  const proto = execution("rex_proto", "__proto__", 900, 1500, true, []);
+  event(900, "review.started", { execution: proto });
+  event(1500, "review.finished", { execution: proto });
+  call(1500, "review___proto__", { inputTokens: 1, outputTokens: 1 });
+  const ctor = execution("rex_ctor", "constructor", 900, 1500, true, []);
+  event(900, "review.started", { execution: ctor });
+  event(1500, "review.finished", { execution: ctor });
+  call(1500, "review_constructor", { inputTokens: 2, outputTokens: 2 });
+
+  // A review event naming an execution row that does not exist, and one naming a row from another
+  // run. Neither may open or close anything.
+  event(1500, "review.started", { execution: { id: "rex_ghost", axis: "correctness" } });
+  db.prepare("INSERT INTO runs VALUES (?,?,?,?,?,?)").run("run_other", "msn_x", "REVIEWING", "RUNNING", 2000, "{}");
+  const foreign = { id: "rex_foreign", runId: "run_other", checkpointHash: "c0ffee", roundIndex: 1, axis: "correctness", completed: true, findings: [], startedAt: 900, finishedAt: 1500 };
+  db.prepare("INSERT INTO review_executions VALUES (?,?,?,?,?,?,?)").run("rex_foreign", "run_other", "c0ffee", 1, "correctness", 1, JSON.stringify(foreign));
+  event(1500, "review.finished", { execution: foreign });
+
+  // A finding citing two executions in different buckets. Choosing either would be arbitrary.
+  finding("fnd_ambiguous", "correctness", "VALID");
+  validation("fval_4", "fnd_ambiguous", "VALID");
+  event(1500, "finding.raised", { finding: { id: "fnd_ambiguous" } }, ["rex_elig", "rex_inelig"]);
+
   finding("fnd_elig_valid", "correctness", "VALID");
   validation("fval_1", "fnd_elig_valid", "VALID");
   event(1500, "finding.raised", { finding: { id: "fnd_elig_valid" } }, ["rex_elig"]);
@@ -619,8 +722,12 @@ function selfcheck() {
     const emptyReport = measure(data, cutoff * 1000);
     const emptyVerdict = verdict(emptyReport);
     const emptyRender = render(emptyReport);
+    let bucketedCalls = 0;
+    for (const bucket of BUCKETS) {
+      for (const row of Object.values(p[bucket].axes)) bucketedCalls += row.reviewerCalls;
+    }
     const checks = [
-      ["eligible executions are the two that finished after the cut-off", p.eligible.executions, 2],
+      ["executions that finished after the cut-off are eligible", p.eligible.executions, 5],
       ["an execution with no review.finished is never eligible", p.unfinished.executions, 1],
       ["the unfinished execution is not counted as ineligible either", axis("ineligible", "adversarial").executions, 0],
       ["a finding follows its execution, not its own ts", axis("ineligible", "regression").findingsRaised, 1],
@@ -634,7 +741,7 @@ function selfcheck() {
       ["the ineligible execution keeps its own call", axis("ineligible", "regression").reviewerTokens, 20],
       ["a null-usage call contributes 0 tokens and is counted", axis("unfinished", "adversarial").nullUsageCalls, 1],
       ["a call with no open execution is unattributed", axis("unattributed", "ghost").reviewerCalls, 1],
-      ["a finding with no execution cause is unattributed", axis("unattributed", "correctness").findingsRaised, 1],
+      ["a finding with no execution cause is unattributed", p.unattributed.findingStatuses.VALID, 2],
       ["an axis outside the three defaults is eligible too", axis("eligible", "architecture").findingsRaised, 1],
       ["the verdict sums every eligible axis, not a fixed three", v.eligibleFindings, 3],
       ["a non-empty eligible set is measured, not inconclusive", v.verdict, "measured"],
@@ -651,6 +758,21 @@ function selfcheck() {
       ["an empty eligible set reports no table", emptyVerdict.eligibleTableReported, false],
       ["and the rendered report says so instead of tabulating zeros", emptyRender.includes("no per-axis yield table is reported"), true],
       ["the rendered empty report has no eligible axis table", emptyRender.split("Ineligible —")[0].includes("| axis |"), false],
+      ["the execution row decides the axis, not the event payload", axis("eligible", "coupling").executions, 1],
+      ["so the axis the event claimed gets nothing", axis("eligible", "performance").reviewerTokens, 0],
+      ["and the claim is counted as an inconsistency", report.inconsistencies.reviewEventAxisMismatch, 2],
+      ["malformed usage contributes no tokens", axis("eligible", "coupling").reviewerTokens, 0],
+      ["malformed usage is counted, not dropped", axis("eligible", "coupling").malformedUsageCalls, 1],
+      ["and it does not turn a total into a string", typeof report.reproduction.reviewerTokens.measured, "number"],
+      ["an axis named __proto__ survives the dictionary", axis("eligible", "__proto__").reviewerTokens, 2],
+      ["an axis named constructor survives it too", axis("eligible", "constructor").reviewerTokens, 4],
+      ["a review event naming no known execution is counted", report.inconsistencies.reviewEventUnknownExecution, 1],
+      ["a review event from another run is counted", report.inconsistencies.reviewEventRunMismatch, 1],
+      ["and that foreign execution is left unclassified", axis("unattributed", "correctness").executions, 1],
+      ["a finding citing two buckets is not assigned to either", axis("eligible", "correctness").findingsRaised, 2],
+      ["it is unattributed", axis("unattributed", "correctness").findingsRaised, 2],
+      ["and the ambiguity is counted", report.inconsistencies.ambiguousFindingCause, 1],
+      ["every reviewer call is accounted for in some bucket", bucketedCalls, report.reproduction.reviewerCalls.measured],
     ];
     const failures = checks.filter(([, actual, expected]) => actual !== expected);
     for (const [name, actual, expected] of checks) {
