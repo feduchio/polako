@@ -190,6 +190,9 @@ noProgressAttempts = 2
 [retry]
 maxAttempts = 5
 
+[budget]
+maxRunWallClockMinutes = 60
+
 [runtimeValidation]
 mode = "auto"
 `,
@@ -346,6 +349,31 @@ function scriptHumanThenDone(provider: ScriptedProvider): void {
   ]);
 }
 
+function scriptUntilBlockingWorker(provider: ScriptedProvider): void {
+  provider.script("wkr", [
+    opinion(plannerIntake()),
+    opinion(supervisorApprove()),
+    opinion(judgeApprove()),
+    {
+      kind: "reply",
+      content: "",
+      toolCalls: [{ id: "pwkr", name: "probe_ping", arguments: "{}" }],
+    },
+    { kind: "reply", content: '{"probe":"ok"}' },
+    opinion(plannerDecompose()),
+    opinion(supervisorApprove({ dropRefs: [] })),
+    opinion(judgeApprove({ restoreRefs: [] })),
+    {
+      kind: "fn",
+      fn: (request) => new Promise((_resolve, reject) => {
+        request.signal?.addEventListener("abort", () => {
+          reject(new Error("worker aborted by stop"));
+        }, { once: true });
+      }),
+    },
+  ]);
+}
+
 // ---------------------------------------------------------------------------
 // B10 daemon happy path
 // ---------------------------------------------------------------------------
@@ -471,6 +499,13 @@ describe("B10 daemon path – production RPC E2E", () => {
       runId,
       answer: "Preserve the public API exactly.",
     });
+    const resumedCouncilCalls = provider.calls
+      .filter((call) => call.metadata.purpose.startsWith("council_decompose_"))
+      .slice(-3);
+    expect(resumedCouncilCalls).toHaveLength(3);
+    expect(resumedCouncilCalls.every((call) =>
+      call.messages.some((message) => message.content.includes("Preserve the public API exactly."))))
+      .toBe(true);
     await driveToTerminal(service, runId);
 
     expect(service.store.repos.runs.get(runId)?.phase).toBe("DONE");
@@ -490,7 +525,8 @@ describe("B10 daemon path – production RPC E2E", () => {
   it("stops in EXECUTING and resumes without dispatching inside the resume RPC", async () => {
     const { repoDir, home, clock } = env;
     service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
-    scriptProvider(service.productionComposition().providers[0] as ScriptedProvider);
+    const provider = service.productionComposition().providers[0] as ScriptedProvider;
+    scriptUntilBlockingWorker(provider);
     const created = await service.handle("run", {
       project: repoDir,
       mission: "Fix duplicate request after resume: clear #pending before retry",
@@ -498,17 +534,34 @@ describe("B10 daemon path – production RPC E2E", () => {
     });
     const runId = (created as { id: string }).id;
     await driveToPhase(service, runId, "EXECUTING");
+    const spentBeforeStop = service.productionComposition().broker.budgetSnapshot(runId).runTokens;
+    const originalDeadline = service.store.repos.jobs.listByRun(runId)
+      .find((job) => job.type === "budget.evaluate")?.dueAt;
+    expect(originalDeadline).toBeTypeOf("number");
+
+    const executing = service.engine.tickRun(runId);
+    for (let i = 0; i < 100 && !provider.calls.some((call) => call.metadata.purpose === "agent_run"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(provider.calls.some((call) => call.metadata.purpose === "agent_run")).toBe(true);
 
     const stopped = await service.handle("stop", { runId }) as {
       phase: string;
       control: string;
       terminalReason: { code: string } | null;
     };
+    await executing;
     expect(stopped).toMatchObject({
       phase: "EXECUTING",
       control: "STOPPED",
       terminalReason: { code: "stopped_by_user" },
     });
+    expect(service.store.repos.candidates.listByRun(runId)).toEqual([]);
+    await service.close();
+    service = undefined;
+    service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
+    expect(service.productionComposition().broker.budgetSnapshot(runId).runTokens).toBe(spentBeforeStop);
+
     const resumed = await service.handle("resume", { runId }) as {
       phase: string;
       control: string;
@@ -520,6 +573,10 @@ describe("B10 daemon path – production RPC E2E", () => {
       terminalReason: null,
     }));
     expect(service.store.repos.candidates.listByRun(runId)).toEqual([]);
+    const resumedDeadline = service.store.repos.jobs.listByRun(runId)
+      .filter((job) => job.type === "budget.evaluate" && job.state !== "CANCELLED");
+    expect(resumedDeadline).toHaveLength(1);
+    expect(resumedDeadline[0]?.dueAt).toBe(originalDeadline);
     assertCausality(service, runId);
     await assertNoWorktrees(service, env, runId);
   });

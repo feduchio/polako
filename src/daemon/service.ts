@@ -27,6 +27,7 @@ import {
 } from "../review/benchmarkRunner.js";
 import { ModelObservationRepository } from "../broker/observations.js";
 import { REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { enqueueBudgetDeadlineJob } from "../convergence/pathology/deadline.js";
 import { hashJson } from "../shared/hash.js";
 import { applyRunBranch } from "./apply.js";
 import { loadPolishConfig } from "./configLoad.js";
@@ -121,7 +122,10 @@ export class DaemonService implements RpcHandler {
     // Spend is not in the event-sourced projections the engine rebuilds, so without this a restarted
     // daemon believes every run has spent nothing and a run can spend its whole budget again. Uses
     // the same predicate `engine.tick` drives, so the restored set and the ticked set cannot drift.
-    for (const run of this.store.repos.runs.listActive()) {
+    for (const run of this.store.repos.runs.listAll().filter((candidate) =>
+      candidate.phase !== "DONE" &&
+      candidate.phase !== "FAILED" &&
+      candidate.control !== "KILLED")) {
       this.productionDeps.broker.restore(run.id);
     }
   }
@@ -370,7 +374,14 @@ export class DaemonService implements RpcHandler {
   private async control(runId: string, command: "pause" | "resume" | "stop" | "kill"): Promise<Run> {
     const before = this.requireRun(runId);
     const run = this.engine.control(runId, command);
+    if (command === "stop" || command === "kill") await this.engine.settleRun(runId);
     if (command === "resume" && before.control === "STOPPED") {
+      enqueueBudgetDeadlineJob({
+        scheduler: this.scheduler,
+        store: this.store,
+        run,
+        config: this.resolveRunSettings(run.id).config,
+      });
       return this.store.repos.runs.get(run.id) ?? run;
     }
     await this.tick();

@@ -11,6 +11,8 @@ export interface PhaseContext {
   scheduler: Scheduler;
   clock: Clock;
   config: PolishConfig;
+  /** Aborted when stop/kill interrupts the currently executing phase driver. */
+  signal?: AbortSignal;
 }
 
 /** Result of one phase-driver invocation. */

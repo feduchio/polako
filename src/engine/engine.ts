@@ -46,7 +46,7 @@ export class RunEngine {
   private readonly resolveRunConfig: (run: Run) => EngineOptions["config"];
   private readonly assertProjectClean: (projectPath: string, policy?: RepositoryStartPolicy) => void;
   private readonly drivers = new Map<RunPhase, PhaseDriver>();
-  private readonly driving = new Set<string>();
+  private readonly driving = new Map<string, { controller: AbortController; promise: Promise<void> }>();
 
   constructor(options: EngineOptions, installStubs = true) {
     this.store = options.store;
@@ -122,6 +122,9 @@ export class RunEngine {
     };
     this.append(runId, "run.control_changed", { run: updated }, { kind: "user" });
 
+    if (next === "STOP_REQUESTED" || next === "KILLED") {
+      this.driving.get(runId)?.controller.abort(new PolishError("CANCELLED", `${command} requested`));
+    }
     if (command === "kill" && next === "KILLED") {
       this.terminate(updated, { code: "killed_by_user", summary: "run killed by user" }, true);
     }
@@ -131,8 +134,14 @@ export class RunEngine {
       this.acknowledgeControlSync(runId);
     }
 
-    this.scheduler.tick();
+    if (!(command === "resume" && run.control === "STOPPED")) this.scheduler.tick();
     return this.requireRun(runId);
+  }
+
+  /** Wait for a directly executing phase driver after control has aborted it. */
+  async settleRun(runId: string): Promise<void> {
+    const active = this.driving.get(runId);
+    if (active !== undefined) await Promise.allSettled([active.promise]);
   }
 
   /**
@@ -175,15 +184,15 @@ export class RunEngine {
   /** Drive a single run until its current phase driver waits or the run leaves the active set. */
   async tickRun(runId: string): Promise<void> {
     if (this.driving.has(runId)) return;
-    this.driving.add(runId);
-    try {
-      await this.driveRun(runId);
-    } finally {
-      this.driving.delete(runId);
-    }
+    const controller = new AbortController();
+    const promise = this.driveRun(runId, controller.signal).finally(() => {
+      if (this.driving.get(runId)?.controller === controller) this.driving.delete(runId);
+    });
+    this.driving.set(runId, { controller, promise });
+    await promise;
   }
 
-  private async driveRun(runId: string): Promise<void> {
+  private async driveRun(runId: string, signal: AbortSignal): Promise<void> {
     let run = this.store.repos.runs.get(runId);
     if (!run) throw new PolishError("NOT_FOUND", `run ${runId} not found`);
     if (isTerminal(RUN_CONTROL_TABLE, run.control)) return;
@@ -209,6 +218,7 @@ export class RunEngine {
         scheduler: this.scheduler,
         clock: this.clock,
         config: this.resolveRunConfig(run),
+        signal,
       });
     } catch (err) {
       const phase = this.requireRun(runId).phase;

@@ -818,6 +818,7 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
       commandPolicy: commandPolicyFor(ctx, profile),
       maxTurns: deps.config.agent.maxTurns,
       maxTokens,
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
       // The one seam between a task and what a production worker is told. Item 18 rebinds this
       // rather than unpicking a concatenation.
       prompt: (task) =>

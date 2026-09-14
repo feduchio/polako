@@ -69,18 +69,15 @@ describe("P1.3 spend restored across a daemon restart", () => {
     expect(restarted.spendOf(runId).runTokens).toBe(0);
   });
 
-  /**
-   * `listActive` excludes on control as well as phase. A phase-only predicate would restore this
-   * run, which is the drift MC1 exists to make inexpressible.
-   */
-  it("does not restore a run excluded only by its control state", async () => {
+  /** P1.12 makes STOPPED resumable, so its already-spent budget must survive restart too. */
+  it("restores a stopped run that can later resume", async () => {
     const fixture = await daemonFixture({ maxRunTokens: 1_000 });
     const runId = await fixture.createRun({});
     await fixture.call(runId);
     fixture.setControl(runId, "STOPPED");
 
     const restarted = await fixture.restart();
-    expect(restarted.spendOf(runId).runTokens).toBe(0);
+    expect(restarted.spendOf(runId).runTokens).toBe(15);
   });
 
   it("restores a snapshot equal to the fold of the run's own model.call events", async () => {

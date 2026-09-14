@@ -44,6 +44,8 @@ export interface SupervisorCouncilOptions {
 
 export interface CouncilIntakeOptions {
   readCheckOutput?: CheckOutputReader;
+  /** Latest durable answer when retrying a NEEDS_HUMAN intake. */
+  humanAnswer?: string;
 }
 
 interface InterpretationProposal {
@@ -94,7 +96,10 @@ export class SupervisorCouncil {
     this.baseline = baseline;
     const mission = normalizeMission(missionRaw, discovery.projectPath, this.now());
     const baselineEvidence = buildBaselineEvidenceView(baseline, options.readCheckOutput ?? (() => null));
-    const context = intakeCouncilPayload(mission, discovery, baseline, baselineEvidence);
+    const context = {
+      ...intakeCouncilPayload(mission, discovery, baseline, baselineEvidence),
+      ...(options.humanAnswer === undefined ? {} : { humanAnswer: options.humanAnswer }),
+    };
     const labeled = [
       { role: "planner" as const, promise: this.planner.analyze({ runId: baseline.runId, purpose: "council_intake_planner", payload: context }) },
       { role: "scope_guardian" as const, promise: this.scopeGuardian.analyze({ runId: baseline.runId, purpose: "council_intake_scope", payload: context }) },
@@ -146,7 +151,10 @@ export class SupervisorCouncil {
     };
   }
 
-  async decompose(interpretation: MissionInterpretation): Promise<TaskDag> {
+  async decompose(
+    interpretation: MissionInterpretation,
+    options: { humanAnswer?: string } = {},
+  ): Promise<TaskDag> {
     if (hasBlockingAmbiguity(interpretation)) {
       throw new PolishError("INVARIANT_VIOLATION", "cannot decompose an interpretation with blocking ambiguity");
     }
@@ -155,7 +163,10 @@ export class SupervisorCouncil {
     if (runId === undefined || baseCheckpointHash === undefined) {
       throw new PolishError("CONFIG_ERROR", "decompose requires prior intake or explicit runId and baseCheckpointHash");
     }
-    const context = { interpretation };
+    const context = {
+      interpretation,
+      ...(options.humanAnswer === undefined ? {} : { humanAnswer: options.humanAnswer }),
+    };
     const labeled = [
       { role: "planner" as const, promise: this.planner.analyze({ runId, purpose: "council_decompose_planner", payload: context }) },
       { role: "scope_guardian" as const, promise: this.scopeGuardian.analyze({ runId, purpose: "council_decompose_scope", payload: context }) },

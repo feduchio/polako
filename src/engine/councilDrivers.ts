@@ -82,6 +82,7 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
     if (baseline === undefined) return { status: "waiting" };
     const profile = await (options.resolveProfile ?? defaultProfile)(ctx);
     const council = createCouncil(ctx, options);
+    const humanAnswer = latestHumanAnswer(ctx);
     let result: IntakeResult;
     try {
       result = await council.intake(mission, profile, baseline, {
@@ -92,6 +93,7 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
             return null;
           }
         },
+        ...(humanAnswer === undefined ? {} : { humanAnswer }),
       });
     } catch (error) {
       recordCouncilUnavailable(ctx, error);
@@ -144,7 +146,11 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
     const council = createCouncil(ctx, options);
     let dag: TaskDag;
     try {
-      dag = await council.decompose(interpretation);
+      const humanAnswer = latestHumanAnswer(ctx);
+      dag = await council.decompose(
+        interpretation,
+        humanAnswer === undefined ? {} : { humanAnswer },
+      );
     } catch (error) {
       recordCouncilUnavailable(ctx, error);
       throw error;
@@ -175,6 +181,14 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
 }
 
 const TERMINAL_TASK_STATES = new Set<Task["state"]>(["INTEGRATED", "REJECTED", "CANCELLED"]);
+
+function latestHumanAnswer(ctx: PhaseContext): string | undefined {
+  return ctx.store.events
+    .list(ctx.run.id, { types: ["run.answer_recorded"] })
+    .map((event) => event.payload["answer"])
+    .filter((answer): answer is string => typeof answer === "string")
+    .at(-1);
+}
 
 function isCodingTask(task: Task): boolean {
   return task.touchesProductCode && task.kind !== "investigation";

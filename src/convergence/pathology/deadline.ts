@@ -22,7 +22,11 @@ export function enqueueBudgetDeadlineJob(input: {
 }): void {
   const minutes = input.config.budget.maxRunWallClockMinutes;
   if (minutes === null) return;
-  if (input.store.repos.jobs.listByRun(input.run.id).some((job) => job.type === BUDGET_EVALUATE_JOB)) return;
+  const deadlineJobs = input.store.repos.jobs.listByRun(input.run.id)
+    .filter((job) => job.type === BUDGET_EVALUATE_JOB);
+  // STOP cancels outstanding work. A later resume recreates only that cancelled deadline,
+  // preserving the original dueAt derived from run.createdAt. Completed/failed jobs stay final.
+  if (deadlineJobs.some((job) => job.state !== "CANCELLED")) return;
   const dueAt = wallClockDueAt(input.run.createdAt, minutes);
   input.scheduler.enqueue({
     runId: input.run.id,

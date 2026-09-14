@@ -148,7 +148,9 @@ export function createExecutingDriver(options: CandidateDriverOptions): PhaseDri
         ]);
       },
       ...(corpus === undefined ? {} : { corpus }),
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
     });
+    if (ctx.signal?.aborted) return { status: "waiting" };
 
     const candidates = results.map((result) => toCandidate(ctx, running, result));
     appendCandidateEvents(ctx, candidates, "candidate.created");
@@ -194,6 +196,7 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
           sandbox: checkout,
           gates,
           ...(corpus === undefined ? {} : { corpus }),
+          ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
         });
         const diff = await checkout.git.diff(candidate.baseCheckpointHash, headCommit);
         const diffRef = ctx.store.artifacts.put(
@@ -380,6 +383,7 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       gates,
       runHead,
       ...(corpus === undefined ? {} : { corpus }),
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
       afterGates: ({ commitHash, workspace }) =>
         validateRuntimeIfNeeded(ctx, options, commitHash, workspace.path),
     });

@@ -129,7 +129,9 @@ export function isExecutionControlRpc(method: string): boolean {
 }
 
 function isWatchSettled(run: Run): boolean {
-  return isTerminal(RUN_PHASE_TABLE, run.phase) || isTerminal(RUN_CONTROL_TABLE, run.control);
+  return run.control === "STOPPED" ||
+    isTerminal(RUN_PHASE_TABLE, run.phase) ||
+    isTerminal(RUN_CONTROL_TABLE, run.control);
 }
 
 function formatFeedLine(ts: number, text: string): string {
