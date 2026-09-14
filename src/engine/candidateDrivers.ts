@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { CandidateWorkerFactory } from "../agents/types.js";
 import {
   CORPUS_EXECUTABLE_STATUS,
@@ -15,6 +16,7 @@ import type { BaselineSnapshot } from "../domain/checks.js";
 import { compareToBaseline } from "../domain/checks.js";
 import type { GateResult } from "../project/checkRunner.js";
 import { createCheckOutputPersister } from "../project/checkRunner.js";
+import { safeTarget } from "../store/acceptance.js";
 import { createVerifierStrategy, VerifierAdapter } from "../verify/sidecar.js";
 import {
   selectTournamentWinner,
@@ -883,11 +885,28 @@ async function validateRuntimeIfNeeded(
   });
   const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
   for (const evidence of evidences) {
-    corpus.recordRuntimeEvidence({
+    const entry = corpus.recordRuntimeEvidence({
       missionId: ctx.run.missionId,
       requirementRef: `runtime.${evidence.scenarioId}`,
       evidence,
       expectedCheckpointHash: integratedCommit,
+    });
+    const template = templates.find((candidate) => candidate.id === evidence.scenarioId);
+    if (evidence.status !== "passed" || template?.kind !== "node_script") continue;
+    const bytes = readFileSync(safeTarget(checkoutDir, template.relativeScript));
+    const sha256 = ctx.store.acceptance.putContent(bytes, `runtime:${evidence.id}:${template.relativeScript}`);
+    corpus.admitExecutable({
+      entryId: entry.id,
+      artifact: {
+        id: id("acc", ctx.clock.now()),
+        runId: ctx.run.id,
+        taskId: null,
+        kind: "runtime_scenario",
+        relativePath: template.relativeScript,
+        sha256,
+        evidenceFor: null,
+        createdAt: ctx.clock.now(),
+      },
     });
   }
   return evidences.every((evidence) => runtimeAllowsDone(mode, evidence, integratedCommit));

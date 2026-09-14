@@ -612,4 +612,65 @@ describe("B10 daemon path – production RPC E2E", () => {
     assertCausality(service, runId);
     await assertNoWorktrees(service, env, runId);
   });
+
+  it("reaches DONE with required runtime evidence whose artifact identity survives restart", async () => {
+    const { repoDir, home, clock } = env;
+    expect(
+      () => execSync("node runtime/check.mjs", { cwd: repoDir, stdio: "pipe" }),
+      "runtime scenario must fail on the baseline bug",
+    ).toThrow();
+
+    service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
+    scriptProvider(service.productionComposition().providers[0] as ScriptedProvider);
+    const created = await service.handle("run", {
+      project: repoDir,
+      mission: "Fix duplicate request after resume: clear #pending before retry",
+      runtime: "required",
+    });
+    const runId = (created as { id: string }).id;
+    await driveToPhase(service, runId, "CONVERGENCE_CHECK");
+    const run = service.store.repos.runs.get(runId)!;
+    const entry = service.store.repos.acceptanceCorpus.forMission(run.missionId).entries
+      .find((candidate) => candidate.runtimeEvidence?.checkpointHash === run.currentCheckpointHash);
+    expect(entry?.runtimeEvidence?.status).toBe("passed");
+    expect(entry?.executable?.relativePath).toBe("runtime/check.mjs");
+    const artifact = service.store.repos.acceptance.get(entry!.executable!.artifactId);
+    expect(artifact).toMatchObject({
+      id: entry!.executable!.artifactId,
+      kind: "runtime_scenario",
+      relativePath: "runtime/check.mjs",
+      sha256: entry!.executable!.sha256,
+    });
+    const identity = {
+      entryId: entry!.id,
+      evidenceId: entry!.runtimeEvidence!.id,
+      artifactId: artifact!.id,
+      relativePath: artifact!.relativePath,
+      sha256: artifact!.sha256,
+    };
+
+    await service.close();
+    service = undefined;
+    service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
+    const restartedEntry = service.store.repos.acceptanceCorpus.get(identity.entryId);
+    expect({
+      entryId: restartedEntry?.id,
+      evidenceId: restartedEntry?.runtimeEvidence?.id,
+      artifactId: restartedEntry?.executable?.artifactId,
+      relativePath: restartedEntry?.executable?.relativePath,
+      sha256: restartedEntry?.executable?.sha256,
+    }).toEqual(identity);
+
+    service.store.db.prepare("DELETE FROM acceptance_corpus_entries WHERE id = ?").run(identity.entryId);
+    await service.engine.tickRun(runId);
+    expect(service.store.repos.runs.get(runId)?.phase).not.toBe("DONE");
+
+    service.store.events.rebuildProjections(runId);
+    const provider = service.productionComposition().providers[0] as ScriptedProvider;
+    provider.script("wkr", [{ kind: "reply", content: JSON.stringify({ findings: [] }) }]);
+    await driveToTerminal(service, runId);
+    expect(service.store.repos.runs.get(runId)?.phase).toBe("DONE");
+    assertCausality(service, runId);
+    await assertNoWorktrees(service, env, runId);
+  });
 });
