@@ -683,3 +683,36 @@ otherwise look like unfinished work.
     `AcceptanceArtifact` the system will ever create, and P1.8 must add the producer, not only the
     union. Recorded here rather than only in P1.8's contract because it also explains why no run
     has ever exercised protected paths or a waiver: there was nothing to protect.
+
+54. **`BASELINING` runs an external project's checks in a git worktree with no dependencies
+    installed, so the baseline records every check as `fail` on a project whose suite is green.**
+    `createBaseliningDriver` (`src/daemon/composition.ts:263-290`) creates a sandbox at
+    `baseline-${ctx.run.id}` from the run commit and calls `runChecks` in it. A git worktree does
+    not carry `node_modules`, and **nothing installs them** — there is no `pnpm install` anywhere
+    in `src/` outside the tests. Every check therefore dies on a missing binary and is persisted as
+    a legitimate `status: "fail"` with an `exitCode`, a duration and a `failureFingerprint`.
+    **Measured 2026-09-14** by P2.3, the first time an external project was ever targeted
+    (`docs/PLAN.md` §2 records 0 before it). On `unjs/defu` at `82632b66`, whose
+    `pnpm test` exits 0 on a clean clone in 4.9 s, the baseline recorded `test:fail` in 409 ms,
+    `lint:fail` in 175 ms and `build:fail` in 176 ms, with `stderr` `sh: oxlint: command not found`
+    and `WARN Local package.json exists, but node_modules missing, did you mean to install?`. Full
+    record in `docs/ledger/P2.3-run.md`; run `run_01m2g9hsh712dd48bvaw37`.
+    **The tree already knows this failure shape and guards it in one place only.**
+    `missingInstalledDependencies` (`src/findings/reproduce.ts:207-216`) returns
+    `"missing installed dependencies"` when `node_modules` is absent and the command looks like a
+    test runner — so the reproduction path refuses to draw a conclusion from exactly this
+    condition, while the baseline path draws one and persists it.
+    **Why it has never been seen.** Every previous run targeted `polish-selfhost-target` or the
+    `resume-dup-fetch` fixture, where a failing `test` check is the correct observation because the
+    defect is present by construction. The one baseline in the store with all checks passing is the
+    oldest, `run_01m1mfzvkb` at `4ae18472`. A wrong all-fail baseline and a right one are
+    indistinguishable in the store: both are `status: "fail"` with a fingerprint.
+    **Consequence, stated as a risk rather than a demonstrated bypass**, because the coordinator did
+    not trace `compareToBaseline` (`src/project/checkRunner.ts:88-89`) to its conclusion: an
+    all-fail baseline is the permissive extreme for any baseline-relative verdict, so a candidate
+    that leaves everything failing has nothing to regress against. Whether the gate has other
+    absolute floors that would still stop it is unverified and is the first thing a fix should
+    establish.
+    **Not scheduled here.** P2.3's contract is a two-phase smoke with no production change, so this
+    is recorded rather than repaired. It is a prerequisite for any external run: Fable D1 cannot
+    mean anything while the baseline of an external project is an artifact of a missing install.
