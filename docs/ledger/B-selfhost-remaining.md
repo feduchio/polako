@@ -689,11 +689,12 @@ otherwise look like unfinished work.
     `createBaseliningDriver` (`src/daemon/composition.ts:263-290`) creates a sandbox at
     `baseline-${ctx.run.id}` from the run commit and calls `runChecks` in it. A git worktree does
     not carry `node_modules` and nothing installs them: there is no `pnpm install` anywhere in
-    `src/` outside the tests, and under the policy the baseline path uses
-    (`allowArbitraryCommands: false`) `CommandPolicy.forProject`
+    `src/` outside the tests, and under the policy the baseline path uses —
+    `allowArbitraryCommands: false`, the schema default at `src/domain/config.ts:207`, since
+    `~/.polish/polish.toml` declares no `[sandbox]` section — `CommandPolicy.forProject`
     (`src/sandbox/allowlist.ts:173-201`) would deny one, since it admits `pnpm run <script>`.
     Installing is not architecturally barred — `CommandPolicy` admits an arbitrary command when
-    `allowArbitraryCommands` is true (`:216`), and a sandbox call can pass `bypassPolicy` — but
+    `allowArbitraryCommands` is true (`:215`), and a sandbox call can pass `bypassPolicy` — but
     nothing in this path does either, so every check dies on a missing binary.
     **The defect is what happens next, not the isolation.** Running checks in a clean worktree is
     the design, and a harness that cannot install is entitled to say so. What it is not entitled to
@@ -714,11 +715,6 @@ otherwise look like unfinished work.
     `lint:fail` in 175 ms and `build:fail` in 176 ms, with `stderr` `sh: oxlint: command not found`
     and `WARN Local package.json exists, but node_modules missing, did you mean to install?`. Full
     record in `docs/ledger/P2.3-run.md`; run `run_01m2g9hsh712dd48bvaw37`.
-    **The tree already knows this failure shape and guards it in one place only.**
-    `missingInstalledDependencies` (`src/findings/reproduce.ts:207-216`) returns
-    `"missing installed dependencies"` when `node_modules` is absent and the command looks like a
-    test runner — so the reproduction path refuses to draw a conclusion from exactly this
-    condition, while the baseline path draws one and persists it.
     **Why it has never been seen.** Every previous run targeted `polish-selfhost-target` or the
     `resume-dup-fetch` fixture, where a failing `test` check is the correct observation because the
     defect is present by construction. The one baseline in the store with all checks passing is the
