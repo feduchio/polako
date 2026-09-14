@@ -579,27 +579,50 @@ describe("B10 positive path – production E2E", () => {
       `planner|council_intake_planner|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
       `scope_guardian|council_decompose_scope|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
       `scope_guardian|council_intake_scope|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
-      `worker|agent_run|${flagged}|t=undefined|mt=32000|rf=undefined|rs=undefined`,
-      `worker|agent_run|${flagged}|t=undefined|mt=31985|rf=undefined|rs=undefined`,
-      // Unconditional, and identical in both arms.
+      // `mt` for the worker is the remaining task budget, which depends on what the previous turn
+      // spent. Pinning the arithmetic result would fail for any change to the fixture's token
+      // accounting, so the two worker rows carry a label and the budget is asserted below against
+      // the usage actually recorded.
+      `worker|agent_run|${flagged}|t=undefined|mt=budget|rf=undefined|rs=undefined`,
+      `worker|agent_run|${flagged}|t=undefined|mt=budget|rf=undefined|rs=undefined`,
+      // Unconditional, and identical in both arms. Each probe runs once per candidate model, and
+      // this fixture has two, so each appears twice: the count is part of the claim.
       `reviewer|review_correctness|${off}|t=0|mt=1500|rf=undefined|rs=review_findings`,
-      `probe|capability_probe_strict_progress|${off}|t=0|mt=256|rf=undefined|rs=agent_progress_score`,
-      `probe|capability_probe_strict_review|${off}|t=0|mt=256|rf=undefined|rs=review_findings`,
-      `probe|capability_probe_strict_score|${off}|t=0|mt=256|rf=undefined|rs=empirical_pair_score`,
-      `probe|capability_probe_json|${unset}|t=0|mt=256|rf=json|rs=undefined`,
-      `probe|capability_probe_tools|${unset}|t=0|mt=256|rf=undefined|rs=undefined`,
+      ...["wkr", "sup"].flatMap(() => [
+        `probe|capability_probe_strict_progress|${off}|t=0|mt=256|rf=undefined|rs=agent_progress_score`,
+        `probe|capability_probe_strict_review|${off}|t=0|mt=256|rf=undefined|rs=review_findings`,
+        `probe|capability_probe_strict_score|${off}|t=0|mt=256|rf=undefined|rs=empirical_pair_score`,
+        `probe|capability_probe_json|${unset}|t=0|mt=256|rf=json|rs=undefined`,
+        `probe|capability_probe_tools|${unset}|t=0|mt=256|rf=undefined|rs=undefined`,
+      ]),
     ].sort();
-    const seen = [...new Set(provider.calls.map((call) =>
+    // A multiset, not a set. The entry-gate lane made the worker wrapper send every request twice
+    // and a de-duplicated table could not tell: AC5 claims a site that starts or stops calling a
+    // model changes it, and collapsing duplicates is exactly not that.
+    const seen = provider.calls.map((call) =>
       [
         call.metadata.role,
         call.metadata.purpose,
         JSON.stringify(call.reasoning ?? null),
         `t=${String(call.temperature)}`,
-        `mt=${String(call.maxTokens)}`,
+        `mt=${call.metadata.purpose === "agent_run" ? "budget" : String(call.maxTokens)}`,
         `rf=${String(call.responseFormat)}`,
         `rs=${String(call.responseSchema?.name)}`,
-      ].join("|")))].sort();
+      ].join("|")).sort();
     expect(seen).toEqual(expected);
+
+    // The worker's budget, against the usage the run actually recorded rather than a constant:
+    // turn one gets the whole task budget and each later turn gets what the previous ones left.
+    const workerRequests = provider.calls.filter((call) => call.metadata.purpose === "agent_run");
+    const workerSpend = store.events.list(run.id, { types: ["model.call"] })
+      .map((event) => event.payload as { purpose?: string; usage?: { inputTokens: number; outputTokens: number } | null })
+      .filter((payload) => payload.purpose === "agent_run")
+      .map((payload) => (payload.usage === null || payload.usage === undefined ? 0 : payload.usage.inputTokens + payload.usage.outputTokens));
+    let remaining = config.budget.maxTaskTokens ?? 32_000;
+    for (const [index, request] of workerRequests.entries()) {
+      expect(request.maxTokens, `worker turn ${String(index + 1)} budget`).toBe(remaining);
+      remaining -= workerSpend[index] ?? 0;
+    }
   });
 });
 

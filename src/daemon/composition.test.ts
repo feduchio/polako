@@ -1122,10 +1122,7 @@ describe("production composition", () => {
    * keys (`src/agents/runner.ts:86-98`), and `signal` only when one is supplied.
    */
   const workerRequestKeys = ["maxTokens", "messages", "metadata", "model", "tools"];
-  it.each([
-    { arm: "default", disableReasoning: false, expected: undefined },
-    { arm: "disabled", disableReasoning: true, expected: { effort: "none", exclude: true } },
-  ])("sends $arm reasoning on worker calls and changes nothing else", async ({ disableReasoning, expected }) => {
+  const runWorkerArm = async (disableReasoning: boolean): Promise<CompletionRequest[]> => {
     const provider = new ScriptedProvider("scripted", [
       { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 } },
     ]);
@@ -1191,19 +1188,45 @@ describe("production composition", () => {
     });
     try {
       await createWorkerFactory(deps, ctx)(0).runLoop(task, sandbox);
-      expect(provider.calls.length).toBeGreaterThan(0);
-      for (const call of provider.calls) {
-        expect(call.reasoning).toEqual(expected);
-        // A key present with an undefined value serialises differently through the payload
-        // builder, which forwards `reasoning` whenever it is not `undefined`.
-        expect("reasoning" in call).toBe(expected !== undefined);
-        expect(Object.keys(call).sort()).toEqual(
-          expected === undefined ? workerRequestKeys : [...workerRequestKeys, "reasoning"].sort());
-      }
+      return provider.calls;
     } finally {
       await sandbox.destroy();
       rmSync(repoDir, { recursive: true, force: true });
     }
+  };
+
+  it("sends reasoning on worker calls and changes nothing else about them", async () => {
+    const base = await runWorkerArm(false);
+    const flagged = await runWorkerArm(true);
+    expect(base.length).toBeGreaterThan(0);
+    expect(flagged).toHaveLength(base.length);
+
+    for (const [index, call] of base.entries()) {
+      expect(call.reasoning).toBeUndefined();
+      // A key present with an undefined value serialises differently through the payload builder,
+      // which forwards `reasoning` whenever it is not `undefined`.
+      expect("reasoning" in call).toBe(false);
+      expect(Object.keys(call).sort()).toEqual(workerRequestKeys);
+      expect(flagged[index]?.reasoning).toEqual(DISABLED_REASONING);
+      expect(Object.keys(flagged[index] ?? {}).sort()).toEqual([...workerRequestKeys, "reasoning"].sort());
+    }
+
+    // Everything else, by deep comparison of the whole request rather than a list of fields. The
+    // entry-gate lane appended a message inside the wrapper and every enumerated-field check
+    // passed; the fields a wrapper can reach are not a list anyone can keep complete.
+    // Ids carry random bytes (`src/shared/ids.ts`) and can never compare equal across two runs,
+    // so they are masked; everything else must match exactly.
+    const withoutReasoning = (calls: readonly CompletionRequest[]): string =>
+      JSON.stringify(calls.map(({ reasoning: _reasoning, ...rest }) => rest))
+        .replaceAll(/\b(run|task|cand|interp|msn|evt|call)_[0-9a-z]+/g, "$1_<id>");
+    expect(withoutReasoning(flagged)).toEqual(withoutReasoning(base));
+    // And absolutely, so a wrapper that edits the request identically in both arms is not hidden
+    // by that comparison: turn one carries exactly the composed instruction and nothing beside it.
+    expect(base[0]?.messages).toHaveLength(1);
+    expect(base[0]?.messages[0]?.role).toBe("user");
+    expect(base[0]?.messages[0]?.content).toContain("WHAT: noop");
+    expect(base[0]?.maxTokens).toBe(32_000);
+    expect(base[0]?.metadata).toMatchObject({ purpose: "agent_run", role: "worker" });
   });
 
   it("promotes PENDING tasks with satisfied dependencies to READY", () => {
