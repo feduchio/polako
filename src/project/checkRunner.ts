@@ -945,14 +945,9 @@ export async function runIndependentGates(input: {
       passed: false,
     };
   }
-  let actualDiffText: string;
-  let actualConfigHashes: Record<string, string>;
-  let actualScriptsHash: string;
+  let candidateDiffText: string;
   try {
-    actualDiffText = await inspectCandidateDiff(input.sandbox, input.baseline.commitHash);
-    const hashes = inspectManifestHashes(input.sandbox.path);
-    actualConfigHashes = hashes.manifestHashes;
-    actualScriptsHash = hashes.scriptsHash;
+    candidateDiffText = await inspectCandidateDiff(input.sandbox, input.baseline.commitHash);
   } catch (error) {
     const reason = `candidate silencing inspection failed: ${error instanceof Error ? error.message : String(error)}`;
     return {
@@ -1036,6 +1031,20 @@ export async function runIndependentGates(input: {
       }];
     }
   })();
+  if (acceptanceProblems.length > 0) {
+    // Do not run the checks. The acceptance artifacts are the thing the checks are supposed to
+    // exercise, and we have just established that what is on disk is not them; a result produced
+    // against a modified or missing artifact would be a statement about something else. The gate
+    // already fails on this, so the only thing running would add is a misleading result set.
+    return {
+      checks: [],
+      silencing: [],
+      acceptanceProblems,
+      candidateProtectedPathProblems,
+      regression: compareToBaseline(input.baseline, []),
+      passed: false,
+    };
+  }
   const checkOpts: BaselineCheckRunOptions = {
     runId: input.runId,
     commitHash: input.commitHash,
@@ -1059,20 +1068,60 @@ export async function runIndependentGates(input: {
         input.validateProtectedChangeWaiver,
       )),
   );
-  const silencing = [
+  // The tree as it stands now, tracked files only. The candidate's capture was taken before the
+  // install and answers "what did the candidate do"; this one answers "what is in the checkout the
+  // checks just ran against", which is a different question the moment anything else writes to it
+  // — a lifecycle script, or a check command. Untracked files are excluded because by now the
+  // biggest of them is the `node_modules` we installed. Finding 54.
+  let settledDiffText: string;
+  let actualConfigHashes: Record<string, string>;
+  let actualScriptsHash: string;
+  try {
+    settledDiffText = await inspectCandidateDiff(input.sandbox, input.baseline.commitHash, { trackedOnly: true });
+    const hashes = inspectManifestHashes(input.sandbox.path);
+    actualConfigHashes = hashes.manifestHashes;
+    actualScriptsHash = hashes.scriptsHash;
+  } catch (error) {
+    const reason = `candidate silencing inspection failed: ${error instanceof Error ? error.message : String(error)}`;
+    return {
+      checks,
+      silencing: [{ kind: "weakened_config", path: "<candidate-checkout>", detail: reason }],
+      acceptanceProblems,
+      candidateProtectedPathProblems,
+      regression: evaluation.regression,
+      passed: false,
+    };
+  }
+  const diffText = settledDiffText === candidateDiffText
+    ? candidateDiffText
+    : `${candidateDiffText}\n${settledDiffText}`;
+  const silencing = dedupeSilencing([
     ...detectSilencing({
       baseline: input.baseline,
       candidateConfigHashes: actualConfigHashes,
       candidateScriptsHash: actualScriptsHash,
       changedFiles: actualChangedFiles,
-      diffText: actualDiffText,
+      diffText,
     }),
     ...silencingFromSkippedBaselineFailures(input.baseline, checks, evaluation.regression.newlyPassing),
-    ...silencingFromDistantWrap(input.baseline, evaluation.regression.newlyPassing, actualDiffText),
-  ].filter((finding) => !waivedSilencingPaths.has(normalizeChangedPath(finding.path)));
+    ...silencingFromDistantWrap(input.baseline, evaluation.regression.newlyPassing, diffText),
+  ]).filter((finding) => !waivedSilencingPaths.has(normalizeChangedPath(finding.path)));
   const regression = evaluation.regression;
   const passed = evaluation.passed && acceptanceProblems.length === 0 && silencing.length === 0;
   return { checks, silencing, acceptanceProblems, candidateProtectedPathProblems, regression, passed };
+}
+
+/** Two captures of one checkout report the same tracked edit twice; it is still one finding. */
+function dedupeSilencing(findings: readonly SilencingFinding[]): SilencingFinding[] {
+  const seen = new Set<string>();
+  const out: SilencingFinding[] = [];
+  for (const finding of findings) {
+    const key = `${finding.kind}\0${finding.path}\0${finding.detail}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(finding);
+  }
+  return out;
 }
 
 /**
@@ -1122,13 +1171,24 @@ export function inspectCanonicalAcceptance(
   return problems;
 }
 
-async function inspectCandidateDiff(sandbox: SandboxHandle, base: string): Promise<string> {
-  if (typeof sandbox.git.diffAgainst === "function") {
-    try {
-      return await sandbox.git.diffAgainst(base);
-    } catch {
-      // Stub git objects in tests fall through to sandbox.diff().
-    }
+/**
+ * The candidate's work as a diff.
+ *
+ * `trackedOnly` asks the narrower question — what the project's own files look like now — which is
+ * the right one once we have installed dependencies into the checkout ourselves. Finding 54.
+ */
+async function inspectCandidateDiff(
+  sandbox: SandboxHandle,
+  base: string,
+  options: { trackedOnly?: boolean } = {},
+): Promise<string> {
+  const git = sandbox.git;
+  const trackedOnly = options.trackedOnly === true;
+  try {
+    if (trackedOnly && typeof git.trackedDiffAgainst === "function") return await git.trackedDiffAgainst(base);
+    if (!trackedOnly && typeof git.diffAgainst === "function") return await git.diffAgainst(base);
+  } catch {
+    // Stub git objects in tests fall through to sandbox.diff().
   }
   return sandbox.diff();
 }

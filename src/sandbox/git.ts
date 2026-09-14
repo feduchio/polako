@@ -162,6 +162,18 @@ export class Git {
   }
 
   /**
+   * Working-tree diff vs `base`, **tracked files only**.
+   *
+   * The counterpart to `diffAgainst`, for asking what the checkout looks like after something other
+   * than the candidate has written to it. An install creates an untracked `node_modules`, which a
+   * repository is entitled not to ignore; limiting the question to tracked files asks about the
+   * project rather than about what we installed into it. Finding 54.
+   */
+  trackedDiffAgainst(base: string): Promise<string> {
+    return this.out(["diff", "--no-color", base]);
+  }
+
+  /**
    * Working-tree diff vs `base`, including untracked files as added-file hunks.
    * Unlike `diff(base, head)` this is not limited to the committed range.
    */

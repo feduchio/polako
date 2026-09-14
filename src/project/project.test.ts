@@ -1513,10 +1513,12 @@ describe("runChecks and runIndependentGates", () => {
       checks: [],
       profile,
     });
+    const ran: string[][] = [];
     const result = await runIndependentGates({
       runId: baseline.runId,
       commitHash: baseline.commitHash,
       sandbox: mockSandbox(async (argv: readonly string[]) => {
+        ran.push([...argv]);
         if (argv[1] === "install") {
           mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
           writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
@@ -1532,6 +1534,11 @@ describe("runChecks and runIndependentGates", () => {
     });
     expect(result.passed).toBe(false);
     expect(result.acceptanceProblems).toEqual([{ path: artifact.relativePath, reason: "modified" }]);
+    // And no check ran against the replacement. The artifacts are what the checks are there to
+    // exercise; a result produced against a file we have just called `modified` describes
+    // something else, and the gate has already failed without it.
+    expect(ran.filter((argv) => argv[1] !== "install")).toEqual([]);
+    expect(result.checks).toEqual([]);
   });
 
   it("rejects a planted untracked protected path before materialization", async () => {
@@ -1919,6 +1926,74 @@ describe("runChecks and runIndependentGates", () => {
       expect(result.passed).toBe(true);
     } finally {
       await gate.destroy();
+    }
+  });
+
+  it("catches a tracked file rewritten by the install or by a check, which no commit shows", async () => {
+    // The other side of reading the candidate's diff early: between that read and the verdict, two
+    // parties write to the checkout — the install's lifecycle scripts and the check commands. A
+    // `vitest.config.ts` exclusion added by either silences tests just as effectively as one the
+    // candidate committed, and the early capture cannot see it. Finding 54.
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-midrun-repo-"));
+    const wtRoot = mkdtempSync(join(tmpdir(), "polish-midrun-wt-"));
+    cleanup.push(repoDir, wtRoot);
+    const repo = await Git.init(repoDir);
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({
+      scripts: { test: "vitest run" },
+      devDependencies: { vitest: "^4" },
+    }));
+    writeFileSync(join(repoDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    writeFileSync(join(repoDir, "vitest.config.ts"), "export default { test: {} }\n");
+    mkdirSync(join(repoDir, "src"), { recursive: true });
+    writeFileSync(join(repoDir, "src/legacy.test.ts"), "it('legacy', () => { expect(1).toBe(1); });\n");
+    const base = (await repo.commitAll("baseline"))!;
+    const profile = discoverProject(repoDir);
+    const baseline = buildBaselineSnapshot({
+      runId: id("run"),
+      commitHash: base,
+      checks: [{ name: "test", kind: "test", status: "pass", exitCode: 0, durationMs: 1, summary: null, outputRef: null }],
+      profile,
+    });
+    const sandbox = new WorktreeSandbox(repoDir, wtRoot, defaultConfig().sandbox);
+    const exclusion = "export default { test: { exclude: ['src/legacy.test.ts'] } }\n";
+    const installVitest = (path: string): void => {
+      const vitest = join(path, "node_modules", "vitest");
+      mkdirSync(vitest, { recursive: true });
+      writeFileSync(join(vitest, "package.json"), '{"name":"vitest"}');
+    };
+
+    for (const culprit of ["install", "check"] as const) {
+      const gate = await sandbox.create({
+        id: `midrun-${culprit}`,
+        baseCommit: base,
+        policy: CommandPolicy.forProject([], null),
+      });
+      try {
+        const result = await runIndependentGates({
+          runId: baseline.runId,
+          commitHash: base,
+          sandbox: {
+            ...gate,
+            run: async (argv) => {
+              const isInstall = argv[1] === "install" || argv[1] === "ci";
+              if (isInstall) installVitest(gate.path);
+              if (isInstall === (culprit === "install")) {
+                writeFileSync(join(gate.path, "vitest.config.ts"), exclusion);
+              }
+              return processResult({ stdout: " Tests  1 passed (1)\n" });
+            },
+          },
+          profile,
+          acceptanceArtifacts: [],
+          materializeAcceptance: vi.fn(),
+          verifyAcceptance: vi.fn(() => []),
+          baseline,
+        });
+        expect(result.silencing.some((finding) => finding.kind === "weakened_config"), culprit).toBe(true);
+        expect(result.passed, culprit).toBe(false);
+      } finally {
+        await gate.destroy();
+      }
     }
   });
 

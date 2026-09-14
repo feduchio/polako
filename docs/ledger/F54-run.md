@@ -2,14 +2,14 @@
 
 | Field | Value |
 |---|---|
-| Contract | revision 6; frozen at `fde4530`, amended at `cf7c804` (rev 2), `6c539f8` (rev 3), and in rounds 7, 8 and 9 |
+| Contract | revision 7; frozen at `fde4530`, amended at `cf7c804` (rev 2), `6c539f8` (rev 3), and in rounds 7, 8, 9 and 10 |
 | Base | HOST `ef11a00` (accepted P2 block) |
 | Finding | 54, from P2.3 |
-| Implementation | `cf7c804`, then nine fix rounds beginning at `6634348` |
-| Change against base | 29 files, +2,563 / −68 |
-| Gate | Node 24.20.0; **95 files, 1,071 tests**, exit 0 (was 93 / 1,022) |
+| Implementation | `cf7c804`, then ten fix rounds beginning at `6634348` |
+| Change against base | 30 files, +2,749 / −62 |
+| Gate | Node 24.20.0; **95 files, 1,072 tests**, exit 0 (was 93 / 1,022) |
 
-This record is written after the ninth round. Earlier versions of it described revision 2 —
+This record is written after the tenth round. Earlier versions of it described revision 2 —
 1,046 tests, "five production files", and a story that ended at `BASELINING → NEEDS_HUMAN` — while
 what had actually shipped spanned the predicate, the check runner, two drivers, the integration
 path, the allowlist, the config, the status projection and the report. A run record that
@@ -87,7 +87,7 @@ candidate reproducing the same failures look regression-free. With no fingerprin
 fails closed on its own terms, without touching `compareToBaseline`, `hasRegression` or the `passed`
 fold — which MC6 forbids.
 
-## The contract changed five times, and why none of it is tuning
+## The contract changed six times, and why none of it is tuning
 
 **Revision 1 → 2.** The trigger was "argv[0] is a Node package manager". The suite falsified it
 immediately — 13 failures — and the counter-example is in the tree: `fixtures/resume-dup-fetch`
@@ -112,6 +112,9 @@ artifact is *restored*, and what matters is that the restoration happens before 
 The lane that found it had to replace the double with production-equivalent behaviour to show it —
 which is the difference between a clause that is observed and one that is merely asserted.
 
+**Revision 6 → 7.** Reading the candidate before the install answered attribution and silently
+stopped answering integrity. Two reads, two questions.
+
 Each amendment is recorded with its counter-example rather than applied quietly, because the
 difference between an amendment and a tuned criterion is exactly whether the counter-example exists.
 
@@ -128,6 +131,7 @@ difference between an amendment and a tuned criterion is exactly whether the cou
 | 7 | the design: preparation was optional, and a deleted call site kept 93 tests green |
 | 8 | preparation ran *after* acceptance artifacts were verified, and four clauses nothing observed |
 | 9 | the install's own `node_modules` was read as the candidate's work, and AC17 was false as written |
+| 10 | reading the candidate early made the install's and the checks' own edits invisible |
 
 ## Round 8: what the ordering change cost, and four clauses nothing observed
 
@@ -167,6 +171,29 @@ The memo was also unobserved as a *promise* memo: storing the settled result ins
 concurrent askers each start an install in the same checkout, with the whole suite green. A
 concurrency case now holds the first install open and asserts the second run issues none.
 
+## Round 10: reading early answered "who", and stopped answering "what"
+
+Moving the read before the install fixed attribution and opened a gap in time. Between that read
+and the verdict, two parties write to the checkout that are not the candidate: the install's
+lifecycle scripts, and the check commands. The first lane planted a `vitest.config.ts` exclusion
+from each in turn, and the gate passed both times.
+
+So the tree is now read **twice**, and the two reads ask different questions:
+
+| Capture | Includes untracked | Answers |
+|---|---|---|
+| before the install | yes | what the candidate did, including files it added but never committed |
+| after the checks | no | what the checkout the verdict is about actually contains |
+
+The second is tracked-only precisely because the biggest untracked thing by then is the
+`node_modules` we installed ourselves. The silencing detector sees both; an edit present in both is
+reported once.
+
+The same round closed the second half of the acceptance ordering. When materialization cannot
+restore an artifact the install replaced, the gate had recorded `modified` and then run the checks
+anyway — against bytes it had just declared were not the artifact. It now returns first, with the
+problem and an empty check set.
+
 The same round closed four clauses that were stated and unobserved, each demonstrated by a mutant
 that kept the whole suite green: the reproduction path's use of the shared predicate (MC1/AC1),
 `tsx` in the runner-shape pattern (MC13), Bun's install command in the runner and in the policy
@@ -185,6 +212,8 @@ against the full suite, not asserted from reading:
 | the refusal happens before the checks run | 2 |
 | `runIndependentGates` verifies acceptance before preparing | 2 |
 | `runIndependentGates` prepares before reading the candidate's diff | 1 |
+| silencing reads only the pre-install capture | 1 |
+| the checks run despite an unverifiable acceptance artifact | 1 |
 | the memo holds the settled result instead of the in-flight promise | 1 |
 | the runner never marks a result untrusted | 1 |
 | an untrusted result keeps its fingerprint | 1 |
@@ -225,4 +254,4 @@ widened into this item.
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result: 95 test files, 1,071 tests, exit 0.
+Result: 95 test files, 1,072 tests, exit 0.
