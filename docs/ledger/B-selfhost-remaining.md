@@ -641,3 +641,22 @@ otherwise look like unfinished work.
     that became live with P1.3. Closure is to hoist the catalog restore out of the per-run loop, which
     is a change to `ModelBroker`'s interface rather than to P1.3's seam; both lanes advised against
     adding a hoist clause to this item. Rides with the next item that touches broker recovery.
+
+52. **No test observes the text of any rendered model prompt.**
+    `composeWorkerInstruction` (`src/context/workerInstruction.ts`), the council's `systemPrompt`
+    (`src/council/roles.ts`) and `reviewerSystemPrompt` (`src/review/reviewerProtocol.ts`) between
+    them produce every instruction this tool sends. Appending `MUTATION` to the output of any of
+    the three passes the whole gate. The two places that compare against a rendered prompt —
+    `src/engine/candidate-drivers.test.ts:157` and, since P1.5, `src/daemon/composition.test.ts` —
+    both call the builder to produce the expected value, so the request and the expectation move
+    together. **Found 2026-09-14** by the GPT-5.6-sol lane in round 5 of P1.5, as an objection to
+    that item's prompt oracle.
+    **Not closed by P1.5, and the objection is only half right.** P1.5's clause is that its two
+    *wrappers* do not alter the request, and for that the builder is the correct oracle: an edit
+    made after composition is caught, which is what round 4 established. What the circularity
+    leaves unobserved is an edit made *inside* a builder — a different claim, about prompt content,
+    which P1.5 does not change and which no item has ever owned.
+    Closure is a golden-file or structural pin per builder, and it is a decision rather than a
+    patch: these prompts are edited deliberately and often, so a byte pin turns every intended
+    wording change into a failing test. That trade is why this is recorded rather than added to a
+    measurement-only item. Rides with the next item that changes what a prompt says.

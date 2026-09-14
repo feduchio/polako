@@ -18,6 +18,8 @@ import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DISABLED_REASONING } from "../broker/responseSchemas.js";
+import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
+import { reviewerSystemPrompt } from "../review/reviewerProtocol.js";
 import { defaultConfig, type PolishConfig } from "../domain/config.js";
 import { RunEngine } from "../engine/engine.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
@@ -203,6 +205,8 @@ interface TestEnv {
   store: Store;
   clock: FakeClock;
 }
+
+const PROTOCOLS = ProtocolRegistry.load(defaultProtocolsRoot());
 
 async function makeEnv(): Promise<TestEnv> {
   const dir = mkdtempSync(join(tmpdir(), "polish-b10-"));
@@ -573,27 +577,28 @@ describe("B10 positive path – production E2E", () => {
     const flagged = disableReasoning ? off : unset;
     const expected = [
       // role | purpose | reasoning | temperature | maxTokens | responseFormat | responseSchema
-      `judge|council_decompose_judge|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
-      `judge|council_intake_judge|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
-      `planner|council_decompose_planner|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
-      `planner|council_intake_planner|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
-      `scope_guardian|council_decompose_scope|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
-      `scope_guardian|council_intake_scope|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
+      // | message shape
+      `judge|council_decompose_judge|${flagged}|t=0|mt=undefined|rf=json|rs=undefined|m=system,user`,
+      `judge|council_intake_judge|${flagged}|t=0|mt=undefined|rf=json|rs=undefined|m=system,user`,
+      `planner|council_decompose_planner|${flagged}|t=0|mt=undefined|rf=json|rs=undefined|m=system,user`,
+      `planner|council_intake_planner|${flagged}|t=0|mt=undefined|rf=json|rs=undefined|m=system,user`,
+      `scope_guardian|council_decompose_scope|${flagged}|t=0|mt=undefined|rf=json|rs=undefined|m=system,user`,
+      `scope_guardian|council_intake_scope|${flagged}|t=0|mt=undefined|rf=json|rs=undefined|m=system,user`,
       // `mt` for the worker is the remaining task budget, which depends on what the previous turn
       // spent. Pinning the arithmetic result would fail for any change to the fixture's token
       // accounting, so the two worker rows carry a label and the budget is asserted below against
       // the usage actually recorded.
-      `worker|agent_run|${flagged}|t=undefined|mt=budget|rf=undefined|rs=undefined`,
-      `worker|agent_run|${flagged}|t=undefined|mt=budget|rf=undefined|rs=undefined`,
+      `worker|agent_run|${flagged}|t=undefined|mt=budget|rf=undefined|rs=undefined|m=user`,
+      `worker|agent_run|${flagged}|t=undefined|mt=budget|rf=undefined|rs=undefined|m=user,assistant,tool`,
       // Unconditional, and identical in both arms. Each probe runs once per candidate model, and
       // this fixture has two, so each appears twice: the count is part of the claim.
-      `reviewer|review_correctness|${off}|t=0|mt=1500|rf=undefined|rs=review_findings`,
+      `reviewer|review_correctness|${off}|t=0|mt=1500|rf=undefined|rs=review_findings|m=system,user`,
       ...["wkr", "sup"].flatMap(() => [
-        `probe|capability_probe_strict_progress|${off}|t=0|mt=256|rf=undefined|rs=agent_progress_score`,
-        `probe|capability_probe_strict_review|${off}|t=0|mt=256|rf=undefined|rs=review_findings`,
-        `probe|capability_probe_strict_score|${off}|t=0|mt=256|rf=undefined|rs=empirical_pair_score`,
-        `probe|capability_probe_json|${unset}|t=0|mt=256|rf=json|rs=undefined`,
-        `probe|capability_probe_tools|${unset}|t=0|mt=256|rf=undefined|rs=undefined`,
+        `probe|capability_probe_strict_progress|${off}|t=0|mt=256|rf=undefined|rs=agent_progress_score|m=user`,
+        `probe|capability_probe_strict_review|${off}|t=0|mt=256|rf=undefined|rs=review_findings|m=user`,
+        `probe|capability_probe_strict_score|${off}|t=0|mt=256|rf=undefined|rs=empirical_pair_score|m=user`,
+        `probe|capability_probe_json|${unset}|t=0|mt=256|rf=json|rs=undefined|m=user`,
+        `probe|capability_probe_tools|${unset}|t=0|mt=256|rf=undefined|rs=undefined|m=user`,
       ]),
     ].sort();
     // A multiset, not a set. The entry-gate lane made the worker wrapper send every request twice
@@ -608,8 +613,17 @@ describe("B10 positive path – production E2E", () => {
         `mt=${call.metadata.purpose === "agent_run" ? "budget" : String(call.maxTokens)}`,
         `rf=${String(call.responseFormat)}`,
         `rs=${String(call.responseSchema?.name)}`,
+        `m=${call.messages.map((message) => message.role).join(",")}`,
       ].join("|")).sort();
     expect(seen).toEqual(expected);
+
+    // The sites the flag must not reach are pinned on content too, not only on shape, and
+    // against the production builder rather than a copy of its text. The entry-gate lane
+    // appended a message to the reviewer's request in the disabled arm only; the shape above
+    // catches that, and this catches an edit to what is already there.
+    const reviewerRequest = provider.calls.find((call) => call.metadata.role === "reviewer");
+    expect(reviewerRequest?.messages[0])
+      .toEqual({ role: "system", content: reviewerSystemPrompt(PROTOCOLS, "correctness") });
 
     // The worker's budget, against the usage the run actually recorded rather than a constant:
     // turn one gets the whole task budget and each later turn gets what the previous ones left.
