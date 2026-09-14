@@ -218,9 +218,12 @@ export async function ensureProjectDependencies(
     return { attempted: true, ready: false, detail: "install aborted", output: result };
   }
   if (result.exitCode !== 0) {
-    // A non-zero install in a clean checkout is the repository's own state: the lockfile, the
-    // manifest, or the package manager version. Retrying this run cannot change any of them.
-    return { attempted: true, ready: false, repositorySide: true, detail: `install exited ${String(result.exitCode)}`, output: result };
+    // Deliberately **not** marked repository-side. A non-zero install can be the repository's own
+    // state — a stale lockfile, an unsupported package-manager version — or it can be a registry
+    // outage, DNS, auth or a full disk. We cannot tell which from an exit code, and claiming the
+    // repository is at fault would send the operator to fix the wrong thing. The instruction for
+    // this case has to name both possibilities.
+    return { attempted: true, ready: false, detail: `install exited ${String(result.exitCode)}`, output: result };
   }
   const stillMissing = dependenciesUnavailableFor(sandbox, profile);
   return stillMissing === null

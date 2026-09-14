@@ -10,7 +10,7 @@ import type { ProjectProfile } from "../project/profile.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { DiffStat } from "../sandbox/git.js";
 import type { Sandbox, SandboxHandle } from "../sandbox/worktree.js";
-import { errorToString } from "../shared/errors.js";
+import { errorToString, PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 
 export type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../agents/types.js";
@@ -60,6 +60,8 @@ export interface CandidateGates {
    * rather than going away. Finding 54.
    */
   prepareDependencies?: { enabled: boolean; timeoutMs: number };
+  /** Fired before the install command runs, so a crash mid-install still leaves a record. */
+  onDependencyInstallStart?: (info: { command: readonly string[]; timeoutMs: number }) => void;
   onDependencyInstall?: (result: EnsureDependenciesResult) => void;
 }
 
@@ -261,8 +263,16 @@ export async function runGates(input: {
     const prepared = await ensureProjectDependencies(input.sandbox, input.gates.profile, {
       ...input.gates.prepareDependencies,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
+      ...(input.gates.onDependencyInstallStart === undefined ? {} : { onStart: input.gates.onDependencyInstallStart }),
     });
     input.gates.onDependencyInstall?.(prepared);
+    if (!prepared.ready) {
+      // Do not run the checks. Their failures would describe this checkout's environment, and a
+      // candidate marked `failed_gates` for that reason is being judged on the wrong thing — the
+      // same confusion as a false baseline, one layer down. The throw makes the candidate an
+      // `error`, which is what an environment that could not be prepared is. Finding 54.
+      throw new PolishError("SANDBOX_ERROR", `candidate gates not run: ${prepared.detail ?? "dependencies unavailable"}`);
+    }
   }
   return runIndependentGates({
     runId: input.runId,

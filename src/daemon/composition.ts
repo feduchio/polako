@@ -316,7 +316,9 @@ export function createBaseliningDriver(deps: ProductionDeps): PhaseDriver {
         const question =
           prepared.repositorySide === true
             ? `Checks ${names} cannot produce evidence about this project: ${why}. This run is pinned to ${commitHash.slice(0, 8)}, so fix it in the repository, commit, and start a new run — resuming this one will repeat the same checkout.`
-            : `Checks ${names} cannot produce evidence about this project: ${why}. Make the install possible here — check the network and sandbox.installDependencies — then resume.`;
+            : prepared.attempted
+              ? `Checks ${names} cannot produce evidence about this project: ${why}. The install ran and did not succeed; the cause may be environmental (registry, network, auth, disk) in which case fix it and resume, or it may be the repository's own lockfile or manifest in which case commit the repair and start a new run, because this run is pinned to ${commitHash.slice(0, 8)}. The install's output is in the run's artifacts.`
+              : `Checks ${names} cannot produce evidence about this project: ${why}. Make the install possible here — check the network and sandbox.installDependencies — then resume.`;
         patchRun(ctx, {
           terminalReason: {
             code: "environment_not_ready",

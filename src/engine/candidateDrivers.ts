@@ -38,6 +38,7 @@ import { RuntimeUnavailableError, type RuntimeValidator } from "../runtime/types
 import { MissionAcceptanceService, acceptanceArtifactsForGate } from "../store/missionAcceptance.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { Sandbox } from "../sandbox/worktree.js";
+import { canonicalJson } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import { Git, type ChangedFileStatus } from "../sandbox/git.js";
 import {
@@ -991,24 +992,57 @@ export async function resolveGates(ctx: PhaseContext, options: CandidateDriverOp
       enabled: ctx.config.sandbox.installDependencies,
       timeoutMs: ctx.config.sandbox.installTimeoutMs,
     },
-    onDependencyInstall: (prepared) => {
-      if (!prepared.attempted) return;
+    // Same start/finish forensic path as the baseline install: announced before it runs, and the
+    // whole ProcessResult persisted after, as docs/THREAT_MODEL.md requires of any command.
+    onDependencyInstallStart: (info) => {
       ctx.store.events.append([
         {
           id: id("evt", ctx.clock.now()),
           runId: ctx.run.id,
           ts: ctx.clock.now(),
           type: "shell.command_started",
+          payload: { check: "dependency_install", command: info.command, timeoutMs: info.timeoutMs, taskId: task.id },
+          causedBy: [],
+          actor: SYSTEM_ACTOR,
+          artifacts: [],
+        },
+      ]);
+    },
+    onDependencyInstall: (prepared) => {
+      if (!prepared.attempted) return;
+      const artifact = ctx.store.artifacts.put(
+        canonicalJson({
+          runId: ctx.run.id,
+          taskId: task.id,
+          ready: prepared.ready,
+          detail: prepared.detail,
+          repositorySide: prepared.repositorySide ?? false,
+          result: prepared.output ?? null,
+        }),
+        "check_output",
+        `${ctx.run.id}:${task.id}:dependency_install`,
+      );
+      ctx.store.events.append([
+        {
+          id: id("evt", ctx.clock.now()),
+          runId: ctx.run.id,
+          ts: ctx.clock.now(),
+          type: "shell.command_finished",
           payload: {
             check: "dependency_install",
             command: prepared.output?.argv ?? [],
             taskId: task.id,
+            exitCode: prepared.output?.exitCode ?? null,
+            timedOut: prepared.output?.timedOut ?? false,
+            aborted: prepared.output?.aborted ?? false,
+            truncated: prepared.output?.truncated ?? false,
+            durationMs: prepared.output?.durationMs ?? null,
             ready: prepared.ready,
             detail: prepared.detail,
           },
           causedBy: [],
           actor: SYSTEM_ACTOR,
-          artifacts: [],
+          artifacts: [artifact],
         },
       ]);
     },

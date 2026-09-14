@@ -216,7 +216,7 @@ describe("candidate gates prepare the project's dependencies", () => {
       git: {} as SandboxHandle["git"],
       run: async (argv) => {
         issued.push([...argv]);
-        if (argv[1] === "install") mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+        if (argv[1] === "install") { mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true }); writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}'); }
         return {
           argv: [...argv],
           cwd: dir,

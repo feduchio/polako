@@ -10,11 +10,17 @@ describe("untrustedForMissingDependencies", () => {
     for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
   });
 
+  /** An installed package is one whose own manifest is present, which is what Node resolves. */
+  function installPackage(root: string, name: string): void {
+    mkdirSync(join(root, "node_modules", name), { recursive: true });
+    writeFileSync(join(root, "node_modules", name, "package.json"), JSON.stringify({ name }));
+  }
+
   function project(manifest: Record<string, unknown>, options: { installed?: string } = {}): string {
     const dir = mkdtempSync(join(tmpdir(), "polish-deps-"));
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
-    if (options.installed !== undefined) mkdirSync(join(dir, "node_modules", options.installed), { recursive: true });
+    if (options.installed !== undefined) installPackage(dir, options.installed);
     return dir;
   }
 
@@ -77,7 +83,7 @@ describe("untrustedForMissingDependencies", () => {
     // A workspace package legitimately has no node_modules of its own.
     const root = mkdtempSync(join(tmpdir(), "polish-ws-"));
     cleanup.push(root);
-    mkdirSync(join(root, "node_modules", "vitest"), { recursive: true });
+    installPackage(root, "vitest");
     const pkg = join(root, "packages", "leaf");
     mkdirSync(pkg, { recursive: true });
     writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "leaf", devDependencies: { vitest: "^4" } }));
@@ -88,6 +94,12 @@ describe("untrustedForMissingDependencies", () => {
     const dir = project({ name: "x", devDependencies: { vitest: "^4" } });
     writeFileSync(join(dir, ".pnp.cjs"), "// pnp");
     expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "test"], "vitest run")).toBeNull();
+  });
+
+  it("does not accept an empty package directory, which is what a broken install leaves", () => {
+    const dir = project({ name: "x", devDependencies: { vitest: "^4" } });
+    mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+    expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "test"], "vitest run")).toBe(MISSING_DEPENDENCIES_REASON);
   });
 
   it("does not accept a node_modules that lacks the declared package", () => {

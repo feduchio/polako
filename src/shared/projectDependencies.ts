@@ -46,6 +46,15 @@ function resolvesUpward(cwd: string, relative: string): boolean {
   }
 }
 
+/**
+ * A package is installed when its own manifest is there, not when a directory bearing its name is.
+ * An empty `node_modules/<name>` is what a half-finished or interrupted install leaves behind, and
+ * Node cannot resolve it — trusting the directory would readmit the defect through the back door.
+ */
+function packageInstalled(cwd: string, name: string): boolean {
+  return resolvesUpward(cwd, join("node_modules", name, "package.json"));
+}
+
 /** Plug'n'Play resolves with no `node_modules` anywhere, so its marker settles availability. */
 function usesPnp(cwd: string): boolean {
   return PNP_MARKERS.some((marker) => resolvesUpward(cwd, marker));
@@ -64,7 +73,7 @@ function usesPnp(cwd: string): boolean {
 function dependenciesAvailable(cwd: string, names: readonly string[]): boolean {
   if (names.length === 0) return true;
   if (usesPnp(cwd)) return true;
-  return names.every((name) => resolvesUpward(cwd, join("node_modules", name)));
+  return names.every((name) => packageInstalled(cwd, name));
 }
 
 /**

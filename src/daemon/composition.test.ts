@@ -1386,10 +1386,13 @@ describe("DISCOVERING_PROJECT and BASELINING drivers", () => {
         if (argv[0] !== "pnpm") return run(argv, opts);
         const done = { cwd: handle.path, signal: null, startedAt: 0, timedOut: false, aborted: false, truncated: false, durationMs: 1 };
         if (argv[1] === "install") {
-          if (install === "creates packages") mkdirSync(join(handle.path, "node_modules", "vitest"), { recursive: true });
+          if (install === "creates packages") {
+            mkdirSync(join(handle.path, "node_modules", "vitest"), { recursive: true });
+            writeFileSync(join(handle.path, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
+          }
           return { argv: [...argv], exitCode: 0, stdout: "installed\n", stderr: "", ...done };
         }
-        return existsSync(join(handle.path, "node_modules", "vitest"))
+        return existsSync(join(handle.path, "node_modules", "vitest", "package.json"))
           ? { argv: [...argv], exitCode: 0, stdout: " Tests  1 passed (1)\n", stderr: "", ...done }
           : { argv: [...argv], exitCode: 1, stdout: "", stderr: "sh: vitest: command not found\n", ...done };
       };

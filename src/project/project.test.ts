@@ -851,6 +851,7 @@ describe("runChecks and runIndependentGates", () => {
     it("attempts nothing when the dependencies are already reachable", async () => {
       const dir = uninstalled();
       mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+      writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
       const run = vi.fn(async () => processResult({}));
       const result = await ensureProjectDependencies(mockSandbox(run, [], dir), discoverProject(dir), { enabled: true, timeoutMs: 1000 });
       expect(result).toMatchObject({ attempted: false, ready: true });
@@ -862,6 +863,7 @@ describe("runChecks and runIndependentGates", () => {
       const run = vi.fn(async (argv: readonly string[]) => {
         expect(argv).toEqual(["pnpm", "install", "--frozen-lockfile"]);
         mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+        writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
         return processResult({ stdout: "done\n" });
       });
       const result = await ensureProjectDependencies(mockSandbox(run, [], dir), discoverProject(dir), { enabled: true, timeoutMs: 1000 });
@@ -919,14 +921,31 @@ describe("runChecks and runIndependentGates", () => {
       expect(aborted.detail).toBe("install aborted");
     });
 
-    it("marks a non-zero install as repository-side, because retrying this checkout cannot help", async () => {
+    it("does not blame the repository for a non-zero install, which an exit code cannot tell", async () => {
       const dir = uninstalled();
       const result = await ensureProjectDependencies(
         mockSandbox(async () => processResult({ exitCode: 1, stderr: "ERR_PNPM_OUTDATED_LOCKFILE\n" }), [], dir),
         discoverProject(dir),
         { enabled: true, timeoutMs: 1000 },
       );
-      expect(result.repositorySide).toBe(true);
+      // A stale lockfile and a registry outage look the same from here.
+      expect(result.repositorySide).toBeUndefined();
+      expect(result.detail).toContain("install exited 1");
+    });
+
+    it("does blame the repository when no package manager can be identified", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "polish-pm-"));
+      cleanup.push(dir);
+      // No lockfile, so discovery cannot name a package manager: a repository fact, not an
+      // environmental one, and no amount of resuming this run will change it.
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
+      const profile = discoverProject(dir);
+      expect(profile.packageManager).toBeNull();
+      const result = await ensureProjectDependencies(mockSandbox(async () => processResult({}), [], dir), profile, {
+        enabled: true,
+        timeoutMs: 1000,
+      });
+      expect(result).toMatchObject({ attempted: false, ready: false, repositorySide: true });
     });
 
     it("does not install when disabled, and says so", async () => {
@@ -983,6 +1002,7 @@ describe("runChecks and runIndependentGates", () => {
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
     mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
     const profile = discoverProject(dir);
     const results = await runChecks({
       runId: id("run"),
