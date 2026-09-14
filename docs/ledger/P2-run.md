@@ -3,10 +3,10 @@
 | Field | Value |
 |---|---|
 | Entry base | HOST `f9195d1` (accepted P1 block) |
-| Block candidate | `bc8c6c3`, reviewed by GPT-5.6-sol and then Grok |
+| Block candidate | **`d000ec4`** — both block reviewers, GPT-5.6-sol then Grok, clean on that commit |
 | Plan | `docs/PLAN.md` §4 |
 | Gate | Node 24.20.0; 93 files; 1,022 tests; exit 0 |
-| Production change across the whole block | **none** — `git diff f9195d1..bc8c6c3 -- src/` is empty |
+| Production change across the whole block | **none** — `git diff f9195d1..d000ec4 -- src/` is empty |
 
 ## The three verdicts
 
@@ -24,6 +24,13 @@
   sixteen `src/e2e/` test results, the historical `INTEGRATING` tasks, and the two bars.
 - **The smoke record exists.** `docs/ledger/P2.3-run.md`, with the verbatim phase sequence, the
   quoted baseline, and the discovered profile checked field by field.
+
+**Every store figure in these three records is a point-in-time measurement, and one of them has
+already moved.** P2.1 records 17 runs of which 11 began after the cut-off; the live store now holds
+18 and 12, because P2.3's own smoke is the eighteenth. P2.3 records that movement under its MC5.
+The conclusion both rest on — none of the post-cut-off runs reached `REVIEWING` — holds on both
+counts, and P2.1's four MC5 figures and its zero eligible count are unchanged. A reader taking
+11 of 17 as current will be off by the smoke run itself.
 
 ## What the block establishes, and it is not what the plan expected
 
@@ -112,4 +119,4 @@ Finding 54 is recorded, not repaired.
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result at `bc8c6c3`: 93 test files, 1,022 tests, exit 0.
+Result at `d000ec4`: 93 test files, 1,022 tests, exit 0.
