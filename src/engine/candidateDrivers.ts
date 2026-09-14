@@ -496,7 +496,9 @@ async function admitCorpusExecutable(
       artifact: {
         id: id("acc", ctx.clock.now()),
         runId: ctx.run.id,
-        taskId: null,
+        // The fixing task's own artifact. A later task's `forTask` excludes it by design: the
+        // corpus, not the run-scoped lookup, is what carries it forward.
+        taskId: task.id,
         kind: "regression_test",
         relativePath: chosen,
         sha256,
@@ -838,7 +840,12 @@ async function validateRuntimeIfNeeded(
   return evidences.every((evidence) => runtimeAllowsDone(mode, evidence, integratedCommit));
 }
 
-async function resolveGates(ctx: PhaseContext, options: CandidateDriverOptions, task: Task): Promise<CandidateGates> {
+/**
+ * Exported for observation: P1.8's union is only cumulative if the **gate deps the driver builds**
+ * carry it, and a check on `acceptanceArtifactsForGate` alone would pass with this call site
+ * reverted.
+ */
+export async function resolveGates(ctx: PhaseContext, options: CandidateDriverOptions, task: Task): Promise<CandidateGates> {
   if (options.resolveGates !== undefined) return options.resolveGates(ctx, task);
   const profile = await (options.resolveProfile ?? defaultProfile)(ctx);
   const baseline = ctx.store.repos.baselines.listByRun(ctx.run.id)[0];

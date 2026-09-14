@@ -126,6 +126,24 @@ describe("executable mission acceptance corpus", () => {
     expect(store.events.list(runId, { types: ["acceptance.recorded"] })).toHaveLength(1);
   });
 
+  /**
+   * Atomicity is the use of one transaction, and `EventLog.append` is where the transaction is.
+   * Two appends would leave the artifact behind when the second failed, and no assertion on the
+   * end state can see that when the failure is arranged before either of them.
+   */
+  it("appends the artifact and the amendment in a single transaction", () => {
+    const original = entry();
+    const appends: number[] = [];
+    const real = store.events.append.bind(store.events);
+    store.events.append = (events) => { appends.push(events.length); return real(events); };
+    try {
+      corpus.admitExecutable({ entryId: original.id, artifact: artifactFor("tests/a.test.mjs", "x") });
+    } finally {
+      store.events.append = real;
+    }
+    expect(appends).toEqual([2]);
+  });
+
   it("leaves neither the artifact nor the amendment when admission fails", () => {
     const original = entry();
     const artifact = artifactFor("tests/retry.test.mjs", "x");
