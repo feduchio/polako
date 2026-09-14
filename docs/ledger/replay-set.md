@@ -26,14 +26,19 @@ about the request shape. Vitest expands it into two test results; the committed 
 The two arms cannot disagree on MC6's predicate, the terminal state, except by crashing the
 pipeline. Counting an `it.each` row as an entry would make any flag table a corpus.
 
-**And the verdict would be `inconclusive` even at a count of 5, because MC4's positive outcome is
-not a count.** Its two authorised outputs are `inconclusive — insufficient replay corpus` below the
-floor and, at or above it, that *the quality gate is evaluable and says so*. The quality gate is
-MC6. A corpus that reduces to **one** observation under the tuple this contract's own vocabulary
-supplies cannot be called evaluable, and an earlier version of this file proved the point by
-printing "floor met" and then withdrawing the licence two sections later — a third verdict the
-contract does not have. The Grok lane named both defects; the second is the one that matters, since
-a reader starting P3.3 reads the verdict line and not the caveat.
+**"Floor met" was never one of MC4's two strings, whatever the count.** MC4 authorises
+`inconclusive — insufficient replay corpus` below the floor and, at or above it, a statement that
+*the quality gate is evaluable*. Earlier versions of this file printed "floor met" instead — a
+third verdict the contract does not have — and then withdrew the licence two sections later, where
+a reader starting P3.3 would not look. That defect is fixed above regardless of the count.
+
+**What the two reviewer lanes disagreed about, recorded because the verdict does not rest on it.**
+Grok read MC4's "evaluable" as a substantive condition, so that a corpus reducing to one
+observation could not be called evaluable even at five entries. GPT read it as satisfied by the
+floor itself, so that reading a distinctness requirement into "evaluable" would amend the frozen
+contract. **The question is moot here**: the count is 4, the floor fails arithmetically, and this
+file takes no position on what MC4 would have required at 5. It is flagged for the plan revision
+that will have to decide, since the same ambiguity will return the moment a fifth scenario exists.
 
 **What this set could establish if it did meet the floor is narrow anyway.** Every entry is a
 `ScriptedProvider` scenario with frozen completions, so by MC5 it can only show that a change did
@@ -42,7 +47,7 @@ alters what a model is asked or what it returns.
 
 ## Admitted entries
 
-All five drive `fixtures/resume-dup-fetch`. All five use the mission
+All four drive `fixtures/resume-dup-fetch`. All four use the mission
 *"Fix duplicate request after resume: clear #pending before retry"*, and the task contract comes
 from the scripted council's `plannerDecompose()`: title *"Fix duplicate in-flight detection on
 retry"*, `requirementRef: "R1"`, acceptance *"retries after transient failure succeed"* and
@@ -203,10 +208,9 @@ carries **one** observation.
 
 The verdict does not rest on that argument, and this is worth being precise about, because the
 argument was tried first and was the wrong shape. The count is **4** against a floor of **5** by
-MC1's own unit, so the floor fails arithmetically and no interpretation is needed. The
-informational point is why a count of 5 would not have rescued it either: MC4's positive outcome is
-that *the quality gate is evaluable*, and one observation is not an evaluable corpus for MC6's
-rule.
+MC1's own unit, so the floor fails arithmetically and no interpretation of "evaluable" is needed.
+Whether one observation could ever satisfy MC4's positive outcome is the open question recorded
+under the verdict, and it is not answered here.
 
 **What is not done here.** MC7 forbids authoring new scenarios to inflate or diversify the set, and
 nothing has been added. Whether the plan's floor should also carry a distinctness requirement is a
@@ -228,6 +232,10 @@ Both hold whether or not the floor is met.
    (`src/providers/scripted.ts:38-57`) sensitive to call count and order.
 
 ## The gate this set supports — MC6
+
+**Nothing in this section is in force, because the floor is unmet.** MC4 makes every gate that
+depends on this set `inconclusive`, so MC6's rule licenses no replacement today. It is recorded
+because it is the rule a corpus that met the floor would be evaluated under.
 
 A change may replace an existing path only if **every** replayable entry reaches the **same
 terminal state** in all 3 repetitions. There is no cost clause: cost is §1's gate on its own
