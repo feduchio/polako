@@ -37,22 +37,31 @@ export function isTestPath(path: string): boolean {
  * execute, not fixtures, snapshots, golden data, or arbitrary files merely stored under tests/.
  */
 export function isRunnableTestPath(path: string): boolean {
-  if (!isTestPath(path)) return false;
   const normalized = normalizePath(path);
   const segments = normalized.split("/");
   const basename = segments.at(-1) ?? "";
-  if (!/\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kts?|swift|cs|php|sh|bash)$/u.test(basename)) {
+  const extension = /\.([^.]+)$/u.exec(basename)?.[1]?.toLowerCase() ?? "";
+  if (!/^(?:[cm]?[jt]sx?|py|rb|go|rs|java|kts?|swift|cs|php|sh|bash)$/u.test(extension)) {
     return false;
   }
   const stem = basename.replace(/\.[^.]+$/u, "");
-  if (/(?:^|[._-])(?:fixture|fixtures|helper|helpers|mock|mocks|snapshot|snapshots)(?:[._-]|$)/iu.test(stem)) {
+  const directories = segments.slice(0, -1);
+  if (directories.some((segment) =>
+    /^(?:__)?(?:fixtures?|helpers?|mocks?|snapshots?|support|common|data|utils?)(?:__)?$/iu.test(segment))) {
     return false;
   }
-  if (/(?:^|[._-])(?:test|tests|spec)(?:[._-]|$)/iu.test(stem)) return true;
-  if (/(?:Test|Tests|Spec)$/u.test(stem)) return true;
-  // Jest/Vitest discover source files under __tests__; Cargo discovers every direct tests/*.rs.
-  if (segments.includes("__tests__")) return true;
-  return basename.endsWith(".rs") && segments.includes("tests");
+  const explicitName =
+    /(?:^|[._-])(?:test|tests|spec)(?:[._-]|$)/iu.test(stem) ||
+    /^(?:Test|Spec)[A-Z0-9_]/u.test(stem) ||
+    /(?:Test|Tests|Spec)$/u.test(stem);
+  if (explicitName) return true;
+  if (/(?:^|[._-])(?:fixture|helper|mock|snapshot|support|common|data|util|utils|setup)(?:[._-]|$)/iu.test(stem)) {
+    return false;
+  }
+  const parent = directories.at(-1)?.toLowerCase();
+  // Direct children are runner-discoverable in conventional test roots. Nested support modules
+  // need an explicit test/spec name; Cargo in particular compiles only direct tests/*.rs as cases.
+  return parent === "test" || parent === "tests" || parent === "__tests__";
 }
 
 function isNeutralPath(path: string): boolean {
