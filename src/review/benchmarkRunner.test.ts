@@ -507,16 +507,20 @@ describe("review benchmark runner", () => {
     });
     expect(new Set(report.cells.map((cell) => cell.oracle.axis))).toEqual(new Set(["correctness"]));
     expect(Object.keys(report.byAxis).sort()).toEqual(["adversarial", "correctness", "regression"]);
-    expect(report.byAxis["adversarial"]?.uniqueHits).toBe(0);
-    expect(report.byAxis["adversarial"]?.tokensPerUniqueHit).toBeNull();
-    expect(report.byAxis["adversarial"]?.discrimination).toEqual({ eligible: 0, discriminated: 0, rate: null });
 
     const summary = renderReviewerBenchmark(report);
     expect(summary).toContain(
       `axis correctness: 100.0% primary recall, 33.3% false positives, 66.7% pair discrimination, 1 unique hits (${pair.pairId}), 138 tokens, 138.00 tokens/unique hit`);
-    expect(summary).toContain(
-      "axis adversarial: undefined primary recall, undefined false positives, undefined pair discrimination, 0 unique hits (none), 0 tokens, undefined tokens/unique hit");
-    expect(summary).toContain("axis regression: undefined primary recall");
+    // Every absent axis, not a representative one: naming one of the two leaves the other free to
+    // carry any value at all, which is the mutant the entry-gate lane survived in round 4.
+    for (const axis of ["adversarial", "regression"] as const) {
+      expect(report.byAxis[axis]?.uniqueHits).toBe(0);
+      expect(report.byAxis[axis]?.uniquePairIds).toEqual([]);
+      expect(report.byAxis[axis]?.tokensPerUniqueHit).toBeNull();
+      expect(report.byAxis[axis]?.discrimination).toEqual({ eligible: 0, discriminated: 0, rate: null });
+      expect(summary).toContain(
+        `axis ${axis}: undefined primary recall, undefined false positives, undefined pair discrimination, 0 unique hits (none), 0 tokens, undefined tokens/unique hit`);
+    }
   });
 
   it("rescoring replays raw bodies through the production parser without provider access", async () => {
