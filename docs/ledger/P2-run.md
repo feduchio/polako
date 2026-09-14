@@ -52,7 +52,7 @@ would mislead whoever tries to unblock P3:
 | Item | What it is actually blocked by | What would unblock it |
 |---|---|---|
 | P2.1 | no post-plumbing review execution exists: 11 of 17 runs began after finding 41's fix and none reached `REVIEWING` | **one** completed review round on the current tree. A round returning no findings still counts; it is a measured zero |
-| P2.2 | the corpus is four committed scripted scenarios of one mission on one fixture, against a floor of five | **not** more store review rounds — those are barred from this set by MC5's first bar anyway. It needs distinct scenarios, or a second fixture, or a plan revision that decides what "evaluable" requires |
+| P2.2 | the corpus is four committed scripted scenarios of one mission on one fixture, against a floor of five | distinct scenarios, or a second fixture, or a plan revision that decides what "evaluable" requires. More store review rounds are **not sufficient** on their own, but they are not excluded either: MC2 admits a historical store task when it is replayable, and all four currently in the store fail that test only because no replay path consumes the recorded completions. MC5's first bar points the other way — it bars *scripted* entries from §1's cost arm, not store-derived entries from this set |
 | P2.3 | nothing — it **succeeded** | it is not an inconclusive verdict at all: it did what it set out to do and found finding 54 doing it |
 
 The one thing they do share is context rather than cause: the system has completed very little on
