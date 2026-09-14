@@ -272,6 +272,16 @@ describe("WorktreeSandbox", () => {
     await h.destroy();
   });
 
+  it("reads committed blobs as exact bytes and rejects capped output", async () => {
+    const bytes = Buffer.from([0xff, 0x00, 0x0a, 0x80]);
+    writeFileSync(join(repoDir, "raw.test.bin"), bytes);
+    const head = await repo.commitAll("add raw blob");
+    expect(head).not.toBeNull();
+    expect(Buffer.from(await repo.showFileBytes(head!, "raw.test.bin"))).toEqual(bytes);
+    await expect(new Git(repoDir, 120_000, 3).showFileBytes(head!, "raw.test.bin"))
+      .rejects.toThrow(/truncated/);
+  });
+
   it("enforces the command policy and scrubs the environment for commands", async () => {
     process.env["POLISH_TEST_SECRET_TOKEN"] = "leak";
     const dumpEnv = "console.log(JSON.stringify(process.env))";

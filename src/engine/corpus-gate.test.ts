@@ -300,4 +300,38 @@ describe("an admitted corpus executable reaches a later candidate's gate", () =>
     expect(materialized).toEqual([expectedPaths]);
     expect(verified).toEqual([expectedPaths, expectedPaths]);
   });
+
+  it("canonical verification rejects corpus-only corruption after materialization", async () => {
+    const { store, artifacts, runId } = setUp();
+    const dir = checkoutFor();
+    const profile = discoverProject(dir);
+    profile.checks = [];
+    const baseline = buildBaselineSnapshot({
+      runId,
+      commitHash: "a".repeat(40),
+      checks: [],
+      profile,
+    });
+    const result = await runIndependentGates({
+      runId,
+      commitHash: baseline.commitHash,
+      sandbox: checkoutSandbox(dir),
+      profile,
+      acceptanceArtifacts: artifacts,
+      materializeAcceptance: (checkoutDir, list) => {
+        store.acceptance.materialize(checkoutDir, list);
+        writeFileSync(join(checkoutDir, artifacts[0]!.relativePath), "tampered\n");
+      },
+      // A forged callback must not be able to hide removal of the corpus artifact from
+      // canonical post-materialization verification.
+      verifyAcceptance: () => [],
+      baseline,
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.acceptanceProblems).toContainEqual({
+      path: artifacts[0]!.relativePath,
+      reason: "modified",
+    });
+  });
 });

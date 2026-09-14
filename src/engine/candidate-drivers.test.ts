@@ -261,6 +261,7 @@ describe("B2 production candidate drivers", () => {
     const testPath = "tests/corpus-regression.test.mjs";
     const corpusCommand = ["node", testPath];
     const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-corpus", "pass", {
+      "tests/a.fixture.json": "{\"fixture\":true}\n",
       [testPath]: "process.stdout.write('CORPUS-REGRESSION-RAN\\n');\n",
     });
     const { runId, taskId } = seedIntegratingRun(store, clock, fixture, winner);
@@ -400,6 +401,61 @@ describe("B2 production candidate drivers", () => {
     expect(await runHead.read()).toBe(fixture.base);
     expect(run.phase).toBe("PLANNING");
     expect(store.repos.tasks.listByRun(runId)[0]?.state).toBe("READY");
+  });
+
+  it("does not admit a pending corpus executable before integration gates pass", async () => {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-failed-corpus", "fail", {
+      "tests/regression.test.mjs": "process.exit(0);\n",
+    });
+    const { runId, taskId } = seedIntegratingRun(store, clock, fixture, winner);
+    const findingId = id("find", clock.now());
+    const validationId = id("fval", clock.now());
+    const task = {
+      ...store.repos.tasks.get(taskId)!,
+      origin: { kind: "valid_finding" as const, findingId, validationId, verdict: "VALID" as const },
+    };
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId,
+      ts: clock.now(),
+      type: "task.state_changed",
+      payload: { task },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
+    const run = store.repos.runs.get(runId)!;
+    const corpus = new MissionAcceptanceService(store, clock);
+    const pending = corpus.record({
+      missionId: run.missionId,
+      sourceRunId: runId,
+      requirementRef: "R1",
+      kind: "regression_test",
+      summary: "Validated finding",
+      evidenceRefs: [],
+      artifactHashes: ["a".repeat(64)],
+      metadata: {
+        findingId,
+        validationId,
+        executableStatus: CORPUS_EXECUTABLE_STATUS.pendingIntegration,
+      },
+    });
+    const { resolveGates: _testOverride, ...productionOptions } = driverOptions;
+    const integration = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    integration.registerPhase("INTEGRATING", createIntegratingDriver({
+      ...productionOptions,
+      resolveProfile: () => fixture.gates.profile,
+    }));
+
+    await integration.tickRun(runId);
+
+    expect(store.events.list(runId, { types: ["acceptance.recorded"] })).toEqual([]);
+    expect(store.repos.acceptanceCorpus.get(pending.id)?.metadata["executableStatus"])
+      .toBe(CORPUS_EXECUTABLE_STATUS.pendingIntegration);
+    expect(store.repos.runs.get(runId)?.currentCheckpointHash).toBe(fixture.base);
   });
 
   it("revalidates a stale winner against the moved head and leaves head unchanged on conflict", async () => {

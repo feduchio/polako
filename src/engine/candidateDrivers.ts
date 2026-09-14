@@ -37,7 +37,10 @@ import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { Sandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import { Git, type ChangedFileStatus } from "../sandbox/git.js";
-import { classifyCheckpointPaths, isTestPath } from "../convergence/pathology/changeClassification.js";
+import {
+  classifyCheckpointPaths,
+  isRunnableTestPath,
+} from "../convergence/pathology/changeClassification.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
 import type { Task } from "../domain/task.js";
 import { incompleteCodingWorkTerminal } from "../convergence/antiFakeDone.js";
@@ -478,7 +481,7 @@ async function admitCorpusExecutable(
     throw new Error(reason);
   }
   const testPaths = changes
-    .filter((change) => change.status !== "D" && isTestPath(change.path))
+    .filter((change) => change.status !== "D" && isRunnableTestPath(change.path))
     .map((change) => change.path)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   if (testPaths.length === 0) {
@@ -488,11 +491,11 @@ async function admitCorpusExecutable(
     return;
   }
   const git = new Git(ctx.run.projectPath);
-  let selected: { path: string; content: string } | null = null;
+  let selected: { path: string; content: Uint8Array } | null = null;
   const failures: string[] = [];
   for (const path of testPaths) {
     try {
-      selected = { path, content: await git.showFile(integratedCommit, path) };
+      selected = { path, content: await git.showFileBytes(integratedCommit, path) };
       break;
     } catch (error) {
       failures.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);

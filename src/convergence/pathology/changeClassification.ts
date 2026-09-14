@@ -32,6 +32,16 @@ export function isTestPath(path: string): boolean {
   return basename.includes(".test.") || basename.includes(".spec.");
 }
 
+/**
+ * Narrower than checkpoint classification: corpus admission needs source a test runner can
+ * execute, not fixtures, snapshots, golden data, or arbitrary files merely stored under tests/.
+ */
+export function isRunnableTestPath(path: string): boolean {
+  if (!isTestPath(path)) return false;
+  const basename = normalizePath(path).split("/").at(-1) ?? "";
+  return /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kts?|swift|cs|php|sh|bash)$/u.test(basename);
+}
+
 function isNeutralPath(path: string): boolean {
   const normalized = normalizePath(path);
   return normalized === "docs" || normalized.startsWith("docs/");

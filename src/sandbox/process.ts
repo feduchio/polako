@@ -9,6 +9,7 @@ export interface RunProcessOptions {
   maxOutputBytes: number;
   signal?: AbortSignal;
   stdin?: string;
+  captureOutputBytes?: boolean;
 }
 
 export interface ProcessResult {
@@ -18,6 +19,7 @@ export interface ProcessResult {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+  stdoutBytes?: Uint8Array;
   /** true if either stream was cut at maxOutputBytes */
   truncated: boolean;
   timedOut: boolean;
@@ -100,7 +102,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
       exited = true;
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
-      resolve({
+      const result: ProcessResult = {
         argv: [...options.argv],
         cwd: options.cwd,
         exitCode: code,
@@ -112,7 +114,9 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
         aborted,
         durationMs: Date.now() - startedAt,
         startedAt,
-      });
+      };
+      if (options.captureOutputBytes === true) result.stdoutBytes = out.toBytes();
+      resolve(result);
     });
 
     child.stdin.on("error", () => {
@@ -147,6 +151,10 @@ class CappedBuffer {
   }
 
   toString(): string {
-    return Buffer.concat(this.chunks).toString("utf8");
+    return this.toBytes().toString("utf8");
+  }
+
+  toBytes(): Buffer {
+    return Buffer.concat(this.chunks);
   }
 }

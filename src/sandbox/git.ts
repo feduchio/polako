@@ -32,6 +32,7 @@ export class Git {
   constructor(
     readonly cwd: string,
     private readonly timeoutMs = 120_000,
+    private readonly maxOutputBytes = 8 * 1024 * 1024,
   ) {}
 
   static async init(dir: string, initialBranch = "main"): Promise<Git> {
@@ -40,14 +41,18 @@ export class Git {
     return git;
   }
 
-  async run(args: readonly string[], opts: { allowFailure?: boolean; signal?: AbortSignal } = {}): Promise<ProcessResult> {
+  async run(
+    args: readonly string[],
+    opts: { allowFailure?: boolean; signal?: AbortSignal; captureOutputBytes?: boolean } = {},
+  ): Promise<ProcessResult> {
     const result = await runProcess({
       argv: ["git", ...args],
       cwd: this.cwd,
       env: { ...GIT_ENV, PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: process.env["HOME"] ?? "/tmp" },
       timeoutMs: this.timeoutMs,
-      maxOutputBytes: 8 * 1024 * 1024,
+      maxOutputBytes: this.maxOutputBytes,
       ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.captureOutputBytes === undefined ? {} : { captureOutputBytes: opts.captureOutputBytes }),
     });
     if (result.exitCode !== 0 && !opts.allowFailure) {
       throw new PolishError("SANDBOX_ERROR", `git ${args.join(" ")} failed (${result.exitCode})`, {
@@ -103,6 +108,19 @@ export class Git {
   /** File content at a commit, without checking anything out. */
   async showFile(commit: string, path: string): Promise<string> {
     return (await this.run(["show", `${commit}:${path}`])).stdout;
+  }
+
+  /** Exact blob bytes at a commit. Output above the subprocess cap is rejected, never hashed partially. */
+  async showFileBytes(commit: string, path: string): Promise<Uint8Array> {
+    const result = await this.run(["show", `${commit}:${path}`], { captureOutputBytes: true });
+    if (result.truncated || result.stdoutBytes === undefined) {
+      throw new PolishError("IO_ERROR", `git show output was truncated for ${path}`, {
+        commit,
+        path,
+        maxOutputBytes: this.maxOutputBytes,
+      });
+    }
+    return result.stdoutBytes;
   }
 
   async changedFilesBetween(base: string, head: string): Promise<string[]> {
