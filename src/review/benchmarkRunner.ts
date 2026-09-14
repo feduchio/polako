@@ -13,13 +13,17 @@ import type { Checkpoint } from "../domain/checkpoint.js";
 import type { ProtocolRegistry } from "../protocols/loader.js";
 import { sha256Hex } from "../shared/hash.js";
 import { runAxisReview, type ReviewedFinding } from "./swarm.js";
+import { DEFAULT_REVIEW_AXES } from "../domain/review.js";
+import type { ReviewAxis } from "../domain/finding.js";
 import {
   canonicalJsonLine,
   exportedPacket,
+  scoreAxisRecall,
   scorePerModelDiscrimination,
   scoreQuality,
   scoreTeamDiscrimination,
   scoreTeamQuality,
+  type AxisRecall,
   type BenchmarkCellResult,
   type BenchmarkLabel,
   type BenchmarkOracle,
@@ -46,6 +50,7 @@ export interface BenchmarkReviewer {
 
 export interface ScheduledBenchmarkCell {
   cellId: string;
+  axis: ReviewAxis;
   pair: ReviewerBenchmarkPair;
   label: BenchmarkLabel;
   reviewer: BenchmarkReviewer;
@@ -71,6 +76,8 @@ export interface ReviewerBenchmarkReport {
   byModel: Record<string, QualityMetrics>;
   byModelDiscrimination: Record<string, PairDiscrimination>;
   team: QualityMetrics;
+  /** Per-axis unique recall; keyed by `ReviewAxis`. See `scoreAxisRecall`. */
+  byAxis: Record<string, AxisRecall>;
   perModelDiscrimination: PairDiscrimination;
   teamDiscrimination: PairDiscrimination;
   packetJsonl: string;
@@ -91,6 +98,8 @@ export interface RunReviewerBenchmarkInput {
   maxOutputTokens?: number;
   onCell?: (cell: RecordedBenchmarkCell, completed: number, requested: number) => void;
   pairs?: readonly ReviewerBenchmarkPair[];
+  /** Defaults to `DEFAULT_REVIEW_AXES`. Subsets the schedule exactly as `pairs` does. */
+  axes?: readonly ReviewAxis[];
 }
 
 export interface ImportedBenchmarkResponse {
@@ -132,6 +141,7 @@ export async function runReviewerBenchmark(
     input.reviewers,
     input.seed,
     input.pairs ?? REVIEWER_BENCHMARK_PAIRS,
+    input.axes ?? DEFAULT_REVIEW_AXES,
   );
   const cells: RecordedBenchmarkCell[] = [];
   let partial = false;
@@ -171,19 +181,25 @@ export function buildBenchmarkSchedule(
   reviewers: readonly [BenchmarkReviewer, BenchmarkReviewer],
   seed: number,
   pairs: readonly ReviewerBenchmarkPair[] = REVIEWER_BENCHMARK_PAIRS,
+  axes: readonly ReviewAxis[] = DEFAULT_REVIEW_AXES,
 ): ScheduledBenchmarkCell[] {
   const cells: ScheduledBenchmarkCell[] = [];
   for (const pair of pairs) {
     for (const label of ["clean", "mutant"] as const) {
       for (const reviewer of reviewers) {
         for (let repetition = 1; repetition <= 3; repetition++) {
-          cells.push({
-            cellId: sha256Hex(`${seed}:${pair.pairId}:${label}:${reviewer.model.provider}:${reviewer.model.model}:${repetition}`).slice(0, 24),
-            pair,
-            label,
-            reviewer,
-            repetition,
-          });
+          // Defaulted from `DEFAULT_REVIEW_AXES` at the caller, not a local list: the benchmark
+          // and production must not be able to disagree about what the axes are.
+          for (const axis of axes) {
+            cells.push({
+              cellId: sha256Hex(`${seed}:${pair.pairId}:${label}:${reviewer.model.provider}:${reviewer.model.model}:${repetition}:${axis}`).slice(0, 24),
+              axis,
+              pair,
+              label,
+              reviewer,
+              repetition,
+            });
+          }
         }
       }
     }
@@ -298,6 +314,7 @@ export async function rescoreReviewerBenchmark(
     const replay = replayProvider(input.model, imported);
     const scheduled: ScheduledBenchmarkCell = {
       cellId,
+      axis: oracle.axis,
       pair,
       label: oracle.label,
       reviewer: { provider: replay, model: input.model, family: input.family },
@@ -340,6 +357,7 @@ async function runCell(
   const span = changedLineSpan(scheduled.pair);
   const oracle: BenchmarkOracle = {
     cellId: scheduled.cellId,
+    axis: scheduled.axis,
     pairId: scheduled.pair.pairId,
     label: scheduled.label,
     criterionId: scheduled.pair.criterionId,
@@ -354,7 +372,7 @@ async function runCell(
   try {
     const result = await runAxisReview({
       checkpoint: checkpoint(scheduled.pair.pairId, scheduled.repetition),
-      axis: "correctness",
+      axis: scheduled.axis,
       artifact: {
         commitHash: "a".repeat(40),
         diffBase: "b".repeat(40),
@@ -413,6 +431,7 @@ function buildReport(
       scorePerModelDiscrimination(cells.filter((cell) => modelKey(cell.model) === key)),
     ]),
   );
+  const byAxis = scoreAxisRecall(cells);
   const packetJsonl = cells.map((cell) =>
     canonicalJsonLine(exportedPacket(cell.oracle.cellId, cell.request?.messages ?? []))).join("");
   const oracleJsonl = cells.map((cell) => canonicalJsonLine(cell.oracle)).join("");
@@ -426,6 +445,7 @@ function buildReport(
     cells,
     byModel,
     byModelDiscrimination,
+    byAxis,
     team: scoreTeamQuality(cells),
     perModelDiscrimination: scorePerModelDiscrimination(cells),
     teamDiscrimination: scoreTeamDiscrimination(cells),

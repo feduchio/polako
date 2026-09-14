@@ -37,12 +37,12 @@ describe("benchmark.review RPC", () => {
           report: { sha256: string };
         };
       };
-      expect(result.summary).toContain("Reviewer benchmark: 96/96 completed cells");
-      expect(result.report.requested).toBe(96);
+      expect(result.summary).toContain("Reviewer benchmark: 288/288 completed cells");
+      expect(result.report.requested).toBe(288);
       expect(result.report.corpusSha256).toBe(benchmarkCorpusSha256());
-      expect(result.report.cells).toHaveLength(96);
-      expect(nex.calls).toHaveLength(48);
-      expect(nvidia.calls).toHaveLength(48);
+      expect(result.report.cells).toHaveLength(288);
+      expect(nex.calls).toHaveLength(144);
+      expect(nvidia.calls).toHaveLength(144);
       expect(service.store.repos.runs.listAll()).toEqual([]);
       expect(service.store.artifacts.has(result.artifacts.packet.sha256)).toBe(true);
       expect(service.store.artifacts.has(result.artifacts.oracle.sha256)).toBe(true);
@@ -64,7 +64,7 @@ describe("benchmark.review RPC", () => {
         JSON.parse(line) as { pairId: string; criterionId: string });
       for (const pair of REVIEWER_BENCHMARK_PAIRS) {
         const rows = oracleRows.filter((row) => row.pairId === pair.pairId);
-        expect(rows).toHaveLength(12);
+        expect(rows).toHaveLength(36);
         expect(new Set(rows.map((row) => row.criterionId))).toEqual(new Set([pair.criterionId]));
       }
     } finally {
@@ -113,9 +113,9 @@ describe("benchmark.review RPC", () => {
       }) as { report: { configuration: string; transportMode: string; cells: unknown[] } };
       expect(result.report.configuration).toBe("operational_strict");
       expect(result.report.transportMode).toBe("strict_schema");
-      expect(result.report.cells).toHaveLength(96);
-      expect(alpha.calls).toHaveLength(48);
-      expect(beta.calls).toHaveLength(48);
+      expect(result.report.cells).toHaveLength(288);
+      expect(alpha.calls).toHaveLength(144);
+      expect(beta.calls).toHaveLength(144);
     } finally {
       await service.close();
     }

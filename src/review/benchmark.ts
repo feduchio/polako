@@ -1,5 +1,6 @@
 import type { ChatMessage, Usage } from "../broker/types.js";
 import type { ModelRef } from "../domain/common.js";
+import type { ReviewAxis } from "../domain/finding.js";
 import type { ReviewedFinding } from "./swarm.js";
 
 export type BenchmarkLabel = "clean" | "mutant";
@@ -11,6 +12,8 @@ export type BenchmarkOutcomeKind =
 
 export interface BenchmarkOracle {
   cellId: string;
+  /** Part of cell identity: three axes share every other field, so without it ids collide. */
+  axis: ReviewAxis;
   pairId: string;
   label: BenchmarkLabel;
   criterionId: string;
@@ -289,4 +292,72 @@ function sortValue(value: unknown): unknown {
   if (value === null || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
   return Object.fromEntries(Object.keys(record).sort().map((key) => [key, sortValue(record[key])]));
+}
+
+/**
+ * Per-axis recall. A hit is unique to an axis when, **for a given pair**, that axis produced a
+ * primary hit in at least one cell and no other axis produced one in any cell — so uniqueness is a
+ * property of the pair across the whole report, not of a cell.
+ */
+export interface AxisRecall {
+  axis: ReviewAxis;
+  /** Pairs this axis hit at all. */
+  hitPairIds: string[];
+  /** Pairs only this axis hit. */
+  uniquePairIds: string[];
+  uniqueHits: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** Total tokens / uniqueHits. `null` — never `Infinity` — when there are no unique hits. */
+  tokensPerUniqueHit: number | null;
+}
+
+export function scoreAxisRecall(cells: readonly BenchmarkCellResult[]): Record<string, AxisRecall> {
+  const axes = [...new Set(cells.map((cell) => cell.oracle.axis))].sort();
+  // Pair -> the set of axes that hit it anywhere. Built once, so "no other axis in any cell" is
+  // answered over the whole report rather than per cell.
+  const hittersByPair = new Map<string, Set<string>>();
+  for (const cell of cells) {
+    if (!primaryHit(cell.findings, cell.oracle)) continue;
+    const hitters = hittersByPair.get(cell.oracle.pairId) ?? new Set<string>();
+    hitters.add(cell.oracle.axis);
+    hittersByPair.set(cell.oracle.pairId, hitters);
+  }
+  const out: Record<string, AxisRecall> = {};
+  for (const axis of axes) {
+    const own = cells.filter((cell) => cell.oracle.axis === axis);
+    let inputTokens = 0;
+    let outputTokens = 0;
+    for (const cell of own) {
+      if (cell.usage === null) continue;
+      inputTokens += cell.usage.inputTokens;
+      outputTokens += cell.usage.outputTokens;
+    }
+    const hitPairIds = [...hittersByPair.entries()]
+      .filter(([, hitters]) => hitters.has(axis)).map(([pairId]) => pairId).sort();
+    const uniquePairIds = hitPairIds.filter((pairId) => hittersByPair.get(pairId)?.size === 1);
+    out[axis] = {
+      axis,
+      hitPairIds,
+      uniquePairIds,
+      uniqueHits: uniquePairIds.length,
+      inputTokens,
+      outputTokens,
+      tokensPerUniqueHit: uniquePairIds.length === 0
+        ? null
+        : (inputTokens + outputTokens) / uniquePairIds.length,
+    };
+  }
+  return out;
+}
+
+/**
+ * Ascending by cost, `null` **last**. P3.1 consumes this ordering, and a comparator treating `null`
+ * as zero would rank an axis that found nothing as the cheapest.
+ */
+export function byTokensPerUniqueHit(a: AxisRecall, b: AxisRecall): number {
+  if (a.tokensPerUniqueHit === null && b.tokensPerUniqueHit === null) return a.axis.localeCompare(b.axis);
+  if (a.tokensPerUniqueHit === null) return 1;
+  if (b.tokensPerUniqueHit === null) return -1;
+  return a.tokensPerUniqueHit - b.tokensPerUniqueHit || a.axis.localeCompare(b.axis);
 }

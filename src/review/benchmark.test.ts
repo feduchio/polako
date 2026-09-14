@@ -7,6 +7,8 @@ import {
   scoreQuality,
   scoreTeamDiscrimination,
   scoreTeamQuality,
+  byTokensPerUniqueHit,
+  scoreAxisRecall,
   strictIdHit,
   wilson95,
   type BenchmarkCellResult,
@@ -15,6 +17,7 @@ import {
 
 const ORACLE: BenchmarkOracle = {
   cellId: "opaque-1",
+  axis: "correctness",
   pairId: "pair-1",
   label: "mutant",
   criterionId: "INV-01",
@@ -187,6 +190,27 @@ function finding(
   } as ReviewedFinding;
 }
 
+function axisCell(
+  axis: string,
+  pairId: string,
+  findings: ReviewedFinding[],
+  outputTokens: number,
+): BenchmarkCellResult {
+  return {
+    oracle: { ...ORACLE, axis: axis as BenchmarkOracle["axis"], pairId, label: "mutant" },
+    model: { provider: "test", model: "m1" },
+    family: "m1",
+    outcome: "completed_with_findings",
+    findings,
+    usage: { inputTokens: 1, outputTokens, costUsd: 0 },
+  };
+}
+
+/** A finding that lands on the oracle's own path and line, so `primaryHit` is true. */
+function hits(): ReviewedFinding[] {
+  return [finding(ORACLE.criterionId, ORACLE.path, ORACLE.line, ORACLE.endLine)];
+}
+
 function cell(
   label: "clean" | "mutant",
   outcome: BenchmarkCellResult["outcome"],
@@ -205,3 +229,73 @@ function cell(
     usage: outputTokens === null ? null : { inputTokens: 1, outputTokens, costUsd: 0 },
   };
 }
+
+describe("scoreAxisRecall", () => {
+  it("credits a pair to the only axis that found it", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10),
+      axisCell("correctness", "pair-A", [], 10),
+      axisCell("regression", "pair-A", [], 10),
+    ]);
+    expect(recall["adversarial"]?.uniquePairIds).toEqual(["pair-A"]);
+    expect(recall["correctness"]?.uniqueHits).toBe(0);
+    expect(recall["regression"]?.uniqueHits).toBe(0);
+  });
+
+  /**
+   * The case a per-cell implementation gets wrong. Uniqueness is a property of the pair across the
+   * whole report: if two axes find it anywhere, it is unique to neither.
+   */
+  it("credits a pair to neither axis when two of them found it", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10),
+      axisCell("correctness", "pair-A", hits(), 10),
+      axisCell("regression", "pair-A", [], 10),
+    ]);
+    expect(recall["adversarial"]?.uniqueHits).toBe(0);
+    expect(recall["correctness"]?.uniqueHits).toBe(0);
+    expect(recall["adversarial"]?.hitPairIds).toEqual(["pair-A"]);
+  });
+
+  it("does not let a second cell of the same axis make a shared pair unique", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10),
+      axisCell("adversarial", "pair-A", hits(), 10),
+      axisCell("correctness", "pair-A", hits(), 10),
+    ]);
+    expect(recall["adversarial"]?.uniqueHits).toBe(0);
+  });
+
+  it("reports null rather than infinity or NaN for an axis with no unique hits", () => {
+    const recall = scoreAxisRecall([
+      axisCell("correctness", "pair-A", [], 10),
+      axisCell("adversarial", "pair-A", hits(), 10),
+    ]);
+    const empty = recall["correctness"];
+    expect(empty?.tokensPerUniqueHit).toBeNull();
+    expect(empty?.tokensPerUniqueHit).not.toBe(Number.POSITIVE_INFINITY);
+    expect(Number.isNaN(empty!.tokensPerUniqueHit as unknown as number)).toBe(false);
+  });
+
+  it("divides total tokens by unique hits, counting every cell of the axis", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10),
+      axisCell("adversarial", "pair-B", [], 30),
+      axisCell("correctness", "pair-A", [], 5),
+    ]);
+    // 2 cells of `adversarial`: (1+10) + (1+30) = 42 tokens over 1 unique pair.
+    expect(recall["adversarial"]?.tokensPerUniqueHit).toBe(42);
+  });
+
+  /** P3.1 consumes this ordering; `null` as zero would rank an axis that found nothing cheapest. */
+  it("orders null worst, below any finite cost", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10),
+      axisCell("correctness", "pair-B", hits(), 100_000),
+      axisCell("regression", "pair-A", [], 1),
+    ]);
+    const order = Object.values(recall).sort(byTokensPerUniqueHit).map((entry) => entry.axis);
+    expect(order).toEqual(["adversarial", "correctness", "regression"]);
+    expect(recall["regression"]?.tokensPerUniqueHit).toBeNull();
+  });
+});

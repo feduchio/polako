@@ -9,8 +9,9 @@ import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/r
 import { ReviewStrategySchema } from "../domain/config.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { sha256Hex } from "../shared/hash.js";
-import { canonicalJsonLine } from "./benchmark.js";
+import { canonicalJsonLine, scoreQuality } from "./benchmark.js";
 import { REVIEWER_BENCHMARK_PAIRS } from "./benchmarkCorpus.js";
+import { reviewerSystemPrompt } from "./reviewerProtocol.js";
 import {
   buildBenchmarkSchedule,
   renderReviewerBenchmark,
@@ -25,7 +26,7 @@ import {
 const PROTOCOLS = ProtocolRegistry.load(defaultProtocolsRoot());
 
 describe("review benchmark runner", () => {
-  it("runs 96 correctness cells once through the production prompt and parser", async () => {
+  it("runs 288 cells, one per axis, each through its own production prompt and parser", async () => {
     const nex = provider("nex", "nex-agi/nex-n2.5-pro:free", () => reply('{"findings":[]}'));
     const nvidia = provider("nvidia", "nvidia/nemotron:free", () => reply('{"findings":[]}'));
     const report = await runReviewerBenchmark({
@@ -34,16 +35,26 @@ describe("review benchmark runner", () => {
       seed: 7,
     });
 
-    expect(report.requested).toBe(96);
-    expect(report.cells).toHaveLength(96);
-    expect(nex.calls).toHaveLength(48);
-    expect(nvidia.calls).toHaveLength(48);
+    expect(report.requested).toBe(288);
+    expect(report.cells).toHaveLength(288);
+    expect(nex.calls).toHaveLength(144);
+    expect(nvidia.calls).toHaveLength(144);
     expect(report.partial).toBe(false);
     expect(report.cells.every((cell) => cell.outcome === "completed_empty")).toBe(true);
-    expect(report.cells.every((cell) =>
-      cell.request?.messages[0]?.content.startsWith("You are an independent correctness reviewer.")))
-      .toBe(true);
-    expect(report.cells.every((cell) => cell.request?.metadata.purpose === "review_correctness")).toBe(true);
+
+    // AC2: every axis scheduled equally, and once per (pair, label, reviewer, repetition).
+    const perAxis = new Map<string, number>();
+    for (const cell of report.cells) perAxis.set(cell.oracle.axis, (perAxis.get(cell.oracle.axis) ?? 0) + 1);
+    expect([...perAxis.entries()].sort()).toEqual([["adversarial", 96], ["correctness", 96], ["regression", 96]]);
+
+    // AC1: the axis is part of cell identity, so no two cells collide.
+    expect(new Set(report.cells.map((cell) => cell.oracle.cellId)).size).toBe(288);
+
+    // AC3: each cell is reviewed on the axis it was scheduled for, not `correctness`.
+    for (const cell of report.cells) {
+      expect(cell.request?.metadata.purpose).toBe(`review_${cell.oracle.axis}`);
+      expect(cell.request?.messages[0]?.content).toBe(reviewerSystemPrompt(PROTOCOLS, cell.oracle.axis));
+    }
     expect(report.transportMode).toBe("strict_schema");
     expect(report.cells[0]?.request?.responseSchema).toEqual(REVIEW_FINDINGS_RESPONSE_SCHEMA);
     expect(report.cells[0]?.request?.reasoning).toEqual(DISABLED_REASONING);
@@ -62,6 +73,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 43,
       pairs: [pair],
+      axes: ["correctness"],
       transportMode: "legacy_json_object",
     });
     expect(report.transportMode).toBe("legacy_json_object");
@@ -102,6 +114,7 @@ describe("review benchmark runner", () => {
       reviewers,
       seed: 43,
       pairs: [pair],
+      axes: ["correctness"],
       transportMode: "legacy_json_object",
       configuration: "original",
     });
@@ -110,6 +123,7 @@ describe("review benchmark runner", () => {
       reviewers,
       seed: 43,
       pairs: [pair],
+      axes: ["correctness"],
       transportMode: "strict_schema",
       configuration: "operational_strict",
     });
@@ -131,6 +145,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 1,
       pairs: [pair],
+      axes: ["correctness"],
     });
     const clean = report.cells.find((cell) => cell.oracle.label === "clean");
     const mutant = report.cells.find((cell) =>
@@ -170,6 +185,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(broken, "nex-agi"), reviewer(empty, "nvidia")],
       seed: 3,
       pairs: [pair],
+      axes: ["correctness"],
     });
     const failures = report.cells.filter((cell) => cell.family === "nex-agi");
     expect(failures).toHaveLength(6);
@@ -188,19 +204,19 @@ describe("review benchmark runner", () => {
     const reviewers = [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")] as const;
 
     const full = await runReviewerBenchmark({ protocols: PROTOCOLS, reviewers, seed: 5 });
-    expect(full.cells).toHaveLength(96);
-    expect(full.team.transportFailures).toBe(96);
+    expect(full.cells).toHaveLength(288);
+    expect(full.team.transportFailures).toBe(288);
     expect(full.team.completed).toBe(0);
     const summary = renderReviewerBenchmark(full);
-    expect(summary).toContain("0/96 completed cells");
+    expect(summary).toContain("0/288 completed cells");
     expect(summary).toContain("undefined primary recall");
     expect(summary).toContain("undefined strict-id recall");
     expect(summary).toContain("undefined false positives");
     expect(summary).toContain("undefined pair discrimination");
     expect(summary).toContain("0 input + 0 output tokens");
     expect(summary).toContain("undefined output tokens/hit");
-    expect(summary).toContain("schema=0/96 (0.0%)");
-    expect(summary).toContain("transport=96/96 (100.0%)");
+    expect(summary).toContain("schema=0/288 (0.0%)");
+    expect(summary).toContain("transport=288/288 (100.0%)");
     expect(summary).toContain("team: undefined primary recall, undefined strict-id recall");
 
     nex.calls.length = 0;
@@ -212,6 +228,74 @@ describe("review benchmark runner", () => {
     expect(renderReviewerBenchmark(partial)).toContain("(partial)");
   });
 
+  /**
+   * The axis is part of cell identity, so it has to survive export and come back through rescore.
+   * Without it in `BenchmarkOracle`, three axes collide on one `cellId` and the id-map sizes differ.
+   */
+  it("carries the axis through export and rescore", async () => {
+    const nex = provider("nex", "nex-agi/a:free", benchmarkReply);
+    const nvidia = provider("nvidia", "nvidia/a:free", benchmarkReply);
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const original = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 12,
+      pairs: [pair],
+    });
+    expect(original.cells).toHaveLength(36);
+    expect(new Set(original.cells.map((cell) => cell.oracle.cellId)).size).toBe(36);
+    // Every oracle line carries its axis on the wire.
+    const axesOnWire = original.oracleJsonl.trim().split("\n")
+      .map((line) => (JSON.parse(line) as { axis: string }).axis);
+    expect(new Set(axesOnWire)).toEqual(new Set(["correctness", "regression", "adversarial"]));
+
+    const responseJsonl = original.cells.map((cell) => canonicalJsonLine({
+      cellId: cell.oracle.cellId,
+      raw: cell.rawContent,
+      usage: cell.usage,
+    })).join("");
+    const rescored = await rescoreReviewerBenchmark({
+      protocols: PROTOCOLS,
+      packetJsonl: original.packetJsonl,
+      oracleJsonl: original.oracleJsonl,
+      responseJsonl,
+      packetSha256: original.packetSha256,
+      oracleSha256: original.oracleSha256,
+      model: { provider: "nex", model: "nex-agi/a:free" },
+      family: "nex-agi",
+      seed: 12,
+    });
+    // Reconstruction restored each cell's own axis, not a default.
+    const byId = new Map(original.cells.map((cell) => [cell.oracle.cellId, cell.oracle.axis]));
+    expect(rescored.cells).toHaveLength(36);
+    for (const cell of rescored.cells) expect(cell.oracle.axis).toBe(byId.get(cell.oracle.cellId));
+  });
+
+  /**
+   * MC9: widening the schedule must not redefine the numbers item 42 was accepted on. The
+   * `correctness` slice of a three-axis run scores exactly as a `correctness`-only run.
+   */
+  it("leaves the correctness slice scoring exactly as a correctness-only run", async () => {
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const build = async (axes?: readonly ["correctness"]): Promise<Awaited<ReturnType<typeof runReviewerBenchmark>>> =>
+      runReviewerBenchmark({
+        protocols: PROTOCOLS,
+        reviewers: [
+          reviewer(provider("nex", "nex-agi/a:free", benchmarkReply), "nex-agi"),
+          reviewer(provider("nvidia", "nvidia/a:free", benchmarkReply), "nvidia"),
+        ],
+        seed: 12,
+        pairs: [pair],
+        ...(axes === undefined ? {} : { axes }),
+      });
+    const all = await build();
+    const only = await build(["correctness"]);
+    expect(scoreQuality(all.cells.filter((cell) => cell.oracle.axis === "correctness")))
+      .toEqual(scoreQuality(only.cells));
+  });
+
   it("does not hide one family's failures behind its sibling's completion", async () => {
     const fail = provider("nex", "nex-agi/a:free", () => Promise.reject(new Error("down")));
     const pass = provider("nvidia", "nvidia/a:free", () => reply('{"findings":[]}'));
@@ -220,11 +304,11 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(fail, "nex-agi"), reviewer(pass, "nvidia")],
       seed: 8,
     });
-    expect(report.team.scheduled).toBe(96);
-    expect(report.team.completed).toBe(48);
-    expect(report.team.transportFailures).toBe(48);
+    expect(report.team.scheduled).toBe(288);
+    expect(report.team.completed).toBe(144);
+    expect(report.team.transportFailures).toBe(144);
     expect(report.team.completionRate).toBe(0.5);
-    expect(renderReviewerBenchmark(report)).toContain("transport=48/96 (50.0%)");
+    expect(renderReviewerBenchmark(report)).toContain("transport=144/288 (50.0%)");
   });
 
   it("bounds each provider call with the configured timeout signal", async () => {
@@ -243,6 +327,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 4,
       pairs: [pair],
+      axes: ["correctness"],
       cellTimeoutMs: 2,
     });
     expect(report.cells).toHaveLength(12);
@@ -267,7 +352,7 @@ describe("review benchmark runner", () => {
         liveAbort: true,
       });
     };
-    expect((await run(4)).cells).toHaveLength(96);
+    expect((await run(4)).cells).toHaveLength(288);
     expect((await run(5)).cells).toHaveLength(20);
   });
 
@@ -316,6 +401,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 10,
       pairs: [pair],
+      axes: ["correctness"],
     });
     const summary = renderReviewerBenchmark(report);
     expect(summary).toContain("nex:nex-agi/nex-n2.5-pro:free: 66.7% primary recall, 33.3% strict-id recall, 33.3% false positives, 33.3% pair discrimination, 12 input + 66 output tokens, 33.00 output tokens/hit");
@@ -334,6 +420,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 12,
       pairs: [pair],
+      axes: ["correctness"],
     });
     const responseJsonl = original.cells.map((cell) => canonicalJsonLine({
       cellId: cell.oracle.cellId,
@@ -502,6 +589,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 7,
       pairs: [pair],
+      axes: ["correctness"],
     });
 
     const cap = ReviewStrategySchema.parse({}).maxOutputTokens;
@@ -522,6 +610,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 7,
       pairs: [pair],
+      axes: ["correctness"],
       maxOutputTokens: 777,
     });
 
@@ -542,6 +631,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 12,
       pairs: [pair],
+      axes: ["correctness"],
     });
 
     expect(report.cells.length).toBeGreaterThan(0);
@@ -560,6 +650,7 @@ describe("review benchmark runner", () => {
       reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
       seed: 12,
       pairs: [pair],
+      axes: ["correctness"],
     });
 
     const truncated = original.cells.map((cell) => canonicalJsonLine({
