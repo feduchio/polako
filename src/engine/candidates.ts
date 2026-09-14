@@ -4,8 +4,8 @@ import type { ArtifactRef, ModelRef } from "../domain/common.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { ProtectedChangeScope, ProtectedChangeWaiver } from "../domain/protectedChangeWaiver.js";
 import type { Task } from "../domain/task.js";
-import type { CheckOutputPersister, GateResult } from "../project/checkRunner.js";
-import { runIndependentGates } from "../project/checkRunner.js";
+import type { CheckOutputPersister, EnsureDependenciesResult, GateResult } from "../project/checkRunner.js";
+import { ensureProjectDependencies, runIndependentGates } from "../project/checkRunner.js";
 import type { ProjectProfile } from "../project/profile.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { DiffStat } from "../sandbox/git.js";
@@ -54,6 +54,13 @@ export interface CandidateGates {
   protectedChangeWaivers?: readonly ProtectedChangeWaiver[];
   protectedChangeScope?: Omit<ProtectedChangeScope, "relativePath">;
   validateProtectedChangeWaiver?: (waiver: ProtectedChangeWaiver) => boolean;
+  /**
+   * A candidate's gate checkout is a fresh worktree, so it needs the project's dependencies for
+   * the same reason the baseline does. Without this the wall moves from BASELINING to GATING
+   * rather than going away. Finding 54.
+   */
+  prepareDependencies?: { enabled: boolean; timeoutMs: number };
+  onDependencyInstall?: (result: EnsureDependenciesResult) => void;
 }
 
 export type CandidateResultStatus =
@@ -250,6 +257,13 @@ export async function runGates(input: {
   corpus?: MissionAcceptanceCorpus;
   signal?: AbortSignal;
 }): Promise<GateResult> {
+  if (input.gates.prepareDependencies !== undefined) {
+    const prepared = await ensureProjectDependencies(input.sandbox, input.gates.profile, {
+      ...input.gates.prepareDependencies,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    });
+    input.gates.onDependencyInstall?.(prepared);
+  }
   return runIndependentGates({
     runId: input.runId,
     commitHash: input.commitHash,

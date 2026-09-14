@@ -23,11 +23,32 @@ describe("untrustedForMissingDependencies", () => {
     expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "test"])).toBe(MISSING_DEPENDENCIES_REASON);
   });
 
-  it("counts every dependency field, not only dependencies", () => {
-    for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+  it("counts dependencies and devDependencies, and only those", () => {
+    for (const field of ["dependencies", "devDependencies"]) {
       const dir = project({ name: "x", [field]: { left: "^1" } });
       expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "build"]), field).toBe(MISSING_DEPENDENCIES_REASON);
     }
+    // optional packages may legitimately be absent after a successful install, and peers are the
+    // consumer's to provide, so requiring either would refuse a correctly installed project.
+    for (const field of ["optionalDependencies", "peerDependencies"]) {
+      const dir = project({ name: "x", [field]: { left: "^1" } });
+      expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "build"]), field).toBeNull();
+    }
+  });
+
+  it("requires every declared package, because a partial install is the defect's own shape", () => {
+    const dir = project({ name: "x", devDependencies: { vitest: "^4", oxlint: "^1" } }, { installed: "vitest" });
+    expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "lint"], "oxlint src")).toBe(MISSING_DEPENDENCIES_REASON);
+  });
+
+  it("looks for the runner itself when the manifest declares nothing", () => {
+    const bare = project({ name: "x", scripts: { test: "vitest run" } });
+    mkdirSync(join(bare, "node_modules", "some-other-package"), { recursive: true });
+    // A node_modules that exists says nothing about whether this command's binary is in it.
+    expect(untrustedForMissingDependencies(bare, ["pnpm", "run", "test"], "vitest run")).toBe(MISSING_DEPENDENCIES_REASON);
+    mkdirSync(join(bare, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(bare, "node_modules", ".bin", "vitest"), "#!/bin/sh\n");
+    expect(untrustedForMissingDependencies(bare, ["pnpm", "run", "test"], "vitest run")).toBeNull();
   });
 
   it("does not flag a project that declares no dependencies and needs none", () => {

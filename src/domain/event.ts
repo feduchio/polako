@@ -58,6 +58,7 @@ export const KNOWN_EVENT_TYPES = [
   "model.observation.recorded",
   "shell.command",
   "shell.command_started",
+  "shell.command_finished",
   "worker.started",
   "worker.progress_scored",
   "worker.progress_abandoned",

@@ -1,7 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] as const;
+/**
+ * Only these two decide availability. `optionalDependencies` may legitimately be absent after a
+ * successful install, and `peerDependencies` are the consumer's to provide, so requiring either
+ * would refuse projects that are correctly installed.
+ */
+const REQUIRED_FIELDS = ["dependencies", "devDependencies"] as const;
 
 /** Command shapes whose result depends on installed packages even when the manifest declares none. */
 const NEEDS_INSTALLED_PACKAGES = /node_modules|(?<![a-z])(vitest|jest|mocha|ava)(?![a-z])/i;
@@ -23,30 +28,43 @@ function declaredDependencies(manifestPath: string): string[] {
   if (typeof manifest !== "object" || manifest === null) return [];
   const record = manifest as Record<string, unknown>;
   const names: string[] = [];
-  for (const field of DEPENDENCY_FIELDS) {
+  for (const field of REQUIRED_FIELDS) {
     const value = record[field];
     if (typeof value === "object" && value !== null) names.push(...Object.keys(value));
   }
   return names;
 }
 
-/**
- * Whether the declared packages are reachable from `cwd`.
- *
- * Walks upward rather than testing one directory, because Node resolution does: a package inside a
- * workspace legitimately has no `node_modules` of its own while the root has one. A Plug'n'Play
- * marker counts as available, since PnP projects resolve with no `node_modules` anywhere.
- */
-function dependenciesAvailable(cwd: string, names: readonly string[]): boolean {
-  if (names.length === 0) return true;
+/** Whether `relative` exists in `cwd` or in any ancestor, which is how Node resolution looks. */
+function resolvesUpward(cwd: string, relative: string): boolean {
   let dir = cwd;
   for (;;) {
-    if (PNP_MARKERS.some((marker) => existsSync(join(dir, marker)))) return true;
-    if (names.some((name) => existsSync(join(dir, "node_modules", name)))) return true;
+    if (existsSync(join(dir, relative))) return true;
     const parent = dirname(dir);
     if (parent === dir) return false;
     dir = parent;
   }
+}
+
+/** Plug'n'Play resolves with no `node_modules` anywhere, so its marker settles availability. */
+function usesPnp(cwd: string): boolean {
+  return PNP_MARKERS.some((marker) => resolvesUpward(cwd, marker));
+}
+
+/**
+ * Whether **every** declared package is reachable from `cwd`.
+ *
+ * Every, not any: a partial install — one package present, another missing — is exactly the state
+ * in which a check fails for an environmental reason while looking like a project failure. That is
+ * the defect this module exists to prevent, and an `any` test lets it straight back in.
+ *
+ * Reachability walks upward because Node resolution does: a package inside a workspace
+ * legitimately has no `node_modules` of its own while the root has one.
+ */
+function dependenciesAvailable(cwd: string, names: readonly string[]): boolean {
+  if (names.length === 0) return true;
+  if (usesPnp(cwd)) return true;
+  return names.every((name) => resolvesUpward(cwd, join("node_modules", name)));
 }
 
 /**
@@ -75,10 +93,15 @@ export function untrustedForMissingDependencies(
   const declared = declaredDependencies(manifestPath);
   if (!dependenciesAvailable(cwd, declared)) return MISSING_DEPENDENCIES_REASON;
   if (declared.length > 0) return null;
-  // A manifest that declares nothing can still run a command that needs packages.
-  if (existsSync(join(cwd, "node_modules"))) return null;
-  if (NEEDS_INSTALLED_PACKAGES.test(`${argv.join(" ")}\n${scriptText ?? ""}`)) return MISSING_DEPENDENCIES_REASON;
-  return null;
+  // A manifest that declares nothing can still run a command that needs packages. Look for the
+  // runner itself rather than for any `node_modules`: the presence of that directory says nothing
+  // about whether the binary this command needs is inside it.
+  if (usesPnp(cwd)) return null;
+  const runner = NEEDS_INSTALLED_PACKAGES.exec(`${argv.join(" ")}\n${scriptText ?? ""}`);
+  if (runner === null) return null;
+  const name = runner[1];
+  if (name !== undefined && resolvesUpward(cwd, join("node_modules", ".bin", name))) return null;
+  return MISSING_DEPENDENCIES_REASON;
 }
 
 /**

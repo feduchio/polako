@@ -985,6 +985,33 @@ export async function resolveGates(ctx: PhaseContext, options: CandidateDriverOp
     materializeAcceptance: (checkoutDir, artifacts) => { ctx.store.acceptance.materialize(checkoutDir, artifacts); },
     verifyAcceptance: (checkoutDir, artifacts) => ctx.store.acceptance.verify(checkoutDir, artifacts),
     persistOutput: createCheckOutputPersister(ctx.store.artifacts),
+    // A candidate's gate checkout needs the project's dependencies for the same reason the
+    // baseline does; without it the wall would just move to GATING. Finding 54.
+    prepareDependencies: {
+      enabled: ctx.config.sandbox.installDependencies,
+      timeoutMs: ctx.config.sandbox.installTimeoutMs,
+    },
+    onDependencyInstall: (prepared) => {
+      if (!prepared.attempted) return;
+      ctx.store.events.append([
+        {
+          id: id("evt", ctx.clock.now()),
+          runId: ctx.run.id,
+          ts: ctx.clock.now(),
+          type: "shell.command_started",
+          payload: {
+            check: "dependency_install",
+            command: prepared.output?.argv ?? [],
+            taskId: task.id,
+            ready: prepared.ready,
+            detail: prepared.detail,
+          },
+          causedBy: [],
+          actor: SYSTEM_ACTOR,
+          artifacts: [],
+        },
+      ]);
+    },
     onCheckStart: (info) => {
       ctx.store.events.append([
         {

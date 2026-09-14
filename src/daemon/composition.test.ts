@@ -1424,11 +1424,15 @@ describe("DISCOVERING_PROJECT and BASELINING drivers", () => {
     // The refusal is clearable: installing is what makes the baseline obtainable.
     expect(store.repos.runs.get(run.id)?.phase).not.toBe("NEEDS_HUMAN");
     expect(store.events.list(run.id, { types: ["baseline.snapshotted"] })).toHaveLength(1);
-    const installs = store.events
+    const started = store.events
       .list(run.id, { types: ["shell.command_started"] })
       .filter((event) => (event.payload as { check?: string }).check === "dependency_install");
-    expect(installs).toHaveLength(1);
-    expect(installs[0]?.artifacts).toHaveLength(1);
+    const finished = store.events.list(run.id, { types: ["shell.command_finished"] });
+    // Announced before it ran, and the full result persisted after.
+    expect(started).toHaveLength(1);
+    expect(finished).toHaveLength(1);
+    expect(finished[0]?.artifacts).toHaveLength(1);
+    expect(finished[0]?.payload).toMatchObject({ check: "dependency_install", ready: true, timedOut: false, aborted: false });
   });
 
   it("refuses when dependency install is turned off, and says which knob", async () => {

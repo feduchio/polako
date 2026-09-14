@@ -869,6 +869,66 @@ describe("runChecks and runIndependentGates", () => {
       expect(run).toHaveBeenCalledTimes(1);
     });
 
+    it("passes the configured timeout and the caller's signal to the command", async () => {
+      const dir = uninstalled();
+      const controller = new AbortController();
+      const seen: { timeoutMs?: number; signal?: AbortSignal }[] = [];
+      const run = vi.fn(async (_argv: readonly string[], opts?: { timeoutMs?: number; signal?: AbortSignal }) => {
+        seen.push({ ...opts });
+        return processResult({});
+      });
+      await ensureProjectDependencies(mockSandbox(run, [], dir), discoverProject(dir), {
+        enabled: true,
+        timeoutMs: 123_456,
+        signal: controller.signal,
+      });
+      expect(seen[0]?.timeoutMs).toBe(123_456);
+      expect(seen[0]?.signal).toBe(controller.signal);
+    });
+
+    it("announces the command before running it", async () => {
+      const dir = uninstalled();
+      const order: string[] = [];
+      await ensureProjectDependencies(
+        mockSandbox(async () => {
+          order.push("ran");
+          return processResult({});
+        }, [], dir),
+        discoverProject(dir),
+        { enabled: true, timeoutMs: 1000, onStart: () => order.push("announced") },
+      );
+      // A crash during a ten-minute install must still leave a record that it was running.
+      expect(order).toEqual(["announced", "ran"]);
+    });
+
+    it("distinguishes a timeout and an abort from an exit code", async () => {
+      const dir = uninstalled();
+      const timedOut = await ensureProjectDependencies(
+        mockSandbox(async () => processResult({ exitCode: null, timedOut: true }), [], dir),
+        discoverProject(dir),
+        { enabled: true, timeoutMs: 5000 },
+      );
+      expect(timedOut.detail).toContain("timed out after 5000ms");
+      expect(timedOut.repositorySide).toBeUndefined();
+
+      const aborted = await ensureProjectDependencies(
+        mockSandbox(async () => processResult({ exitCode: null, aborted: true }), [], dir),
+        discoverProject(dir),
+        { enabled: true, timeoutMs: 5000 },
+      );
+      expect(aborted.detail).toBe("install aborted");
+    });
+
+    it("marks a non-zero install as repository-side, because retrying this checkout cannot help", async () => {
+      const dir = uninstalled();
+      const result = await ensureProjectDependencies(
+        mockSandbox(async () => processResult({ exitCode: 1, stderr: "ERR_PNPM_OUTDATED_LOCKFILE\n" }), [], dir),
+        discoverProject(dir),
+        { enabled: true, timeoutMs: 1000 },
+      );
+      expect(result.repositorySide).toBe(true);
+    });
+
     it("does not install when disabled, and says so", async () => {
       const dir = uninstalled();
       const run = vi.fn(async () => processResult({}));
@@ -1201,7 +1261,8 @@ describe("runChecks and runIndependentGates", () => {
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
     // The comparison under test needs a trustworthy environment: a `vitest run` script with no
     // vitest present is an environment failure, not a project failure (finding 54).
-    mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+    mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", ".bin", "vitest"), "#!/bin/sh\n");
     const profile = discoverProject(dir);
     const failingOutput = " Tests  1 failed (1)\n FAIL  src/legacy.test.ts\n";
     const captured = await runChecks({

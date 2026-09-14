@@ -23,6 +23,7 @@ import {
   type ProtectedChangeScope,
   type ProtectedChangeWaiver,
 } from "../domain/protectedChangeWaiver.js";
+import type { ProcessResult } from "../sandbox/process.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import { canonicalJson, sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
@@ -156,7 +157,15 @@ export interface EnsureDependenciesResult {
   /** whether the project's checks can now produce evidence */
   ready: boolean;
   detail: string | null;
-  output?: { argv: readonly string[]; exitCode: number | null; stdout: string; stderr: string };
+  /**
+   * `true` when the reason it is not ready lives in the repository — a stale lockfile, an
+   * unsupported package manager — rather than in the environment. This run is pinned to a
+   * checkpoint, so a repository-side repair needs a new commit and a new run; the caller must not
+   * tell the operator that retrying will help. Finding 54.
+   */
+  repositorySide?: boolean;
+  /** The full process result, so a timeout or an abort is distinguishable from an exit code. */
+  output?: ProcessResult;
 }
 
 /**
@@ -171,32 +180,58 @@ export interface EnsureDependenciesResult {
 export async function ensureProjectDependencies(
   sandbox: SandboxHandle,
   profile: ProjectProfile,
-  options: { enabled: boolean; timeoutMs: number; signal?: AbortSignal },
+  options: {
+    enabled: boolean;
+    timeoutMs: number;
+    signal?: AbortSignal;
+    /** Fired before the command runs, so a crash mid-install still leaves a record of it. */
+    onStart?: (info: { command: readonly string[]; timeoutMs: number }) => void;
+  },
 ): Promise<EnsureDependenciesResult> {
   const missing = dependenciesUnavailableFor(sandbox, profile);
   if (missing === null) return { attempted: false, ready: true, detail: null };
   if (!options.enabled) return { attempted: false, ready: false, detail: "dependency install is disabled" };
   const argv = installCommandFor(profile.packageManager);
   if (argv === null) {
-    return { attempted: false, ready: false, detail: `no install command for package manager ${profile.packageManager ?? "unknown"}` };
+    return {
+      attempted: false,
+      ready: false,
+      // The manifest names a package manager we cannot drive; that is a repository fact.
+      repositorySide: true,
+      detail: `no install command for package manager ${profile.packageManager ?? "unknown"}`,
+    };
   }
   const runOpts: { timeoutMs: number; signal?: AbortSignal } = { timeoutMs: options.timeoutMs };
   if (options.signal !== undefined) runOpts.signal = options.signal;
-  let result;
+  options.onStart?.({ command: argv, timeoutMs: options.timeoutMs });
+  let result: ProcessResult;
   try {
     result = await sandbox.run(argv, runOpts);
   } catch (error) {
-    const stderr = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-    return { attempted: true, ready: false, detail: `install failed to start: ${stderr}`, output: { argv, exitCode: null, stdout: "", stderr } };
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    return { attempted: true, ready: false, detail: `install failed to start: ${message}` };
   }
-  const output = { argv, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+  if (result.timedOut) {
+    return { attempted: true, ready: false, detail: `install timed out after ${String(options.timeoutMs)}ms`, output: result };
+  }
+  if (result.aborted) {
+    return { attempted: true, ready: false, detail: "install aborted", output: result };
+  }
   if (result.exitCode !== 0) {
-    return { attempted: true, ready: false, detail: `install exited ${String(result.exitCode)}`, output };
+    // A non-zero install in a clean checkout is the repository's own state: the lockfile, the
+    // manifest, or the package manager version. Retrying this run cannot change any of them.
+    return { attempted: true, ready: false, repositorySide: true, detail: `install exited ${String(result.exitCode)}`, output: result };
   }
   const stillMissing = dependenciesUnavailableFor(sandbox, profile);
   return stillMissing === null
-    ? { attempted: true, ready: true, detail: null, output }
-    : { attempted: true, ready: false, detail: "install succeeded but dependencies are still unreachable", output };
+    ? { attempted: true, ready: true, detail: null, output: result }
+    : {
+        attempted: true,
+        ready: false,
+        repositorySide: true,
+        detail: "install succeeded but dependencies are still unreachable",
+        output: result,
+      };
 }
 
 async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise<CheckResult> {

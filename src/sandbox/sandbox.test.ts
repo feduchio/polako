@@ -106,6 +106,22 @@ describe("runProcess", () => {
 describe("CommandPolicy", () => {
   const policy = CommandPolicy.forProject([["pnpm", "test"], ["pnpm", "typecheck"]], "pnpm");
 
+  it("admits exactly the install command of the discovered package manager, and nothing near it", () => {
+    // A project with no installed dependencies cannot produce evidence about itself (finding 54),
+    // and the command that fixes that has to be nameable by the policy that admits it.
+    expect(policy.check(["pnpm", "install", "--frozen-lockfile"])).toBeNull();
+    // Exact, not prefix: an appended argument is a different command.
+    expect(policy.check(["pnpm", "install", "--frozen-lockfile", "--force"])).toMatch(/not in allowlist/);
+    expect(policy.check(["pnpm", "install"])).toMatch(/not in allowlist/);
+    expect(policy.check(["pnpm", "--frozen-lockfile", "install"])).toMatch(/not in allowlist/);
+    // Another package manager's install is not admitted by a pnpm project.
+    expect(policy.check(["npm", "ci"])).toMatch(/not in allowlist/);
+    expect(CommandPolicy.forProject([], "npm").check(["npm", "ci"])).toBeNull();
+    expect(CommandPolicy.forProject([], "npm").check(["pnpm", "install", "--frozen-lockfile"])).toMatch(/not in allowlist/);
+    // A package manager we do not drive gains no install rule at all.
+    expect(CommandPolicy.forProject([], "cargo").check(["cargo", "build"])).toMatch(/not in allowlist/);
+  });
+
   it("allows project checks and read-only git; denies raw search and the rest", () => {
     expect(policy.check(["pnpm", "test"])).toBeNull();
     expect(policy.check(["pnpm", "test", "--", "src/x.test.ts"])).toMatch(/not in allowlist/);

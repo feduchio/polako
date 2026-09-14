@@ -285,8 +285,12 @@ export function createBaseliningDriver(deps: ProductionDeps): PhaseDriver {
       const prepared = await ensureProjectDependencies(sandbox, profile, {
         enabled: ctx.config.sandbox.installDependencies,
         timeoutMs: ctx.config.sandbox.installTimeoutMs,
+        ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+        // Before, not after: a crash or a kill during a ten-minute install must still leave a
+        // record that it was running, which is what docs/THREAT_MODEL.md promises of any command.
+        onStart: (info) => { recordInstallStart(ctx, info); },
       });
-      if (prepared.output !== undefined) recordDependencyInstall(ctx, prepared);
+      if (prepared.attempted) recordDependencyInstall(ctx, prepared);
       const checks = await runChecks({
         runId: ctx.run.id,
         commitHash,
@@ -306,11 +310,18 @@ export function createBaseliningDriver(deps: ProductionDeps): PhaseDriver {
       if (untrusted.length > 0) {
         const names = untrusted.map((check) => check.name).join(", ");
         const why = prepared.detail ?? untrusted[0]?.reason ?? "environment not ready";
+        // What the operator can do differs by case, and promising a retry that cannot work is
+        // what made the first version of this refusal a dead end. A run is pinned to its
+        // checkpoint, so a repository-side repair needs a commit and a new run.
+        const question =
+          prepared.repositorySide === true
+            ? `Checks ${names} cannot produce evidence about this project: ${why}. This run is pinned to ${commitHash.slice(0, 8)}, so fix it in the repository, commit, and start a new run — resuming this one will repeat the same checkout.`
+            : `Checks ${names} cannot produce evidence about this project: ${why}. Make the install possible here — check the network and sandbox.installDependencies — then resume.`;
         patchRun(ctx, {
           terminalReason: {
             code: "environment_not_ready",
             summary: `baseline not recorded for ${names}: ${why}`,
-            question: `Checks ${names} cannot produce evidence about this project: ${why}. Fix the project's dependency install, or set sandbox.installDependencies and retry.`,
+            question,
           },
         });
         return { status: "complete", nextPhase: "NEEDS_HUMAN" };
@@ -1084,22 +1095,57 @@ function patchRun(ctx: PhaseContext, patch: Partial<typeof ctx.run>): void {
   ctx.store.events.append([event]);
 }
 
-/** Forensics for a dependency install. It is not one of the project's checks and is not stored as one. */
-function recordDependencyInstall(ctx: PhaseContext, prepared: EnsureDependenciesResult): void {
-  const output = prepared.output;
-  if (output === undefined) return;
-  const artifact = ctx.store.artifacts.put(
-    canonicalJson({ runId: ctx.run.id, ...output, ready: prepared.ready, detail: prepared.detail }),
-    "check_output",
-    `${ctx.run.id}:dependency_install`,
-  );
+/** Announce a dependency install before it runs, so a crash mid-install still leaves a record. */
+function recordInstallStart(ctx: PhaseContext, info: { command: readonly string[]; timeoutMs: number }): void {
   ctx.store.events.append([
     {
       id: id("evt", ctx.clock.now()),
       runId: ctx.run.id,
       ts: ctx.clock.now(),
       type: "shell.command_started",
-      payload: { check: "dependency_install", command: output.argv, ready: prepared.ready, detail: prepared.detail },
+      payload: { check: "dependency_install", command: info.command, timeoutMs: info.timeoutMs },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [],
+    },
+  ]);
+}
+
+/**
+ * Forensics for a finished dependency install. It is not one of the project's checks and is not
+ * stored as one; the whole `ProcessResult` goes to the CAS so a timeout or an abort is
+ * distinguishable from an exit code, as `docs/THREAT_MODEL.md` requires of any command.
+ */
+function recordDependencyInstall(ctx: PhaseContext, prepared: EnsureDependenciesResult): void {
+  const artifact = ctx.store.artifacts.put(
+    canonicalJson({
+      runId: ctx.run.id,
+      ready: prepared.ready,
+      detail: prepared.detail,
+      repositorySide: prepared.repositorySide ?? false,
+      result: prepared.output ?? null,
+    }),
+    "check_output",
+    `${ctx.run.id}:dependency_install`,
+  );
+  const output = prepared.output;
+  ctx.store.events.append([
+    {
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "shell.command_finished",
+      payload: {
+        check: "dependency_install",
+        command: output?.argv ?? [],
+        exitCode: output?.exitCode ?? null,
+        timedOut: output?.timedOut ?? false,
+        aborted: output?.aborted ?? false,
+        truncated: output?.truncated ?? false,
+        durationMs: output?.durationMs ?? null,
+        ready: prepared.ready,
+        detail: prepared.detail,
+      },
       causedBy: [],
       actor: SYSTEM_ACTOR,
       artifacts: [artifact],

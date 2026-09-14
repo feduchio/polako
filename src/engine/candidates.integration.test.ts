@@ -11,8 +11,10 @@ import { CommandPolicy } from "../sandbox/allowlist.js";
 import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
+import type { SandboxHandle } from "../sandbox/worktree.js";
 import {
   runCandidatesParallel,
+  runGates,
   ScriptedCandidateWorker,
   type CandidateGates,
 } from "./candidates.js";
@@ -189,6 +191,107 @@ describe("B2 temporary integration workspace", () => {
     expect(result.status).toBe("failed_runtime");
     expect(result.advanced).toBe(false);
     expect(await runHead.read()).toBe(fixture.base);
+  });
+});
+
+describe("candidate gates prepare the project's dependencies", () => {
+  /** A checkout that declares a dependency and has none, like any candidate worktree. */
+  function uninstalledCheckout(): string {
+    const dir = mkdtempSync(join(tmpdir(), "polish-gate-deps-"));
+    cleanup.push(dir);
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }),
+    );
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    return dir;
+  }
+
+  function scriptedHandle(dir: string, issued: string[][]): SandboxHandle {
+    return {
+      id: "sb_gate",
+      path: dir,
+      branch: null,
+      baseCommit: "a".repeat(40),
+      git: {} as SandboxHandle["git"],
+      run: async (argv) => {
+        issued.push([...argv]);
+        if (argv[1] === "install") mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+        return {
+          argv: [...argv],
+          cwd: dir,
+          exitCode: 0,
+          signal: null,
+          stdout: " Tests  1 passed (1)\n",
+          stderr: "",
+          truncated: false,
+          timedOut: false,
+          aborted: false,
+          durationMs: 1,
+          startedAt: 0,
+        };
+      },
+      headCommit: async () => "a".repeat(40),
+      commitAll: async () => null,
+      changedFiles: async () => [],
+      diffStat: async () => ({ files: 0, insertions: 0, deletions: 0 }),
+      diff: async () => "",
+      destroy: async () => undefined,
+    };
+  }
+
+  function gatesFor(dir: string, prepare: boolean): CandidateGates {
+    const hashes = inspectManifestHashes(dir);
+    const profile: ProjectProfile = {
+      projectPath: dir,
+      alias: null,
+      packageManager: "pnpm",
+      framework: "vitest",
+      checks: [{ name: "test", kind: "test", command: ["pnpm", "run", "test"], mandatory: true }],
+      manifestHashes: hashes.manifestHashes,
+      scriptsHash: hashes.scriptsHash,
+      discoveredAt: Date.now(),
+    };
+    return {
+      profile,
+      baseline: {
+        id: id("base"),
+        runId: id("run"),
+        commitHash: "a".repeat(40),
+        checks: [{ name: "test", kind: "test", status: "pass", exitCode: 0, durationMs: 1, summary: null, outputRef: null }],
+        configHashes: hashes.manifestHashes,
+        scriptsHash: hashes.scriptsHash,
+        toolchain: {},
+        createdAt: Date.now(),
+      },
+      acceptanceArtifacts: [],
+      verifyAcceptance: () => [],
+      materializeAcceptance: () => undefined,
+      ...(prepare ? { prepareDependencies: { enabled: true, timeoutMs: 60_000 } } : {}),
+    };
+  }
+
+  it("installs before gating, so the wall does not simply move from BASELINING to GATING", async () => {
+    const dir = uninstalledCheckout();
+    const issued: string[][] = [];
+    const installs: unknown[] = [];
+    const gates = { ...gatesFor(dir, true), onDependencyInstall: (r: unknown) => installs.push(r) };
+    await runGates({ runId: id("run"), commitHash: "a".repeat(40), sandbox: scriptedHandle(dir, issued), gates });
+    expect(issued[0]).toEqual(["pnpm", "install", "--frozen-lockfile"]);
+    expect(issued[1]).toEqual(["pnpm", "run", "test"]);
+    expect(installs).toMatchObject([{ attempted: true, ready: true }]);
+  });
+
+  it("issues no install when the gates do not ask for one", async () => {
+    const dir = uninstalledCheckout();
+    const issued: string[][] = [];
+    await runGates({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      sandbox: scriptedHandle(dir, issued),
+      gates: gatesFor(dir, false),
+    });
+    expect(issued).toEqual([["pnpm", "run", "test"]]);
   });
 });
 
