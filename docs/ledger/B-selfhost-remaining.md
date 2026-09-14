@@ -642,11 +642,16 @@ otherwise look like unfinished work.
     is a change to `ModelBroker`'s interface rather than to P1.3's seam; both lanes advised against
     adding a hoist clause to this item. Rides with the next item that touches broker recovery.
 
-52. **No test observes the text of any rendered model prompt.**
-    `composeWorkerInstruction` (`src/context/workerInstruction.ts`), the council's `systemPrompt`
-    (`src/council/roles.ts`) and `reviewerSystemPrompt` (`src/review/reviewerProtocol.ts`) between
-    them produce every instruction this tool sends. Appending `MUTATION` to the output of any of
-    the three passes the whole gate. The two places that compare against a rendered prompt —
+52. **No test pins the complete output of any prompt builder.**
+    Appending `MUTATION` to the output of `composeWorkerInstruction`
+    (`src/context/workerInstruction.ts`), the council's `systemPrompt` (`src/council/roles.ts`) or
+    `reviewerSystemPrompt` (`src/review/reviewerProtocol.ts`) passes the whole gate, singly or all
+    three at once. **Corrected 2026-09-14** from a first wording that overstated it twice, on the
+    entry-gate lane's objection: tests *do* assert fragments of rendered prompts — strings such as
+    `Controlling instruction hierarchy`, `baselineEvidence` and `Return JSON only` — they just do
+    not pin a complete output; and these three builders are **not** every prompt surface. The
+    others, unexamined here, are the progress packet, the empirical and pairwise verifiers, the
+    finding debate, the capability probes and the model audition. The two places that compare against a rendered prompt —
     `src/engine/candidate-drivers.test.ts:157` and, since P1.5, `src/daemon/composition.test.ts` —
     both call the builder to produce the expected value, so the request and the expectation move
     together. **Found 2026-09-14** by the GPT-5.6-sol lane in round 5 of P1.5, as an objection to
