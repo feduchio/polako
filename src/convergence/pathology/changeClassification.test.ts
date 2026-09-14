@@ -23,6 +23,7 @@ describe("runnable regression test paths", () => {
     for (const path of [
       "tests/a.fixture.ts",
       "tests/aFixture.ts",
+      "tests/test-helper.ts",
       "tests/retry.helper.ts",
       "__tests__/fixtures/data.ts",
       "tests/common/mod.rs",

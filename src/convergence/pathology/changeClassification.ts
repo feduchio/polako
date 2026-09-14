@@ -57,15 +57,18 @@ export function runnableTestPathPriority(path: string): number | null {
     /^(?:__)?(?:fixtures?|helpers?|mocks?|snapshots?|support|common|data|utils?)(?:__)?$/iu.test(segment))) {
     return null;
   }
-  const explicitName =
-    /(?:^|[._-])(?:test|tests|spec)(?:[._-]|$)/iu.test(stem) ||
-    /^(?:Test|Spec)[A-Z0-9_]/u.test(stem) ||
-    /(?:Test|Tests|Spec)$/u.test(stem);
-  if (explicitName) return 0;
+  const strongName = /(?:^|[._-])(?:test|spec)$/iu.test(stem);
+  if (strongName) return 0;
   const tokenizedStem = stem.replace(/([a-z0-9])([A-Z])/gu, "$1_$2");
   if (/(?:^|[._-])(?:fixture|helper|mock|snapshot|support|common|data|util|utils|setup)(?:[._-]|$)/iu.test(tokenizedStem)) {
     return null;
   }
+  const ecosystemName =
+    /^(?:test|spec)[._-]/iu.test(stem) ||
+    /[._-](?:test|tests|spec)$/iu.test(stem) ||
+    /^(?:Test|Spec)[A-Z0-9_]/u.test(stem) ||
+    /(?:Test|Tests|Spec)$/u.test(stem);
+  if (ecosystemName) return 0;
   const parent = directories.at(-1)?.toLowerCase();
   // Direct children are runner-discoverable in conventional test roots. Nested support modules
   // need an explicit test/spec name; Cargo in particular compiles only direct tests/*.rs as cases.
