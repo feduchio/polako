@@ -140,6 +140,23 @@ describe("reports", () => {
       };
       const report = renderFinalReport(buildFinalReportInput(reportCtx(run, store, clock)));
       expect(report).toContain(commitHash);
+      expect(report.startsWith("DONE:")).toBe(true);
+
+      // A failed run must not be reported as done, and must carry the actionable part.
+      const failed: Run = {
+        ...run,
+        phase: "FAILED",
+        terminalReason: {
+          code: "environment_not_ready",
+          summary: "gates not run: dependency install is disabled",
+          question: "Make the install possible here, then start a new run.",
+        },
+      };
+      const failedReport = renderFinalReport(buildFinalReportInput(reportCtx(failed, store, clock)));
+      expect(failedReport.startsWith("FAILED:")).toBe(true);
+      expect(failedReport).toContain("gates not run: dependency install is disabled");
+      expect(failedReport).toContain("Make the install possible here");
+      expect(failedReport).not.toContain("Mission complete");
       expect(mentionedPhases(EVENTS)).toEqual(["mission", "planning", "execution", "integration", "review"]);
       expect(mentionedPhases(EVENTS)).not.toContain("baseline");
       expect(mentionedPhases(EVENTS)).not.toContain("convergence");

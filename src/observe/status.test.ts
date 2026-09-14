@@ -60,6 +60,26 @@ describe("RunObserver projection", () => {
     expect(view.warning).toMatch(/no active operation/i);
   });
 
+  it("a FAILED run shows why it failed and what to do, not just the phase name", () => {
+    // Finding 54: terminating through FAILED is only acceptable if the reason is readable.
+    const run = baseRun({
+      phase: "FAILED",
+      terminalReason: {
+        code: "environment_not_ready",
+        summary: "gates not run: dependency install is disabled",
+        question: "Make the install possible here, then start a new run.",
+      },
+    });
+    const events = [evt(0, "run.phase_changed", { to: "FAILED", run: { phase: "FAILED", terminalReason: run.terminalReason } }, NOW)];
+    const view = projectRunStatus(run, events, NOW + 1);
+    expect(view.terminal?.code).toBe("environment_not_ready");
+    expect(view.terminal?.summary).toContain("dependency install is disabled");
+    expect(view.terminal?.question).toContain("start a new run");
+    const rendered = renderRunStatus(view);
+    expect(rendered).toContain("ENVIRONMENT_NOT_READY");
+    expect(rendered).toContain("start a new run");
+  });
+
   it("D: genuine NEEDS_HUMAN status shows the human question", () => {
     const run = baseRun({
       phase: "NEEDS_HUMAN",

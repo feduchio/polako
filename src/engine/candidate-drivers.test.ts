@@ -181,7 +181,7 @@ describe("B2 production candidate drivers", () => {
     const run = store.repos.runs.get(runId)!;
     expect(run.phase).not.toBe("FAILED");
     const states = store.repos.candidates.listByTask(taskId).map((candidate) => candidate.state);
-    expect(states).toContain("INTERRUPTED");
+    expect(states).toContain("DISCARDED");
     expect(states).toContain("PASSED_GATES");
   });
 

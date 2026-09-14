@@ -189,7 +189,7 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
     const gated: Candidate[] = [];
     // Per candidate, not per run: a candidate can make its own install fail by editing
     // `package.json` without its lockfile, and that is a fact about that candidate. Only when no
-    // candidate could be prepared at all is the cause shared, and only then is it the run's.
+    // candidate could be prepared at all does the run terminate.
     let unpreparable: EnvironmentNotReadyError | null = null;
     for (const candidate of pending) {
       const headCommit = candidate.headCommit;
@@ -218,18 +218,21 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
         gated.push({ ...applyGateResult(ctx, candidate, headCommit, gateResult), diffRef });
       } catch (error) {
         if (!(error instanceof EnvironmentNotReadyError)) throw error;
-        // Not a verdict on the work: INTERRUPTED, not FAILED_GATES. A candidate judged on an
-        // environment it never controlled is the same confusion as a false baseline.
+        // Not a verdict on the work, so not FAILED_GATES; and terminal, so not INTERRUPTED,
+        // which EXECUTING treats as in-flight and would wait on forever if the task were retried.
+        // DISCARDED is the terminal non-verdict, and IMPLEMENTED -> DISCARDED is a legal edge.
         unpreparable = error;
-        gated.push({ ...candidate, state: "INTERRUPTED", updatedAt: ctx.clock.now() });
+        gated.push({ ...candidate, state: "DISCARDED", updatedAt: ctx.clock.now() });
       } finally {
         await checkout.destroy().catch(() => undefined);
       }
     }
     appendCandidateEvents(ctx, gated, "candidate.gated");
-    if (unpreparable !== null && gated.every((candidate) => candidate.state === "INTERRUPTED")) {
-      // No candidate could be prepared, so the cause is shared and no tick will change it: every
-      // attempt builds the same fresh worktree. Terminate with something an operator can act on.
+    if (unpreparable !== null && gated.every((candidate) => candidate.state === "DISCARDED")) {
+      // No candidate could be prepared. The cause is not *provably* shared — every candidate could
+      // have broken its own lockfile independently — but nothing was gated, so there is no verdict
+      // to carry forward and no tick will change the outcome: each builds the same fresh worktree.
+      // Terminate with something an operator can act on.
       // GATING may not reach NEEDS_HUMAN (`RUN_PHASE_TABLE`), so this follows finding 37's
       // precedent and terminates through FAILED with the reason on the run.
       const terminal = environmentTerminalReason(unpreparable, ctx.run.currentCheckpointHash);

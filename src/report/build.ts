@@ -45,6 +45,10 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
         : `Mission complete at checkpoint ${checkpointHash}`;
 
   const changes: string[] = [];
+  // The question is the only actionable part of a failure, so it belongs in the report and not
+  // only in `polish status`. A report that names a failure without saying what to do about it is
+  // the same omission as one that calls a failure DONE. Finding 54.
+  if (failure?.question !== undefined) changes.push(`Next: ${failure.question}`);
   if (mission !== null) changes.push(`Mission: ${mission.text}`);
   if (run.interpretationId !== null) changes.push(`Interpretation: ${run.interpretationId}`);
   if (baseline !== undefined) changes.push(`Baseline checkpoint: ${baseline.commitHash}`);
