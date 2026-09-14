@@ -194,12 +194,12 @@ describe("executable mission acceptance corpus", () => {
         .toThrow(new RegExp(`unmappable_legacy_corpus_entry: ${legacy.id}`));
     });
 
-    it("permits a pending entry only while gating its own fixing task", () => {
+    it("permits every explicitly pending entry until its fixing task integrates", () => {
       const pending = entry();
-      const findingId = pending.metadata["findingId"] as string;
-      expect(acceptanceArtifactsForGate([], corpus.get(missionId), resolve, findingId)).toEqual([]);
-      expect(() => acceptanceArtifactsForGate([], corpus.get(missionId), resolve, id("find", NOW + 1)))
-        .toThrow(new RegExp(`unmappable_legacy_corpus_entry: ${pending.id}`));
+      entry();
+      expect(acceptanceArtifactsForGate([], corpus.get(missionId), resolve)).toEqual([]);
+      expect(store.repos.acceptanceCorpus.get(pending.id)?.metadata["executableStatus"])
+        .toBe(CORPUS_EXECUTABLE_STATUS.pendingIntegration);
     });
 
     it("does not classify a newly recorded runtime-only entry as legacy", () => {
@@ -232,7 +232,11 @@ describe("executable mission acceptance corpus", () => {
       corpus.recordExecutableAbsent({ entryId: decided.id, reason: "no_test_file_in_diff" });
       expect(acceptanceArtifactsForGate([], corpus.get(missionId), resolve)).toEqual([]);
 
-      entry();
+      const legacy = entry();
+      corpus.record({
+        ...legacy,
+        metadata: { findingId: legacy.metadata["findingId"] },
+      });
       expect(() => acceptanceArtifactsForGate([], corpus.get(missionId), resolve))
         .toThrow(/unmappable_legacy_corpus_entry/);
     });

@@ -383,8 +383,8 @@ function passDriverOptions(fixture: Awaited<ReturnType<typeof repositoryFixture>
     sandbox: fixture.sandbox,
     policy: fixture.policy,
     workerFactory: () => () =>
-      new ScriptedCandidateWorker((_task, worktree) => {
-        writeFileSync(join(worktree.path, "outcome.txt"), "pass");
+      new ScriptedCandidateWorker((task, worktree) => {
+        writeFileSync(join(worktree.path, "outcome.txt"), task.id);
         return { status: "completed" };
       }),
     resolveProfile: () => fixture.gates.profile,

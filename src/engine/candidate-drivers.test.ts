@@ -3,7 +3,7 @@ import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CORPUS_EXECUTABLE_STATUS, type RuntimeEvidence } from "../domain/acceptance.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { defaultConfig } from "../domain/config.js";
@@ -299,6 +299,52 @@ describe("B2 production candidate drivers", () => {
         executableStatus: CORPUS_EXECUTABLE_STATUS.pendingIntegration,
       },
     });
+    const secondFindingId = id("find", clock.now() + 1);
+    const secondValidationId = id("fval", clock.now() + 1);
+    const second = {
+      ...createTaskFromRequirement(id("interp", clock.now()), "R2", {
+        id: id("task", clock.now()),
+        runId,
+        title: "Change outcome again",
+        description: "WHAT: update outcome.txt again",
+        kind: "bugfix" as const,
+        acceptance: ["Checks pass"],
+        complexity: "normal" as const,
+        baseCheckpointHash: fixture.base,
+        now: clock.now(),
+      }),
+      origin: {
+        kind: "valid_finding" as const,
+        findingId: secondFindingId,
+        validationId: secondValidationId,
+        verdict: "VALID" as const,
+      },
+      state: "READY" as const,
+    };
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId,
+      ts: clock.now(),
+      type: "task.created",
+      payload: { task: second },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
+    corpus.record({
+      missionId: run.missionId,
+      sourceRunId: runId,
+      requirementRef: "R2",
+      kind: "regression_test",
+      summary: "Second validated finding",
+      evidenceRefs: [],
+      artifactHashes: ["b".repeat(64)],
+      metadata: {
+        findingId: secondFindingId,
+        validationId: secondValidationId,
+        executableStatus: CORPUS_EXECUTABLE_STATUS.pendingIntegration,
+      },
+    });
     const profile = {
       ...fixture.gates.profile,
       checks: [
@@ -336,46 +382,24 @@ describe("B2 production candidate drivers", () => {
     expect(admitted?.executable?.sha256).not.toBe(pending.artifactHashes[0]);
     expect(store.events.list(runId, { types: ["acceptance.recorded"] })).toHaveLength(1);
     const checkpoint = store.repos.runs.get(runId)!.currentCheckpointHash!;
+    expect(store.repos.tasks.get(second.id)?.baseCheckpointHash).toBe(checkpoint);
 
-    const second = createTaskFromRequirement(id("interp", clock.now()), "R2", {
-      id: id("task", clock.now()),
+    store.events.append([{
+      id: id("evt", clock.now() + 1),
       runId,
-      title: "Change outcome again",
-      description: "WHAT: update outcome.txt again",
-      kind: "bugfix",
-      acceptance: ["Checks pass"],
-      complexity: "normal",
-      baseCheckpointHash: checkpoint,
-      now: clock.now(),
-    });
-    store.events.append([
-      {
-        id: id("evt", clock.now()),
-        runId,
-        ts: clock.now(),
-        type: "task.created",
-        payload: { task: { ...second, state: "READY" as const } },
-        causedBy: [],
-        actor: { kind: "system" },
-        artifacts: [],
-      },
-      {
-        id: id("evt", clock.now() + 1),
-        runId,
-        ts: clock.now() + 1,
-        type: "run.phase_changed",
-        payload: {
-          run: {
-            ...store.repos.runs.get(runId)!,
-            phase: "EXECUTING" as const,
-            updatedAt: clock.now() + 1,
-          },
+      ts: clock.now() + 1,
+      type: "run.phase_changed",
+      payload: {
+        run: {
+          ...store.repos.runs.get(runId)!,
+          phase: "EXECUTING" as const,
+          updatedAt: clock.now() + 1,
         },
-        causedBy: [],
-        actor: { kind: "system" },
-        artifacts: [],
       },
-    ]);
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
 
     await lifecycle.tickRun(runId);
     await lifecycle.tickRun(runId);
@@ -458,6 +482,67 @@ describe("B2 production candidate drivers", () => {
     expect(store.repos.acceptanceCorpus.get(pending.id)?.metadata["executableStatus"])
       .toBe(CORPUS_EXECUTABLE_STATUS.pendingIntegration);
     expect(store.repos.runs.get(runId)?.currentCheckpointHash).toBe(fixture.base);
+  });
+
+  it("finishes the integrated task and stops explicitly when corpus inventory fails", async () => {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-corpus-inventory-error", "pass", {
+      "tests/regression.test.mjs": "process.exit(0);\n",
+    });
+    const { runId, taskId } = seedIntegratingRun(store, clock, fixture, winner);
+    const findingId = id("find", clock.now());
+    const validationId = id("fval", clock.now());
+    const task = {
+      ...store.repos.tasks.get(taskId)!,
+      origin: { kind: "valid_finding" as const, findingId, validationId, verdict: "VALID" as const },
+    };
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId,
+      ts: clock.now(),
+      type: "task.state_changed",
+      payload: { task },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
+    const run = store.repos.runs.get(runId)!;
+    const corpus = new MissionAcceptanceService(store, clock);
+    const pending = corpus.record({
+      missionId: run.missionId,
+      sourceRunId: runId,
+      requirementRef: "R1",
+      kind: "regression_test",
+      summary: "Validated finding",
+      evidenceRefs: [],
+      artifactHashes: ["a".repeat(64)],
+      metadata: {
+        findingId,
+        validationId,
+        executableStatus: CORPUS_EXECUTABLE_STATUS.pendingIntegration,
+      },
+    });
+    const { resolveGates: _testOverride, ...productionOptions } = driverOptions;
+    const integration = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    integration.registerPhase("INTEGRATING", createIntegratingDriver({
+      ...productionOptions,
+      resolveProfile: () => fixture.gates.profile,
+    }));
+    const inventory = vi.spyOn(Git.prototype, "changedFileStatusesBetween")
+      .mockRejectedValueOnce(new Error("inventory unavailable"));
+    try {
+      await integration.tickRun(runId);
+    } finally {
+      inventory.mockRestore();
+    }
+
+    expect(store.repos.tasks.get(taskId)?.state).toBe("INTEGRATED");
+    expect(store.repos.runs.get(runId)?.phase).toBe("FAILED");
+    expect(store.repos.runs.get(runId)?.terminalReason?.summary).toContain("test_file_inventory_unavailable");
+    expect(store.repos.acceptanceCorpus.get(pending.id)?.metadata["executableStatus"])
+      .toBe("test_file_inventory_unavailable");
   });
 
   it("revalidates a stale winner against the moved head and leaves head unchanged on conflict", async () => {

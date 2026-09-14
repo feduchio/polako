@@ -216,27 +216,21 @@ export class MissionAcceptanceService {
  * The artifacts a candidate's gate must inject, protect and hash-verify: the task's own plus
  * every executable the mission corpus has admitted.
  *
- * A **legacy** entry — one with no `executable` and no recognised status — throws. The current
- * fixing task may pass its own `pending_integration` entry; a different task may not. `docs/PLAN.md`
- * P1.8 says to fail closed on an entry that cannot be mapped to a path rather than guess one.
+ * A **legacy** entry — one with no `executable` and no recognised status — throws. Explicitly
+ * pending entries have no artifact yet and are skipped until their fixing tasks integrate.
+ * `docs/PLAN.md` P1.8 says to fail closed on an entry that cannot be mapped to a path.
  */
 export function acceptanceArtifactsForGate(
   taskArtifacts: readonly AcceptanceArtifact[],
   corpus: MissionAcceptanceCorpus | undefined,
   resolveArtifact: (artifactId: string) => AcceptanceArtifact | undefined,
-  pendingFindingId?: string,
 ): AcceptanceArtifact[] {
   const byId = new Map(taskArtifacts.map((artifact) => [artifact.id, artifact]));
   for (const entry of corpus?.entries ?? []) {
     if (entry.executable === null) {
       const status = entry.metadata["executableStatus"];
       if (typeof status === "string" && NON_EXECUTABLE_TERMINAL_STATUSES.has(status)) continue;
-      if (
-        status === CORPUS_EXECUTABLE_STATUS.pendingIntegration &&
-        entry.metadata["findingId"] === pendingFindingId
-      ) {
-        continue;
-      }
+      if (status === CORPUS_EXECUTABLE_STATUS.pendingIntegration) continue;
       throw new PolishError("INVARIANT_VIOLATION", `unmappable_legacy_corpus_entry: ${entry.id}`, {
         entryId: entry.id,
         kind: entry.kind,

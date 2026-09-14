@@ -433,13 +433,21 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       ...classified,
     });
     appendRunCheckpoint(ctx, checkpoint.commitHash);
-    await admitCorpusExecutable(ctx, integrating, integratedCommit, changes);
+    const admission = await admitCorpusExecutable(ctx, integrating, integratedCommit, changes);
     appendTaskEvent(ctx, {
       ...integrating,
       state: "INTEGRATED",
       baseCheckpointHash: checkpoint.commitHash,
       updatedAt: ctx.clock.now(),
     });
+    rebaseUnstartedTasks(ctx, integrating.id, checkpoint.commitHash);
+    if (!admission.ok) {
+      const reason = {
+        code: "internal_error" as const,
+        summary: `corpus executable admission failed after integration: ${admission.reason}`,
+      };
+      return { status: "complete", nextPhase: "FAILED", terminalReason: reason };
+    }
     const remaining = incompleteCodingWorkTerminal(
       ctx.store.repos.tasks.listByRun(ctx.run.id),
       ctx.config.retry.maxAttempts,
@@ -465,20 +473,20 @@ async function admitCorpusExecutable(
   task: Task,
   integratedCommit: string,
   changes: readonly ChangedFileStatus[] | null,
-): Promise<void> {
-  if (task.origin.kind !== "valid_finding") return;
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (task.origin.kind !== "valid_finding") return { ok: true };
   const findingId = task.origin.findingId;
   const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
   const pending = corpus.get(ctx.run.missionId).entries.filter((entry) =>
     entry.executable === null &&
     entry.metadata["executableStatus"] === CORPUS_EXECUTABLE_STATUS.pendingIntegration &&
     entry.metadata["findingId"] === findingId);
-  if (pending.length === 0) return;
+  if (pending.length === 0) return { ok: true };
 
   if (changes === null) {
     const reason = "test_file_inventory_unavailable";
     for (const entry of pending) corpus.recordExecutableAbsent({ entryId: entry.id, reason });
-    throw new Error(reason);
+    return { ok: false, reason };
   }
   const testPaths = changes
     .filter((change) => change.status !== "D")
@@ -490,7 +498,7 @@ async function admitCorpusExecutable(
     for (const entry of pending) {
       corpus.recordExecutableAbsent({ entryId: entry.id, reason: CORPUS_EXECUTABLE_STATUS.noTestFile });
     }
-    return;
+    return { ok: true };
   }
   const git = new Git(ctx.run.projectPath);
   let selected: { path: string; content: Uint8Array } | null = null;
@@ -508,7 +516,7 @@ async function admitCorpusExecutable(
     for (const entry of pending) {
       corpus.recordExecutableAbsent({ entryId: entry.id, reason });
     }
-    throw new Error(reason);
+    return { ok: false, reason };
   }
   const sha256 = ctx.store.acceptance.putContent(selected.content, `corpus:${task.id}:${selected.path}`);
   for (const entry of pending) {
@@ -526,6 +534,18 @@ async function admitCorpusExecutable(
         evidenceFor: findingId,
         createdAt: ctx.clock.now(),
       },
+    });
+  }
+  return { ok: true };
+}
+
+function rebaseUnstartedTasks(ctx: PhaseContext, integratedTaskId: string, checkpointHash: string): void {
+  for (const task of ctx.store.repos.tasks.listByRun(ctx.run.id)) {
+    if (task.id === integratedTaskId || (task.state !== "PENDING" && task.state !== "READY")) continue;
+    appendTaskEvent(ctx, {
+      ...task,
+      baseCheckpointHash: checkpointHash,
+      updatedAt: ctx.clock.now(),
     });
   }
 }
@@ -884,7 +904,6 @@ export async function resolveGates(ctx: PhaseContext, options: CandidateDriverOp
       ctx.store.repos.acceptance.forTask(ctx.run.id, task.id),
       ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId),
       (artifactId) => ctx.store.repos.acceptance.get(artifactId) ?? undefined,
-      task.origin.kind === "valid_finding" ? task.origin.findingId : undefined,
     ),
     materializeAcceptance: (checkoutDir, artifacts) => { ctx.store.acceptance.materialize(checkoutDir, artifacts); },
     verifyAcceptance: (checkoutDir, artifacts) => ctx.store.acceptance.verify(checkoutDir, artifacts),
