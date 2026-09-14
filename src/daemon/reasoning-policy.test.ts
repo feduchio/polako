@@ -11,7 +11,7 @@
  * `worker` and the three council roles are governed by the flag and are checked at their own
  * sites. Every seam below is one the flag must not reach, so both arms must be byte-identical.
  */
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -21,8 +21,9 @@ import {
   PROGRESS_SCORE_RESPONSE_SCHEMA,
   REVIEW_FINDINGS_RESPONSE_SCHEMA,
 } from "../broker/responseSchemas.js";
+
 import { hashJson } from "../shared/hash.js";
-import type { CompletionRequest } from "../broker/types.js";
+import type { CompletionRequest, ModelInfo, ProviderAdapter } from "../broker/types.js";
 import { defaultConfig } from "../domain/config.js";
 import { FindingSchema } from "../domain/finding.js";
 import { createTaskFromRequirement } from "../domain/task.js";
@@ -33,13 +34,18 @@ import { Scheduler } from "../scheduler/index.js";
 import { FakeClock } from "../shared/clock.js";
 import { openStore, type Store } from "../store/index.js";
 import type { TournamentCandidate } from "../verify/strategy.js";
+import { DaemonService } from "./service.js";
 import {
   buildProductionDeps,
   completeDebateRole,
   installProductionDrivers,
+  resolveCouncilRoles,
   resolveProductionVerifier,
   selectReviewProviders,
 } from "./composition.js";
+import { CouncilRoleAgent } from "../council/roles.js";
+import { PLANNER_INTAKE_PURPOSE } from "../council/structuredOutput.js";
+import { DISABLED_REASONING } from "../broker/responseSchemas.js";
 
 const NOW = 1_700_000_000_000;
 /** Fixed, so two arms produce the same request rather than two ids that can never match. */
@@ -254,6 +260,38 @@ describe("reasoning policy at each production seam", () => {
     expect(canonical(await capture(true))).toEqual(canonical(off));
   });
 
+  /**
+   * The planner's schema-repair request (`createStructuredCouncilClient`). It is built from the
+   * original request plus a repair message, so it is a second seam the flag reaches and a place
+   * the two could disagree. The council checks elsewhere never reach it, because their first
+   * response is valid.
+   */
+  it("carries the same reasoning on the planner's repair request as on its first", async () => {
+    const capture = async (disableReasoning: boolean): Promise<CompletionRequest[]> => {
+      const { provider, deps } = await arm(disableReasoning);
+      const roles = resolveCouncilRoles(deps);
+      provider.calls.length = 0;
+      // The fallback answers `ok`, which is not a valid planner intake proposal, so the
+      // structured client issues its one repair and then fails closed.
+      await expect(new CouncilRoleAgent("planner", roles.planner).analyze({
+        runId: RUN_ID,
+        purpose: PLANNER_INTAKE_PURPOSE,
+        payload: { note: "probe" },
+      })).rejects.toThrow();
+      return provider.calls;
+    };
+    const off = await capture(false);
+    const on = await capture(true);
+    expect(off).toHaveLength(2);
+    expect(on).toHaveLength(2);
+    for (const call of off) expect(call.reasoning).toBeUndefined();
+    for (const call of on) expect(call.reasoning).toEqual(DISABLED_REASONING);
+    // Everything but the reasoning is the same in both arms, repair message included.
+    const withoutReasoning = (calls: readonly CompletionRequest[]): string =>
+      canonical(calls.map(({ reasoning: _reasoning, ...rest }) => rest as CompletionRequest));
+    expect(withoutReasoning(on)).toEqual(withoutReasoning(off));
+  });
+
   it("sends an identical empirical-verifier request under both arms", async () => {
     const capture = async (disableReasoning: boolean): Promise<CompletionRequest[]> => {
       const { config, provider, deps, store: armStore } = await arm(disableReasoning);
@@ -299,4 +337,72 @@ describe("reasoning policy at each production seam", () => {
     expect(off.length).toBeGreaterThan(0);
     expect(canonical(await captureDiscovery(true, "model-audition:"))).toEqual(canonical(off));
   });
+
+  /**
+   * The reviewer benchmark forwards through its own recording wrapper, not through the review
+   * swarm's transport, and it is reached by an operator command rather than by a run. The report
+   * records the request **before** forwarding it, so an assertion on the report would not see a
+   * change made after that point; this compares what the **provider** received.
+   */
+  it("sends identical reviewer-benchmark requests under both arms", async () => {
+    const capture = async (disableReasoning: boolean): Promise<CompletionRequest[]> => {
+      const home = join(dir, `bench-${disableReasoning ? "on" : "off"}`);
+      mkdirSync(home, { recursive: true });
+      if (disableReasoning) {
+        writeFileSync(join(home, "polish.toml"), "[routing]\ndisableReasoning = true\n");
+      }
+      const providers = [
+          benchmarkProvider("nex", "nex-agi/a:free", "nex-agi"),
+          benchmarkProvider("nvidia", "nvidia/a:free", "nvidia"),
+        ];
+      const service = new DaemonService({ home, providers });
+      try {
+        expect(service.productionComposition().config.routing.disableReasoning).toBe(disableReasoning);
+        await service.handle("benchmark.review", { seed: 9 });
+        return providers.flatMap((provider) => provider.calls);
+      } finally {
+        service.store.close();
+      }
+    };
+    const off = await capture(false);
+    expect(off.length).toBeGreaterThan(0);
+    expect(canonical(await capture(true))).toEqual(canonical(off));
+  });
 });
+
+/** Two free reviewers the benchmark's model selection will pick, recording what they receive. */
+function benchmarkProvider(id: string, model: string, family: string): ProviderAdapter & { calls: CompletionRequest[] } {
+  const calls: CompletionRequest[] = [];
+  const info: ModelInfo = {
+    ref: { provider: id, model },
+    displayName: model,
+    capabilities: {
+      contextWindow: 32_000,
+      maxOutputTokens: 2_000,
+      supportsTools: false,
+      supportsJson: true,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+      tier: "fast",
+      family,
+    },
+    source: "provider",
+  };
+  return {
+    id,
+    kind: "scripted",
+    concurrency: 1,
+    calls,
+    listModels: () => Promise.resolve([info]),
+    complete: (request) => {
+      calls.push(structuredClone(request));
+      return Promise.resolve({
+        message: { role: "assistant" as const, content: '{"findings":[]}' },
+        usage: { inputTokens: 10, outputTokens: 5, costUsd: 0 },
+        finishReason: "stop" as const,
+        latencyMs: 1,
+      });
+    },
+    health: () => Promise.resolve({ ok: true, checkedAt: 1 }),
+  };
+}
