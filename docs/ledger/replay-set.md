@@ -11,7 +11,15 @@ its own denominator in `docs/PLAN.md` §1.
 | Reading | Entries | Of which `DONE` | Floor (≥5, ≥2) |
 |---|---|---|---|
 | MC1 applied literally, one entry per committed scenario | **5** | **5** | met |
-| entries de-duplicated by (fixture, mission, task contract) | **3** | **3** | not met |
+| de-duplicated by (fixture, mission, task contract) | **1** | **1** | not met |
+| de-duplicated by (fixture, mission, task contract, control path) | **3** | **3** | not met |
+
+The middle row is **1**, not 3, and the distinction matters enough to spell out. All five entries
+share one fixture, one mission and one task contract, so the tuple the contract's own vocabulary
+supplies collapses them to a single observation. The three of the last row appear only if the key
+is widened to include the control path each entry exercises — daemon happy path, daemon
+answer-and-resume, engine tick loop. An earlier version of this file reported 3 under the
+three-part key, which was wrong: it quoted a key it had not applied. The GPT lane caught it.
 
 The literal reading is the one the frozen contract authorises, so the recorded verdict is **floor
 met**. The de-duplicated count is recorded beside it because it is the more informative number, and
@@ -97,12 +105,20 @@ Every task in `~/.polish/polish.db` that ever entered `INTEGRATING`, read-only a
 `readOnly: true`, never through `openDb`. **Four**, not the two `docs/PLAN.md` §4 recorded on
 2026-09-13: two of these are from the post-cut-off runs of 2026-09-14.
 
-| Task | Run | Run phase | Final task state | Base checkpoint | Tokens | Replayable |
-|---|---|---|---|---|---|---|
-| `task_01m1my57cms33fcyvg1wxq` | `run_01m1my3pdwwqxr1pe45z91` | `DONE` | `INTEGRATED` | `bd6ee536` | 115,475 | no |
-| `task_01m1p04nbyw6y5berx0yf3` | `run_01m1p013kghsprxj7atb6w` | `DONE` | `INTEGRATED` | `44e6bf3f` | 902,060 | no |
-| `task_01m2f941ehfap4aphdchey` | `run_01m2f93fdescrs2qrtq01f` | `FAILED` | `BLOCKED` | `4afe9df1` | 104,047 | no |
-| `task_01m2fmszpqrm2vpf19yy4z` | `run_01m2fms2rgx22qjckxrz66` | `FAILED` | `INTEGRATED` | `4afe9df1` | 358,838 | no |
+| Task | Run | Run phase | Reached `INTEGRATED` | Final task state | Base checkpoint | Tokens | Replayable |
+|---|---|---|---|---|---|---|---|
+| `task_01m1my57cms33fcyvg1wxq` | `run_01m1my3pdwwqxr1pe45z91` | `DONE` | yes | `INTEGRATED` | `bd6ee536` | 115,475 | no |
+| `task_01m1p04nbyw6y5berx0yf3` | `run_01m1p013kghsprxj7atb6w` | `DONE` | yes | `INTEGRATED` | `44e6bf3f` | 902,060 | no |
+| `task_01m2f941ehfap4aphdchey` | `run_01m2f93fdescrs2qrtq01f` | `FAILED` | **yes** | `BLOCKED` | `4afe9df1` | 104,047 | no |
+| `task_01m2fmszpqrm2vpf19yy4z` | `run_01m2fms2rgx22qjckxrz66` | `FAILED` | yes | `INTEGRATED` | `4afe9df1` | 358,838 | no |
+
+**All four reached `INTEGRATED`, and the final-state column hides one of them.**
+`task_01m2f941ehfap4aphdchey`'s history is
+`PENDING > READY > RUNNING > GATED > SELECTED > INTEGRATING > INTEGRATED > BLOCKED`: it integrated
+and was then blocked, so reading only its final state undercounts integration. The `reached
+INTEGRATED` column exists because of that task. An earlier version of this file said three of four
+reached `INTEGRATED` and that one task integrated inside a `FAILED` run; both numbers were one
+short, and the GPT lane found them.
 
 **Excluded: 4 of 4.** The reason is the same for all four and it is not a judgement about them:
 `not_replayable(no replay path consumes the recorded completions)`. The material exists — the CAS
@@ -116,17 +132,17 @@ what those cassettes encode.
 Recorded as an observation rather than scheduled work: the gap between 954 stored responses and
 zero replayable entries is a missing adapter, not missing data.
 
-Two of the four are worth noting for the third and fourth columns together:
-`task_01m2fmszpqrm2vpf19yy4z` reached `INTEGRATED` inside a run that ended `FAILED`. Task
-integration and run success are not the same event, which is why the floor counts entries by their
-own terminal state and the run phase is recorded beside it rather than instead of it.
+**Two of the four integrated inside runs that ended `FAILED`** — `task_01m2f941ehfap4aphdchey` and
+`task_01m2fmszpqrm2vpf19yy4z`, both from 2026-09-14. Task integration and run success are not the
+same event, which is why the floor counts entries by their own terminal state and records the run
+phase beside it rather than instead of it.
 
 ## The floor counts entries, not information
 
-Four of the five admitted entries are the same mission against the same fixture, and two of those
-four are one scenario with a routing flag flipped. Under `docs/PLAN.md` §4's words the floor is
-met; under any reading that asks how much independent signal the set carries, it is one scenario
-family with variations.
+**All five** admitted entries are the same mission against the same fixture with the same task
+contract, and two of the five are one scenario with a routing flag flipped. Under `docs/PLAN.md`
+§4's words the floor is met; under the tuple that vocabulary implies, the set carries **one**
+observation. The three control paths are the only axis along which the entries differ at all.
 
 This is recorded as a **defect in the criterion, not repaired here**, for two reasons. Imposing a
 de-duplication rule now would amend a frozen contract after seeing the count, which is the exact
