@@ -101,7 +101,7 @@ describe("run control axis", () => {
     );
   });
 
-  it("kill is absorbing and stop is irreversible", () => {
+  it("kill is absorbing; stopped remains stopped until explicit resume", () => {
     fc.assert(
       fc.property(fc.array(commandArb, { maxLength: 10 }), (cmds) => {
         let c = applyControlCommand("RUNNING", "kill");
@@ -110,12 +110,13 @@ describe("run control axis", () => {
       }),
     );
     fc.assert(
-      fc.property(fc.array(fc.constantFrom("pause", "resume", "quiesced", "stopped"), { maxLength: 10 }), (cmds) => {
+      fc.property(fc.array(fc.constantFrom("pause", "quiesced", "stopped"), { maxLength: 10 }), (cmds) => {
         let c = applyControlCommand("RUNNING", "stop");
         for (const cmd of cmds) c = applyControlCommand(c, cmd);
         expect(["STOP_REQUESTED", "STOPPED"]).toContain(c);
       }),
     );
+    expect(applyControlCommand("STOPPED", "resume")).toBe("RUNNING");
   });
 
   it("pause drains, stop/kill cancel; only RUNNING dispatches new jobs", () => {
@@ -124,6 +125,7 @@ describe("run control axis", () => {
     expect(mustCancelInFlight("PAUSE_REQUESTED")).toBe(false);
     expect(mustCancelInFlight("PAUSED")).toBe(false);
     expect(mustCancelInFlight("STOP_REQUESTED")).toBe(true);
+    expect(mustCancelInFlight("STOPPED")).toBe(true);
     expect(mustCancelInFlight("KILLED")).toBe(true);
   });
 

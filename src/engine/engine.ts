@@ -112,7 +112,14 @@ export class RunEngine {
     // kill after STOPPED is a no-op (stays STOPPED)
     const next = applyControlCommand(run.control, command);
     if (next === run.control) return run;
-    const updated: Run = { ...run, control: next, updatedAt: this.clock.now() };
+    const updated: Run = {
+      ...run,
+      control: next,
+      updatedAt: this.clock.now(),
+      ...(command === "resume" && run.control === "STOPPED" && run.terminalReason?.code === "stopped_by_user"
+        ? { terminalReason: null }
+        : {}),
+    };
     this.append(runId, "run.control_changed", { run: updated }, { kind: "user" });
 
     if (command === "kill" && next === "KILLED") {

@@ -3,7 +3,7 @@ import { basename, join, resolve } from "node:path";
 import { withRuntimeValidationMode, type PolishConfig } from "../domain/config.js";
 import { createMission } from "../domain/mission.js";
 import type { NewEvent } from "../domain/event.js";
-import type { Run } from "../domain/run.js";
+import { RunPhaseSchema, type Run } from "../domain/run.js";
 import { RunEngine } from "../engine/index.js";
 import type { ProviderAdapter } from "../broker/types.js";
 import {
@@ -368,18 +368,67 @@ export class DaemonService implements RpcHandler {
   }
 
   private async control(runId: string, command: "pause" | "resume" | "stop" | "kill"): Promise<Run> {
+    const before = this.requireRun(runId);
     const run = this.engine.control(runId, command);
+    if (command === "resume" && before.control === "STOPPED") {
+      return this.store.repos.runs.get(run.id) ?? run;
+    }
     await this.tick();
     return this.store.repos.runs.get(run.id) ?? run;
   }
 
-  private answer(runId: string, answer: string): { accepted: true; runId: string; phase: "NEEDS_HUMAN" } {
+  private async answer(runId: string, answer: string): Promise<{ accepted: true; runId: string; phase: Run["phase"] }> {
     const run = this.requireRun(runId);
     if (run.phase !== "NEEDS_HUMAN") {
       throw new PolishError("CONFLICT", `run ${runId} is ${run.phase}, not NEEDS_HUMAN`);
     }
-    appendFileSync(join(this.runDir(runId), "answers.jsonl"), `${JSON.stringify({ at: Date.now(), answer })}\n`);
-    return { accepted: true, runId, phase: "NEEDS_HUMAN" };
+    const events = this.store.events.list(runId);
+    const waiting = [...events].reverse().find((event) =>
+      event.type === "run.phase_changed" &&
+      (event.payload["run"] as { phase?: unknown } | undefined)?.phase === "NEEDS_HUMAN");
+    const returnPhase = [...events]
+      .reverse()
+      .filter((event) => waiting === undefined || event.seq < waiting.seq)
+      .map((event) => (event.payload["run"] as { phase?: unknown } | undefined)?.phase)
+      .map((phase) => RunPhaseSchema.safeParse(phase))
+      .find((parsed) => parsed.success && parsed.data !== "DONE" && parsed.data !== "NEEDS_HUMAN" && parsed.data !== "FAILED");
+    if (waiting === undefined || returnPhase?.success !== true) {
+      throw new PolishError("INVARIANT_VIOLATION", `run ${runId} has no resumable phase before NEEDS_HUMAN`);
+    }
+    const now = this.clock.now();
+    appendFileSync(join(this.runDir(runId), "answers.jsonl"), `${JSON.stringify({ at: now, answer })}\n`);
+    const answerEventId = id("evt", now);
+    this.store.events.append([
+      {
+        id: answerEventId,
+        runId,
+        ts: now,
+        type: "run.answer_recorded",
+        payload: { answer, returnPhase: returnPhase.data },
+        causedBy: [waiting.id],
+        actor: { kind: "user" },
+        artifacts: [],
+      },
+      {
+        id: id("evt", now + 1),
+        runId,
+        ts: now + 1,
+        type: "run.phase_changed",
+        payload: {
+          run: {
+            ...run,
+            phase: returnPhase.data,
+            terminalReason: null,
+            updatedAt: now + 1,
+          },
+        },
+        causedBy: [answerEventId],
+        actor: { kind: "user" },
+        artifacts: [],
+      },
+    ]);
+    await this.tick();
+    return { accepted: true, runId, phase: this.requireRun(runId).phase };
   }
 
   private async apply(runId: string): Promise<{ branch: string; commit: string }> {

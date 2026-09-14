@@ -94,7 +94,7 @@ export function applyControlCommand(current: RunControl, command: ControlCommand
       if (current === "RUNNING") return "PAUSE_REQUESTED";
       return current;
     case "resume":
-      if (current === "PAUSED" || current === "PAUSE_REQUESTED") return "RUNNING";
+      if (current === "PAUSED" || current === "PAUSE_REQUESTED" || current === "STOPPED") return "RUNNING";
       return current;
     case "quiesced":
       if (current === "PAUSE_REQUESTED") return "PAUSED";
@@ -108,13 +108,13 @@ export function applyControlCommand(current: RunControl, command: ControlCommand
 export const RUN_CONTROL_TABLE: TransitionTable<RunControl> = {
   initial: "RUNNING",
   states: RunControlSchema.options,
-  terminal: ["STOPPED", "KILLED"],
+  terminal: ["KILLED"],
   edges: {
     RUNNING: ["PAUSE_REQUESTED", "STOP_REQUESTED", "KILLED"],
     PAUSE_REQUESTED: ["PAUSED", "RUNNING", "STOP_REQUESTED", "KILLED"],
     PAUSED: ["RUNNING", "STOP_REQUESTED", "KILLED"],
     STOP_REQUESTED: ["STOPPED", "KILLED"],
-    STOPPED: [],
+    STOPPED: ["RUNNING"],
     KILLED: [],
   },
 };

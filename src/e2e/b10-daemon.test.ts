@@ -6,6 +6,7 @@
  */
 
 import {
+  readFileSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -18,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ScriptedProvider } from "../providers/scripted.js";
 import { FakeClock } from "../shared/clock.js";
 import { Git } from "../sandbox/git.js";
+import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { DaemonService } from "../daemon/service.js";
 
 // ---------------------------------------------------------------------------
@@ -217,6 +219,40 @@ async function driveToTerminal(
   throw new Error(`run did not reach terminal after ${maxTicks} ticks; last phase=${run.phase}`);
 }
 
+async function driveToPhase(
+  service: DaemonService,
+  runId: string,
+  phase: string,
+  maxTicks = 100,
+): Promise<void> {
+  for (let i = 0; i < maxTicks; i++) {
+    const run = service.store.repos.runs.get(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    if (run.phase === phase) return;
+    await service.engine.tickRun(runId);
+  }
+  throw new Error(`run did not reach ${phase}; last=${service.store.repos.runs.get(runId)?.phase}`);
+}
+
+function assertCausality(service: DaemonService, runId: string): void {
+  const events = service.store.events.list(runId);
+  const byId = new Map(events.map((event) => [event.id, event]));
+  for (const event of events) {
+    for (const causeId of event.causedBy) {
+      expect(byId.get(causeId)?.runId, `${event.type} -> ${causeId}`).toBe(runId);
+    }
+  }
+}
+
+async function assertNoWorktrees(service: DaemonService, env: TestEnv, runId: string): Promise<void> {
+  const sandbox = new WorktreeSandbox(
+    env.repoDir,
+    join(env.home, "worktrees", runId),
+    service.getConfig().sandbox,
+  );
+  expect(await sandbox.list()).toEqual([]);
+}
+
 /**
  * Script wkr in execution order (mirrors b10.test.ts batching on one model).
  * Parallel council calls consume sequential entries from the same model queue.
@@ -266,6 +302,46 @@ function scriptProvider(provider: ScriptedProvider): void {
 
   // Review — 1 reviewer, clean round.
   provider.script("wkr", [
+    { kind: "reply", content: JSON.stringify({ findings: [] }) },
+  ]);
+}
+
+function scriptHumanThenDone(provider: ScriptedProvider): void {
+  provider.script("wkr", [
+    opinion(plannerIntake()),
+    opinion(supervisorApprove()),
+    opinion(judgeApprove()),
+    {
+      kind: "reply",
+      content: "",
+      toolCalls: [{ id: "pwkr", name: "probe_ping", arguments: "{}" }],
+    },
+    { kind: "reply", content: '{"probe":"ok"}' },
+    opinion(plannerDecompose()),
+    opinion(JSON.stringify({
+      decision: "needs_human",
+      rationale: "Need an explicit compatibility decision.",
+      concerns: ["Confirm that the public API must remain compatible."],
+      proposal: { dropRefs: [] },
+    })),
+    opinion(judgeApprove({ restoreRefs: [] })),
+    opinion(plannerDecompose()),
+    opinion(supervisorApprove({ dropRefs: [] })),
+    opinion(judgeApprove({ restoreRefs: [] })),
+    {
+      kind: "reply",
+      content: "",
+      toolCalls: [{
+        id: "t1",
+        name: "write",
+        arguments: JSON.stringify({ path: "src/retryFetch.mjs", content: FIXED_SOURCE }),
+      }],
+    },
+    {
+      kind: "reply",
+      content: "",
+      toolCalls: [{ id: "t2", name: "finish", arguments: JSON.stringify({ summary: "Fixed #pending" }) }],
+    },
     { kind: "reply", content: JSON.stringify({ findings: [] }) },
   ]);
 }
@@ -374,5 +450,103 @@ describe("B10 daemon path – production RPC E2E", () => {
 
     // terminal DONE
     expect(finalRun.phase).toBe("DONE");
+  });
+
+  it("answers NEEDS_HUMAN through RPC and resumes the requesting phase to DONE", async () => {
+    const { repoDir, home, clock } = env;
+    service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
+    const provider = service.productionComposition().providers[0] as ScriptedProvider;
+    scriptHumanThenDone(provider);
+
+    const created = await service.handle("run", {
+      project: repoDir,
+      mission: "Fix duplicate request after resume: clear #pending before retry",
+      runtime: "auto",
+    });
+    const runId = (created as { id: string }).id;
+    await driveToPhase(service, runId, "NEEDS_HUMAN");
+    expect(service.store.repos.runs.get(runId)?.phase).toBe("NEEDS_HUMAN");
+
+    await service.handle("answer", {
+      runId,
+      answer: "Preserve the public API exactly.",
+    });
+    await driveToTerminal(service, runId);
+
+    expect(service.store.repos.runs.get(runId)?.phase).toBe("DONE");
+    const answers = service.store.events.list(runId, { types: ["run.answer_recorded"] });
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.actor.kind).toBe("user");
+    const reopening = service.store.events.list(runId, { types: ["run.phase_changed"] })
+      .find((event) => event.causedBy.includes(answers[0]!.id));
+    expect((reopening?.payload["run"] as { phase?: string } | undefined)?.phase)
+      .toBe("PLANNING");
+    expect(readFileSync(join(home, "runs", runId, "answers.jsonl"), "utf8"))
+      .toContain("Preserve the public API exactly.");
+    assertCausality(service, runId);
+    await assertNoWorktrees(service, env, runId);
+  });
+
+  it("stops in EXECUTING and resumes without dispatching inside the resume RPC", async () => {
+    const { repoDir, home, clock } = env;
+    service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
+    scriptProvider(service.productionComposition().providers[0] as ScriptedProvider);
+    const created = await service.handle("run", {
+      project: repoDir,
+      mission: "Fix duplicate request after resume: clear #pending before retry",
+      runtime: "auto",
+    });
+    const runId = (created as { id: string }).id;
+    await driveToPhase(service, runId, "EXECUTING");
+
+    const stopped = await service.handle("stop", { runId }) as {
+      phase: string;
+      control: string;
+      terminalReason: { code: string } | null;
+    };
+    expect(stopped).toMatchObject({
+      phase: "EXECUTING",
+      control: "STOPPED",
+      terminalReason: { code: "stopped_by_user" },
+    });
+    const resumed = await service.handle("resume", { runId }) as {
+      phase: string;
+      control: string;
+      terminalReason: unknown;
+    };
+    expect(resumed).toEqual(expect.objectContaining({
+      phase: "EXECUTING",
+      control: "RUNNING",
+      terminalReason: null,
+    }));
+    expect(service.store.repos.candidates.listByRun(runId)).toEqual([]);
+    assertCausality(service, runId);
+    await assertNoWorktrees(service, env, runId);
+  });
+
+  it("recovers an EXECUTING run, its jobs, and non-zero spend in a fresh service", async () => {
+    const { repoDir, home, clock } = env;
+    service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
+    scriptProvider(service.productionComposition().providers[0] as ScriptedProvider);
+    const created = await service.handle("run", {
+      project: repoDir,
+      mission: "Fix duplicate request after resume: clear #pending before retry",
+      runtime: "auto",
+    });
+    const runId = (created as { id: string }).id;
+    await driveToPhase(service, runId, "EXECUTING");
+    const beforePhase = service.store.repos.runs.get(runId)!.phase;
+    const beforeJobs = service.store.repos.jobs.listByRun(runId).map((job) => job.id).sort();
+    expect(service.productionComposition().broker.budgetSnapshot(runId).runTokens).toBeGreaterThan(0);
+
+    await service.close();
+    service = undefined;
+    service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
+
+    expect(service.store.repos.runs.get(runId)?.phase).toBe(beforePhase);
+    expect(service.store.repos.jobs.listByRun(runId).map((job) => job.id).sort()).toEqual(beforeJobs);
+    expect(service.productionComposition().broker.budgetSnapshot(runId).runTokens).toBeGreaterThan(0);
+    assertCausality(service, runId);
+    await assertNoWorktrees(service, env, runId);
   });
 });
