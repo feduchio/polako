@@ -39,7 +39,7 @@ import { id } from "../shared/ids.js";
 import { Git, type ChangedFileStatus } from "../sandbox/git.js";
 import {
   classifyCheckpointPaths,
-  isRunnableTestPath,
+  runnableTestPathPriority,
 } from "../convergence/pathology/changeClassification.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
 import type { Task } from "../domain/task.js";
@@ -481,9 +481,11 @@ async function admitCorpusExecutable(
     throw new Error(reason);
   }
   const testPaths = changes
-    .filter((change) => change.status !== "D" && isRunnableTestPath(change.path))
-    .map((change) => change.path)
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    .filter((change) => change.status !== "D")
+    .map((change) => ({ path: change.path, priority: runnableTestPathPriority(change.path) }))
+    .filter((candidate): candidate is { path: string; priority: number } => candidate.priority !== null)
+    .sort((a, b) => a.priority - b.priority || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .map((candidate) => candidate.path);
   if (testPaths.length === 0) {
     for (const entry of pending) {
       corpus.recordExecutableAbsent({ entryId: entry.id, reason: CORPUS_EXECUTABLE_STATUS.noTestFile });

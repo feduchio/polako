@@ -37,31 +37,39 @@ export function isTestPath(path: string): boolean {
  * execute, not fixtures, snapshots, golden data, or arbitrary files merely stored under tests/.
  */
 export function isRunnableTestPath(path: string): boolean {
+  return runnableTestPathPriority(path) !== null;
+}
+
+/** Lower values are stronger evidence that the project runner discovers the file as a test. */
+export function runnableTestPathPriority(path: string): number | null {
   const normalized = normalizePath(path);
   const segments = normalized.split("/");
   const basename = segments.at(-1) ?? "";
   const extension = /\.([^.]+)$/u.exec(basename)?.[1]?.toLowerCase() ?? "";
   if (!/^(?:[cm]?[jt]sx?|py|rb|go|rs|java|kts?|swift|cs|php|sh|bash)$/u.test(extension)) {
-    return false;
+    return null;
   }
   const stem = basename.replace(/\.[^.]+$/u, "");
   const directories = segments.slice(0, -1);
-  if (directories.some((segment) =>
+  const testRoot = directories.findLastIndex((segment) =>
+    segment === "test" || segment === "tests" || segment === "__tests__");
+  if (testRoot >= 0 && directories.slice(testRoot + 1).some((segment) =>
     /^(?:__)?(?:fixtures?|helpers?|mocks?|snapshots?|support|common|data|utils?)(?:__)?$/iu.test(segment))) {
-    return false;
+    return null;
   }
   const explicitName =
     /(?:^|[._-])(?:test|tests|spec)(?:[._-]|$)/iu.test(stem) ||
     /^(?:Test|Spec)[A-Z0-9_]/u.test(stem) ||
     /(?:Test|Tests|Spec)$/u.test(stem);
-  if (explicitName) return true;
-  if (/(?:^|[._-])(?:fixture|helper|mock|snapshot|support|common|data|util|utils|setup)(?:[._-]|$)/iu.test(stem)) {
-    return false;
+  if (explicitName) return 0;
+  const tokenizedStem = stem.replace(/([a-z0-9])([A-Z])/gu, "$1_$2");
+  if (/(?:^|[._-])(?:fixture|helper|mock|snapshot|support|common|data|util|utils|setup)(?:[._-]|$)/iu.test(tokenizedStem)) {
+    return null;
   }
   const parent = directories.at(-1)?.toLowerCase();
   // Direct children are runner-discoverable in conventional test roots. Nested support modules
   // need an explicit test/spec name; Cargo in particular compiles only direct tests/*.rs as cases.
-  return parent === "test" || parent === "tests" || parent === "__tests__";
+  return parent === "test" || parent === "tests" || parent === "__tests__" ? 1 : null;
 }
 
 function isNeutralPath(path: string): boolean {
