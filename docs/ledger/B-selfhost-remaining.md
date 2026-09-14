@@ -719,8 +719,11 @@ otherwise look like unfinished work.
     `src/project/project.test.ts:1081-1085` asserts this behaviour deliberately for the legitimate
     case — a pre-existing failure must not block an unrelated fix.
     So with an all-fail baseline, a candidate that reproduces the same three
-    command-not-found failures has **no regression, no silencing and no acceptance problem**, and
-    the deterministic gate passes. The coordinator has not run a candidate through it end to end,
+    command-not-found failures has **no regression**, and the deterministic gate passes **provided
+    the two independent predicates in that same expression are also empty** — `silencing` and
+    `acceptanceProblems` (`src/project/checkRunner.ts:770-783`). Equal fingerprints settle the
+    regression term only; they say nothing about the other two, and the first draft of this
+    paragraph claimed all three at once. The coordinator has not run a candidate through it end to end,
     so this is a code-traced consequence rather than an observed run; that is the one step a fix
     should close first.
     **Not scheduled here.** P2.3's contract is a two-phase smoke with no production change, so this
