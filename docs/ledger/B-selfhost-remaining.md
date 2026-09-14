@@ -775,3 +775,20 @@ otherwise look like unfinished work.
     capture can only answer what its own moment supports. A gate now reads the checkout twice, and
     each read is judged whole against its own metadata.
 
+
+55. **A run can reach `FAILED` with no `terminalReason`, so `polish status` shows a phase and no
+    reason.** Observed in D1 attempt 1 (`run_01m2gy5yg30631j247sn13`, `docs/ledger/D1-run-1.md`):
+    every free-tier worker model returned `Rate limit exceeded: free-models-per-day`, all 22
+    candidates were `DISCARDED` — each correctly carrying the provider error on `Candidate.error` —
+    and `GATING` had no survivors, so the run terminated. `polish status` reports
+    `"terminalReason": null`.
+    **Why this is the same class the project already ruled on.** Finding 37 established that a
+    terminal `FAILED` must name its cause, and F54 round 5 fixed exactly this shape for the
+    environment case: `environmentTerminalReason` builds a reason and `GATING` returns it. The
+    zero-survivors path in `handleZeroSurvivors` (`src/engine/candidateDrivers.ts`) has no
+    equivalent for the case where every candidate was discarded by provider exhaustion, which is
+    the most likely way a free-tier run ends.
+    **What a fix must establish.** A run that terminates because no candidate survived says so,
+    naming the dominant discard reason and distinguishing *the work failed its gates* from *nothing
+    ever ran*. The candidates already hold the evidence; nothing new needs to be collected.
+    **Found 2026-09-14** by the first real external run.
