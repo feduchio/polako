@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Contract | revision 2 at `cf7c804`; revision 1 frozen at `fde4530` |
+| Contract | revision 3 at `6634348`; rev 1 frozen at `fde4530`, rev 2 at `cf7c804` |
 | Base | HOST `ef11a00` (accepted P2 block) |
 | Finding | 54, from P2.3 |
-| Implementation | `cf7c804` |
-| Gate | Node 24.20.0; **94 files, 1,032 tests**, exit 0 (was 93 / 1,022) |
+| Implementation | `cf7c804`, then `6634348` |
+| Gate | Node 24.20.0; **94 files, 1,046 tests**, exit 0 (was 93 / 1,022) |
 
 ## What changed
 
@@ -88,12 +88,72 @@ produces no `baseline.snapshotted` and no baseline row, reaches `NEEDS_HUMAN` wi
 The existing baselining test — a `package.json` with no dependencies — still passes unchanged,
 which is AC4: the normal path is untouched.
 
+## Round 1 changed the item: both halves, because one of them was unclearable alone
+
+The entry gate returned six findings and the first reframed the work. The refusal sent the run to
+`NEEDS_HUMAN` telling the operator to install dependencies — but every baseline attempt creates a
+**fresh** git worktree, which never carries `node_modules`, so the instruction could not be acted
+on. The reviewer demonstrated it: it reached `NEEDS_HUMAN`, created `projectPath/node_modules`,
+resumed, and returned to `NEEDS_HUMAN`. A refusal nobody can clear trades a false baseline for a
+stuck run, which for a self-hosting system is not obviously better.
+
+**User decision 2026-09-14: do the install half now.** Contract revision 3. The sandbox installs
+the project's dependencies before its checks run, and the refusal stays as the backstop — which is
+what makes the install safe to have, since install can be disabled, fail, or change nothing.
+
+| Piece | Where |
+|---|---|
+| install command, one definition shared with the policy that admits it | `installCommandFor` in `src/shared/projectDependencies.ts` |
+| exact-match allowlist rule, for the discovered package manager only | `CommandPolicy.forProject` |
+| `sandbox.installDependencies` (default `true`) and `sandbox.installTimeoutMs` | `src/domain/config.ts` |
+| install, re-check, and a forensic record that is not a check result | `ensureProjectDependencies` in `src/project/checkRunner.ts` |
+
+The default is `true` because the refusal is otherwise unclearable, and nothing is attempted when
+dependencies are already reachable — every in-tree fixture declares none, so no existing path
+changes.
+
+## The other five findings
+
+**Only a non-passing result can be untrusted.** Revision 2 evaluated the predicate independently of
+the results, so a project declaring dependencies whose checks **passed** was refused. A check that
+passed is evidence whatever the environment looked like.
+
+**The spawn-error path withholds its fingerprint too.** The untrusted branch sat only in the
+successful-`run` path, so a sandbox throwing `ENOENT` still produced one.
+
+**The resolved script text reaches the predicate.** A profile check is `<pm> run <script>`, and the
+script is what says whether packages are needed. Without it the command-shape test could never fire
+for a profile check, which left the original defect survivable for a project that declares no
+dependencies but whose script needs them.
+
+**Availability is not a local directory.** Node resolution walks ancestors, so a workspace package
+legitimately has no `node_modules` of its own, and Yarn PnP has none anywhere. The test now walks
+upward for the declared package and treats a PnP marker as available. It also no longer accepts an
+empty `node_modules`, which the previous rule did.
+
+**AC1 is amended rather than quietly broken.** The reproduction path's decision boundary does
+change: a runnable reproduction in a project that declares unavailable dependencies now returns
+`UNCERTAIN` where it previously executed. Same fail-closed direction, and it is the point of one
+shared definition — but revision 2's AC1 claimed the behaviour was unchanged, and that was false.
+
+## Two things the round taught about the tests themselves
+
+**Two test environments were untrustworthy and are now installed.** `allows an unchanged baseline
+failure but rejects a new failure` captured its baseline through a sandbox at one path and gated
+through another that declared `vitest run` with no vitest present. Under the new rule the gate
+result is correctly untrusted, which broke a test about comparison for reasons that had nothing to
+do with comparison. It now creates `node_modules/vitest`.
+
+**The driver tests script every package-manager command, because pnpm v10 installs before `run`.**
+The first version of the install test let the real `pnpm` run and it reached the network: with a
+lockfile present and `node_modules` missing, pnpm installs before running a script. The tests were
+measuring the registry. They now script `pnpm` entirely and assert the driver's decisions.
+
 ## What is still not fixed
 
-**Nothing installs dependencies.** An external project still cannot produce a *trusted* baseline;
-it now refuses to produce an untrustworthy one. Finding 54 is updated to say which half is done.
-The remaining half needs an allowlist entry for `pnpm install`, a network policy and a timeout
-budget, and it is a separate decision rather than an oversight.
+An install that genuinely cannot succeed — no network, a stale lockfile, a package manager we do
+not drive — still ends at `NEEDS_HUMAN`. That is now the correct outcome rather than a dead end,
+because the operator can fix the install itself, and the terminal reason says which case it is.
 
 ## Gate
 

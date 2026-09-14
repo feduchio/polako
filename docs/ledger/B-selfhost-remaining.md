@@ -748,14 +748,18 @@ otherwise look like unfinished work.
     with this baseline than the wording above would suggest.
     **Not scheduled in P2.3.** That contract is a two-phase smoke with no production change, so
     this was recorded rather than repaired there.
-    **HALF FIXED 2026-09-14 by F54** (`docs/ledger/F54.md`, run record `docs/ledger/F54-run.md`).
-    The refuse-to-record half is done: a failure produced where the project's packages are not
-    installed is recorded as `error` rather than `fail` and carries **no** `failureFingerprint`,
-    and `BASELINING` appends no `baseline.snapshotted` at all, taking the run to `NEEDS_HUMAN` with
-    the new terminal reason `environment_not_ready`. The predicate has one definition
-    (`src/shared/projectDependencies.ts`), used by the check runner and the reproduction path.
-    **The other half is not done and is not scheduled**: nothing installs dependencies, so an
-    external project still cannot produce a *trusted* baseline — it now refuses to produce an
-    untrustworthy one instead. That needs an allowlist entry for `pnpm install`, a network policy
-    and a timeout budget, and it is a separate decision. Fable D1 still cannot proceed, but it now
-    fails loudly rather than on a false baseline.
+    **FIXED 2026-09-14 by F54** (`docs/ledger/F54.md` rev 3, run record `docs/ledger/F54-run.md`).
+    Both halves, because the first review round showed the refusal alone was unclearable: every
+    baseline attempt creates a fresh worktree, so an operator told to install could never make the
+    instruction take effect.
+    A sandbox now installs the project's dependencies before its checks run, through one command
+    definition shared with the exact-match allowlist rule that admits it, controlled by
+    `sandbox.installDependencies` (default on) and `sandbox.installTimeoutMs`. And the
+    refuse-to-record half stays as the backstop, which is what makes the install safe to have: when
+    install is disabled, fails, or changes nothing, a non-passing check in an environment that
+    cannot produce evidence is recorded as `error` with **no** `failureFingerprint`, no
+    `baseline.snapshotted` is appended, and the run stops at `NEEDS_HUMAN` with
+    `environment_not_ready` naming which case it is.
+    The availability test walks up the directory tree as Node resolution does and recognises Yarn
+    Plug'n'Play, so a workspace package with no local `node_modules` is not refused, and an empty
+    `node_modules` is no longer mistaken for an install.
