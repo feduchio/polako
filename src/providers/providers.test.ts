@@ -62,6 +62,8 @@ describe("OpenRouterProvider", () => {
         body: {
           data: [
             { id: "openrouter/fusion", pricing: { prompt: "-1", completion: "-1" }, context_length: 1_048_576 },
+            { id: "vendor/blank", pricing: { prompt: "", completion: "   " }, context_length: 131_072 },
+            { id: "vendor/unparseable", pricing: { prompt: "tbd", completion: "0" }, context_length: 131_072 },
             { id: "vendor/priced", pricing: { prompt: "0.00000015", completion: "0.0000005" }, context_length: 131_072 },
             { id: "vendor/free", pricing: { prompt: "0", completion: "0" }, context_length: 131_072 },
           ],
@@ -72,6 +74,9 @@ describe("OpenRouterProvider", () => {
       (await provider.listModels()).map((m) => [m.ref.model, [m.capabilities.inputCostPerM, m.capabilities.outputCostPerM]]),
     );
     expect(priced["openrouter/fusion"]).toEqual([null, null]);
+    // `Number("")` is 0, so a blank field would otherwise be published as a free price.
+    expect(priced["vendor/blank"]).toEqual([null, null]);
+    expect(priced["vendor/unparseable"]).toEqual([null, 0]);
     expect(priced["vendor/priced"]).toEqual([0.15, 0.5]);
     expect(priced["vendor/free"]).toEqual([0, 0]);
   });

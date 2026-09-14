@@ -81,6 +81,28 @@ describe("ModelBroker", () => {
     );
   });
 
+  it("charges a probe to the budget and records its event, but not its routing statistics", async () => {
+    provider.script("big", [{ kind: "error", error: new ProviderError("p1", "rate_limit", "429", { status: 429 }) }]);
+    provider.script("mid", [{ kind: "reply", content: "ok", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.002 } }]);
+    const probe = (model: string): CompletionRequest => ({
+      ...req(runId, model),
+      metadata: { runId, purpose: "capability_probe_tools", role: "probe", retryPolicy: { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 } },
+    });
+    await expect(broker.complete(probe("big"))).rejects.toThrow(ProviderError);
+    await broker.complete(probe("mid"));
+
+    // The account being out of free requests today says nothing about "big".
+    expect(catalog.get({ provider: "p1", model: "big" })?.stats).toMatchObject({ calls: 0, failures: 0 });
+    expect(catalog.get({ provider: "p1", model: "mid" })?.stats.calls).toBe(0);
+    expect(store.events.list(runId, { types: ["model.observation.recorded"] })).toHaveLength(0);
+    // Spend and the call record are not optional for a probe: they are the point of R0.
+    expect(store.events.list(runId, { types: ["model.call"] })).toHaveLength(2);
+    expect(budget.snapshot(runId)).toMatchObject({ runUsd: 0.002 });
+
+    await broker.complete({ ...req(runId, "mid"), metadata: { runId, purpose: "test", role: "worker" } });
+    expect(catalog.get({ provider: "p1", model: "mid" })?.stats.calls).toBe(1);
+  });
+
   it("retries retryable errors with backoff, cools down on rate limits, and gives up after maxAttempts", async () => {
     provider.script("mid", [
       { kind: "error", error: new ProviderError("p1", "rate_limit", "slow down", { retryAfterMs: 500 }) },

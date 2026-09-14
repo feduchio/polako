@@ -6,8 +6,17 @@ import {
 } from "./costEligibility.js";
 import type { ModelInfo } from "./types.js";
 
+/**
+ * Cheapest first, and a model whose price is unknown is not cheap. Treating `null` as 0 sorted
+ * unpriced routes ahead of free ones, which is how `openrouter/fusion` came to be probed first
+ * and billed at 17x the ceiling (`docs/ledger/R0-run.md`). Under `free_only` and `ceiling` the
+ * eligibility filter has already removed them; this is what `unrestricted` needs.
+ */
 function estimatedCostPerM(cap: ModelInfo["capabilities"]): number {
-  return (cap.inputCostPerM ?? 0) + (cap.outputCostPerM ?? 0);
+  const input = cap.inputCostPerM;
+  const output = cap.outputCostPerM;
+  if (input === null || output === null) return Number.POSITIVE_INFINITY;
+  return input + output;
 }
 
 /**

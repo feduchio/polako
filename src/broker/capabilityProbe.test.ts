@@ -8,6 +8,8 @@ import { ProviderError } from "./types.js";
 import { id } from "../shared/ids.js";
 import { parseModelRefString } from "../daemon/configLoad.js";
 import { DISABLED_REASONING } from "./responseSchemas.js";
+import { isBudgetError } from "./quota.js";
+import { PolishError } from "../shared/errors.js";
 
 const RUN = id("run");
 
@@ -127,6 +129,36 @@ describe("probeModelCapabilities", () => {
     // The adapter is where the money is spent and where the broker's budget check is not.
     expect(provider.calls).toHaveLength(0);
     expect(result.checks.tools.verdict).toBe("supported");
+  });
+
+  it("lets a budget error out instead of recording it as a capability verdict", async () => {
+    const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("m", [
+      { kind: "reply", content: "", toolCalls: [{ id: "t1", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    const exhausted = new PolishError("CONFLICT", "run USD budget exhausted", { budget: "run_usd" });
+    expect(isBudgetError(exhausted)).toBe(true);
+    await expect(
+      probeModelCapabilities(provider, model("m"), { runId: RUN, skipHealth: true, complete: () => Promise.reject(exhausted) }),
+    ).rejects.toBe(exhausted);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("stops discovery on a budget error rather than blaming the model or the provider", async () => {
+    const provider = new ScriptedProvider("p", [{ name: "m", capabilities: FAKE_CAPABILITIES.strong }]);
+    const catalog = new ModelCatalog();
+    catalog.register(provider);
+    const exhausted = new PolishError("CONFLICT", "run USD budget exhausted", { budget: "run_usd" });
+    await expect(
+      catalog.discover({
+        maxProbesPerProvider: 8,
+        capabilityProbe: (adapter, info) =>
+          probeModelCapabilities(adapter, info, { runId: RUN, skipHealth: true, complete: () => Promise.reject(exhausted) }),
+      }),
+    ).rejects.toBe(exhausted);
+    // Recorded as `errors[...]` instead, the run would keep probing and keep being refused.
+    expect(catalog.get({ provider: "p", model: "m" })?.available).toBe(true);
   });
 
   it("does not inherit strict support from advertisements on timeout", async () => {
@@ -478,5 +510,26 @@ describe("buildDiscoveryShortlist", () => {
       maxOutputCostPerM: 0,
     });
     expect(shortlist.map((entry) => entry.ref.model)).toEqual(["model-02", "free-zero"]);
+  });
+
+  it("sorts an unknown price last, not first, when nothing filters it out", () => {
+    const models = [
+      {
+        ref: { provider: "p", model: "unknown-price" },
+        displayName: "unknown-price",
+        capabilities: { ...FAKE_CAPABILITIES.fast, inputCostPerM: null, outputCostPerM: null },
+        source: "provider" as const,
+      },
+      model("dearest", FAKE_CAPABILITIES.fast, 9),
+      model("cheapest", FAKE_CAPABILITIES.fast, 1),
+    ];
+    // `unrestricted` is the only mode that lets an unpriced model reach the sort. Read as 0, it
+    // was probed before every priced model; `openrouter/fusion` billed 17x the ceiling that way.
+    const shortlist = buildDiscoveryShortlist(models, "p", [], 8, {
+      mode: "unrestricted",
+      maxInputCostPerM: 0,
+      maxOutputCostPerM: 0,
+    });
+    expect(shortlist.map((entry) => entry.ref.model)).toEqual(["cheapest", "dearest", "unknown-price"]);
   });
 });

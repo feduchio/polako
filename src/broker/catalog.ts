@@ -2,6 +2,7 @@ import { modelRefKey, type ModelRef } from "../domain/common.js";
 import type { CapabilityProbeResult } from "./capabilityProbe.js";
 import type { CostEligibilityPolicy } from "./costEligibility.js";
 import { buildDiscoveryShortlist } from "./discoveryShortlist.js";
+import { isBudgetError } from "./quota.js";
 import type { ModelInfo, ProviderAdapter } from "./types.js";
 
 export interface ModelStats {
@@ -112,12 +113,16 @@ export class ModelCatalog {
             this.upsert(result.info);
             this.setModelAvailable(model.ref, result.available);
           } catch (error) {
+            // Discovery has no money left; every remaining probe would be refused too, and the
+            // provider is not the thing that failed.
+            if (isBudgetError(error)) throw error;
             const message = error instanceof Error ? error.message : String(error);
             errors[`${id}/${model.ref.model}:probe`] = message;
             this.upsert(model);
           }
         }
       } catch (err) {
+        if (isBudgetError(err)) throw err;
         errors[id] = err instanceof Error ? err.message : String(err);
         this.providerAvailable.set(id, false);
       }

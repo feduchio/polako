@@ -114,8 +114,7 @@ export class ModelBroker {
         const latency = Math.max(0, clock.now() - started) || response.latencyMs;
         const outcome: AttemptOutcome = { ok: true, latencyMs: latency, at: clock.now() };
         outcomes.push(outcome);
-        catalog.recordCall(tagged.model, outcome);
-        this.observations.recordCall(tagged.model, outcome, tagged.metadata.runId);
+        this.recordRoutingStats(tagged, outcome);
         const snapshot = budget.record(tagged.metadata.runId, response.usage, tagged.metadata.taskId, callId);
         const eventId = this.recordEvent(tagged, response, attempt, outcomes, null, snapshot.runUsd, callId);
         return { eventId, response, attempts: attempt, callId };
@@ -125,8 +124,7 @@ export class ModelBroker {
         const kind = isCancel(err) ? "cancelled" : err instanceof ProviderError ? err.kind : "unknown";
         const outcome: AttemptOutcome = { ok: false, latencyMs: clock.now() - started, errorKind: kind, at: clock.now() };
         outcomes.push(outcome);
-        catalog.recordCall(tagged.model, outcome);
-        this.observations.recordCall(tagged.model, outcome, tagged.metadata.runId);
+        this.recordRoutingStats(tagged, outcome);
         if (isCancel(err)) {
           this.recordEvent(tagged, null, attempt, outcomes, errorToString(err), budget.snapshot(tagged.metadata.runId).runUsd, callId);
           throw err;
@@ -153,6 +151,19 @@ export class ModelBroker {
       }
     }
     throw lastError instanceof Error ? lastError : new PolishError("PROVIDER_ERROR", "model call failed");
+  }
+
+  /**
+   * A capability probe asks whether a model can do a thing. Its outcome is not an observation of
+   * how well the model serves work, and the commonest probe failure — the account is out of free
+   * requests for the day — is a property of the account, not of the model it happened to hit. Nine
+   * models probed under one exhausted quota would otherwise each carry a routing penalty for it.
+   * The probe's own verdict is recorded by the discovery driver, as `model.probed`.
+   */
+  private recordRoutingStats(request: CompletionRequest, outcome: AttemptOutcome): void {
+    if (request.metadata.role === "probe") return;
+    this.deps.catalog.recordCall(request.model, outcome);
+    this.observations.recordCall(request.model, outcome, request.metadata.runId);
   }
 
   private backoff(attempt: number, retry: RetryPolicy = this.retry): number {

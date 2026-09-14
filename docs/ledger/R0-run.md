@@ -4,7 +4,18 @@ Contract: `docs/ledger/R0.md`. Base: HOST `e87dd26`. Date: 2026-09-15.
 Coordinator/implementer: Claude Opus 5. Reviewer lane: GPT (`gpt-5.6-sol-high`), one lane.
 
 Every number below carries the command that produces it. Three live runs against
-`~/screen-audit-toolkit` were used; their total spend is $0.0187.
+`~/screen-audit-toolkit` were used; their recorded spend is $0.020655498:
+
+```
+sqlite3 "file:$HOME/.polish/polish.db?mode=ro" \
+  "select round(sum(coalesce(json_extract(json,'\$.payload.usage.costUsd'),0)),9) from events
+    where type='model.call' and run_id in
+    ('run_01m2h2vmy5qj0648tcn2fn','run_01m2h3ck0v06t7596n0fh7','run_01m2h3hpe2f6f4ra1ywcg7');"
+0.020655498      # run 1 0.003842688 + run 2 0.016812810 + run 3 0.0
+```
+
+That total is what the store recorded. It is not what the key was charged: finding R0-2 below is
+precisely a path whose calls emitted no event, so run 1's true spend cannot be reconstructed.
 
 ## The change
 
@@ -43,9 +54,12 @@ $5 on the key into ten runs.
 sqlite3 "file:$HOME/.polish/polish.db?mode=ro" \
   "select json_extract(json,'\$.payload.purpose'), json_extract(json,'\$.payload.model.model'),
           json_extract(json,'\$.payload.usage.costUsd'), json_extract(json,'\$.payload.usage.inputTokens')
-     from events where run_id='run_01m2h2vmy5qj0648tcn2fn'
+     from events where run_id='run_01m2h2vmy5qj0648tcn2fn' and type='model.call'
       and json_extract(json,'\$.payload.role')='probe';"
-capability_probe_strict_review | openrouter/fusion | 0.003825 | 745
+capability_probe_strict_review   | openrouter/auto-beta | 4.556e-06 |  16
+capability_probe_strict_score    | openrouter/auto-beta | 8.040e-06 |  16
+capability_probe_strict_progress | openrouter/auto-beta | 5.092e-06 |  16
+capability_probe_strict_review   | openrouter/fusion    | 0.003825  | 745
 ```
 
 ### Finding R0-1 — the ceiling admitted a route that has no price, and it billed 17x the ceiling
@@ -119,7 +133,8 @@ now appear as `model.call` events (36 probe events against 4 in run 1).
 
 ## Acceptance check 2 — a run that hits `maxRunUsd` is rejected with a named reason: NOT MET
 
-Not met, and not force-fixed here, exactly as the contract said it might go. What was observed:
+**R0 is therefore not accepted.** The repair belongs to R3, but the criterion is R0's, so R0 stays
+open and R3's acceptance re-runs this check. What was observed:
 
 - Run 2 reached `FAILED` at $0.01478445 under a $0.05 limit — the budget never bound because the
   run died of something else first.
@@ -127,12 +142,15 @@ Not met, and not force-fixed here, exactly as the contract said it might go. Wha
   does D1 (`run_01m2gy5yg30631j247sn13`). Three FAILED runs, three absent reasons. This is
   finding 55 and belongs to **R3**.
 - Run 3 (`run_01m2h3hpe2f6f4ra1ywcg7`, `--budget-usd 0.003`) produced a **second reasonless shape**:
-  it did not fail, it went to `PLANNING / PAUSED` and sat there. The pause is
-  `run.control_changed` with `actor: {"kind":"user"}` — no user asked for it. `engine.ts:230`
-  pauses any run whose driver throws in a council phase, and `engine.ts:235` rethrows the error
-  without recording it. The daemon is spawned with `stdio: "ignore"` (`src/cli/client.ts:28`), so
-  that error reaches no log either. An operator sees a run they appear to have paused themselves,
-  with no reason available anywhere. **New input for R3**, not repaired here.
+  it did not fail, it went to `PLANNING / PAUSED` and sat there for ten minutes until killed. Its
+  recorded spend is $0, so its budget never bound and the pause has some other cause. The pause is
+  `run.control_changed` carrying `actor: {"kind":"user"}`, and no `polish pause` was issued in this
+  session. `engine.ts:230` pauses any run whose driver throws in a council phase and `engine.ts:235`
+  rethrows the error without recording it; the daemon is spawned with `stdio: "ignore"`
+  (`src/cli/client.ts:28`), so the error reaches no log either. The error itself is therefore
+  **unrecoverable from this run** — which is the finding. An operator sees a run they appear to
+  have paused themselves, with no reason available anywhere. **New input for R3**, not repaired
+  here.
 
 ## What R0 did not fix, and where it goes
 
@@ -147,26 +165,64 @@ recorded 34 `model.retry_scheduled` events. §1.2's cause is therefore still liv
 ```
 "Rate limit exceeded: free-models-per-day-high-balance.",
 "X-RateLimit-Limit":"1000", "X-RateLimit-Remaining":"0",
-"X-RateLimit-Reset":"1789430400000"   # 2026-09-15T00:00:00Z
+"X-RateLimit-Reset":"1789430400000",  # 2026-09-15T00:00:00Z
+"limit_source":"openrouter_free_tier_daily"
 ```
 
-That is a **per-day account** cap of 1000, already exhausted, not the per-minute cap of 20 that
-`docs/RECOVERY.md` §1.2 names. A request-rate window paces a per-minute cap; it cannot pace an
-exhausted daily one. R1 must handle the scope *and the period*, or it will pace a lane that has no
-requests left to give. Funding the key raised the free allowance from 20/min to 1000/day; it did
-not remove it.
+The `limit_source` is `openrouter_free_tier_daily`, not the `openrouter_free_tier_per_minute` that
+`docs/RECOVERY.md` §1.2 names, and `X-RateLimit-Remaining` is 0: a **per-day account** cap of 1000,
+already exhausted. A request-rate window paces a per-minute cap; it cannot pace an exhausted daily
+one. R1 must handle the scope *and the period*, or it will pace a lane that has no requests left to
+give. What the store cannot show is *why* the limit differs from §1.2's — the label says
+"high-balance", and funding the key is the change between the two observations, but that is an
+inference, not a recorded fact.
 
-**Reviewers cannot reach a paid model at all.** `selectReviewProviders` requires
-`requireStrictReviewSchema` (`composition.ts:460`), which only a probe can set. Probes go to
-`buildDiscoveryShortlist`, which sorts by advertised cost ascending and takes
-`maxProbesPerProvider` = 8 — so the probed set is the eight cheapest eligible models, and free
-routes cost 0. Run 2's probe list is nine models, every one of them `:free`. Under any ceiling that
-admits free routes, **no paid model is ever probed, so no paid model is ever a reviewer.** R0 does
-not touch it; it is named here because R5's acceptance ("fewer than 10% did not arrive") cannot be
-met while reviewers are confined to a lane whose daily quota is exhausted.
+**No paid model reaches the reviewer pool by the route discovery currently takes.**
+`selectReviewProviders` requires `requireStrictReviewSchema` (`composition.ts:460`), which only a
+probe can set. Probes come from `buildDiscoveryShortlist`, which sorts by advertised cost ascending
+and takes `maxProbesPerProvider` = 8, and free routes cost 0. Run 2's probe list is nine models,
+every one `:free`. The one exception is a **pinned** model, which the shortlist admits ahead of the
+sort regardless of price (`discoveryShortlist.ts:28-34`) — so "a paid reviewer is impossible" would
+be false; the accurate statement is that under this config no paid model is probed, and therefore
+none is eligible to review. R0 does not touch it; it is named because R5's acceptance ("fewer than
+10% did not arrive") cannot be met while reviewers are confined to a lane whose daily quota is
+exhausted. Either R1 changes what gets probed, or the pins do.
+
+**What `maxRunUsd` actually is.** An admission threshold checked before each call
+(`BudgetTracker.assertWithin`, `quota.ts:145-157`), not a hard cap: the call that crosses the line
+is the one already allowed, so a run may finish above its limit by the cost of one call. Calls with
+`costUsd: null` — every Gemini call in these runs — add nothing to `runUsd` at all and so are
+outside it entirely; they are counted separately as `unknownCostCalls`. And `--budget-usd`
+**replaces** the configured value rather than clamping it (`applyRunBudgetOverrides`,
+`composition.ts:156-164`), so a per-run flag can raise the cap as easily as lower it. `0.50` is
+therefore a default guard against an unattended run, not a guarantee about the $5 on the key. That
+is a deliberate trade-off — an operator naming a budget should get the one they named — recorded
+here rather than changed, because nothing observed argues for taking the override away.
+
+## Review round 1 — GPT lane, `gpt-5.6-sol-high`, on commit `11ec918`
+
+Verdict FAIL, 6 blocking and 7 notes. Dispositions, in the reconcile precedence
+`contract-misread → actionable → trade-off → noise`:
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | `Number("")` is 0, so a blank advertised price was published as free | **actionable** — `advertisedPricePerM` rejects a blank or unparseable field; test covers `""`, `"   "`, `"tbd"` |
+| 2 | A budget error thrown by a now-brokered probe became the verdict `probe_failed` | **actionable** — budget errors propagate from all five probes and abort `ModelCatalog.discover` instead of being blamed on the model or the provider |
+| 3 | Brokered probe failures now penalise every probed model's routing score, including for an account-wide 429 | **actionable** — probe-role calls no longer feed `catalog.recordCall` or `model.observation.recorded`. This also removes the same effect from the three strict probes, which had it before this item |
+| 4 | `maxRunUsd` is an admission threshold, `--budget-usd` replaces rather than clamps, null-cost calls are outside it | **actionable on the text, trade-off on the behaviour** — see "What `maxRunUsd` actually is" above; the claim "divides the $5 into ten runs" was wrong and is withdrawn |
+| 5 | Deferring acceptance check 2 to R3 waives it rather than meeting it | **contract-misread, upheld** — `R0.md` amended: R0 stays open until check 2 passes |
+| 6 | The $0.0187 total and the quoted run-1 query are not reproducible | **actionable** — total corrected to $0.020655498 with its query; the probe query was missing `type='model.call'` and is corrected, with all four rows |
+| 7 | New boundary tests assert shapes an implementation special-casing `-1_000_000` would also pass | **actionable** — one single-input case per boundary: `-0`, `±Infinity`, `NaN`, each ceiling from both sides |
+| 8 | `null` pricing sorts first in `estimatedCostPerM`, the same trap one level down | **actionable** — unknown price sorts last; it only reaches the sort under `unrestricted`, which is why the ceiling fix did not cover it |
+| 9 | Renaming `strictComplete` breaks untyped external callers | **noise** — one production caller, typechecked; no external consumer exists |
+| 10 | "No paid model is ever probed" is too categorical: pinned models bypass the cost sort | **actionable on the text** — corrected above |
+| 12 | The 20/min → 1000/day attribution to funding is inference, not record | **actionable on the text** — corrected, and `limit_source: openrouter_free_tier_daily` added, which is the more precise fact R1 needs |
+| — | Contract names base `e87dd26`; implementation base is `e594bbc` | **actionable** — corrected in `R0.md` |
+
+Finding 11 and 13 confirmed the sentinel fix, production reachability, paid selection, one-attempt
+retry behaviour, and the gate.
 
 ## Gates
 
 Node 24.20.0. `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
-→ exit 0, 95 files, 1080 tests (baseline at `e87dd26`: 95 files, 1077 tests). Three added:
-the ceiling/sentinel case, the OpenRouter `-1` listing case, and the probe-seam case.
+→ exit 0, 95 files, **1094 tests** (baseline at `e87dd26`: 95 files, 1077 tests).

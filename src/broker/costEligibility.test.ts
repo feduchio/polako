@@ -40,6 +40,25 @@ describe("cost eligibility", () => {
     expect(isCostEligible({ inputCostPerM: Number.NaN, outputCostPerM: 0 }, ceiling)).toBe(false);
   });
 
+  // One input per boundary, because an aggregate over several boundaries observes none of them:
+  // each price is tested on its own side of its own ceiling, and each rejected shape on its own.
+  it.each([
+    ["input at ceiling", 0.3, 0, true],
+    ["input just above", 0.30001, 0, false],
+    ["output at ceiling", 0, 1.2, true],
+    ["output just above", 0, 1.20001, false],
+    ["negative zero input", -0, 0, true],
+    ["smallest negative input", -Number.MIN_VALUE, 0, false],
+    ["negative output", 0, -1, false],
+    ["infinite input", Number.POSITIVE_INFINITY, 0, false],
+    ["infinite output", 0, Number.POSITIVE_INFINITY, false],
+    ["NaN output", 0, Number.NaN, false],
+  ] as const)("ceiling boundary: %s", (_label, inputCostPerM, outputCostPerM, eligible) => {
+    expect(
+      isCostEligible({ inputCostPerM, outputCostPerM }, { mode: "ceiling", maxInputCostPerM: 0.3, maxOutputCostPerM: 1.2 }),
+    ).toBe(eligible);
+  });
+
   it("does not let a paid higher-tier model beat a free lower-tier model under free_only", () => {
     const catalog = new ModelCatalog();
     catalog.register(new ScriptedProvider("p", []));

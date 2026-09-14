@@ -1,3 +1,4 @@
+import { isBudgetError } from "./quota.js";
 import type { ModelInfo, ProviderAdapter, CompletionRequest } from "./types.js";
 import { ProviderError } from "./types.js";
 import {
@@ -50,6 +51,10 @@ const PROBE_RETRY_POLICY = { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 };
  * probes that used to call `adapter.complete` directly were spend that no budget could see and no
  * economics query could count. Harmless while every probed model was free, not once a ceiling
  * admits paid ones.
+ *
+ * A budget error is the one failure that is never a verdict: it says the run has no money left,
+ * not that the model cannot do the thing. It propagates instead of being recorded as
+ * `probe_failed`, which would let discovery keep asking and keep being refused.
  */
 export async function probeModelCapabilities(
   adapter: ProviderAdapter,
@@ -110,6 +115,7 @@ export async function probeModelCapabilities(
       ...(toolsVerdict === "supported" ? {} : { detail: `finish=${tools.finishReason}` }),
     };
   } catch (err) {
+    if (isBudgetError(err)) throw err;
     toolsVerdict = probeErrorVerdict(err);
     checks.tools = { ok: false, verdict: toolsVerdict, detail: probeErrorDetail(err) };
   }
@@ -185,6 +191,7 @@ export async function probeModelCapabilities(
       ...(jsonVerdict === "supported" ? {} : { detail: `content=${json.message.content.slice(0, 40)}` }),
     };
   } catch (err) {
+    if (isBudgetError(err)) throw err;
     jsonVerdict = probeErrorVerdict(err);
     checks.json = { ok: false, verdict: jsonVerdict, detail: probeErrorDetail(err) };
   }
@@ -233,6 +240,7 @@ async function strictProbe(
     const value: unknown = JSON.parse(response.message.content);
     return accepts(value) ? "supported" : "unsupported";
   } catch (error) {
+    if (isBudgetError(error)) throw error;
     return probeErrorVerdict(error);
   }
 }

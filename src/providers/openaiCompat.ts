@@ -189,7 +189,8 @@ export class OpenAICompatProvider implements ProviderAdapter {
  * for 745 input tokens — 17x the ceiling that admitted it (`docs/ledger/R0-run.md`).
  */
 function advertisedPricePerM(raw: string | undefined): number | null {
-  if (raw === undefined) return null;
+  // `Number("")` and `Number("   ")` are 0, which would publish a blank field as "free".
+  if (raw === undefined || raw.trim() === "") return null;
   const perM = Number(raw) * 1_000_000;
   return Number.isFinite(perM) && perM >= 0 ? perM : null;
 }
