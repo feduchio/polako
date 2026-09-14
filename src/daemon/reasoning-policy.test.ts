@@ -16,27 +16,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ModelObservationRepository } from "../broker/observations.js";
-import { REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import {
+  EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  PROGRESS_SCORE_RESPONSE_SCHEMA,
+  REVIEW_FINDINGS_RESPONSE_SCHEMA,
+} from "../broker/responseSchemas.js";
 import { hashJson } from "../shared/hash.js";
 import type { CompletionRequest } from "../broker/types.js";
 import { defaultConfig } from "../domain/config.js";
 import { FindingSchema } from "../domain/finding.js";
+import { createTaskFromRequirement } from "../domain/task.js";
 import { RunEngine } from "../engine/engine.js";
 import type { PhaseContext } from "../engine/types.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import { Scheduler } from "../scheduler/index.js";
 import { FakeClock } from "../shared/clock.js";
 import { openStore, type Store } from "../store/index.js";
+import type { TournamentCandidate } from "../verify/strategy.js";
 import {
   buildProductionDeps,
   completeDebateRole,
   installProductionDrivers,
+  resolveProductionVerifier,
   selectReviewProviders,
 } from "./composition.js";
 
 const NOW = 1_700_000_000_000;
 /** Fixed, so two arms produce the same request rather than two ids that can never match. */
 const RUN_ID = "run_01hf7yat00000000000000";
+const TASK_ID = "task_01hf7yat00000000000000";
+const INTERPRETATION_ID = "interp_01hf7yat00000000000000";
 const FINDING = FindingSchema.parse({
   id: "find_01hf7yat00000000000000",
   runId: RUN_ID,
@@ -56,6 +65,26 @@ const FINDING = FindingSchema.parse({
   createdAt: NOW,
   updatedAt: NOW,
 });
+
+function verifierCandidate(id: string): TournamentCandidate {
+  return {
+    id,
+    diff: `diff --git a/${id}.ts b/${id}.ts\n+export const ${id} = true;\n`,
+    metrics: {
+      candidateId: id,
+      checksPassed: 2,
+      checksTotal: 2,
+      newFailures: 0,
+      newFailureKeys: [],
+      linesChanged: 1,
+      filesChanged: 1,
+      insertions: 1,
+      deletions: 0,
+    },
+    diffSummary: { files: 1, insertions: 1, deletions: 0 },
+    gateReport: { passed: true, checks: [{ name: "test", kind: "test", status: "passed" }] },
+  };
+}
 
 describe("reasoning policy at each production seam", () => {
   let dir: string;
@@ -92,20 +121,28 @@ describe("reasoning policy at each production seam", () => {
       maxTasks: 1,
       tasks: [{ id: "echo", prompt: "Reply with exactly: ok", expected: "ok" }],
     };
-    const provider = new ScriptedProvider("scripted", [{
-      name: "m",
+    // Two models in distinct families: the empirical verifier selects one per family and needs
+    // two, and with one it falls back to the heuristic and issues no model call at all.
+    const provider = new ScriptedProvider("scripted", ["m", "m2"].map((name, index) => ({
+      name,
       capabilities: {
         ...FAKE_CAPABILITIES.strong,
+        family: `family-${String(index)}`,
         supportsJson: true,
         supportsTools: true,
         inputCostPerM: 0,
         outputCostPerM: 0,
       },
-    }], {
+    })), {
       fallback: {
         kind: "fn",
-        fn: () => ({
-          message: { role: "assistant" as const, content: "ok" },
+        fn: (request) => ({
+          message: {
+            role: "assistant" as const,
+            content: request.responseSchema?.name === "empirical_pair_score"
+              ? JSON.stringify({ scoreA: 4, scoreB: 0 })
+              : "ok",
+          },
           usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
           finishReason: "stop" as const,
           latencyMs: 1,
@@ -116,16 +153,6 @@ describe("reasoning policy at each production seam", () => {
     mkdirSync(home, { recursive: true });
     const deps = buildProductionDeps({ store: armStore, clock, config, home, providers: [provider] });
     await deps.catalog.discover();
-    // `selectReviewProviders` requires a recorded strict-review probe, so record one rather than
-    // consume provider scripts probing for it.
-    const observations = new ModelObservationRepository(armStore);
-    observations.recordStrictProbe({ provider: "scripted", model: "m" }, {
-      schema: "review",
-      schemaHash: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
-      supported: true,
-      at: clock.now(),
-    });
-    observations.restoreCatalog(deps.catalog);
     return { config, provider, deps, store: armStore };
   };
 
@@ -147,7 +174,17 @@ describe("reasoning policy at each production seam", () => {
 
   it("sends an identical reviewer request under both arms", async () => {
     const capture = async (disableReasoning: boolean): Promise<CompletionRequest[]> => {
-      const { provider, deps } = await arm(disableReasoning);
+      const { provider, deps, store: armStore } = await arm(disableReasoning);
+      // Only this seam needs the strict-review probe pre-recorded. Recording it in the shared
+      // setup made discovery skip that probe, so the probe comparison below never saw it.
+      const observations = new ModelObservationRepository(armStore);
+      observations.recordStrictProbe({ provider: "scripted", model: "m" }, {
+        schema: "review",
+        schemaHash: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
+        supported: true,
+        at: clock.now(),
+      });
+      observations.restoreCatalog(deps.catalog);
       const reviewers = await selectReviewProviders(deps);
       const reviewer = reviewers[0];
       if (reviewer === undefined) throw new Error("no reviewer selected");
@@ -188,7 +225,15 @@ describe("reasoning policy at each production seam", () => {
 
   it("sends identical capability-probe requests under both arms", async () => {
     const off = await captureDiscovery(false, "capability_probe_");
-    expect(off.length).toBeGreaterThan(0);
+    // Every probe, named: a probe the setup made discovery skip is a purpose this comparison
+    // silently does not cover, which is how the strict-review one went unobserved.
+    expect([...new Set(off.map((call) => call.metadata.purpose))].sort()).toEqual([
+      "capability_probe_json",
+      "capability_probe_strict_progress",
+      "capability_probe_strict_review",
+      "capability_probe_strict_score",
+      "capability_probe_tools",
+    ]);
     expect(canonical(await captureDiscovery(true, "capability_probe_"))).toEqual(canonical(off));
   });
 
@@ -206,6 +251,46 @@ describe("reasoning policy at each production seam", () => {
     };
     const off = await capture(false);
     expect(off).toHaveLength(1);
+    expect(canonical(await capture(true))).toEqual(canonical(off));
+  });
+
+  it("sends an identical empirical-verifier request under both arms", async () => {
+    const capture = async (disableReasoning: boolean): Promise<CompletionRequest[]> => {
+      const { config, provider, deps, store: armStore } = await arm(disableReasoning);
+      const observations = new ModelObservationRepository(armStore);
+      for (const model of ["m", "m2"]) {
+        for (const schema of ["score", "progress"] as const) {
+          observations.recordStrictProbe({ provider: "scripted", model }, {
+            schema,
+            schemaHash: hashJson(schema === "score" ? EMPIRICAL_SCORE_RESPONSE_SCHEMA : PROGRESS_SCORE_RESPONSE_SCHEMA),
+            supported: true,
+            at: clock.now(),
+          });
+        }
+      }
+      observations.restoreCatalog(deps.catalog);
+      const task = createTaskFromRequirement(INTERPRETATION_ID, "R1", {
+        id: TASK_ID,
+        runId: RUN_ID,
+        title: "noop",
+        description: "WHAT: noop",
+        kind: "bugfix",
+        acceptance: ["noop"],
+        complexity: "normal",
+        baseCheckpointHash: "a".repeat(40),
+        now: NOW,
+      });
+      const strategy = await resolveProductionVerifier(deps, context(config, armStore), task);
+      provider.calls.length = 0;
+      await strategy.comparePair(verifierCandidate("a"), verifierCandidate("b"), {
+        runId: RUN_ID,
+        taskKind: "bugfix",
+        task: "noop",
+      });
+      return provider.calls;
+    };
+    const off = await capture(false);
+    expect(off.length).toBeGreaterThan(0);
     expect(canonical(await capture(true))).toEqual(canonical(off));
   });
 
