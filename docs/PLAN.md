@@ -560,6 +560,15 @@ pass P2.2 before the old path may be removed.
   `axes.length < DEFAULT_REVIEW_AXES.length` guard at `:10-11` in the same change.
 - Criterion: lowest **VALID findings per token** from P2.1; ties broken in favour of higher unique
   raw recall from P1.4.
+- **P1.4 has reported, and it supplies no tiebreaker.** Measured 2026-09-14 at seed 43, 168 of 288
+  cells: **no axis has a unique hit.** `correctness` and `regression` each hit all eight pairs and
+  `adversarial` six, all shared, so `tokensPerUniqueHit` is `null` for all three and the tie above
+  cannot be broken. P3.1 is therefore decided by P2.1 alone, or reports that it cannot be decided.
+  Two further figures from the same run, so this item does not start from the assumption that
+  `adversarial` is the axis to drop: the worst clean-site false-positive rate is `correctness` at
+  80.0%, and the best pair discrimination by a wide margin is `regression` at 70.6% against
+  `adversarial`'s 26.7% and `correctness`'s 17.6%. `adversarial` is the weakest on raw recall
+  (65.0%), which is what the plan expected. Full record in `docs/ledger/P1.4-run.md`.
 - Void if P1.1's conditional skip already reduced the axis to near-zero use; check the skip rate
   first.
 - Verify: recall on the 8 pairs must not fall; P2.2 replay set unchanged.
