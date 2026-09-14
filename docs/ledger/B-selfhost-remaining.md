@@ -684,13 +684,27 @@ otherwise look like unfinished work.
     union. Recorded here rather than only in P1.8's contract because it also explains why no run
     has ever exercised protected paths or a waiver: there was nothing to protect.
 
-54. **`BASELINING` runs an external project's checks in a git worktree with no dependencies
-    installed, so the baseline records every check as `fail` on a project whose suite is green.**
+54. **`runChecks` persists an environment failure as the project's check status, so an external
+    project's baseline says the project is broken when it is not.**
     `createBaseliningDriver` (`src/daemon/composition.ts:263-290`) creates a sandbox at
     `baseline-${ctx.run.id}` from the run commit and calls `runChecks` in it. A git worktree does
-    not carry `node_modules`, and **nothing installs them** — there is no `pnpm install` anywhere
-    in `src/` outside the tests. Every check therefore dies on a missing binary and is persisted as
-    a legitimate `status: "fail"` with an `exitCode`, a duration and a `failureFingerprint`.
+    not carry `node_modules` and nothing installs them: there is no `pnpm install` anywhere in
+    `src/` outside the tests, and `CommandPolicy.forProject` (`src/sandbox/allowlist.ts:173-201`)
+    would deny one, since it admits `pnpm run <script>` and not `pnpm install`. Every check
+    therefore dies on a missing binary.
+    **The defect is what happens next, not the isolation.** Running checks in a clean worktree is
+    the design, and a harness that cannot install is entitled to say so. What it is not entitled to
+    do is persist `status: "fail"` with an `exitCode`, a duration and a `failureFingerprint`, which
+    is a statement about the project, when what failed was the environment. In the store the two
+    are indistinguishable.
+    **The tree already refuses this exact shape one path over.**
+    `missingInstalledDependencies` (`src/findings/reproduce.ts:207-216`) returns
+    `"missing installed dependencies"` when `node_modules` is absent and the command looks like a
+    test runner, and the reproduction path returns `UNCERTAIN` rather than a verdict
+    (`:127-134`). `runChecks` has no equivalent. So the remedy has two candidate halves and the
+    second is not optional: installing dependencies would make a *trusted* baseline obtainable, but
+    only a refuse-to-record guard closes the hole, because install can fail or be skipped and
+    `runChecks` would persist the same false result again.
     **Measured 2026-09-14** by P2.3, the first time an external project was ever targeted
     (`docs/PLAN.md` §2 records 0 before it). On `unjs/defu` at `82632b66`, whose
     `pnpm test` exits 0 on a clean clone in 4.9 s, the baseline recorded `test:fail` in 409 ms,
@@ -726,6 +740,13 @@ otherwise look like unfinished work.
     paragraph claimed all three at once. The coordinator has not run a candidate through it end to end,
     so this is a code-traced consequence rather than an observed run; that is the one step a fix
     should close first.
+    **One detail that widens it.** The fingerprints are not the "command not found" lines.
+    `diagnosticLines` (`src/project/checkRunner.ts:189-192`) keeps only lines matching
+    `fail|error|assert|expected|actual`, so the `lint` and `build` fingerprints here are
+    `ELIFECYCLE Command failed.` alone. Equal-fingerprint matching is therefore coarser than the
+    specific failure, and more candidate outcomes collide with this baseline than the wording above
+    would suggest.
     **Not scheduled here.** P2.3's contract is a two-phase smoke with no production change, so this
     is recorded rather than repaired. It is a prerequisite for any external run: Fable D1 cannot
-    mean anything while the baseline of an external project is an artifact of a missing install.
+    mean anything while an external project's baseline can record the environment's failure as the
+    project's.
