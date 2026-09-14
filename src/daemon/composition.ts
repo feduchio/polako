@@ -1001,7 +1001,11 @@ function brokerCouncilClient(broker: ModelBroker): CouncilCompletionClient {
   };
 }
 
-function resolveDiscoveredProfile(ctx: PhaseContext): ProjectProfile {
+/**
+ * Exported for observation: P1.5's AC1 pins the worker's turn-one message against the instruction
+ * `composeWorkerInstruction` composes, and that needs the same profile the factory resolved.
+ */
+export function resolveDiscoveredProfile(ctx: PhaseContext): ProjectProfile {
   const events = ctx.store.events.list(ctx.run.id, { types: ["project.discovered"] });
   const latest = events.at(-1);
   const payload = latest?.payload as { profile?: ProjectProfile } | undefined;

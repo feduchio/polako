@@ -87,7 +87,11 @@ export class Judge extends CouncilRoleAgent {
   }
 }
 
-function systemPrompt(role: CouncilRole): string {
+/**
+ * Exported for observation: P1.5's AC1 pins the council request's messages exactly, and a check
+ * that reconstructed this text would be asserting its own copy rather than what was sent.
+ */
+export function systemPrompt(role: CouncilRole): string {
   const evidence =
     "execution.baselineEvidence is the failure content (command, status, exit, summary, compact diagnostics). outputArtifact is a CAS pointer to full stdout/stderr, not missing evidence. Do not vote needs_human because you only see a sha256, because source files are not inlined, or because profileHints.framework/packageManager are informational. Workers read the repo later. needs_human is only for genuine mission or product ambiguity this evidence cannot resolve.";
   const workClass =

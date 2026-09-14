@@ -23,11 +23,15 @@ import {
   createWorkerFactory,
   installProductionDrivers,
   promoteEligibleTasksToReady,
+  resolveDiscoveredProfile,
   resolveEnsembleAlternatives,
   resolveProductionVerifier,
 } from "./composition.js";
 import { selectEligibleEnsemble } from "../convergence/pathology/index.js";
 import { createInvestigationTask, createTaskFromRequirement } from "../domain/task.js";
+import type { Task } from "../domain/task.js";
+import { AGENT_TOOL_NAMES } from "../agents/types.js";
+import { composeWorkerInstruction, workerPackCap } from "../context/workerInstruction.js";
 import { id } from "../shared/ids.js";
 import type { PhaseContext } from "../engine/types.js";
 import { AgentRunner } from "../agents/runner.js";
@@ -1122,7 +1126,8 @@ describe("production composition", () => {
    * keys (`src/agents/runner.ts:86-98`), and `signal` only when one is supplied.
    */
   const workerRequestKeys = ["maxTokens", "messages", "metadata", "model", "tools"];
-  const runWorkerArm = async (disableReasoning: boolean): Promise<CompletionRequest[]> => {
+  interface WorkerArm { calls: CompletionRequest[]; task: Task; prompt: string }
+  const runWorkerArm = async (disableReasoning: boolean): Promise<WorkerArm> => {
     const provider = new ScriptedProvider("scripted", [
       { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 } },
     ]);
@@ -1186,9 +1191,20 @@ describe("production composition", () => {
       baseCommit: head,
       policy: CommandPolicy.forProject([], null, false, { packageScripts: [], search: true }),
     });
+    // The instruction the factory will compose, built here from the same seam and the same
+    // inputs, so the check below compares what was sent against what should have been composed
+    // rather than against a copy of it.
+    const prompt = composeWorkerInstruction({
+      registry: deps.protocols,
+      task,
+      findings: store.repos.findings.listByRun(runId),
+      profile: resolveDiscoveredProfile(ctx),
+      tools: [...AGENT_TOOL_NAMES],
+      maxPackTokens: workerPackCap(32_000, config.contextBudget.maxPackTokens),
+    });
     try {
       await createWorkerFactory(deps, ctx)(0).runLoop(task, sandbox);
-      return provider.calls;
+      return { calls: provider.calls, task, prompt: prompt.text };
     } finally {
       await sandbox.destroy();
       rmSync(repoDir, { recursive: true, force: true });
@@ -1196,8 +1212,10 @@ describe("production composition", () => {
   };
 
   it("sends reasoning on worker calls and changes nothing else about them", async () => {
-    const base = await runWorkerArm(false);
-    const flagged = await runWorkerArm(true);
+    const baseArm = await runWorkerArm(false);
+    const flaggedArm = await runWorkerArm(true);
+    const base = baseArm.calls;
+    const flagged = flaggedArm.calls;
     expect(base.length).toBeGreaterThan(0);
     expect(flagged).toHaveLength(base.length);
 
@@ -1215,18 +1233,25 @@ describe("production composition", () => {
     // entry-gate lane appended a message inside the wrapper and every enumerated-field check
     // passed; the fields a wrapper can reach are not a list anyone can keep complete.
     // Ids carry random bytes (`src/shared/ids.ts`) and can never compare equal across two runs,
-    // so they are masked; everything else must match exactly.
+    // so they are masked; everything else must match exactly. The mask is the exact id shape —
+    // a known prefix and 22 characters of the base32 alphabet — because a looser one erases more
+    // than ids: `\w+` after the prefix also rewrote the `run_command` tool name, and renaming
+    // that tool in one arm then compared equal.
     const withoutReasoning = (calls: readonly CompletionRequest[]): string =>
       JSON.stringify(calls.map(({ reasoning: _reasoning, ...rest }) => rest))
-        .replaceAll(/\b(run|task|cand|interp|msn|evt|call)_[0-9a-z]+/g, "$1_<id>");
+        .replaceAll(/\b(run|task|cand|interp|msn|evt|call)_[0-9a-hjkmnp-tv-z]{22}\b/g, "$1_<id>");
     expect(withoutReasoning(flagged)).toEqual(withoutReasoning(base));
+
     // And absolutely, so a wrapper that edits the request identically in both arms is not hidden
-    // by that comparison: turn one carries exactly the composed instruction and nothing beside it.
-    expect(base[0]?.messages).toHaveLength(1);
-    expect(base[0]?.messages[0]?.role).toBe("user");
-    expect(base[0]?.messages[0]?.content).toContain("WHAT: noop");
+    // by that comparison: turn one is exactly the composed instruction, and nothing beside it.
+    expect(base[0]?.messages).toEqual([{ role: "user", content: baseArm.prompt }]);
+    expect(flagged[0]?.messages).toEqual([{ role: "user", content: flaggedArm.prompt }]);
     expect(base[0]?.maxTokens).toBe(32_000);
-    expect(base[0]?.metadata).toMatchObject({ purpose: "agent_run", role: "worker" });
+    expect(base[0]?.metadata).toMatchObject({
+      purpose: "agent_run",
+      role: "worker",
+      taskId: baseArm.task.id,
+    });
   });
 
   it("promotes PENDING tasks with satisfied dependencies to READY", () => {
