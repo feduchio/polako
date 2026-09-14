@@ -113,12 +113,24 @@ Every task in `~/.polish/polish.db` that ever entered `INTEGRATING`, read-only a
 | `task_01m2fmszpqrm2vpf19yy4z` | `run_01m2fms2rgx22qjckxrz66` | `FAILED` | yes | `INTEGRATED` | `4afe9df1` | 358,838 | no |
 
 **All four reached `INTEGRATED`, and the final-state column hides one of them.**
-`task_01m2f941ehfap4aphdchey`'s history is
-`PENDING > READY > RUNNING > GATED > SELECTED > INTEGRATING > INTEGRATED > BLOCKED`: it integrated
-and was then blocked, so reading only its final state undercounts integration. The `reached
-INTEGRATED` column exists because of that task. An earlier version of this file said three of four
-reached `INTEGRATED` and that one task integrated inside a `FAILED` run; both numbers were one
-short, and the GPT lane found them.
+`task_01m2f941ehfap4aphdchey` integrated and then went through three further gate-and-retry cycles
+before ending `BLOCKED`, so reading only its final state undercounts integration. Its recorded
+sequence, in full:
+
+```
+PENDING > READY > RUNNING > GATED > READY > RUNNING > GATED > READY > RUNNING > GATED > SELECTED
+> INTEGRATING > INTEGRATED > GATED > READY > RUNNING > GATED > READY > RUNNING > GATED > READY
+> RUNNING > GATED > BLOCKED
+```
+
+`task_01m2fmszpqrm2vpf19yy4z` is the other post-cut-off one, and it **integrated twice**:
+`… SELECTED > INTEGRATING > INTEGRATED > GATED > SELECTED > INTEGRATING > INTEGRATED`.
+
+The `reached INTEGRATED` column exists because of those two. An earlier version of this file said
+three of four reached `INTEGRATED` and that one task integrated inside a `FAILED` run — both a
+count short — and then described the first task's history as `INTEGRATED > BLOCKED`, which skipped
+nine transitions. The GPT lane found all three errors; the third came from a query that printed
+distinct states rather than the sequence.
 
 **Excluded: 4 of 4.** The reason is the same for all four and it is not a judgement about them:
 `not_replayable(no replay path consumes the recorded completions)`. The material exists — the CAS
