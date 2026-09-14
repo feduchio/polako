@@ -6,30 +6,39 @@ its own denominator in `docs/PLAN.md` §1.
 
 ## Verdict
 
-**The floor is met as the contract words it, and the set is much weaker than a met floor suggests.**
+**`inconclusive — insufficient replay corpus`.**
+
+**4** admitted entries, all 4 reaching `DONE`, against a floor of 5. The floor is **not met**, so by
+MC4 every gate that depends on this set — P3.2 and P3.3 — reports `inconclusive` rather than
+passing.
 
 | Reading | Entries | Of which `DONE` | Floor (≥5, ≥2) |
 |---|---|---|---|
-| MC1 applied literally, one entry per committed scenario | **5** | **5** | met |
-| de-duplicated by (fixture, mission, task contract) | **1** | **1** | not met |
-| de-duplicated by (fixture, mission, task contract, control path) | **3** | **3** | not met |
+| MC1 applied as frozen, one entry per committed scenario | **4** | **4** | **not met** |
+| de-duplicated by (fixture, mission, task contract) | 1 | 1 | not met |
+| de-duplicated by (fixture, mission, task contract, control path) | 3 | 3 | not met |
 
-The middle row is **1**, not 3, and the distinction matters enough to spell out. All five entries
-share one fixture, one mission and one task contract, so the tuple the contract's own vocabulary
-supplies collapses them to a single observation. The three of the last row appear only if the key
-is widened to include the control path each entry exercises — daemon happy path, daemon
-answer-and-resume, engine tick loop. An earlier version of this file reported 3 under the
-three-part key, which was wrong: it quoted a key it had not applied. The GPT lane caught it.
+**The count is 4 because a parameterised test is one committed scenario.** MC1's unit is "a
+committed scripted scenario", and its opening sentence says it is stated so the count cannot be
+inflated. `b10.test.ts:512-515` is a single `it.each` with two arms — the same fixture, mission,
+cassettes and engine path, differing only in `routing.disableReasoning` and in what they assert
+about the request shape. Vitest expands it into two test results; the committed scenario is one.
+The two arms cannot disagree on MC6's predicate, the terminal state, except by crashing the
+pipeline. Counting an `it.each` row as an entry would make any flag table a corpus.
 
-The literal reading is the one the frozen contract authorises, so the recorded verdict is **floor
-met**. The de-duplicated count is recorded beside it because it is the more informative number, and
-because the difference between them is a defect in the criterion rather than in the corpus — see
-*The floor counts entries, not information* below. Nothing was de-duplicated away silently.
+**And the verdict would be `inconclusive` even at a count of 5, because MC4's positive outcome is
+not a count.** Its two authorised outputs are `inconclusive — insufficient replay corpus` below the
+floor and, at or above it, that *the quality gate is evaluable and says so*. The quality gate is
+MC6. A corpus that reduces to **one** observation under the tuple this contract's own vocabulary
+supplies cannot be called evaluable, and an earlier version of this file proved the point by
+printing "floor met" and then withdrawing the licence two sections later — a third verdict the
+contract does not have. The Grok lane named both defects; the second is the one that matters, since
+a reader starting P3.3 reads the verdict line and not the caveat.
 
-**What a met floor licenses here is narrow.** Every entry is a `ScriptedProvider` scenario with
-frozen completions, so by MC5 the set can establish that a change did not break orchestration and
-can **never** discharge quality non-inferiority for a change that alters what a model is asked or
-what it returns.
+**What this set could establish if it did meet the floor is narrow anyway.** Every entry is a
+`ScriptedProvider` scenario with frozen completions, so by MC5 it can only show that a change did
+not break orchestration, and can **never** discharge quality non-inferiority for a change that
+alters what a model is asked or what it returns.
 
 ## Admitted entries
 
@@ -44,8 +53,14 @@ retry"*, `requirementRef: "R1"`, acceptance *"retries after transient failure su
 | E1 | `b10-daemon.test.ts` · "runs full production pipeline via DaemonService.handle to DONE" | `DaemonService.handle("run")` then `engine.tickRun` | `DONE` (`:480`) | `wkr` |
 | E2 | `b10-daemon.test.ts` · "answers NEEDS_HUMAN through RPC and resumes the requesting phase to DONE" | `handle("run")`, `handle("answer")`, `tickRun` | `DONE` (`:517`) | `wkr` |
 | E3 | `b10.test.ts` · "runs full production pipeline from bug-present to DONE with all 23 assertions" | `installProductionDrivers` + `engine.tickRun` | `DONE` (`:498`) | `sup`, `wkr` |
-| E4 | `b10.test.ts` · "sends default reasoning per role across a whole production run" | same as E3, `routing.disableReasoning = false` | `DONE` (`:564`) | `sup`, `wkr` |
-| E5 | `b10.test.ts` · "sends disabled reasoning per role across a whole production run" | same as E3, `routing.disableReasoning = true` | `DONE` (`:564`) | `sup`, `wkr` |
+| E4 | `b10.test.ts:512` · the `it.each` "sends $arm reasoning per role across a whole production run" | same as E3, once with `routing.disableReasoning = false` and once `true` | `DONE` (`:564`), both arms | `sup`, `wkr` |
+
+E4 is **one** entry. Vitest expands it into two test results and both reach `DONE`, but it is one
+committed scenario, and MC1 counts scenarios. Both arms are still executed and both are covered by
+the stability check below; what they do not do is count twice toward the floor.
+
+All four entries reached their asserted `DONE` in all three repetitions, so the `DONE` count is 4
+and the binding shortfall is the entry count, not the `DONE` count.
 
 **The models are placeholders, and that is material.** `wkr` and `sup` are `ScriptedProvider`
 names with `FAKE_CAPABILITIES` and zero cost per million tokens (`b10.test.ts:245-247`), not real
@@ -54,8 +69,8 @@ evidence about any model's behaviour. MC3 of `docs/PLAN.md` §4's "two model nam
 satisfied by a scripted corpus; it is recorded as unsatisfiable for this set rather than filled in
 with fictional names.
 
-E4 and E5 are E3 with one routing flag flipped. They are distinct committed scenarios and MC1
-admits them; they are the reason the two readings of the floor differ by two.
+E4 is E3 with one routing flag flipped, in both directions. It is admitted as one scenario, which
+is what takes the count to 4 rather than 5.
 
 ## Stability — MC3
 
@@ -71,13 +86,26 @@ pnpm vitest run src/e2e/b10-daemon.test.ts src/e2e/b10.test.ts --maxWorkers=2
 | 2 | exit 0, 14 tests passed |
 | 3 | exit 0, 14 tests passed |
 
-All five admitted entries reached their asserted terminal state in all three repetitions. No entry
-is `unstable`, so none is excluded on that ground.
+All four admitted entries, including both arms of E4, reached their asserted terminal state in all
+three repetitions. No entry is `unstable`, so none is excluded on that ground. The shortfall is a
+shortfall of entries, not of stability.
 
 ## Dispositioned and not admitted
 
-Every `it` block in `src/e2e/` is accounted for. Sixteen in total: 5 admitted, 5 `not_terminal`,
-6 `not_replayable`.
+Every `it` block in `src/e2e/` is accounted for. Sixteen expanded test results in total: 5 of them
+admitted as 4 entries, 5 `not_terminal`, 6 `not_replayable`.
+
+**The census was also taken outside `src/e2e/`, because MC1 does not confine a scenario to that
+directory — AC2 does.** The second reviewer lane searched the rest of `src/` for the three MC1
+clauses together and found no further admission. The near misses, recorded so the search is
+reproducible rather than asserted: `src/daemon/bootstrap-daemon.test.ts:81` drives a production
+daemon through `handle("run")` but against a synthetic demo repository rather than a named fixture,
+and asserts `EXECUTING|REVIEWING`; `src/engine/engine.test.ts`, `multi-task-done.test.ts`,
+`planning-reentry.test.ts` and `convergence-drivers.test.ts` reach `DONE`, `FAILED` or
+`NEEDS_HUMAN` on **stub** drivers or seeded phase state; `src/engine/review-drivers.test.ts`
+reaches `FAILED` from `seedReviewingRun` with stubs; `src/engine/review-routing.test.ts` and
+`src/daemon/reasoning-policy.test.ts` use production drivers but assert at function level with no
+named terminal for a fixture run.
 
 | Scenario | Disposition |
 |---|---|
@@ -145,33 +173,47 @@ holds **954** `model_response` and **890** `model_request` artifacts — but not
 into a provider. `RecordReplayProvider` keys on the request's messages, reasoning and `maxTokens`
 (`src/providers/recordReplay.ts:31-60`) and is not wired to the CAS, and finding 14, which would
 have recorded cassettes, is dropped as requiring paid provider APIs. Re-running these four missions
-with the `ScriptedProvider` would not reproduce them; it would produce E1–E5 again, because that is
+with the `ScriptedProvider` would not reproduce them; it would produce E1–E4 again, because that is
 what those cassettes encode.
 
 Recorded as an observation rather than scheduled work: the gap between 954 stored responses and
 zero replayable entries is a missing adapter, not missing data.
+
+**The `Base checkpoint` column is the task's creation baseline, not where it integrated.** It is
+`baseCheckpointHash` as recorded on `task.created`, which is the run's baseline at the moment the
+task was planned. The value moves afterwards: the first two tasks' final projected bases are
+`c011b6e8` and `b35fe739` — the same two review checkpoints `docs/ledger/g1-baseline.md` keys its
+six rounds on — and `task_01m2fmszpqrm2vpf19yy4z` was created at `4afe9df1` but finally carries
+`52d0ccef`, the first of its two integrations. Anyone joining this table to §1's rounds on these
+prefixes will find nothing; join on the final base or on the round identity instead. Recorded
+because the first draft's final-state column hid a transition the same way.
 
 **Two of the four integrated inside runs that ended `FAILED`** — `task_01m2f941ehfap4aphdchey` and
 `task_01m2fmszpqrm2vpf19yy4z`, both from 2026-09-14. Task integration and run success are not the
 same event, which is why the floor counts entries by their own terminal state and records the run
 phase beside it rather than instead of it.
 
-## The floor counts entries, not information
+## Why the count and the information both fall short
 
-**All five** admitted entries are the same mission against the same fixture with the same task
-contract, and two of the five are one scenario with a routing flag flipped. Under `docs/PLAN.md`
-§4's words the floor is met; under the tuple that vocabulary implies, the set carries **one**
-observation. The three control paths are the only axis along which the entries differ at all.
+**All four** admitted entries are the same mission against the same fixture with the same task
+contract. The three control paths — daemon happy path, daemon answer-and-resume, engine tick loop —
+are the only axis along which they differ at all, and one of the four is another scenario's engine
+path with a routing flag flipped. Under the tuple this contract's vocabulary supplies, the set
+carries **one** observation.
 
-This is recorded as a **defect in the criterion, not repaired here**, for two reasons. Imposing a
-de-duplication rule now would amend a frozen contract after seeing the count, which is the exact
-move freezing exists to prevent. And MC7 forbids authoring new entries to inflate — or in this
-case diversify — the set. The decision belongs to a plan revision: either the floor gains a
-distinctness requirement, or it is acknowledged that five entries drawn from one fixture is what
-"5 replayable entries" was always going to mean while one fixture is all there is.
+The verdict does not rest on that argument, and this is worth being precise about, because the
+argument was tried first and was the wrong shape. The count is **4** against a floor of **5** by
+MC1's own unit, so the floor fails arithmetically and no interpretation is needed. The
+informational point is why a count of 5 would not have rescued it either: MC4's positive outcome is
+that *the quality gate is evaluable*, and one observation is not an evaluable corpus for MC6's
+rule.
+
+**What is not done here.** MC7 forbids authoring new scenarios to inflate or diversify the set, and
+nothing has been added. Whether the plan's floor should also carry a distinctness requirement is a
+question for a plan revision; it is now moot for this verdict, since the floor fails on the count.
 
 `docs/PLAN.md` §2 records **0** external projects ever targeted, which is the same fact from the
-other end.
+other end: one fixture is all there is to draw entries from.
 
 ## The two bars — MC5
 
@@ -196,6 +238,10 @@ because it re-imported the retired task-based metric into a quality-only section
 
 | Item | Status from this set |
 |---|---|
-| **P3.2** — adversarial axis as falsifier | **`inconclusive`**, and not because of the floor. P3.2 changes what the adversarial reviewer is asked — it sees only the diff and the other axes' findings and may only refute. That is a change to the request, so bar 2 applies and this set cannot discharge non-inferiority for it. The met floor does not help. |
-| **P3.3** — fail-to-pass on the corpus | Evaluable against this set **if** its change is confined to admission ordering and check comparison and does not alter any model request. P3.3 as written in `docs/PLAN.md` §5 touches neither `src/verify/` nor convergence accounting, so that condition is plausible; it must be re-checked against the actual diff when P3.3 is implemented, not assumed from this file. |
-| **P3.1** | Unaffected. It is gated on P2.1, which reported `inconclusive — no post-validation yield data`. |
+| **P3.2** — adversarial axis as falsifier | **`inconclusive`**, twice over. The floor is unmet, and even a met floor would not have helped: P3.2 changes what the adversarial reviewer is asked — it sees only the diff and the other axes' findings and may only refute — so MC5's second bar applies. `docs/PLAN.md` §5's verify clause "P2.2 replay set unchanged" cannot be discharged when the cassettes would miss. |
+| **P3.3** — fail-to-pass on the corpus | **`inconclusive`**. The floor is unmet, and MC4 says every dependent gate reports `inconclusive` rather than passing. Its change may well touch no model request — `docs/PLAN.md` §5 puts it in admission ordering and check comparison, touching neither `src/verify/` nor convergence accounting — but that only means MC5's second bar would not *additionally* block it. It does not restore the floor. |
+| **P3.1** | Unaffected by this item. It is gated on P2.1, which reported `inconclusive — no post-validation yield data`. |
+
+All three P3 items are therefore `inconclusive`, each for its own reason, and `docs/PLAN.md` §1's
+quality-coupling clause continues to hold: while the quality gate is not `pass`, no cost-reducing
+production behaviour may be enabled by default. `review.skipAdversarialWhenClean` stays `false`.
