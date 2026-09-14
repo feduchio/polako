@@ -485,6 +485,40 @@ describe("review benchmark runner", () => {
     expect(summary).toContain("team tokens: 30 input + 108 output, 36.00 output tokens/hit");
   });
 
+  /**
+   * MC4 and MC9b, at the report rather than at `scoreAxisRecall`. A run that produced cells for one
+   * axis must still persist and render the other two — that is the shape of the partial free-tier
+   * run AC9 exists for, and keying the table on the axes *observed* makes it shrink in exactly the
+   * case it is most needed. And the axis line carries the same three figures as `team (all axes)`,
+   * pair discrimination included, so the two can be read against each other.
+   */
+  it("persists and renders every configured axis, including one that produced no cells", async () => {
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const report = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [
+        reviewer(provider("nex", "nex-agi/a:free", (request) => asymmetricReply("nex", request)), "nex-agi"),
+        reviewer(provider("nvidia", "nvidia/a:free", (request) => asymmetricReply("nvidia", request)), "nvidia"),
+      ],
+      seed: 10,
+      pairs: [pair],
+      axes: ["correctness"],
+    });
+    expect(new Set(report.cells.map((cell) => cell.oracle.axis))).toEqual(new Set(["correctness"]));
+    expect(Object.keys(report.byAxis).sort()).toEqual(["adversarial", "correctness", "regression"]);
+    expect(report.byAxis["adversarial"]?.uniqueHits).toBe(0);
+    expect(report.byAxis["adversarial"]?.tokensPerUniqueHit).toBeNull();
+    expect(report.byAxis["adversarial"]?.discrimination).toEqual({ eligible: 0, discriminated: 0, rate: null });
+
+    const summary = renderReviewerBenchmark(report);
+    expect(summary).toContain(
+      `axis correctness: 100.0% primary recall, 33.3% false positives, 66.7% pair discrimination, 1 unique hits (${pair.pairId}), 138 tokens, 138.00 tokens/unique hit`);
+    expect(summary).toContain(
+      "axis adversarial: undefined primary recall, undefined false positives, undefined pair discrimination, 0 unique hits (none), 0 tokens, undefined tokens/unique hit");
+    expect(summary).toContain("axis regression: undefined primary recall");
+  });
+
   it("rescoring replays raw bodies through the production parser without provider access", async () => {
     const nex = provider("nex", "nex-agi/a:free", benchmarkReply);
     const nvidia = provider("nvidia", "nvidia/a:free", benchmarkReply);
