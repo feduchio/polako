@@ -38,8 +38,21 @@ export function isTestPath(path: string): boolean {
  */
 export function isRunnableTestPath(path: string): boolean {
   if (!isTestPath(path)) return false;
-  const basename = normalizePath(path).split("/").at(-1) ?? "";
-  return /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kts?|swift|cs|php|sh|bash)$/u.test(basename);
+  const normalized = normalizePath(path);
+  const segments = normalized.split("/");
+  const basename = segments.at(-1) ?? "";
+  if (!/\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kts?|swift|cs|php|sh|bash)$/u.test(basename)) {
+    return false;
+  }
+  const stem = basename.replace(/\.[^.]+$/u, "");
+  if (/(?:^|[._-])(?:fixture|fixtures|helper|helpers|mock|mocks|snapshot|snapshots)(?:[._-]|$)/iu.test(stem)) {
+    return false;
+  }
+  if (/(?:^|[._-])(?:test|tests|spec)(?:[._-]|$)/iu.test(stem)) return true;
+  if (/(?:Test|Tests|Spec)$/u.test(stem)) return true;
+  // Jest/Vitest discover source files under __tests__; Cargo discovers every direct tests/*.rs.
+  if (segments.includes("__tests__")) return true;
+  return basename.endsWith(".rs") && segments.includes("tests");
 }
 
 function isNeutralPath(path: string): boolean {

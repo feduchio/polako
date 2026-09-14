@@ -261,7 +261,7 @@ describe("B2 production candidate drivers", () => {
     const testPath = "tests/corpus-regression.test.mjs";
     const corpusCommand = ["node", testPath];
     const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-corpus", "pass", {
-      "tests/a.fixture.json": "{\"fixture\":true}\n",
+      "tests/a.fixture.ts": "export const fixture = true;\n",
       [testPath]: "process.stdout.write('CORPUS-REGRESSION-RAN\\n');\n",
     });
     const { runId, taskId } = seedIntegratingRun(store, clock, fixture, winner);
