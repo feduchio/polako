@@ -12,6 +12,7 @@ import {
   strictIdHit,
   wilson95,
   type BenchmarkCellResult,
+  type AxisRecall,
   type BenchmarkOracle,
 } from "./benchmark.js";
 
@@ -195,9 +196,11 @@ function axisCell(
   pairId: string,
   findings: ReviewedFinding[],
   outputTokens: number,
+  label: "clean" | "mutant" = "mutant",
+  repetition = 1,
 ): BenchmarkCellResult {
   return {
-    oracle: { ...ORACLE, axis: axis as BenchmarkOracle["axis"], pairId, label: "mutant" },
+    oracle: { ...ORACLE, axis: axis as BenchmarkOracle["axis"], pairId, label, repetition },
     model: { provider: "test", model: "m1" },
     family: "m1",
     outcome: "completed_with_findings",
@@ -297,5 +300,106 @@ describe("scoreAxisRecall", () => {
     const order = Object.values(recall).sort(byTokensPerUniqueHit).map((entry) => entry.axis);
     expect(order).toEqual(["adversarial", "correctness", "regression"]);
     expect(recall["regression"]?.tokensPerUniqueHit).toBeNull();
+  });
+});
+
+describe("scoreAxisRecall boundaries", () => {
+  /**
+   * A `clean` cell has no planted defect, so a finding there is a false positive. Counting it as
+   * recall would let an axis that only hallucinates look like the sole finder of a pair.
+   */
+  it("does not count a clean-site false positive as a unique hit", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10, "clean"),
+      axisCell("correctness", "pair-A", [], 10, "mutant"),
+      axisCell("regression", "pair-A", [], 10, "mutant"),
+    ]);
+    expect(recall["adversarial"]?.uniqueHits).toBe(0);
+    expect(recall["adversarial"]?.hitPairIds).toEqual([]);
+  });
+
+  /** MC5 says "at least one cell", not "every cell". */
+  it("counts an axis that hit in one repetition and missed in another", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10, "mutant", 1),
+      axisCell("adversarial", "pair-A", [], 10, "mutant", 2),
+      axisCell("correctness", "pair-A", [], 10, "mutant", 1),
+    ]);
+    expect(recall["adversarial"]?.uniqueHits).toBe(1);
+  });
+
+  it("treats two axes hitting the same pair in different repetitions as shared", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10, "mutant", 1),
+      axisCell("correctness", "pair-A", hits(), 10, "mutant", 3),
+    ]);
+    expect(recall["adversarial"]?.uniqueHits).toBe(0);
+    expect(recall["correctness"]?.uniqueHits).toBe(0);
+  });
+
+  /**
+   * A partial run is expected on the free tier, and the per-axis table must not silently shrink to
+   * the axes that happened to complete.
+   */
+  it("reports every configured axis even when a run produced no cells for it", () => {
+    const recall = scoreAxisRecall([axisCell("correctness", "pair-A", hits(), 10)]);
+    expect(Object.keys(recall).sort()).toEqual(["adversarial", "correctness", "regression"]);
+    expect(recall["adversarial"]?.uniqueHits).toBe(0);
+    expect(recall["adversarial"]?.tokensPerUniqueHit).toBeNull();
+    expect(recall["adversarial"]?.quality.scheduled).toBe(0);
+    expect(scoreAxisRecall([])["regression"]?.uniqueHits).toBe(0);
+  });
+
+  it("omits a usage-less cell from the token total without losing its hit", () => {
+    const withoutUsage: BenchmarkCellResult = { ...axisCell("adversarial", "pair-A", hits(), 0), usage: null };
+    const recall = scoreAxisRecall([withoutUsage, axisCell("adversarial", "pair-B", [], 30)]);
+    expect(recall["adversarial"]?.uniqueHits).toBe(1);
+    const adversarial = recall["adversarial"]!;
+    expect(adversarial.inputTokens + adversarial.outputTokens).toBe(31);
+  });
+
+  /** The denominator has to be the unique-hit count, which one unique hit cannot distinguish. */
+  it("divides by the unique-hit count, not by one", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 9),
+      axisCell("adversarial", "pair-B", hits(), 9),
+      axisCell("correctness", "pair-C", hits(), 5),
+    ]);
+    expect(recall["adversarial"]?.uniqueHits).toBe(2);
+    // (1+9) + (1+9) = 20 over 2 unique pairs.
+    expect(recall["adversarial"]?.tokensPerUniqueHit).toBe(10);
+  });
+
+  it("carries each axis's own quality slice", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10),
+      axisCell("correctness", "pair-A", [], 10),
+    ]);
+    expect(recall["adversarial"]?.quality.scheduled).toBe(1);
+    expect(recall["adversarial"]?.quality.primaryHits).toBe(1);
+    expect(recall["correctness"]?.quality.primaryHits).toBe(0);
+  });
+});
+
+describe("byTokensPerUniqueHit boundaries", () => {
+  const at = (axis: string, tokensPerUniqueHit: number | null): AxisRecall =>
+    ({ axis, hitPairIds: [], uniquePairIds: [], uniqueHits: 0, inputTokens: 0, outputTokens: 0,
+       tokensPerUniqueHit, quality: scoreQuality([]) } as unknown as AxisRecall);
+
+  it("orders null last from either operand position", () => {
+    expect(byTokensPerUniqueHit(at("a", null), at("b", 5))).toBeGreaterThan(0);
+    expect(byTokensPerUniqueHit(at("a", 5), at("b", null))).toBeLessThan(0);
+  });
+
+  it("orders finite costs ascending from either operand position", () => {
+    expect(byTokensPerUniqueHit(at("a", 1), at("b", 5))).toBeLessThan(0);
+    expect(byTokensPerUniqueHit(at("a", 5), at("b", 1))).toBeGreaterThan(0);
+  });
+
+  /** MC7: ties are reported, not broken on cost. The axis name only makes the order stable. */
+  it("keeps a finite tie and a null/null pair stable by axis name rather than dropping one", () => {
+    expect(byTokensPerUniqueHit(at("adversarial", 5), at("regression", 5))).toBeLessThan(0);
+    expect(byTokensPerUniqueHit(at("regression", 5), at("adversarial", 5))).toBeGreaterThan(0);
+    expect(byTokensPerUniqueHit(at("adversarial", null), at("regression", null))).toBeLessThan(0);
   });
 });

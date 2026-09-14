@@ -14,10 +14,11 @@ import type { ProtocolRegistry } from "../protocols/loader.js";
 import { sha256Hex } from "../shared/hash.js";
 import { runAxisReview, type ReviewedFinding } from "./swarm.js";
 import { DEFAULT_REVIEW_AXES } from "../domain/review.js";
-import type { ReviewAxis } from "../domain/finding.js";
+import { ReviewAxisSchema, type ReviewAxis } from "../domain/finding.js";
 import {
   canonicalJsonLine,
   exportedPacket,
+  byTokensPerUniqueHit,
   scoreAxisRecall,
   scorePerModelDiscrimination,
   scoreQuality,
@@ -267,9 +268,12 @@ export function renderReviewerBenchmark(report: ReviewerBenchmarkReport): string
     `Reviewer benchmark: ${String(report.team.completed)}/${String(report.requested)} completed cells${report.partial ? " (partial)" : ""} [configuration=${report.configuration ?? "rescore"}, transport=${report.transportMode ?? "rescore"}]`,
     ...Object.entries(report.byModel).map(([model, score]) =>
       `${model}: ${formatRate(score.primaryRecall)} primary recall, ${formatRate(score.strictIdRecall)} strict-id recall, ${formatRate(score.falsePositiveRate)} false positives, ${formatRate(report.byModelDiscrimination[model]?.rate ?? null)} pair discrimination, ${String(score.inputTokens)} input + ${String(score.outputTokens)} output tokens, ${formatNumber(score.outputTokensPerPrimaryHit)} output tokens/hit`),
-    `team: ${formatRate(report.team.primaryRecall)} primary recall, ${formatRate(report.team.strictIdRecall)} strict-id recall, ${formatRate(report.team.falsePositiveRate)} false positives, ${formatRate(report.teamDiscrimination.rate)} pair discrimination`,
+    `team (all axes): ${formatRate(report.team.primaryRecall)} primary recall, ${formatRate(report.team.strictIdRecall)} strict-id recall, ${formatRate(report.team.falsePositiveRate)} false positives, ${formatRate(report.teamDiscrimination.rate)} pair discrimination`,
     `team tokens: ${String(report.team.inputTokens)} input + ${String(report.team.outputTokens)} output, ${formatNumber(report.team.outputTokensPerPrimaryHit)} output tokens/hit`,
     `failures: schema=${String(report.team.schemaFailures)}/${String(report.team.scheduled)} (${schemaRate}), transport=${String(report.team.transportFailures)}/${String(report.team.scheduled)} (${transportRate})`,
+    // Per axis, ordered by the cost P3.1 decides on. `null` sorts last.
+    ...Object.values(report.byAxis).sort(byTokensPerUniqueHit).map((recall) =>
+      `axis ${recall.axis}: ${formatRate(recall.quality.primaryRecall)} primary recall, ${formatRate(recall.quality.falsePositiveRate)} false positives, ${String(recall.uniqueHits)} unique hits (${recall.uniquePairIds.join(",") || "none"}), ${String(recall.inputTokens + recall.outputTokens)} tokens, ${formatNumber(recall.tokensPerUniqueHit)} tokens/unique hit`),
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -583,6 +587,7 @@ function isPacket(value: unknown): value is ReturnType<typeof exportedPacket> {
 function isOracle(value: unknown): value is BenchmarkOracle {
   if (!isRecord(value)) return false;
   return typeof value["cellId"] === "string" &&
+    ReviewAxisSchema.safeParse(value["axis"]).success &&
     typeof value["pairId"] === "string" &&
     (value["label"] === "clean" || value["label"] === "mutant") &&
     typeof value["criterionId"] === "string" &&

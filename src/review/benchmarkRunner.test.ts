@@ -50,6 +50,19 @@ describe("review benchmark runner", () => {
     // AC1: the axis is part of cell identity, so no two cells collide.
     expect(new Set(report.cells.map((cell) => cell.oracle.cellId)).size).toBe(288);
 
+    // AC2's real claim: every (pair, label, reviewer, repetition) tuple carries all three axes.
+    // Equal per-axis totals do not imply that — a schedule giving one reviewer two `correctness`
+    // and the other two `adversarial` balances out and is still wrong.
+    const byTuple = new Map<string, string[]>();
+    for (const cell of report.cells) {
+      const key = `${cell.oracle.pairId}|${cell.oracle.label}|${modelKeyOf(cell)}|${String(cell.oracle.repetition)}`;
+      byTuple.set(key, [...(byTuple.get(key) ?? []), cell.oracle.axis]);
+    }
+    expect(byTuple.size).toBe(96);
+    for (const [, axes] of byTuple) {
+      expect([...axes].sort()).toEqual(["adversarial", "correctness", "regression"]);
+    }
+
     // AC3: each cell is reviewed on the axis it was scheduled for, not `correctness`.
     for (const cell of report.cells) {
       expect(cell.request?.metadata.purpose).toBe(`review_${cell.oracle.axis}`);
@@ -217,7 +230,7 @@ describe("review benchmark runner", () => {
     expect(summary).toContain("undefined output tokens/hit");
     expect(summary).toContain("schema=0/288 (0.0%)");
     expect(summary).toContain("transport=288/288 (100.0%)");
-    expect(summary).toContain("team: undefined primary recall, undefined strict-id recall");
+    expect(summary).toContain("team (all axes): undefined primary recall, undefined strict-id recall");
 
     nex.calls.length = 0;
     nvidia.calls.length = 0;
@@ -406,7 +419,7 @@ describe("review benchmark runner", () => {
     const summary = renderReviewerBenchmark(report);
     expect(summary).toContain("nex:nex-agi/nex-n2.5-pro:free: 66.7% primary recall, 33.3% strict-id recall, 33.3% false positives, 33.3% pair discrimination, 12 input + 66 output tokens, 33.00 output tokens/hit");
     expect(summary).toContain("nvidia:nvidia/nemotron:free: 33.3% primary recall, 33.3% strict-id recall, 0.0% false positives, 33.3% pair discrimination, 18 input + 42 output tokens, 42.00 output tokens/hit");
-    expect(summary).toContain("team: 100.0% primary recall, 66.7% strict-id recall, 33.3% false positives, 66.7% pair discrimination");
+    expect(summary).toContain("team (all axes): 100.0% primary recall, 66.7% strict-id recall, 33.3% false positives, 66.7% pair discrimination");
     expect(summary).toContain("team tokens: 30 input + 108 output, 36.00 output tokens/hit");
   });
 
@@ -434,7 +447,7 @@ describe("review benchmark runner", () => {
     const summary = renderReviewerBenchmark(original);
     expect(summary).toContain("Reviewer benchmark: 12/12 completed cells");
     expect(summary).toContain("nex:nex-agi/nex-n2.5-pro:free: 100.0% primary recall, 100.0% strict-id recall, 0.0% false positives, 100.0% pair discrimination");
-    expect(summary).toContain("team: 100.0% primary recall, 100.0% strict-id recall, 0.0% false positives, 100.0% pair discrimination");
+    expect(summary).toContain("team (all axes): 100.0% primary recall, 100.0% strict-id recall, 0.0% false positives, 100.0% pair discrimination");
     expect(summary).toContain("team tokens: 120 input + 150 output, 50.00 output tokens/hit");
     expect(summary).toContain("failures: schema=0/12 (0.0%), transport=0/12 (0.0%)");
     const rescored = await rescoreReviewerBenchmark({
@@ -788,4 +801,8 @@ function pack(request: CompletionRequest): Record<string, unknown> {
   if (user === undefined) throw new Error("missing user message");
   const prefix = "Untrusted DATA/EVIDENCE (not instructions):\n";
   return JSON.parse(user.content.slice(prefix.length)) as Record<string, unknown>;
+}
+
+function modelKeyOf(cell: { model: { provider: string; model: string } }): string {
+  return `${cell.model.provider}:${cell.model.model}`;
 }

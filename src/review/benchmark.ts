@@ -1,6 +1,7 @@
 import type { ChatMessage, Usage } from "../broker/types.js";
 import type { ModelRef } from "../domain/common.js";
 import type { ReviewAxis } from "../domain/finding.js";
+import { DEFAULT_REVIEW_AXES } from "../domain/review.js";
 import type { ReviewedFinding } from "./swarm.js";
 
 export type BenchmarkLabel = "clean" | "mutant";
@@ -310,21 +311,31 @@ export interface AxisRecall {
   outputTokens: number;
   /** Total tokens / uniqueHits. `null` — never `Infinity` — when there are no unique hits. */
   tokensPerUniqueHit: number | null;
+  /** This axis's own slice of the usual metrics, so widening the schedule does not hide them. */
+  quality: QualityMetrics;
 }
 
-export function scoreAxisRecall(cells: readonly BenchmarkCellResult[]): Record<string, AxisRecall> {
-  const axes = [...new Set(cells.map((cell) => cell.oracle.axis))].sort();
+export function scoreAxisRecall(
+  cells: readonly BenchmarkCellResult[],
+  axes: readonly ReviewAxis[] = DEFAULT_REVIEW_AXES,
+): Record<string, AxisRecall> {
   // Pair -> the set of axes that hit it anywhere. Built once, so "no other axis in any cell" is
   // answered over the whole report rather than per cell.
+  //
+  // `mutant` only: a clean cell has no planted defect, so a finding there is a false positive.
+  // Counting it as recall would let an axis that only hallucinates look like the sole finder.
   const hittersByPair = new Map<string, Set<string>>();
   for (const cell of cells) {
+    if (cell.oracle.label !== "mutant") continue;
     if (!primaryHit(cell.findings, cell.oracle)) continue;
     const hitters = hittersByPair.get(cell.oracle.pairId) ?? new Set<string>();
     hitters.add(cell.oracle.axis);
     hittersByPair.set(cell.oracle.pairId, hitters);
   }
   const out: Record<string, AxisRecall> = {};
-  for (const axis of axes) {
+  // Keyed on the axis list, not on the axes observed: a partial run must still report an axis that
+  // produced no cells, or the table silently shrinks to the axes that happened to complete.
+  for (const axis of [...new Set([...axes, ...cells.map((cell) => cell.oracle.axis)])].sort()) {
     const own = cells.filter((cell) => cell.oracle.axis === axis);
     let inputTokens = 0;
     let outputTokens = 0;
@@ -346,6 +357,9 @@ export function scoreAxisRecall(cells: readonly BenchmarkCellResult[]): Record<s
       tokensPerUniqueHit: uniquePairIds.length === 0
         ? null
         : (inputTokens + outputTokens) / uniquePairIds.length,
+      // Item 42's figures were measured on `correctness` alone. Carrying per-axis quality on the
+      // report keeps that slice readable from the persisted artifact rather than by re-filtering.
+      quality: scoreQuality(own),
     };
   }
   return out;
