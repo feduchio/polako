@@ -2,14 +2,14 @@
 
 | Field | Value |
 |---|---|
-| Contract | revision 7; frozen at `fde4530`, amended at `cf7c804` (rev 2), `6c539f8` (rev 3), and in rounds 7, 8, 9 and 10 |
+| Contract | revision 8; frozen at `fde4530`, amended at `cf7c804` (rev 2), `6c539f8` (rev 3), and in rounds 7 through 11 |
 | Base | HOST `ef11a00` (accepted P2 block) |
 | Finding | 54, from P2.3 |
-| Implementation | `cf7c804`, then ten fix rounds beginning at `6634348` |
-| Change against base | 30 files, +2,749 / −62 |
-| Gate | Node 24.20.0; **95 files, 1,072 tests**, exit 0 (was 93 / 1,022) |
+| Implementation | `cf7c804`, then eleven fix rounds beginning at `6634348` |
+| Change against base | 30 files, +2,856 / −68 |
+| Gate | Node 24.20.0; **95 files, 1,074 tests**, exit 0 (was 93 / 1,022) |
 
-This record is written after the tenth round. Earlier versions of it described revision 2 —
+This record is written after the eleventh round. Earlier versions of it described revision 2 —
 1,046 tests, "five production files", and a story that ended at `BASELINING → NEEDS_HUMAN` — while
 what had actually shipped spanned the predicate, the check runner, two drivers, the integration
 path, the allowlist, the config, the status projection and the report. A run record that
@@ -87,7 +87,7 @@ candidate reproducing the same failures look regression-free. With no fingerprin
 fails closed on its own terms, without touching `compareToBaseline`, `hasRegression` or the `passed`
 fold — which MC6 forbids.
 
-## The contract changed six times, and why none of it is tuning
+## The contract changed seven times, and why none of it is tuning
 
 **Revision 1 → 2.** The trigger was "argv[0] is a Node package manager". The suite falsified it
 immediately — 13 failures — and the counter-example is in the tree: `fixtures/resume-dup-fetch`
@@ -115,6 +115,9 @@ which is the difference between a clause that is observed and one that is merely
 **Revision 6 → 7.** Reading the candidate before the install answered attribution and silently
 stopped answering integrity. Two reads, two questions.
 
+**Revision 7 → 8.** Two reads have to stay two. Concatenating them into one text before parsing
+re-merged the states the split existed to separate.
+
 Each amendment is recorded with its counter-example rather than applied quietly, because the
 difference between an amendment and a tuned criterion is exactly whether the counter-example exists.
 
@@ -132,6 +135,7 @@ difference between an amendment and a tuned criterion is exactly whether the cou
 | 8 | preparation ran *after* acceptance artifacts were verified, and four clauses nothing observed |
 | 9 | the install's own `node_modules` was read as the candidate's work, and AC17 was false as written |
 | 10 | reading the candidate early made the install's and the checks' own edits invisible |
+| 11 | the two reads were concatenated before parsing, and a failed read fell back silently |
 
 ## Round 8: what the ordering change cost, and four clauses nothing observed
 
@@ -213,6 +217,8 @@ against the full suite, not asserted from reading:
 | `runIndependentGates` verifies acceptance before preparing | 2 |
 | `runIndependentGates` prepares before reading the candidate's diff | 1 |
 | silencing reads only the pre-install capture | 1 |
+| the two captures are concatenated before parsing | 1 |
+| a failing settled read falls back instead of refusing | 1 |
 | the checks run despite an unverifiable acceptance artifact | 1 |
 | the memo holds the settled result instead of the in-flight promise | 1 |
 | the runner never marks a result untrusted | 1 |
@@ -254,4 +260,4 @@ widened into this item.
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result: 95 test files, 1,072 tests, exit 0.
+Result: 95 test files, 1,074 tests, exit 0.

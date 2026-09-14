@@ -1581,6 +1581,98 @@ describe("runChecks and runIndependentGates", () => {
     expect(materialize).not.toHaveBeenCalled();
   });
 
+  it("parses each capture on its own, so an earlier deletion cannot cancel a later wrap", async () => {
+    // Two reads of one checkout are two states, not one longer diff. The wrap detector reasons per
+    // file about additions without a substantial deletion; feeding both states to one parser lets
+    // a deletion the candidate made cancel a wrap the install or a check added afterwards, and the
+    // silencing disappears. Finding 54.
+    const dir = installedCheckout("polish-two-captures-");
+    const profile = discoverProject(dir);
+    const failingOutput = " Tests  1 failed (1)\n FAIL  src/legacy.test.ts > legacy fails\n";
+    const captured = await runChecks({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      sandbox: mockSandbox(async () => processResult({ exitCode: 1, stdout: failingOutput }), [], dir),
+      profile,
+    });
+    const baseline = buildBaselineSnapshot({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      checks: captured,
+      profile,
+    });
+    // What the candidate committed: an unrelated assertion removed, no additions. On its own this
+    // is nothing — the wrap detector needs additions, and the hunk has none.
+    const candidateDiff = [
+      "diff --git a/src/legacy.test.ts b/src/legacy.test.ts",
+      "--- a/src/legacy.test.ts",
+      "+++ b/src/legacy.test.ts",
+      "-  expect(unrelated).toBe(true);",
+      "   it(\"legacy fails\", () => { expect(1).toBe(2); });",
+    ].join("\n");
+    // What the checkout contains at the verdict: the baseline failure wrapped out of the run by
+    // additions alone, with its declaration nowhere in this capture. On its own this is silencing.
+    const settledDiff = [
+      "diff --git a/src/legacy.test.ts b/src/legacy.test.ts",
+      "--- a/src/legacy.test.ts",
+      "+++ b/src/legacy.test.ts",
+      "+describe.each([])(\"legacy\", () => {",
+      "+});",
+    ].join("\n");
+    const sandbox: SandboxHandle = {
+      ...mockSandbox(async () => processResult({ stdout: " Tests  2 passed (2)\n" }), ["src/legacy.test.ts"], dir),
+      git: {
+        diffAgainst: async () => candidateDiff,
+        trackedDiffAgainst: async () => settledDiff,
+      } as unknown as SandboxHandle["git"],
+    };
+    const result = await runIndependentGates({
+      runId: baseline.runId,
+      commitHash: baseline.commitHash,
+      sandbox,
+      profile,
+      acceptanceArtifacts: [],
+      materializeAcceptance: vi.fn(),
+      verifyAcceptance: vi.fn(() => []),
+      baseline,
+    });
+    expect(result.silencing.some((finding) => finding.kind === "skip_only")).toBe(true);
+    expect(result.passed).toBe(false);
+  });
+
+  it("refuses the gate when the settled read of the checkout fails, rather than guessing", async () => {
+    // A git object that has the method and throws has failed to answer. Falling back would
+    // substitute the commit-range diff, which cannot see a working-tree edit at all — precisely
+    // what the second read exists to find. Finding 54.
+    const dir = installedCheckout("polish-settled-read-fails-");
+    const profile = discoverProject(dir);
+    const baseline = buildBaselineSnapshot({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      checks: [],
+      profile,
+    });
+    const sandbox: SandboxHandle = {
+      ...mockSandbox(async () => processResult({ stdout: " Tests  1 passed (1)\n" }), [], dir),
+      git: {
+        diffAgainst: async () => "",
+        trackedDiffAgainst: () => Promise.reject(new Error("git index is locked")),
+      } as unknown as SandboxHandle["git"],
+    };
+    const result = await runIndependentGates({
+      runId: baseline.runId,
+      commitHash: baseline.commitHash,
+      sandbox,
+      profile,
+      acceptanceArtifacts: [],
+      materializeAcceptance: vi.fn(),
+      verifyAcceptance: vi.fn(() => []),
+      baseline,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.silencing[0]?.detail).toContain("git index is locked");
+  });
+
   it("fails independent gates when a failing test is deleted and the count is padded", async () => {
     const dir = installedCheckout("polish-silence-gate-");
     const profile = discoverProject(dir);

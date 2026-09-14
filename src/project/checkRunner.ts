@@ -1092,19 +1092,26 @@ export async function runIndependentGates(input: {
       passed: false,
     };
   }
-  const diffText = settledDiffText === candidateDiffText
-    ? candidateDiffText
-    : `${candidateDiffText}\n${settledDiffText}`;
+  // Each capture is parsed **on its own** and the findings are merged afterwards. Concatenating
+  // first would feed one parser two states of the same file: the detectors carry per-file state —
+  // whether a hunk only added lines, whether a test body was substantially deleted — and a
+  // deletion in the earlier capture would cancel an additions-only wrap in the later one, hiding
+  // a real silencing. Finding 54.
+  const captures = settledDiffText === candidateDiffText
+    ? [candidateDiffText]
+    : [candidateDiffText, settledDiffText];
   const silencing = dedupeSilencing([
-    ...detectSilencing({
-      baseline: input.baseline,
-      candidateConfigHashes: actualConfigHashes,
-      candidateScriptsHash: actualScriptsHash,
-      changedFiles: actualChangedFiles,
-      diffText,
-    }),
+    ...captures.flatMap((diffText) => [
+      ...detectSilencing({
+        baseline: input.baseline,
+        candidateConfigHashes: actualConfigHashes,
+        candidateScriptsHash: actualScriptsHash,
+        changedFiles: actualChangedFiles,
+        diffText,
+      }),
+      ...silencingFromDistantWrap(input.baseline, evaluation.regression.newlyPassing, diffText),
+    ]),
     ...silencingFromSkippedBaselineFailures(input.baseline, checks, evaluation.regression.newlyPassing),
-    ...silencingFromDistantWrap(input.baseline, evaluation.regression.newlyPassing, diffText),
   ]).filter((finding) => !waivedSilencingPaths.has(normalizeChangedPath(finding.path)));
   const regression = evaluation.regression;
   const passed = evaluation.passed && acceptanceProblems.length === 0 && silencing.length === 0;
@@ -1182,13 +1189,15 @@ async function inspectCandidateDiff(
   base: string,
   options: { trackedOnly?: boolean } = {},
 ): Promise<string> {
+  // Absent, not failing, is what falls through: a stub git object in a test has no such method,
+  // while a real one that throws has failed to answer, and the caller turns that into a refused
+  // gate. Swallowing it would silently substitute `git diff base..HEAD`, which cannot see a
+  // working-tree edit at all — the exact thing the second read exists to find. Finding 54.
   const git = sandbox.git;
-  const trackedOnly = options.trackedOnly === true;
-  try {
-    if (trackedOnly && typeof git.trackedDiffAgainst === "function") return await git.trackedDiffAgainst(base);
-    if (!trackedOnly && typeof git.diffAgainst === "function") return await git.diffAgainst(base);
-  } catch {
-    // Stub git objects in tests fall through to sandbox.diff().
+  if (options.trackedOnly === true) {
+    if (typeof git.trackedDiffAgainst === "function") return await git.trackedDiffAgainst(base);
+  } else if (typeof git.diffAgainst === "function") {
+    return await git.diffAgainst(base);
   }
   return sandbox.diff();
 }
