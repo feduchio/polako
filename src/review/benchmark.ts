@@ -311,8 +311,15 @@ export interface AxisRecall {
   outputTokens: number;
   /** Total tokens / uniqueHits. `null` — never `Infinity` — when there are no unique hits. */
   tokensPerUniqueHit: number | null;
-  /** This axis's own slice of the usual metrics, so widening the schedule does not hide them. */
+  /**
+   * This axis's own slice of the headline numbers, computed the way the headline numbers are:
+   * `scoreTeamQuality`, the OR over the two-model team, not `scoreQuality`'s per-cell aggregate.
+   * Item 42's 82.6% / 60.0% were team figures, so a per-cell slice printed beside them is a
+   * different statistic wearing the same name.
+   */
   quality: QualityMetrics;
+  /** Item 42's third headline figure, 36.8%, on the same team grouping. */
+  discrimination: PairDiscrimination;
 }
 
 export function scoreAxisRecall(
@@ -357,9 +364,11 @@ export function scoreAxisRecall(
       tokensPerUniqueHit: uniquePairIds.length === 0
         ? null
         : (inputTokens + outputTokens) / uniquePairIds.length,
-      // Item 42's figures were measured on `correctness` alone. Carrying per-axis quality on the
-      // report keeps that slice readable from the persisted artifact rather than by re-filtering.
-      quality: scoreQuality(own),
+      // Item 42's figures were measured on `correctness` alone, and they are team figures.
+      // Carrying them per axis on the report keeps that slice readable from the persisted
+      // artifact, and comparable to what it is printed next to.
+      quality: scoreTeamQuality(own),
+      discrimination: scoreTeamDiscrimination(own),
     };
   }
   return out;

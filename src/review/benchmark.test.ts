@@ -379,12 +379,49 @@ describe("scoreAxisRecall boundaries", () => {
     expect(recall["adversarial"]?.quality.primaryHits).toBe(1);
     expect(recall["correctness"]?.quality.primaryHits).toBe(0);
   });
+
+  /**
+   * MC9: the slice must be the same statistic as the aggregate it is printed beside, which is the
+   * team OR over the two models — not `scoreQuality`'s per-cell aggregate. One model hitting and
+   * the other missing the same cell is where the two disagree: team recall 1/1, per-cell 1/2.
+   */
+  it("scores each axis as a team, not as a bag of cells", () => {
+    const sibling = (cell: BenchmarkCellResult, model: string): BenchmarkCellResult =>
+      ({ ...cell, model: { provider: "test", model }, family: model });
+    const hit = axisCell("adversarial", "pair-A", hits(), 10);
+    const miss = axisCell("adversarial", "pair-A", [], 10);
+    const cells = [sibling(hit, "m1"), sibling(miss, "m2")];
+    expect(recallOf(cells).quality.primaryRecall).toBe(1);
+    expect(scoreQuality(cells).primaryRecall).toBe(0.5);
+    // Cost accounting is not an OR: both cells were scheduled and paid for.
+    expect(recallOf(cells).quality.outputTokens).toBe(20);
+  });
+
+  /** Item 42's third headline figure is pair discrimination, on the same team grouping. */
+  it("carries each axis's own pair discrimination", () => {
+    const recall = scoreAxisRecall([
+      axisCell("adversarial", "pair-A", hits(), 10, "mutant"),
+      axisCell("adversarial", "pair-A", [], 10, "clean"),
+      axisCell("correctness", "pair-A", hits(), 10, "mutant"),
+      axisCell("correctness", "pair-A", hits(), 10, "clean"),
+    ]);
+    expect(recall["adversarial"]?.discrimination).toEqual({ eligible: 1, discriminated: 1, rate: 1 });
+    expect(recall["correctness"]?.discrimination).toEqual({ eligible: 1, discriminated: 0, rate: 0 });
+    expect(recall["regression"]?.discrimination).toEqual({ eligible: 0, discriminated: 0, rate: null });
+  });
 });
+
+function recallOf(cells: readonly BenchmarkCellResult[]): AxisRecall {
+  const entry = scoreAxisRecall(cells)["adversarial"];
+  if (entry === undefined) throw new Error("missing adversarial recall");
+  return entry;
+}
 
 describe("byTokensPerUniqueHit boundaries", () => {
   const at = (axis: string, tokensPerUniqueHit: number | null): AxisRecall =>
     ({ axis, hitPairIds: [], uniquePairIds: [], uniqueHits: 0, inputTokens: 0, outputTokens: 0,
-       tokensPerUniqueHit, quality: scoreQuality([]) } as unknown as AxisRecall);
+       tokensPerUniqueHit, quality: scoreQuality([]),
+       discrimination: { eligible: 0, discriminated: 0, rate: null } } as unknown as AxisRecall);
 
   it("orders null last from either operand position", () => {
     expect(byTokensPerUniqueHit(at("a", null), at("b", 5))).toBeGreaterThan(0);

@@ -273,7 +273,7 @@ export function renderReviewerBenchmark(report: ReviewerBenchmarkReport): string
     `failures: schema=${String(report.team.schemaFailures)}/${String(report.team.scheduled)} (${schemaRate}), transport=${String(report.team.transportFailures)}/${String(report.team.scheduled)} (${transportRate})`,
     // Per axis, ordered by the cost P3.1 decides on. `null` sorts last.
     ...Object.values(report.byAxis).sort(byTokensPerUniqueHit).map((recall) =>
-      `axis ${recall.axis}: ${formatRate(recall.quality.primaryRecall)} primary recall, ${formatRate(recall.quality.falsePositiveRate)} false positives, ${String(recall.uniqueHits)} unique hits (${recall.uniquePairIds.join(",") || "none"}), ${String(recall.inputTokens + recall.outputTokens)} tokens, ${formatNumber(recall.tokensPerUniqueHit)} tokens/unique hit`),
+      `axis ${recall.axis}: ${formatRate(recall.quality.primaryRecall)} primary recall, ${formatRate(recall.quality.falsePositiveRate)} false positives, ${formatRate(recall.discrimination.rate)} pair discrimination, ${String(recall.uniqueHits)} unique hits (${recall.uniquePairIds.join(",") || "none"}), ${String(recall.inputTokens + recall.outputTokens)} tokens, ${formatNumber(recall.tokensPerUniqueHit)} tokens/unique hit`),
   ];
   return `${lines.join("\n")}\n`;
 }

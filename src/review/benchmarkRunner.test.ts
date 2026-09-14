@@ -286,18 +286,73 @@ describe("review benchmark runner", () => {
   });
 
   /**
-   * MC9: widening the schedule must not redefine the numbers item 42 was accepted on. The
-   * `correctness` slice of a three-axis run scores exactly as a `correctness`-only run.
+   * AC4's other half. The axis is part of cell identity, so an oracle arriving without a usable one
+   * must be refused at the schema boundary — both an unknown string and the pre-P1.4 shape that has
+   * no axis at all. Hashes are recomputed, so this observes the schema check and not the hash check.
    */
-  it("leaves the correctness slice scoring exactly as a correctness-only run", async () => {
+  it("refuses an imported oracle whose axis is absent or not a review axis", async () => {
+    const nex = provider("nex", "nex-agi/a:free", benchmarkReply);
+    const nvidia = provider("nvidia", "nvidia/a:free", benchmarkReply);
+    const pair = REVIEWER_BENCHMARK_PAIRS[0];
+    if (pair === undefined) throw new Error("missing benchmark pair");
+    const original = await runReviewerBenchmark({
+      protocols: PROTOCOLS,
+      reviewers: [reviewer(nex, "nex-agi"), reviewer(nvidia, "nvidia")],
+      seed: 12,
+      pairs: [pair],
+    });
+    const responseJsonl = original.cells.map((cell) => canonicalJsonLine({
+      cellId: cell.oracle.cellId,
+      raw: cell.rawContent,
+      usage: cell.usage,
+    })).join("");
+
+    const rewriteOracles = (edit: (oracle: Record<string, unknown>) => void): string =>
+      original.oracleJsonl.trim().split("\n").map((line) => {
+        const oracle = JSON.parse(line) as Record<string, unknown>;
+        edit(oracle);
+        return canonicalJsonLine(oracle);
+      }).join("");
+
+    for (const oracleJsonl of [
+      rewriteOracles((oracle) => { oracle["axis"] = "vibes"; }),
+      rewriteOracles((oracle) => { delete oracle["axis"]; }),
+    ]) {
+      expect(oracleJsonl).not.toBe(original.oracleJsonl);
+      await expect(rescoreReviewerBenchmark({
+        protocols: PROTOCOLS,
+        packetJsonl: original.packetJsonl,
+        oracleJsonl,
+        responseJsonl,
+        packetSha256: original.packetSha256,
+        oracleSha256: sha256Hex(oracleJsonl),
+        model: { provider: "nex", model: "nex-agi/a:free" },
+        family: "nex-agi",
+        seed: 12,
+      })).rejects.toThrow(/benchmark JSONL schema mismatch/);
+    }
+  });
+
+  /**
+   * MC9/AC8: widening the schedule must not redefine the numbers item 42 was accepted on, and the
+   * preserved slice must be readable from the **persisted report** rather than by re-filtering it.
+   * So this asserts `byAxis.correctness` itself, against a `correctness`-only run's headline
+   * figures — which are team figures, `scoreTeamQuality` and `scoreTeamDiscrimination`.
+   *
+   * The reviewers are deliberately asymmetric: one finds in repetitions 1–2 and the other in 3, so
+   * the team OR and the per-cell aggregate differ. Under a `byAxis` computed with `scoreQuality`
+   * this check fails, which is the point — a per-cell slice printed beside a team aggregate is a
+   * different statistic wearing the same name.
+   */
+  it("carries the correctness slice's team figures on the persisted report", async () => {
     const pair = REVIEWER_BENCHMARK_PAIRS[0];
     if (pair === undefined) throw new Error("missing benchmark pair");
     const build = async (axes?: readonly ["correctness"]): Promise<Awaited<ReturnType<typeof runReviewerBenchmark>>> =>
       runReviewerBenchmark({
         protocols: PROTOCOLS,
         reviewers: [
-          reviewer(provider("nex", "nex-agi/a:free", benchmarkReply), "nex-agi"),
-          reviewer(provider("nvidia", "nvidia/a:free", benchmarkReply), "nvidia"),
+          reviewer(provider("nex", "nex-agi/a:free", (request) => asymmetricReply("nex", request)), "nex-agi"),
+          reviewer(provider("nvidia", "nvidia/a:free", (request) => asymmetricReply("nvidia", request)), "nvidia"),
         ],
         seed: 12,
         pairs: [pair],
@@ -305,8 +360,15 @@ describe("review benchmark runner", () => {
       });
     const all = await build();
     const only = await build(["correctness"]);
-    expect(scoreQuality(all.cells.filter((cell) => cell.oracle.axis === "correctness")))
-      .toEqual(scoreQuality(only.cells));
+    const slice = all.byAxis["correctness"];
+    expect(slice?.quality).toEqual(only.team);
+    expect(slice?.discrimination).toEqual(only.teamDiscrimination);
+
+    // The fixture has to be one on which the two statistics disagree, or the assertion above is
+    // satisfied by an implementation that computed the wrong one.
+    const cells = all.cells.filter((cell) => cell.oracle.axis === "correctness");
+    expect(scoreQuality(cells).primaryRecall).not.toEqual(only.team.primaryRecall);
+    expect(scoreQuality(cells)).toEqual(scoreQuality(only.cells));
   });
 
   it("does not hide one family's failures behind its sibling's completion", async () => {
