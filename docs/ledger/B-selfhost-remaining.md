@@ -497,9 +497,9 @@ seven review rounds. Every finding below has exactly one disposition. None is dr
 | 10 | ACCEPTED as `B-bootstrap-cost-eligibility` (lifted out of this list) |
 | 11 | ACCEPTED with 32+34+44 at `78a3378` |
 | 12 | **ACCEPTED**, both halves. Settings at `0c69901` as P1.7: one resolver owns a run's config, limits and overrides. Spend at `4ad342c` as P1.3: a restarted daemon restores each active run's spend from its own `model.call` events and the restored number binds. Split because the halves are independent: limits without spend still bind, spend without limits binds the wrong number |
-| 13 | **P1.12** — daemon coding E2E for `NEEDS_HUMAN`, STOP/RESUME, crash recovery |
+| 13 | **ACCEPTED** as P1.12. Production implementation `49775bf`; accepted run record at `e903b9e`, `docs/ledger/P1.12-run.md`. Daemon E2E covers answer-to-DONE, STOPPED resume, phase/job/spend recovery, deadlines, causality and worktree cleanup |
 | 14 | **DROPPED.** Requires real paid provider APIs, which policy forbids. Transport-layer cassettes if the need returns |
-| 15 | **P1.13** — `runtime=required` happy path; depends on P1.6 and P1.8 |
+| 15 | **ACCEPTED** as P1.13. Production implementation `2e2043a`; accepted run record at `41739d2`, `docs/ledger/P1.13-run.md`. A required-mode run reaches DONE with restart-stable checkpoint-bound evidence and executable artifact identity |
 | 16 | **ACCEPTED** at `e45aebc` as P1.6. The missing `off` early return in `corpusRuntimeEvidenceAllowsDone` is added; one round, both lanes clean. Run record `docs/ledger/P1.6-run.md` |
 | 17, 21, 22, 25 | **ACCEPTED** at `0c69901` as P1.7. 17: neither boundary defaults an omitted `--runtime`, so `polish.toml` is effective. 21: `run.settings_fallback`, once per run, per dimension. 22: both source-grep pins retired for behavioural isolation checks. 25: one merge site. Run record `docs/ledger/P1.7-run.md` |
 | 18 | ACCEPTED at `8ea156d`; 15 rounds |
@@ -517,7 +517,7 @@ seven review rounds. Every finding below has exactly one disposition. None is dr
 | 35 | ACCEPTED with 23 at `4c5bb63` |
 | 37, 39, 41 | ACCEPTED; fixed on `task/B-review-plumbing` |
 | 42, 45 | ACCEPTED at `b055c81`; re-measured after 32+34+44 |
-| **new (2026-09-13)** | **Corpus discarded during materialization** → **P1.8**. `createGateDeps` (`src/engine/candidateDrivers.ts:784-786`) takes a corpus-aware callback whose two branches are identical, so the `corpus` parameter is discarded and `verifyAcceptance` drops it too. A Mission Acceptance Corpus entry is recorded as metadata and never injected or executed for later candidates. This is the "corpus is cumulative and first-class" invariant failing in production. Found by the council during plan review, not by the code audit |
+| **new (2026-09-13), finding 53** | **ACCEPTED** as P1.8. Production implementation `08d4aec`; accepted run record at `c1de79b`, `docs/ledger/P1.8-run.md`. Mission corpus artifacts are admitted after durable integration, injected into later candidates, protected, canonical-hash verified and executed |
 
 ## Finding 31 — ACCEPTED RISK, 2026-09-13
 
