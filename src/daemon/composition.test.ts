@@ -1091,11 +1091,17 @@ describe("production composition", () => {
    * P1.5 AC1/AC3. The seam is the `complete` wrapper in `createWorkerFactory`, and what matters is
    * what the **provider** received: a helper that is correct and unwired looks identical from the
    * helper's own test. Both arms, because the default arm is the one the item must not disturb.
+   *
+   * MC1 says the default request is what it is at base, and "no reasoning key" is only part of
+   * that. The key set is pinned too: the entry-gate lane added `temperature: 0.25` in the wrapper
+   * and a check that looked only at `reasoning` passed. `AgentRunner` builds exactly these five
+   * keys (`src/agents/runner.ts:86-98`), and `signal` only when one is supplied.
    */
+  const workerRequestKeys = ["maxTokens", "messages", "metadata", "model", "tools"];
   it.each([
     { arm: "default", disableReasoning: false, expected: undefined },
     { arm: "disabled", disableReasoning: true, expected: { effort: "none", exclude: true } },
-  ])("sends $arm reasoning on worker calls", async ({ disableReasoning, expected }) => {
+  ])("sends $arm reasoning on worker calls and changes nothing else", async ({ disableReasoning, expected }) => {
     const provider = new ScriptedProvider("scripted", [
       { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 } },
     ]);
@@ -1167,6 +1173,8 @@ describe("production composition", () => {
         // A key present with an undefined value serialises differently through the payload
         // builder, which forwards `reasoning` whenever it is not `undefined`.
         expect("reasoning" in call).toBe(expected !== undefined);
+        expect(Object.keys(call).sort()).toEqual(
+          expected === undefined ? workerRequestKeys : [...workerRequestKeys, "reasoning"].sort());
       }
     } finally {
       await sandbox.destroy();

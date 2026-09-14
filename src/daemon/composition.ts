@@ -605,7 +605,12 @@ export function selectDebateRoles(deps: ProductionDeps, ctx?: PhaseContext): Deb
   return threeDistinctDebateRoles(roles) ? roles : null;
 }
 
-async function completeDebateRole(
+/**
+ * Exported for observation, not for reuse: `installProductionDrivers` is its only caller. P1.5's
+ * MC5 says the debate site does not gain `routing.disableReasoning`, and that is a property of
+ * this request, so a criterion has to be able to see it.
+ */
+export async function completeDebateRole(
   deps: ProductionDeps,
   ctx: PhaseContext,
   request: DebateCompletionRequest,

@@ -270,3 +270,32 @@ describe("C8 audition strategy and observations", () => {
     expect(debateStarted).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * P1.5 MC5. Audition is a production model call that the happy-path pipeline never reaches, so
+ * the whole-run criterion in `src/e2e/b10.test.ts` cannot see it. It sends no `reasoning`, and
+ * `routing.disableReasoning` must not change that: the flag is wired to the worker and the
+ * council and to nothing else.
+ */
+describe("audition reasoning", () => {
+  it("sends no reasoning field at all", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-audition-reasoning-"));
+    const store = openStore({ artifactsDir: join(dir, "artifacts") });
+    try {
+      const provider = new ScriptedProvider("scripted", [
+        { name: "candidate", capabilities: FAKE_CAPABILITIES.fast },
+      ]).script("candidate", [{ kind: "reply", content: "ok" }]);
+      await new ModelAuditioner(new ModelObservationRepository(store), () => 1, { enabled: true }).run(
+        [{ provider: "scripted", model: "candidate" }],
+        [{ id: "echo", prompt: "say ok", expected: "ok" }],
+        new MicroTaskAuditionStrategy(provider, "run_audition_reasoning"),
+      );
+      expect(provider.calls).toHaveLength(1);
+      expect(provider.calls[0]?.reasoning).toBeUndefined();
+      expect("reasoning" in (provider.calls[0] ?? {})).toBe(false);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

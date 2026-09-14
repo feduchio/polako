@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SecretStore } from "../broker/secrets.js";
 import { CouncilRoleAgent } from "../council/roles.js";
+import { FindingSchema } from "../domain/finding.js";
 import { PolishError } from "../shared/errors.js";
-import { loadConfiguredProviders, resolveCouncilRoles, buildProductionDeps } from "./composition.js";
+import { completeDebateRole, loadConfiguredProviders, resolveCouncilRoles, buildProductionDeps } from "./composition.js";
 import { loadPolishConfig, parseModelRefString } from "./configLoad.js";
 import { FakeClock } from "../shared/clock.js";
 import { openStore } from "../store/index.js";
@@ -354,7 +355,51 @@ model = "scripted:judge"
       if (call === undefined) throw new Error(`no provider call for ${role}`);
       seen[role] = call.reasoning;
       expect("reasoning" in call).toBe(expected !== undefined);
+      // MC1's "unchanged at the default" is more than the absence of one key: the entry-gate lane
+      // added an unrelated field and a check that looked only at `reasoning` passed.
+      const keys = ["messages", "metadata", "model", "responseFormat", "temperature"];
+      expect(Object.keys(call).sort()).toEqual(
+        expected === undefined ? keys : [...keys, "reasoning"].sort());
     }
     expect(seen).toEqual({ planner: expected, scope_guardian: expected, judge: expected });
+
+    // MC5. The finding debate is a production model call the happy-path pipeline never reaches,
+    // so the whole-run criterion in `b10.test.ts` cannot see it. The entry-gate lane applied the
+    // flag here and every check passed. It must send no reasoning under either arm.
+    provider.calls.length = 0;
+    const runId = id("run", clock.now());
+    const finding = FindingSchema.parse({
+      id: id("find", clock.now()),
+      runId,
+      checkpointHash: "a".repeat(40),
+      axis: "correctness",
+      criterion: "INV-01",
+      severity: "high",
+      blocking: true,
+      claim: "the guard admits an equal value",
+      evidence: [{ path: "src/subject.ts", line: 2 }],
+      reproduction: ["call it with equal operands"],
+      reportedBy: { kind: "reviewer", model: { provider: "scripted", model: "council" } },
+      status: "UNCERTAIN",
+      duplicateOf: null,
+      fingerprint: "fp",
+      investigationRounds: 0,
+      createdAt: clock.now(),
+      updatedAt: clock.now(),
+    });
+    await completeDebateRole(deps, {
+      run: { id: runId } as PhaseContext["run"],
+      store,
+      scheduler: {} as PhaseContext["scheduler"],
+      clock,
+      config,
+    } satisfies PhaseContext, {
+      model: { provider: "scripted", model: "council" },
+      role: "judge",
+      prompt: "evidence",
+      finding,
+    });
+    expect(provider.calls[0]?.reasoning).toBeUndefined();
+    expect("reasoning" in (provider.calls[0] ?? {})).toBe(false);
   });
 });

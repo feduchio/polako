@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DISABLED_REASONING } from "../broker/responseSchemas.js";
 import { defaultConfig, type PolishConfig } from "../domain/config.js";
 import { RunEngine } from "../engine/engine.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
@@ -490,6 +491,100 @@ describe("B10 positive path – production E2E", () => {
 
     // 23. Only then DONE.
     expect(finalRun.phase, "run must be DONE").toBe("DONE");
+  });
+
+  /**
+   * P1.5 MC5/AC5, at the pipeline rather than at each site. The per-site checks in
+   * `composition.test.ts` and `configLoad.test.ts` observe the two sites the flag is wired to;
+   * they say nothing about the sites it must **not** reach. The entry-gate lane made that concrete:
+   * stripping the reviewer's or the progress tracker's unconditional `DISABLED_REASONING` in
+   * composition, and adding the flag to `completeDebateRole`, all survived every check.
+   *
+   * So this drives a whole production run to `DONE` and asserts the reasoning actually sent,
+   * per role, in both arms. The observed role set is pinned too: a site that starts calling a
+   * model, or one that stops, changes this table and has to say so.
+   */
+  it.each([
+    { arm: "default", disableReasoning: false },
+    { arm: "disabled", disableReasoning: true },
+  ])("sends $arm reasoning per role across a whole production run", async ({ disableReasoning }) => {
+    const { repoDir, store, clock } = env;
+    const config = testConfig();
+    // The default arm reads the default rather than setting it.
+    if (disableReasoning) config.routing.disableReasoning = true;
+    else expect(config.routing.disableReasoning).toBe(false);
+
+    const { engine, provider } = await buildTestEngine(env, config);
+    provider.script("sup", [
+      { kind: "reply", content: plannerIntake() },
+      { kind: "reply", content: supervisorApprove() },
+      { kind: "reply", content: judgeApprove() },
+    ]);
+    provider.script("wkr", [
+      { kind: "reply", content: "", toolCalls: [{ id: "pwkr", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: "not json" },
+    ]);
+    provider.script("sup", [
+      { kind: "reply", content: "", toolCalls: [{ id: "psup", name: "probe_ping", arguments: "{}" }] },
+      { kind: "reply", content: '{"probe":"ok"}' },
+    ]);
+    provider.script("sup", [
+      { kind: "reply", content: plannerDecompose() },
+      { kind: "reply", content: supervisorApprove({ dropRefs: [] }) },
+      { kind: "reply", content: judgeApprove({ restoreRefs: [] }) },
+    ]);
+    provider.script("wkr", [
+      {
+        kind: "reply",
+        content: "",
+        toolCalls: [{
+          id: "t1",
+          name: "write",
+          arguments: JSON.stringify({ path: "src/retryFetch.mjs", content: FIXED_SOURCE }),
+        }],
+      },
+      {
+        kind: "reply",
+        content: "",
+        toolCalls: [{ id: "t2", name: "finish", arguments: JSON.stringify({ summary: "Fixed #pending not cleared before retry" }) }],
+      },
+    ]);
+    provider.script("sup", [{ kind: "reply", content: JSON.stringify({ findings: [] }) }]);
+
+    const run = engine.createRun({ projectPath: repoDir, runBranch: "polish/main" });
+    recordMission(store, run.id, run.missionId, repoDir, clock);
+    const head = await new Git(repoDir).revParse("HEAD");
+    await new Git(repoDir).createBranch(run.runBranch, head);
+    engine.setCurrentCheckpoint(run.id, head);
+    expect((await driveToTerminal(engine, run.id, store, 300)).phase).toBe("DONE");
+
+    const off = JSON.stringify(DISABLED_REASONING);
+    const unset = "null";
+    const flagged = disableReasoning ? off : unset;
+    // `worker` and the three council roles follow the flag. The other two are unconditional and
+    // must be unmoved by either arm: `reviewer` (`swarm.ts`) always disables it, and `probe`
+    // (`capabilityProbe.ts`) disables it on the strict-schema probes and sends nothing on the
+    // tools and JSON probes. Every role's whole observed set is pinned, so a site that changes
+    // what it sends fails here rather than being averaged away.
+    const expectedByRole: Record<string, string[]> = {
+      worker: [flagged],
+      planner: [flagged],
+      scope_guardian: [flagged],
+      judge: [flagged],
+      reviewer: [off],
+      probe: [off, unset],
+    };
+    const seen = new Map<string, Set<string>>();
+    for (const call of provider.calls) {
+      const role = call.metadata.role;
+      const set = seen.get(role) ?? new Set<string>();
+      set.add(JSON.stringify(call.reasoning ?? null));
+      seen.set(role, set);
+    }
+    expect([...seen.keys()].sort()).toEqual(Object.keys(expectedByRole).sort());
+    for (const [role, expected] of Object.entries(expectedByRole)) {
+      expect([...(seen.get(role) ?? new Set())].sort(), `role ${role}`).toEqual([...expected].sort());
+    }
   });
 });
 
