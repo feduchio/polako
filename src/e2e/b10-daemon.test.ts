@@ -660,6 +660,14 @@ describe("B10 daemon path – production RPC E2E", () => {
       relativePath: restartedEntry?.executable?.relativePath,
       sha256: restartedEntry?.executable?.sha256,
     }).toEqual(identity);
+    const restartedArtifact = service.store.repos.acceptance.get(identity.artifactId);
+    expect(restartedArtifact).toMatchObject({
+      id: identity.artifactId,
+      relativePath: identity.relativePath,
+      sha256: identity.sha256,
+    });
+    expect(Buffer.from(service.store.artifacts.getBytes(identity.sha256)))
+      .toEqual(readFileSync(join(repoDir, "runtime/check.mjs")));
 
     service.store.db.prepare("DELETE FROM acceptance_corpus_entries WHERE id = ?").run(identity.entryId);
     await service.engine.tickRun(runId);

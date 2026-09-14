@@ -4,6 +4,7 @@ import {
   CORPUS_EXECUTABLE_STATUS,
   runtimeAllowsDone,
   type MissionAcceptanceCorpus,
+  type RuntimeEvidence,
 } from "../domain/acceptance.js";
 import type { GateReport, Candidate, CandidateState } from "../domain/candidate.js";
 import type { GateFailureReason } from "../domain/candidate.js";
@@ -377,6 +378,7 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
     const gates = await resolveGates(ctx, options, integrating);
     const corpus = await resolveCorpus(ctx, options);
     const runHead = await (options.resolveRunHead ?? defaultRunHead)(ctx);
+    let runtimeCapture: RuntimeValidationCapture = { passed: true, records: [] };
     const result = await integrateWinner({
       runId: ctx.run.id,
       winnerCommit: winner.headCommit,
@@ -386,8 +388,10 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       runHead,
       ...(corpus === undefined ? {} : { corpus }),
       ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
-      afterGates: ({ commitHash, workspace }) =>
-        validateRuntimeIfNeeded(ctx, options, commitHash, workspace.path),
+      afterGates: async ({ commitHash, workspace }) => {
+        runtimeCapture = await validateRuntimeIfNeeded(ctx, options, commitHash, workspace.path);
+        return runtimeCapture.passed;
+      },
     });
 
     const integrated = result.advanced && result.status === "integrated";
@@ -419,7 +423,6 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
     if (integratedCommit === null || gateResult === null) {
       return { status: "complete", nextPhase: "FAILED" };
     }
-
     const checkpoint = createCheckpoint(ctx, integrating, integratedCommit, gateResult, result.previousHead);
     let changes: ChangedFileStatus[] | null = null;
     let classified: ReturnType<typeof classifyCheckpointPaths> = {
@@ -441,6 +444,7 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
     appendRunCheckpoint(ctx, checkpoint.commitHash);
     let admission: Awaited<ReturnType<typeof admitCorpusExecutable>>;
     try {
+      persistRuntimeCapture(ctx, integratedCommit, runtimeCapture);
       admission = await admitCorpusExecutable(ctx, integrating, integratedCommit, changes);
     } catch (error) {
       admission = {
@@ -840,14 +844,22 @@ function createCheckpoint(
   };
 }
 
+interface RuntimeValidationCapture {
+  passed: boolean;
+  records: {
+    evidence: RuntimeEvidence;
+    executable?: { relativePath: string; bytes: Uint8Array };
+  }[];
+}
+
 async function validateRuntimeIfNeeded(
   ctx: PhaseContext,
   options: CandidateDriverOptions,
   integratedCommit: string,
   checkoutDir: string,
-): Promise<boolean> {
+): Promise<RuntimeValidationCapture> {
   const mode = ctx.config.runtimeValidation.mode;
-  if (mode === "off") return true;
+  if (mode === "off") return { passed: true, records: [] };
   const validators = await resolveValue(options.runtimeValidators ?? [], ctx);
   const templates = resolveProductionRuntimeTemplates({
     checkoutTemplates: discoverProjectRuntime(checkoutDir).templates,
@@ -856,9 +868,11 @@ async function validateRuntimeIfNeeded(
     ),
     corpusTemplates: templatesFromCorpus(ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId)),
   });
-  if (validators.length === 0 || templates.length === 0) return mode !== "required";
+  if (validators.length === 0 || templates.length === 0) {
+    return { passed: mode !== "required", records: [] };
+  }
   const first = templates[0];
-  if (first === undefined) return mode !== "required";
+  if (first === undefined) return { passed: mode !== "required", records: [] };
   const scenario = bindNodeScenario({
     template: first,
     projectPath: checkoutDir,
@@ -871,10 +885,12 @@ async function validateRuntimeIfNeeded(
   } catch (error) {
     // Only `required` turns an unusable validator into a clean fail-closed result; any other
     // throw must keep propagating so integration reports an error rather than advancing.
-    if (mode === "required" && error instanceof RuntimeUnavailableError) return false;
+    if (mode === "required" && error instanceof RuntimeUnavailableError) {
+      return { passed: false, records: [] };
+    }
     throw error;
   }
-  if (selection.validator === null) return mode !== "required";
+  if (selection.validator === null) return { passed: mode !== "required", records: [] };
   const evidences = await rerunRuntimeScenarios({
     templates,
     projectPath: checkoutDir,
@@ -883,18 +899,42 @@ async function validateRuntimeIfNeeded(
     validator: selection.validator,
     level: ctx.config.runtimeValidation.level,
   });
+  const records = evidences.map((evidence) => {
+    const template = templates.find((candidate) => candidate.id === evidence.scenarioId);
+    if (evidence.status !== "passed" || template?.kind !== "node_script") return { evidence };
+    return {
+      evidence,
+      executable: {
+        relativePath: template.relativeScript,
+        bytes: readFileSync(safeTarget(checkoutDir, template.relativeScript)),
+      },
+    };
+  });
+  return {
+    passed: evidences.every((evidence) => runtimeAllowsDone(mode, evidence, integratedCommit)),
+    records,
+  };
+}
+
+function persistRuntimeCapture(
+  ctx: PhaseContext,
+  integratedCommit: string,
+  capture: RuntimeValidationCapture,
+): void {
   const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
-  for (const evidence of evidences) {
+  for (const record of capture.records) {
+    const evidence = record.evidence;
     const entry = corpus.recordRuntimeEvidence({
       missionId: ctx.run.missionId,
       requirementRef: `runtime.${evidence.scenarioId}`,
       evidence,
       expectedCheckpointHash: integratedCommit,
     });
-    const template = templates.find((candidate) => candidate.id === evidence.scenarioId);
-    if (evidence.status !== "passed" || template?.kind !== "node_script") continue;
-    const bytes = readFileSync(safeTarget(checkoutDir, template.relativeScript));
-    const sha256 = ctx.store.acceptance.putContent(bytes, `runtime:${evidence.id}:${template.relativeScript}`);
+    if (record.executable === undefined) continue;
+    const sha256 = ctx.store.acceptance.putContent(
+      record.executable.bytes,
+      `runtime:${evidence.id}:${record.executable.relativePath}`,
+    );
     corpus.admitExecutable({
       entryId: entry.id,
       artifact: {
@@ -902,14 +942,13 @@ async function validateRuntimeIfNeeded(
         runId: ctx.run.id,
         taskId: null,
         kind: "runtime_scenario",
-        relativePath: template.relativeScript,
+        relativePath: record.executable.relativePath,
         sha256,
         evidenceFor: null,
         createdAt: ctx.clock.now(),
       },
     });
   }
-  return evidences.every((evidence) => runtimeAllowsDone(mode, evidence, integratedCommit));
 }
 
 /**

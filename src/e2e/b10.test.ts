@@ -476,7 +476,7 @@ describe("B10 positive path – production E2E", () => {
     expect(integratedCheckpoint, "integrated checkpoint must exist").not.toBeNull();
     expect(integratedCheckpoint!.evidence.testsPassed, "integration gates must have at least one passing test").toBeGreaterThan(0);
 
-    // 20. No runtime required (mode=auto, no runtime/ dir).
+    // 20. Runtime remains optional in this engine-level auto-mode scenario.
     expect(config.runtimeValidation.mode).toBe("auto");
 
     // 21. Original bug is gone — integrated source contains the fix.

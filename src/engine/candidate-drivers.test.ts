@@ -716,7 +716,33 @@ describe("B2 production candidate drivers", () => {
     expect(evidence.map((entry) => entry.scenarioId)).toEqual(["runtime/check.mjs"]);
   });
 
-  it("keeps failed auto runtime evidence blocking integration while still recording it", async () => {
+  it("admits no runtime evidence when run-head CAS rejects the gated workspace", async () => {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-stale-runtime", "pass", {
+      "runtime/check.mjs": "process.exit(0);\n",
+    });
+    const { runId } = seedIntegratingRun(store, clock, fixture, winner);
+    const stale = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    stale.registerPhase("INTEGRATING", createIntegratingDriver({
+      ...driverOptions,
+      runtimeValidators: [new FixtureRuntimeValidator()],
+      resolveRunHead: () => ({
+        read: () => Promise.resolve(fixture.base),
+        compareAndSet: () => Promise.resolve(false),
+      }),
+    }));
+
+    await stale.tickRun(runId);
+
+    expect(store.events.list(runId, { types: ["integration.finished"] })[0]?.payload["status"])
+      .toBe("stale_head");
+    expect(runtimeEvidenceEntries(store, store.repos.runs.get(runId)!.missionId)).toEqual([]);
+    expect(store.events.list(runId, { types: ["acceptance.recorded"] })).toEqual([]);
+  });
+
+  it("does not admit runtime evidence for an integration that failed runtime validation", async () => {
     const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-failing-runtime", "pass", {
       "runtime/check.mjs": "process.exit(1);\n",
     });
@@ -728,10 +754,7 @@ describe("B2 production candidate drivers", () => {
     const finished = store.events.list(runId, { types: ["integration.finished"] })[0];
     expect(finished?.payload["advanced"]).toBe(false);
     expect(finished?.payload["status"]).toBe("failed_runtime");
-    const evidence = runtimeEvidenceEntries(store, run.missionId);
-    expect(evidence).toHaveLength(1);
-    expect(evidence[0]?.status).toBe("failed");
-    expect(evidence[0]?.checkpointHash).toBe(finished?.payload["integratedCommit"]);
+    expect(runtimeEvidenceEntries(store, run.missionId)).toEqual([]);
   });
 });
 
