@@ -43,7 +43,7 @@ export class ScriptedFindingEvidenceWorker implements FindingEvidenceWorker {
 }
 
 export interface CorpusAppender {
-  record(entry: Omit<CorpusEntry, "id" | "createdAt"> & { id?: string }): CorpusEntry;
+  record(entry: Omit<CorpusEntry, "id" | "createdAt" | "executable"> & { id?: string; executable?: CorpusEntry["executable"] }): CorpusEntry;
 }
 
 export interface FindingValidatorOptions {

@@ -147,6 +147,24 @@ export const CorpusEntrySchema = z.object({
   artifactHashes: z.array(Sha256Schema),
   metadata: z.record(z.string(), z.unknown()),
   runtimeEvidence: RuntimeEvidenceSchema.optional(),
+  /**
+   * The executable artifact this entry injects into a later candidate's checkout, admitted once
+   * the fixing task has integrated. `artifactHashes` cannot serve: they are command-output blobs
+   * from validation evidence, and `AcceptanceStorage.materialize` needs a path.
+   *
+   * `null` **with** `metadata.executableStatus` means the decision was made and there was nothing
+   * to admit — the fixing task's diff carried no test file. `null` **without** one is a legacy
+   * entry that predates this descriptor, and the gate fails closed on it rather than guessing a
+   * path.
+   */
+  executable: z
+    .object({
+      artifactId: IdSchema,
+      relativePath: z.string().min(1),
+      sha256: Sha256Schema,
+    })
+    .nullable()
+    .default(null),
   createdAt: TimestampSchema,
 });
 export type CorpusEntry = z.infer<typeof CorpusEntrySchema>;

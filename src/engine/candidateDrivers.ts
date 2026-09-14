@@ -29,12 +29,12 @@ import {
   templatesFromDiscoveredPayload,
 } from "../runtime/corpus.js";
 import { RuntimeUnavailableError, type RuntimeValidator } from "../runtime/types.js";
-import { MissionAcceptanceService } from "../store/missionAcceptance.js";
+import { MissionAcceptanceService, acceptanceArtifactsForGate } from "../store/missionAcceptance.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { Sandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import { Git } from "../sandbox/git.js";
-import { classifyCheckpointPaths } from "../convergence/pathology/changeClassification.js";
+import { classifyCheckpointPaths, isTestPath } from "../convergence/pathology/changeClassification.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
 import type { Task } from "../domain/task.js";
 import { incompleteCodingWorkTerminal } from "../convergence/antiFakeDone.js";
@@ -427,6 +427,7 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       ...classified,
     });
     appendRunCheckpoint(ctx, checkpoint.commitHash);
+    await admitCorpusExecutable(ctx, integrating, integratedCommit, classified.paths);
     appendTaskEvent(ctx, {
       ...integrating,
       state: "INTEGRATED",
@@ -439,6 +440,71 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
     );
     return { status: "complete", nextPhase: remaining ?? "REVIEWING" };
   };
+}
+
+/**
+ * Give the fixing task's corpus entry its executable artifact, once the task has integrated.
+ *
+ * The bytes are the winning candidate's **own regression test file**, read from the integrated
+ * commit. Not `validation.evidenceRefs`, which are command-output blobs, and not
+ * `suggestedCheck`, which is prose or a command. If the integrated diff carries no test file,
+ * nothing is admitted and the entry records that decision — a synthesised file would be a
+ * guess, and a silent skip is indistinguishable from a legacy entry.
+ *
+ * Runs after the checkpoint is durable. A failure here must not undo an integration that has
+ * already happened, so it records the reason and moves on.
+ */
+async function admitCorpusExecutable(
+  ctx: PhaseContext,
+  task: Task,
+  integratedCommit: string,
+  changedPaths: readonly string[],
+): Promise<void> {
+  if (task.origin.kind !== "valid_finding") return;
+  const findingId = task.origin.findingId;
+  const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
+  const pending = corpus.get(ctx.run.missionId).entries.filter((entry) =>
+    entry.executable === null &&
+    typeof entry.metadata["executableStatus"] !== "string" &&
+    entry.metadata["findingId"] === findingId);
+  if (pending.length === 0) return;
+
+  const testPaths = changedPaths.filter((path) => isTestPath(path)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const chosen = testPaths[0];
+  if (chosen === undefined) {
+    for (const entry of pending) {
+      corpus.recordExecutableAbsent({ entryId: entry.id, reason: "no_test_file_in_diff" });
+    }
+    return;
+  }
+  let content: string;
+  try {
+    content = await new Git(ctx.run.projectPath).showFile(integratedCommit, chosen);
+  } catch (error) {
+    for (const entry of pending) {
+      corpus.recordExecutableAbsent({
+        entryId: entry.id,
+        reason: `test_file_unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+    return;
+  }
+  const sha256 = ctx.store.acceptance.putContent(content, `corpus:${task.id}:${chosen}`);
+  for (const entry of pending) {
+    corpus.admitExecutable({
+      entryId: entry.id,
+      artifact: {
+        id: id("acc", ctx.clock.now()),
+        runId: ctx.run.id,
+        taskId: null,
+        kind: "regression_test",
+        relativePath: chosen,
+        sha256,
+        evidenceFor: findingId,
+        createdAt: ctx.clock.now(),
+      },
+    });
+  }
 }
 
 function activeCodingTask(ctx: PhaseContext): Task | null {
@@ -781,11 +847,17 @@ async function resolveGates(ctx: PhaseContext, options: CandidateDriverOptions, 
   return {
     profile,
     baseline,
-    acceptanceArtifacts: ctx.store.repos.acceptance.forTask(ctx.run.id, task.id),
-    materializeAcceptance: (checkoutDir, artifacts, corpus) => {
-      if (corpus === undefined) ctx.store.acceptance.materialize(checkoutDir, artifacts);
-      else ctx.store.acceptance.materialize(checkoutDir, artifacts);
-    },
+    // The union happens **here**, once, and it is what `acceptanceArtifacts` carries. That is
+    // what makes the corpus cumulative: protected-path inspection, materialization and canonical
+    // hash verification all read this one field, so a corpus artifact reaches all three without
+    // a second mechanism. The callbacks' corpus parameter is gone; its two branches were
+    // identical, which is why a corpus entry was never injected or executed.
+    acceptanceArtifacts: acceptanceArtifactsForGate(
+      ctx.store.repos.acceptance.forTask(ctx.run.id, task.id),
+      ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId),
+      (artifactId) => ctx.store.repos.acceptance.get(artifactId) ?? undefined,
+    ),
+    materializeAcceptance: (checkoutDir, artifacts) => { ctx.store.acceptance.materialize(checkoutDir, artifacts); },
     verifyAcceptance: (checkoutDir, artifacts) => ctx.store.acceptance.verify(checkoutDir, artifacts),
     persistOutput: createCheckOutputPersister(ctx.store.artifacts),
     onCheckStart: (info) => {

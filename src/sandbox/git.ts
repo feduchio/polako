@@ -95,6 +95,11 @@ export class Git {
     return files;
   }
 
+  /** File content at a commit, without checking anything out. */
+  showFile(commit: string, path: string): Promise<string> {
+    return this.out(["show", `${commit}:${path}`]);
+  }
+
   async changedFilesBetween(base: string, head: string): Promise<string[]> {
     const text = await this.out(["diff", "--name-only", "-z", `${base}..${head}`]);
     return text.split("\0").filter((path) => path.length > 0);

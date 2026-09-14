@@ -35,15 +35,19 @@ export interface CandidateGates {
   profile: ProjectProfile;
   baseline: BaselineSnapshot;
   acceptanceArtifacts: readonly AcceptanceArtifact[];
+  /**
+   * `artifacts` is already the union of the task's own acceptance artifacts and the mission
+   * corpus's admitted executables — `acceptanceArtifactsForGate` builds it once, at the gate
+   * deps. These callbacks took a corpus argument and ignored it, which is why a corpus entry was
+   * never injected.
+   */
   verifyAcceptance: (
     checkoutDir: string,
     artifacts: readonly AcceptanceArtifact[],
-    corpus?: MissionAcceptanceCorpus,
   ) => { path: string; reason: string }[];
   materializeAcceptance: (
     checkoutDir: string,
     artifacts: readonly AcceptanceArtifact[],
-    corpus?: MissionAcceptanceCorpus,
   ) => void;
   persistOutput?: CheckOutputPersister;
   onCheckStart?: (info: { name: string; command: readonly string[] }) => void;

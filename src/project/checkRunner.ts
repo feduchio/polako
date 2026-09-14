@@ -673,7 +673,6 @@ export async function runIndependentGates(input: {
         input.sandbox.path,
         changedArtifacts,
         input.verifyAcceptance,
-        input.acceptanceCorpus,
       );
   const inspectedByPath = new Map(
     inspectedProblems.map((problem) => [normalizeChangedPath(problem.path), problem]),
@@ -699,16 +698,11 @@ export async function runIndependentGates(input: {
 
   const acceptanceProblems: { path: string; reason: string }[] = (() => {
     try {
-      if (input.acceptanceCorpus === undefined) {
-        input.materializeAcceptance(input.sandbox.path, input.acceptanceArtifacts);
-      } else {
-        input.materializeAcceptance(input.sandbox.path, input.acceptanceArtifacts, input.acceptanceCorpus);
-      }
+      input.materializeAcceptance(input.sandbox.path, input.acceptanceArtifacts);
       const callbackProblems = inspectProtectedPaths(
         input.sandbox.path,
         input.acceptanceArtifacts,
         input.verifyAcceptance,
-        input.acceptanceCorpus,
       );
       // Callback success cannot forge canonical presence; inspect checkout bytes/hash.
       return mergeAcceptanceProblems(
@@ -879,12 +873,10 @@ function inspectProtectedPaths(
   verify: (
     checkoutDir: string,
     artifacts: readonly AcceptanceArtifact[],
-    corpus?: MissionAcceptanceCorpus,
   ) => { path: string; reason: string }[],
-  corpus?: MissionAcceptanceCorpus,
 ): { path: string; reason: string }[] {
   try {
-    return corpus === undefined ? verify(checkoutDir, artifacts) : verify(checkoutDir, artifacts, corpus);
+    return verify(checkoutDir, artifacts);
   } catch (error) {
     const reason = `protected path inspection failed: ${error instanceof Error ? error.message : String(error)}`;
     return artifacts.length > 0
