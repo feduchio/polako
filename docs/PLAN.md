@@ -1,4 +1,20 @@
-# Polish — plan v2, revision 8
+# Polish — plan v2, revision 8 — FROZEN 2026-09-15
+
+> **This document is frozen and is not the current plan.** The current plan is
+> `docs/RECOVERY.md`. Nothing here is executed until `docs/RECOVERY.md` §3 is complete.
+>
+> **Its §2 "Facts" table has been deleted, not corrected.** Four of its entries were false at the
+> time they were read: `ModelBroker.restore` has a production caller (`src/daemon/service.ts:129`,
+> wired by P1.3); "External projects ever targeted | 0" is contradicted by the store, which records
+> a run against `~/polish-selfhost-target` on 2026-09-03 with a fully green baseline; the 78.7% /
+> 64.4% review share is a 2026-09-04 snapshot, against 32.6% / 26.7% across the store today; and
+> the B-selfhost-8 commit counts exist in four mutually incompatible versions across this file,
+> `PHASE-C.md:194`, finding 23 and `B-selfhost-8-run.md:106`. A facts table inside a plan goes
+> stale silently and is then cited as evidence. Facts are now obtained by query — see
+> `docs/RECOVERY.md` §4 rule 3.
+>
+> **The economic programme built on those numbers — P1.1, P1.2, P3.1, P3.2 and the §1 cost gate —
+> is suspended** pending the re-measurement in `docs/RECOVERY.md` R6.
 
 Base: HOST `4c5bb63` on `phase-c-collab`. Gate there: 860 tests, 85 files, 28.1 s, exit 0.
 
@@ -145,34 +161,11 @@ gate evaluated at partial coverage is `inconclusive`.
 
 This criterion is a project decision recorded here, not a Fable §1 invariant.
 
-## 2. Facts
+## 2. Facts — DELETED 2026-09-15
 
-Verified at `4c5bb63`.
-
-| Fact | Value | Source |
-|---|---|---|
-| Production / test lines in `src/` | 30,347 / 30,116 | `wc -l` |
-| Real runs reaching `DONE` | 2 of 6 | finding 29 |
-| External projects ever targeted | 0 | `~/.polish/projects.json` |
-| Review swarm share of all tokens | 78.7%, 5:1 output:input | finding 29 |
-| `adversarial` axis alone | 64.4% of all spend | finding 29 |
-| Observed reviewer completion tokens | 435–1,107 | finding 43 |
-| Free reviewers: recall / clean-site FP / pair discrimination | 82.6% / 60.0% / 36.8% | item 42 |
-| Historical completed review executions returning findings | 0 of 18 | finding 41 |
-| B-selfhost-8 production change | +109/−20 in **2 behaviour commits**, rounds 1–3 | `B-selfhost-8-run.md:106-108` |
-| B-selfhost-8 after that | 26 rounds, **26 test-only commits** | same |
-| B-selfhost-8 test file | 982 lines | `src/daemon/service.budget-override.test.ts` |
-| `docs/BVP.md` "at most 2 fix rounds" | never honoured: A2 7, A3 7, A6 9 | ledgers |
-| `EmpiricalVerifier` in production | wired | `src/daemon/composition.ts:715` |
-| `detectTestOnlyTreadmill` | shipped with 35+23 | `src/convergence/pathology/detectors.ts:165-211` |
-| `ModelBroker.restore` production callers | none | `src/broker/broker.ts:278` |
-| Benchmark runner axes | **`correctness` only** | `src/review/benchmarkRunner.ts:334` |
-| `reviewersPerRound` | a **count** cycling `DEFAULT_REVIEW_AXES` | `src/domain/review.ts:6-18` |
-| Axis dispatch | **sequential** `for` loop over `missingAxes`, in `DEFAULT_REVIEW_AXES` order, so `adversarial` is last at the default of 3 | `src/engine/reviewDrivers.ts:172`, `:815-828` |
-| `reviewDrivers.ts:905` | **not** dispatch — it is `exhaustedAxes`, counting sticky failures | `src/engine/reviewDrivers.ts:895-915` |
-| `roundExecutions` binding | a snapshot taken at `:118`, **before** the axis loop | `src/engine/reviewDrivers.ts:118` |
-| Reviewer calls today | `reasoning: DISABLED_REASONING`, **no** `maxTokens`, `temperature: 0` | `src/review/swarm.ts:69-88` |
-| `model.call` payload | carries `role` and `purpose` | `src/broker/broker.ts:172`, `swarm.ts:83-86` |
+This table is removed, not corrected. See the freeze banner at the top of this file for the
+four entries that were false, and `docs/RECOVERY.md` §4 rule 3 for the replacement practice:
+every fact carries the command that reproduces it, or it is not a fact.
 
 ## 3. P1 — Live repairs, cost, and transport bounds
 
