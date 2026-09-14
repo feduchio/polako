@@ -945,9 +945,12 @@ export async function runIndependentGates(input: {
       passed: false,
     };
   }
-  let candidateDiffText: string;
+  let candidateCapture: CheckoutCapture;
   try {
-    candidateDiffText = await inspectCandidateDiff(input.sandbox, input.baseline.commitHash);
+    candidateCapture = await captureCheckout(input.sandbox, input.baseline.commitHash, {
+      phase: "candidate",
+      changedFiles: actualChangedFiles,
+    });
   } catch (error) {
     const reason = `candidate silencing inspection failed: ${error instanceof Error ? error.message : String(error)}`;
     return {
@@ -1073,14 +1076,9 @@ export async function runIndependentGates(input: {
   // checks just ran against", which is a different question the moment anything else writes to it
   // — a lifecycle script, or a check command. Untracked files are excluded because by now the
   // biggest of them is the `node_modules` we installed. Finding 54.
-  let settledDiffText: string;
-  let actualConfigHashes: Record<string, string>;
-  let actualScriptsHash: string;
+  let settledCapture: CheckoutCapture;
   try {
-    settledDiffText = await inspectCandidateDiff(input.sandbox, input.baseline.commitHash, { trackedOnly: true });
-    const hashes = inspectManifestHashes(input.sandbox.path);
-    actualConfigHashes = hashes.manifestHashes;
-    actualScriptsHash = hashes.scriptsHash;
+    settledCapture = await captureCheckout(input.sandbox, input.baseline.commitHash, { phase: "settled" });
   } catch (error) {
     const reason = `candidate silencing inspection failed: ${error instanceof Error ? error.message : String(error)}`;
     return {
@@ -1092,30 +1090,88 @@ export async function runIndependentGates(input: {
       passed: false,
     };
   }
-  // Each capture is parsed **on its own** and the findings are merged afterwards. Concatenating
-  // first would feed one parser two states of the same file: the detectors carry per-file state —
-  // whether a hunk only added lines, whether a test body was substantially deleted — and a
-  // deletion in the earlier capture would cancel an additions-only wrap in the later one, hiding
-  // a real silencing. Finding 54.
-  const captures = settledDiffText === candidateDiffText
-    ? [candidateDiffText]
-    : [candidateDiffText, settledDiffText];
+  // Each capture is judged **whole and on its own**: its diff with its own file list and its own
+  // manifest hashes, from the moment it was taken. Two reasons, and both were defects first. One
+  // parser given two states of a file lets a deletion in the earlier state cancel an
+  // additions-only wrap in the later one. And pairing the earlier diff with the *later* hashes
+  // loses everything the candidate did and then undid — a script that edits `package.json`, runs,
+  // and restores it is invisible to a hash read at the end. Finding 54.
+  const captures = sameCapture(candidateCapture, settledCapture)
+    ? [candidateCapture]
+    : [candidateCapture, settledCapture];
   const silencing = dedupeSilencing([
-    ...captures.flatMap((diffText) => [
+    ...captures.flatMap((capture) => [
       ...detectSilencing({
         baseline: input.baseline,
-        candidateConfigHashes: actualConfigHashes,
-        candidateScriptsHash: actualScriptsHash,
-        changedFiles: actualChangedFiles,
-        diffText,
+        candidateConfigHashes: capture.configHashes,
+        candidateScriptsHash: capture.scriptsHash,
+        changedFiles: capture.changedFiles,
+        diffText: capture.diffText,
       }),
-      ...silencingFromDistantWrap(input.baseline, evaluation.regression.newlyPassing, diffText),
+      ...silencingFromDistantWrap(input.baseline, evaluation.regression.newlyPassing, capture.diffText),
     ]),
     ...silencingFromSkippedBaselineFailures(input.baseline, checks, evaluation.regression.newlyPassing),
   ]).filter((finding) => !waivedSilencingPaths.has(normalizeChangedPath(finding.path)));
   const regression = evaluation.regression;
   const passed = evaluation.passed && acceptanceProblems.length === 0 && silencing.length === 0;
   return { checks, silencing, acceptanceProblems, candidateProtectedPathProblems, regression, passed };
+}
+
+/**
+ * Everything the silencing detectors read about a checkout, from one moment.
+ *
+ * A value rather than four loose variables because the defect this item kept producing was always
+ * the same: evidence from one moment evaluated against metadata from another. A gate reads the
+ * checkout twice — before the install, which is what the candidate did, and after the checks,
+ * which is what the verdict is about — and mixing a diff from one with hashes from the other loses
+ * exactly the changes made and then undone in between. Finding 54.
+ */
+interface CheckoutCapture {
+  phase: "candidate" | "settled";
+  changedFiles: string[];
+  diffText: string;
+  configHashes: Record<string, string>;
+  scriptsHash: string;
+}
+
+/**
+ * `candidate` includes untracked files, because a file the candidate added without committing it is
+ * its work. `settled` does not, because by then the untracked part of the checkout is dominated by
+ * the `node_modules` we installed, and its file list comes from the diff for the same reason.
+ */
+async function captureCheckout(
+  sandbox: SandboxHandle,
+  base: string,
+  input: { phase: "candidate"; changedFiles: readonly string[] } | { phase: "settled" },
+): Promise<CheckoutCapture> {
+  const trackedOnly = input.phase === "settled";
+  const diffText = await inspectCandidateDiff(sandbox, base, { trackedOnly });
+  const hashes = inspectManifestHashes(sandbox.path);
+  return {
+    phase: input.phase,
+    changedFiles: input.phase === "candidate"
+      ? input.changedFiles.map(normalizeChangedPath)
+      : changedPathsInDiff(diffText),
+    diffText,
+    configHashes: hashes.manifestHashes,
+    scriptsHash: hashes.scriptsHash,
+  };
+}
+
+function changedPathsInDiff(diffText: string): string[] {
+  const paths = new Set<string>();
+  for (const line of diffText.split("\n")) {
+    const git = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (git?.[2] !== undefined) paths.add(normalizeChangedPath(git[2]));
+  }
+  return [...paths];
+}
+
+/** Whether the checkout said the same thing twice, in which case one judgement is enough. */
+function sameCapture(a: CheckoutCapture, b: CheckoutCapture): boolean {
+  return a.diffText === b.diffText &&
+    a.scriptsHash === b.scriptsHash &&
+    canonicalJson(a.configHashes) === canonicalJson(b.configHashes);
 }
 
 /** Two captures of one checkout report the same tracked edit twice; it is still one finding. */

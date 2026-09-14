@@ -1581,6 +1581,57 @@ describe("runChecks and runIndependentGates", () => {
     expect(materialize).not.toHaveBeenCalled();
   });
 
+  it("keeps the candidate's own manifest evidence, which a check can undo before anyone looks", async () => {
+    // Each capture carries the hashes from its own moment. Reading the manifest only at the end
+    // loses whatever the candidate changed and then put back: a script that widens `test`, runs,
+    // and restores `package.json` leaves a final hash identical to the baseline's. Finding 54.
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-restore-repo-"));
+    const wtRoot = mkdtempSync(join(tmpdir(), "polish-restore-wt-"));
+    cleanup.push(repoDir, wtRoot);
+    const repo = await Git.init(repoDir);
+    const original = JSON.stringify({ scripts: { test: "vitest run" } });
+    writeFileSync(join(repoDir, "package.json"), original);
+    mkdirSync(join(repoDir, "src"), { recursive: true });
+    writeFileSync(join(repoDir, "src/a.test.ts"), "it('a', () => { expect(1).toBe(1); });\n");
+    const base = (await repo.commitAll("baseline"))!;
+    const profile = discoverProject(repoDir);
+    const baseline = buildBaselineSnapshot({
+      runId: id("run"),
+      commitHash: base,
+      checks: [{ name: "test", kind: "test", status: "pass", exitCode: 0, durationMs: 1, summary: null, outputRef: null }],
+      profile,
+    });
+    const sandbox = new WorktreeSandbox(repoDir, wtRoot, defaultConfig().sandbox);
+    const candidate = await sandbox.create({ id: "restore-cand", baseCommit: base, branch: "polish/restore", policy: CommandPolicy.forProject([], null) });
+    writeFileSync(join(candidate.path, "package.json"), JSON.stringify({ scripts: { test: "vitest run --passWithNoTests" } }));
+    const head = (await candidate.commitAll("widen the test script"))!;
+    const gate = await sandbox.create({ id: "restore-gate", baseCommit: head, policy: CommandPolicy.forProject([], null) });
+    try {
+      const result = await runIndependentGates({
+        runId: baseline.runId,
+        commitHash: head,
+        sandbox: {
+          ...gate,
+          run: async () => {
+            // The check puts the manifest back on its way out.
+            writeFileSync(join(gate.path, "package.json"), original);
+            return processResult({ stdout: " Tests  1 passed (1)\n" });
+          },
+        },
+        profile,
+        acceptanceArtifacts: [],
+        materializeAcceptance: vi.fn(),
+        verifyAcceptance: vi.fn(() => []),
+        baseline,
+      });
+      expect(result.silencing.some((finding) => finding.kind === "scripts_changed")).toBe(true);
+      expect(result.passed).toBe(false);
+    } finally {
+      await gate.destroy();
+      await candidate.destroy();
+    }
+  });
+
   it("parses each capture on its own, so an earlier deletion cannot cancel a later wrap", async () => {
     // Two reads of one checkout are two states, not one longer diff. The wrap detector reasons per
     // file about additions without a substantial deletion; feeding both states to one parser lets
