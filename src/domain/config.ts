@@ -199,6 +199,14 @@ export const RuntimeValidationConfigSchema = z.object({
 });
 export type RuntimeValidationConfig = z.infer<typeof RuntimeValidationConfigSchema>;
 
+/**
+ * The preparation defaults, here rather than inline in the schema because the check runner applies
+ * the same two values when a caller says nothing. One definition, so an operator reading the config
+ * and a sandbox prepared without one cannot disagree. Finding 54.
+ */
+export const DEFAULT_INSTALL_DEPENDENCIES = true;
+export const DEFAULT_INSTALL_TIMEOUT_MS = 10 * 60_000;
+
 export const SandboxConfigSchema = z.object({
   backend: z.enum(["worktree", "sandbox-exec", "container"]).default("worktree"),
   commandTimeoutMs: z.number().int().min(1000).default(15 * 60_000),
@@ -211,8 +219,8 @@ export const SandboxConfigSchema = z.object({
    * rather than the project, and the alternative — refusing to record a baseline — cannot be
    * cleared by an operator, because every attempt uses a fresh worktree. Finding 54.
    */
-  installDependencies: z.boolean().default(true),
-  installTimeoutMs: z.number().int().min(1000).default(10 * 60_000),
+  installDependencies: z.boolean().default(DEFAULT_INSTALL_DEPENDENCIES),
+  installTimeoutMs: z.number().int().min(1000).default(DEFAULT_INSTALL_TIMEOUT_MS),
   envAllowlist: z.array(z.string()).default(["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "SHELL", "USER"]),
   envDenyPatterns: z
     .array(z.string())

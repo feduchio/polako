@@ -282,7 +282,10 @@ describe("candidate gates prepare the project's dependencies", () => {
     expect(installs).toMatchObject([{ attempted: true, ready: true }]);
   });
 
-  it("issues no install when the gates do not ask for one", async () => {
+  it("installs even when the gates do not ask, because omission cannot mean skip", async () => {
+    // The mutant this kills: deleting the `prepareDependencies` assignment in `resolveGates`, which
+    // a review round did with 93 tests still green. Preparation is not a favour a call site does;
+    // saying nothing means prepare, so the deletion loses the operator's setting, not the step.
     const dir = uninstalledCheckout();
     const issued: string[][] = [];
     await runGates({
@@ -291,7 +294,8 @@ describe("candidate gates prepare the project's dependencies", () => {
       sandbox: scriptedHandle(dir, issued),
       gates: gatesFor(dir, false),
     });
-    expect(issued).toEqual([["pnpm", "run", "test"]]);
+    expect(issued[0]).toEqual(["pnpm", "install", "--frozen-lockfile"]);
+    expect(issued[1]).toEqual(["pnpm", "run", "test"]);
   });
 });
 

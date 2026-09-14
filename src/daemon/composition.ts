@@ -25,10 +25,11 @@ import { createStructuredCouncilClient } from "../council/structuredOutput.js";
 import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } from "../council/types.js";
 import type { PolishConfig } from "../domain/config.js";
 import { supervisorModelChain } from "../domain/config.js";
+import type { CheckResult } from "../domain/checks.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
 import { modelRefKey, SYSTEM_ACTOR, type ModelRef } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
-import type { RunPhase } from "../domain/run.js";
+import type { RunPhase, TerminalReason } from "../domain/run.js";
 import type { Task } from "../domain/task.js";
 import {
   createComparingDriver,
@@ -53,9 +54,8 @@ import {
   buildBaselineSnapshot,
   createCheckOutputPersister,
   discoverProject,
-  ensureProjectDependencies,
+  EnvironmentNotReadyError,
   runChecks,
-  untrustedChecks,
   type EnsureDependenciesResult,
   type ProjectProfile,
 } from "../project/index.js";
@@ -280,52 +280,38 @@ export function createBaseliningDriver(deps: ProductionDeps): PhaseDriver {
       policy,
     });
     try {
-      // Make the sandbox able to produce evidence before asking it to. A fresh worktree carries no
-      // node_modules, so without this the checks below would describe the environment. Finding 54.
-      const prepared = await ensureProjectDependencies(sandbox, profile, {
-        enabled: ctx.config.sandbox.installDependencies,
-        timeoutMs: ctx.config.sandbox.installTimeoutMs,
-        ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
-        // Before, not after: a crash or a kill during a ten-minute install must still leave a
-        // record that it was running, which is what docs/THREAT_MODEL.md promises of any command.
-        onStart: (info) => { recordInstallStart(ctx, info); },
-      });
-      if (prepared.attempted) recordDependencyInstall(ctx, prepared);
-      const checks = await runChecks({
-        runId: ctx.run.id,
-        commitHash,
-        sandbox,
-        profile,
-        persistOutput: createCheckOutputPersister(ctx.store.artifacts),
-        onCheckStart: (info) => {
-          recordCheckStart(ctx, info);
-        },
-      });
-      // Refuse to record rather than record something untrue. A baseline is what every later
-      // comparison is relative to, so one describing the environment instead of the project is
-      // worse than none: a candidate reproducing the same failures would show no regression.
-      // The checks still ran and their output is in the CAS, which is what the human needs.
-      // Finding 54.
-      const untrusted = untrustedChecks(sandbox, profile, checks);
-      if (untrusted.length > 0) {
-        const names = untrusted.map((check) => check.name).join(", ");
-        const why = prepared.detail ?? untrusted[0]?.reason ?? "environment not ready";
-        // What the operator can do differs by case, and promising a retry that cannot work is
-        // what made the first version of this refusal a dead end. A run is pinned to its
-        // checkpoint, so a repository-side repair needs a commit and a new run.
-        const question =
-          prepared.repositorySide === true
-            ? `Checks ${names} cannot produce evidence about this project: ${why}. This run is pinned to ${commitHash.slice(0, 8)}, so fix it in the repository, commit, and start a new run — resuming this one will repeat the same checkout.`
-            : prepared.attempted
-              ? `Checks ${names} cannot produce evidence about this project: ${why}. The install ran and did not succeed; the cause may be environmental (registry, network, auth, disk) in which case fix it and resume, or it may be the repository's own lockfile or manifest in which case commit the repair and start a new run, because this run is pinned to ${commitHash.slice(0, 8)}. The install's output is in the run's artifacts.`
-              : `Checks ${names} cannot produce evidence about this project: ${why}. Make the install possible here — check the network and sandbox.installDependencies — then resume.`;
-        patchRun(ctx, {
-          terminalReason: {
-            code: "environment_not_ready",
-            summary: `baseline not recorded for ${names}: ${why}`,
-            question,
+      let checks: CheckResult[];
+      try {
+        checks = await runChecks({
+          runId: ctx.run.id,
+          commitHash,
+          sandbox,
+          profile,
+          persistOutput: createCheckOutputPersister(ctx.store.artifacts),
+          onCheckStart: (info) => {
+            recordCheckStart(ctx, info);
+          },
+          ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+          // The driver states the operator's setting and how to record what happened. It does not
+          // decide *whether* to prepare: a fresh worktree carries no node_modules, so `runChecks`
+          // prepares whatever this says, and refuses to run a check it cannot support. Finding 54.
+          prepareDependencies: {
+            enabled: ctx.config.sandbox.installDependencies,
+            timeoutMs: ctx.config.sandbox.installTimeoutMs,
+            // Before, not after: a crash or a kill during a ten-minute install must still leave a
+            // record it was running, which docs/THREAT_MODEL.md promises of any command.
+            onStart: (info) => { recordInstallStart(ctx, info); },
+            onResult: (prepared) => { if (prepared.attempted) recordDependencyInstall(ctx, prepared); },
           },
         });
+      } catch (error) {
+        if (!(error instanceof EnvironmentNotReadyError)) throw error;
+        // Refuse to record rather than record something untrue. A baseline is what every later
+        // comparison is relative to, so one describing the environment instead of the project is
+        // worse than none: a candidate reproducing the same failures would show no regression.
+        // The checks did run and their output is in the CAS, which is what the human needs.
+        // Finding 54.
+        patchRun(ctx, { terminalReason: baselineRefusal(error, commitHash) });
         return { status: "complete", nextPhase: "NEEDS_HUMAN" };
       }
       const baseline = buildBaselineSnapshot({
@@ -1095,6 +1081,33 @@ function patchRun(ctx: PhaseContext, patch: Partial<typeof ctx.run>): void {
     artifacts: [],
   };
   ctx.store.events.append([event]);
+}
+
+/**
+ * Why no baseline was recorded, in terms of what the operator can do next.
+ *
+ * The three branches differ because the move differs, and promising a retry that cannot work is
+ * what made the first version of this refusal a dead end: a run is pinned to its checkpoint, so a
+ * repository-side repair needs a commit and a new run. Finding 54.
+ */
+function baselineRefusal(error: EnvironmentNotReadyError, commitHash: string): TerminalReason {
+  const names = error.untrusted.map((check) => check.name).join(", ");
+  const why = error.detail;
+  const pinned = commitHash.slice(0, 8);
+  const prepared = error.prepared;
+  const question =
+    prepared.repositorySide === true
+      ? `Checks ${names} cannot produce evidence about this project: ${why}. This run is pinned to ${pinned}, so fix it in the repository, commit, and start a new run — resuming this one will repeat the same checkout.`
+      : prepared.ready
+        ? `Checks ${names} cannot produce evidence about this project: ${why}. The sandbox was usable when the run started, so something removed it while the checks ran; inspect the checks' output in the run's artifacts, then resume.`
+        : prepared.attempted
+          ? `Checks ${names} cannot produce evidence about this project: ${why}. The install ran and did not succeed; the cause may be environmental (registry, network, auth, disk) in which case fix it and resume, or it may be the repository's own lockfile or manifest in which case commit the repair and start a new run, because this run is pinned to ${pinned}. The install's output is in the run's artifacts.`
+          : `Checks ${names} cannot produce evidence about this project: ${why}. Make the install possible here — check the network and sandbox.installDependencies — then resume.`;
+  return {
+    code: "environment_not_ready",
+    summary: `baseline not recorded for ${names}: ${why}`,
+    question,
+  };
 }
 
 /** Announce a dependency install before it runs, so a crash mid-install still leaves a record. */

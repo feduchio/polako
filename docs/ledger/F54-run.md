@@ -2,161 +2,159 @@
 
 | Field | Value |
 |---|---|
-| Contract | revision 3 at `6634348`; rev 1 frozen at `fde4530`, rev 2 at `cf7c804` |
+| Contract | revision 4; rev 1 frozen at `fde4530`, rev 2 at `cf7c804`, rev 3 at `6634348` |
 | Base | HOST `ef11a00` (accepted P2 block) |
 | Finding | 54, from P2.3 |
-| Implementation | `cf7c804`, then `6634348` |
-| Gate | Node 24.20.0; **94 files, 1,046 tests**, exit 0 (was 93 / 1,022) |
+| Implementation | `cf7c804`, `6634348`, then seven fix rounds |
+| Change against base | 28 files |
+| Gate | Node 24.20.0; **94 files, 1,065 tests**, exit 0 (was 93 / 1,022) |
 
-## What changed
+This record is written after the seventh round. Earlier versions of it described revision 2 —
+1,046 tests, "five production files", and a story that ended at `BASELINING → NEEDS_HUMAN` — while
+what had actually shipped spanned the predicate, the check runner, two drivers, the integration
+path, the allowlist, the config, the status projection and the report. A run record that
+misdescribes what shipped has been treated as a class (a) defect on this project before, so it is
+rewritten rather than patched.
 
-Five production files and one new module, across revisions 2 and 3.
+## What the item became
 
-**`src/shared/projectDependencies.ts` — the predicate, defined once.**
-`untrustedForMissingDependencies(cwd, argv, scriptText?)` returns a reason or `null`. The condition
-is: no `node_modules`, a `package.json` present, and **either** the manifest declares at least one
-dependency in any of the four dependency fields **or** the command or resolved script names
-something that needs installed packages. `src/findings/reproduce.ts` now calls it instead of
-carrying its own copy.
+**One sentence.** Nothing produces a `CheckResult` from a sandbox nobody prepared, and no result
+that fails to say something about the project is returned to anyone.
 
-**`src/project/checkRunner.ts` — the result stops lying.** A non-passing check whose command was
-untrusted is recorded as `status: "error"` rather than `"fail"`, and **with no
-`failureFingerprint`**. `untrustedChecks(sandbox, profile)` is exported so a caller can ask about a
-whole profile before deciding to record anything.
+Two halves, as revision 3 framed them, and the order matters: the second is what makes the first
+safe to have.
 
-**`src/daemon/composition.ts` — `BASELINING` refuses.** When any check of the run is untrusted, no
-`baseline.snapshotted` event is appended and the driver returns `NEEDS_HUMAN` with a
-`terminalReason` naming the checks and telling the operator to install dependencies and resume.
-The checks still run first, so their real output is in the CAS where the operator can read it.
+1. **A trusted baseline is obtainable.** A sandbox installs the project's dependencies before its
+   checks run.
+2. **Nothing untrustworthy is recorded.** When install is disabled, fails, or does not help, the
+   results are refused rather than stored as the project's own status.
 
-**`src/domain/run.ts` — one new terminal reason code, `environment_not_ready`.** None of the
-existing codes fits and bending one would have repeated the defect this item exists to fix. No
-consumer switches exhaustively over that enum.
-
-## Why the missing fingerprint is the load-bearing part
-
-Marking the status `error` is the honest label. Withholding the fingerprint is what closes the
-hole. `compareToBaseline` (`src/domain/checks.ts:104-130`) treats a check failing in both baseline
-and candidate as **unchanged** when the two `failureFingerprint` values are equal, and records a
-`diagnosticChange` when one is missing. That is the mechanism by which an all-fail baseline made a
-candidate reproducing the same failures look regression-free. With no fingerprint the comparison
-fails closed on its own terms, without touching `compareToBaseline`, `hasRegression` or the
-`passed` fold — which MC6 forbids.
-
-## The contract changed before anything shipped, and why that is not tuning
-
-Revision 1 defined the trigger as "argv[0] is a Node package manager". **The test suite falsified
-it immediately: 13 failures**, and the counter-example is in the repository.
-`fixtures/resume-dup-fetch` declares **no** dependencies and its check is `pnpm run test` →
-`node --test tests/retryFetch.test.mjs`, which needs no `node_modules`. Under revision 1 every
-fixture run would have refused to baseline.
-
-Revision 2 keys on **declared dependencies** instead, which separates the two cases exactly: the
-fixture declares none, `unjs/defu` declares eleven devDependencies and has none installed. The
-command-shape test is kept as a second disjunct so the reproduction path's behaviour is preserved.
-
-This is an amendment forced by a counter-example, not a criterion tuned to make a number come out
-right, and the distinction is the reason it is recorded here in full rather than applied quietly.
-The residual false positive is stated in MC2 and in the code: a project that declares dependencies,
-does not need them for a given check, and fails legitimately is still called untrusted. That is
-the fail-closed direction.
-
-## Observation — ten new checks, and the four mutants that prove they are not vacuous
-
-`src/shared/projectDependencies.test.ts` (7 cases): a manifest declaring dependencies with none
-installed is flagged; all four dependency fields count; a project declaring none that needs none is
-**not** flagged, and the case is labelled as the fixture's shape; a command that needs packages is
-flagged even when the manifest declares none; an installed project is not flagged; a directory with
-no manifest is not flagged; an unreadable manifest is treated as declaring nothing rather than
-throwing.
-
-`src/project/project.test.ts` (2 cases): an uninstalled project's failure is `error` with no
-fingerprint; an installed project's genuine failure is still `fail` **with** one.
-
-`src/daemon/composition.test.ts` (1 case): a repository declaring dependencies with none installed
-produces no `baseline.snapshotted` and no baseline row, reaches `NEEDS_HUMAN` with
-`environment_not_ready`, names the check in the summary, and still records the
-`shell.command_started` events proving the checks ran.
-
-| Planted defect | Tests that fail |
-|---|---|
-| the runner never marks a result untrusted | 1 |
-| the driver records the baseline anyway | 1 |
-| the predicate ignores declared dependencies | 4 |
-| an untrusted result keeps its fingerprint | 1 |
-
-The existing baselining test — a `package.json` with no dependencies — still passes unchanged,
-which is AC4: the normal path is untouched.
-
-## Round 1 changed the item: both halves, because one of them was unclearable alone
-
-The entry gate returned six findings and the first reframed the work. The refusal sent the run to
-`NEEDS_HUMAN` telling the operator to install dependencies — but every baseline attempt creates a
-**fresh** git worktree, which never carries `node_modules`, so the instruction could not be acted
-on. The reviewer demonstrated it: it reached `NEEDS_HUMAN`, created `projectPath/node_modules`,
-resumed, and returned to `NEEDS_HUMAN`. A refusal nobody can clear trades a false baseline for a
-stuck run, which for a self-hosting system is not obviously better.
-
-**User decision 2026-09-14: do the install half now.** Contract revision 3. The sandbox installs
-the project's dependencies before its checks run, and the refusal stays as the backstop — which is
-what makes the install safe to have, since install can be disabled, fail, or change nothing.
+## Where it lives
 
 | Piece | Where |
 |---|---|
-| install command, one definition shared with the policy that admits it | `installCommandFor` in `src/shared/projectDependencies.ts` |
+| the predicate — "this command's result is not evidence about the project" | `untrustedForMissingDependencies` in `src/shared/projectDependencies.ts` |
+| the install command, one definition shared with the policy that admits it | `installCommandFor`, same file |
 | exact-match allowlist rule, for the discovered package manager only | `CommandPolicy.forProject` |
-| `sandbox.installDependencies` (default `true`) and `sandbox.installTimeoutMs` | `src/domain/config.ts` |
-| install, re-check, and a forensic record that is not a check result | `ensureProjectDependencies` in `src/project/checkRunner.ts` |
+| `sandbox.installDependencies` (default on) and `sandbox.installTimeoutMs`, with the same two defaults the runner applies | `src/domain/config.ts` |
+| install, re-check, forensics that are not a check result | `ensureProjectDependencies` in `src/project/checkRunner.ts` |
+| **preparation and refusal, inside the function that runs the checks** | `runChecks`, same file |
+| the refusal type, thrown where it is decided | `EnvironmentNotReadyError`, same file, re-exported by `src/engine/candidates.ts` |
+| `BASELINING` turns the refusal into `NEEDS_HUMAN` | `src/daemon/composition.ts` |
+| `GATING` turns it into a `DISCARDED` candidate, and a terminal `FAILED` when no candidate survived | `src/engine/candidateDrivers.ts` |
+| `INTEGRATING` lets it escape rather than folding it into an integration outcome | `src/engine/integration.ts` |
+| `environment_not_ready`, a terminal reason code that names the condition honestly | `src/domain/run.ts` |
 
-The default is `true` because the refusal is otherwise unclearable, and nothing is attempted when
-dependencies are already reachable — every in-tree fixture declares none, so no existing path
-changes.
+## The design correction, round 7
 
-## The other five findings
+The second lane blocked the item on a mutant rather than on a detail. `prepareDependencies` was an
+optional field, and `runGates` skipped preparation when it was unset; deleting the four-line
+assignment in `resolveGates` left **93 tests green** while candidate gating silently stopped
+preparing — and under that mutant the whole path this item had spent four rounds building
+(`EnvironmentNotReadyError`, `DISCARDED`, terminal `FAILED`) never executed at all, because every
+candidate simply failed its gates instead.
 
-**Only a non-passing result can be untrusted.** Revision 2 evaluated the predicate independently of
-the results, so a project declaring dependencies whose checks **passed** was refused. A check that
-passed is evidence whatever the environment looked like.
+The diagnosis is about the object, not the wiring. MC9 named **two places that must remember**. Six
+rounds of fixes were six consumers of one idea forgetting it in turn. What must actually hold is
+that nothing produces a check result from an unprepared sandbox, and the only formulation of that
+which cannot be forgotten is the one inside the function that runs the commands. So:
 
-**The spawn-error path withholds its fingerprint too.** The untrusted branch sat only in the
-successful-`run` path, so a sandbox throwing `ENOENT` still produced one.
+- `runChecks` prepares, and **omitting the option means prepare with defaults**. A call site can be
+  deleted without turning preparation off; what it carries now is the operator's *setting*.
+- `enabled: false` is a refusal, not a skip: the checks still do not get to speak.
+- The refusal is thrown from `project/`, where it is decided, and re-exported from `engine/`. All
+  three consumers get the same refusal without three layers agreeing to it separately.
 
-**The resolved script text reaches the predicate.** A profile check is `<pm> run <script>`, and the
-script is what says whether packages are needed. Without it the command-shape test could never fire
-for a profile check, which left the original defect survivable for a project that declares no
-dependencies but whose script needs them.
+## Why the refusal is decided after the checks run, not before
 
-**Availability is not a local directory.** Node resolution walks ancestors, so a workspace package
-legitimately has no `node_modules` of its own, and Yarn PnP has none anywhere. The test now walks
-upward for the declared package and treats a PnP marker as available. It also no longer accepts an
-empty `node_modules`, which the previous rule did.
+The obvious form — refuse as soon as preparation fails — is simpler and wrong. It re-breaks MC11,
+the correction review round 1 had already forced: a project that declares dependencies it does not
+need, whose check **passes**, would be refused, and that check is evidence whatever the environment
+looked like. The suite says so directly; two tests fail on the early-refusal version, and one of
+them is a candidate being discarded for an environment its passing checks did not need.
 
-**AC1 is amended rather than quietly broken.** The reproduction path's decision boundary does
-change: a runnable reproduction in a project that declares unavailable dependencies now returns
-`UNCERTAIN` where it previously executed. Same fail-closed direction, and it is the point of one
-shared definition — but revision 2's AC1 claimed the behaviour was unchanged, and that was false.
+So `runChecks` prepares, runs, and then asks whether any **non-passing** result was produced where
+the environment could not support it. If so it throws, carrying both the preparation outcome and
+the results — which are still `error` without a `failureFingerprint`, so that even the forensic copy
+is not a statement about the project.
 
-## Two things the round taught about the tests themselves
+## Why the missing fingerprint is load-bearing
 
-**Two test environments were untrustworthy and are now installed.** `allows an unchanged baseline
-failure but rejects a new failure` captured its baseline through a sandbox at one path and gated
-through another that declared `vitest run` with no vitest present. Under the new rule the gate
-result is correctly untrusted, which broke a test about comparison for reasons that had nothing to
-do with comparison. It now creates `node_modules/vitest`.
+`compareToBaseline` (`src/domain/checks.ts:104-130`) treats a check failing in both baseline and
+candidate as **unchanged** when the two `failureFingerprint` values are equal, and records a
+`diagnosticChange` when one is missing. That equality is what made an all-fail baseline let a
+candidate reproducing the same failures look regression-free. With no fingerprint the comparison
+fails closed on its own terms, without touching `compareToBaseline`, `hasRegression` or the `passed`
+fold — which MC6 forbids.
 
-**The driver tests script every package-manager command, because pnpm v10 installs before `run`.**
-The first version of the install test let the real `pnpm` run and it reached the network: with a
-lockfile present and `node_modules` missing, pnpm installs before running a script. The tests were
-measuring the registry. They now script `pnpm` entirely and assert the driver's decisions.
+## The contract changed three times, and why none of it is tuning
 
-## What is still not fixed
+**Revision 1 → 2.** The trigger was "argv[0] is a Node package manager". The suite falsified it
+immediately — 13 failures — and the counter-example is in the tree: `fixtures/resume-dup-fetch`
+declares **no** dependencies and its check is `pnpm run test` → `node --test`, which needs no
+`node_modules`. Revision 2 keys on declared dependencies, which separates the cases exactly: the
+fixture declares none, `unjs/defu` declares eleven and has none installed.
 
-An install that genuinely cannot succeed — no network, a stale lockfile, a package manager we do
-not drive — still ends at `NEEDS_HUMAN`. That is now the correct outcome rather than a dead end,
-because the operator can fix the install itself, and the terminal reason says which case it is.
+**Revision 2 → 3.** Review round 1 showed the refusal alone was unclearable: every baseline attempt
+creates a fresh worktree, so an operator told to install dependencies could never make the
+instruction take effect. The reviewer demonstrated it — `NEEDS_HUMAN`, install into `projectPath`,
+resume, `NEEDS_HUMAN` again. **User decision 2026-09-14: do the install half now.**
+
+**Revision 3 → 4.** The design correction above, forced by a surviving mutant rather than by taste.
+
+Each amendment is recorded with its counter-example rather than applied quietly, because the
+difference between an amendment and a tuned criterion is exactly whether the counter-example exists.
+
+## The rounds, and what each one was
+
+| Round | What was wrong |
+|---|---|
+| 1 | candidate gating did not prepare at all — the wall moved from `BASELINING` to `GATING` |
+| 2 | availability accepted *any* declared package rather than every one, so a partial install passed |
+| 3 | availability accepted a directory rather than an installed manifest |
+| 4 | the refusal threw where production never caught it, so every tick reinstalled forever |
+| 5 | `FAILED` hid the reason, and the report said "DONE: Mission complete" for a failed run |
+| 6 | `INTERRUPTED` was non-terminal, so a retry deadlocked |
+| 7 | the design: preparation was optional, and a deleted call site kept 93 tests green |
+
+## Observation
+
+New and changed checks, and the mutants they kill:
+
+| Planted defect | Tests that fail |
+|---|---|
+| `runChecks` does not prepare unless asked | 2 |
+| the `resolveGates` assignment is deleted | 1 |
+| the refusal happens before the checks run | 2 |
+| the runner never marks a result untrusted | 1 |
+| an untrusted result keeps its fingerprint | 1 |
+| the predicate ignores declared dependencies | 4 |
+| the driver records the baseline anyway | 1 |
+| a discarded candidate carries no reason | 1 |
+
+The new cases are: preparation happens when the caller says nothing (`project.test.ts`,
+`candidates.integration.test.ts`); a refusal names only the checks that ran, under `only`; a
+candidate whose checks pass in an unpreparable checkout is gated rather than discarded; the
+operator's `installDependencies` setting reaches candidate gating, observed through the branch of
+the refusal message that is reachable only when the setting arrived.
+
+## Known cost, stated rather than discovered later
+
+**MC2's residual false positive.** A project that declares dependencies, does not need them for a
+given check, and fails legitimately is classified as untrusted. That is the fail-closed direction.
+
+**An install that cannot succeed still ends the run.** No network, a stale lockfile, a package
+manager we do not drive: `NEEDS_HUMAN` from baselining, terminal `FAILED` from gating or
+integration. That is the correct outcome rather than a dead end, because the operator can fix the
+install itself and the terminal reason says which of the three cases it is.
+
+**Worker worktrees are not prepared.** This item covers sandboxes that run *project checks*. A
+candidate worker's own worktree is a fourth sandbox, and it gets no `node_modules`; a worker that
+wants to run the suite while it works will have to install for itself. Recorded here rather than
+widened into this item.
 
 ## Gate
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result: 94 test files, 1,046 tests, exit 0.
+Result: 94 test files, 1,065 tests, exit 0.

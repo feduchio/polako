@@ -101,8 +101,10 @@ describe("B2 production candidate drivers", () => {
     // environment it never controlled, and the failure must not recur on every tick.
     const options = buildDriverOptions(fixture, () =>
       new ScriptedCandidateWorker((_task, worktree) => {
-        writeFileSync(join(worktree.path, "outcome.txt"), "pass");
-        // A manifest that declares a package nothing installed here.
+        // A check that does not pass, in a checkout declaring a package nothing installed here.
+        // Both halves matter: the failure is what cannot be attributed to the candidate, and a
+        // check that *passed* would be evidence whatever the environment looked like (MC11).
+        writeFileSync(join(worktree.path, "outcome.txt"), "fail");
         writeFileSync(
           join(worktree.path, "package.json"),
           JSON.stringify({ name: "demo", devDependencies: { vitest: "^4" } }),
@@ -149,7 +151,7 @@ describe("B2 production candidate drivers", () => {
     const options = buildDriverOptions(fixture, () => {
       const poison = seq++ === 0;
       return new ScriptedCandidateWorker((_task, worktree) => {
-        writeFileSync(join(worktree.path, "outcome.txt"), "pass");
+        writeFileSync(join(worktree.path, "outcome.txt"), poison ? "fail" : "pass");
         if (poison) {
           writeFileSync(
             join(worktree.path, "package.json"),
@@ -185,9 +187,91 @@ describe("B2 production candidate drivers", () => {
     expect(states).toContain("PASSED_GATES");
   });
 
+  it("gates a candidate whose checks pass in an unpreparable checkout, rather than discarding it", async () => {
+    // MC11, one layer down from the baseline it was written for: a check that passed is evidence
+    // whatever the environment looked like. Refusing it here would discard a real observation and
+    // make an undeclared dependency enough to kill a good candidate.
+    // The check runs in a subdirectory that declares a package nothing installed, so the
+    // environment is unpreparable exactly where the check runs. The root manifest is untouched:
+    // rewriting it would fail the gate for silencing and hide what this test is about.
+    const options = buildDriverOptions(fixture, () =>
+      new ScriptedCandidateWorker((_task, worktree) => {
+        mkdirSync(join(worktree.path, "pkg"), { recursive: true });
+        writeFileSync(join(worktree.path, "pkg", "outcome.txt"), "pass");
+        writeFileSync(
+          join(worktree.path, "pkg", "package.json"),
+          JSON.stringify({ name: "demo", devDependencies: { vitest: "^4" } }),
+        );
+        return { status: "completed" };
+      }),
+    );
+    const gateEngine = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    gateEngine.registerPhase("EXECUTING", createExecutingDriver(options));
+    gateEngine.registerPhase(
+      "GATING",
+      createGatingDriver({
+        ...options,
+        resolveGates: async (ctx, task) => {
+          const gates = await options.resolveGates!(ctx, task);
+          const [check] = gates.profile.checks;
+          return {
+            ...gates,
+            profile: { ...gates.profile, checks: [{ ...check!, cwd: "pkg" }] },
+            prepareDependencies: { enabled: false, timeoutMs: 1000 },
+          };
+        },
+      }),
+    );
+    const { runId, taskId } = seedRun(store, clock, fixture);
+    await gateEngine.tickRun(runId);
+    await gateEngine.tickRun(runId);
+
+    expect(store.repos.runs.get(runId)?.phase).not.toBe("FAILED");
+    const states = store.repos.candidates.listByTask(taskId).map((candidate) => candidate.state);
+    expect(states).toContain("PASSED_GATES");
+    expect(states).not.toContain("DISCARDED");
+  });
+
+  it("carries the operator's install setting from config into the gates", async () => {
+    // Without this the gates prepare with defaults, which is the safe direction but not the
+    // configured one: an operator who set `installDependencies: false` would still see an install
+    // attempted in every candidate checkout. Observes the assignment in `resolveGates`, which a
+    // review round deleted with 93 tests still green. Finding 54.
+    const { resolveGates: _productionResolvesThem, ...options } = buildDriverOptions(fixture, () =>
+      new ScriptedCandidateWorker((_task, worktree) => {
+        writeFileSync(join(worktree.path, "outcome.txt"), "fail");
+        writeFileSync(
+          join(worktree.path, "package.json"),
+          JSON.stringify({ name: "demo", devDependencies: { vitest: "^4" } }),
+        );
+        return { status: "completed" };
+      }),
+    );
+    const config = defaultConfig();
+    config.sandbox.installDependencies = false;
+    const gateEngine = new RunEngine(
+      { store, clock, scheduler: sched, config, assertProjectClean: () => undefined },
+      false,
+    );
+    gateEngine.registerPhase("EXECUTING", createExecutingDriver(options));
+    gateEngine.registerPhase("GATING", createGatingDriver(options));
+    const { runId } = seedRun(store, clock, fixture);
+    await gateEngine.tickRun(runId);
+    await gateEngine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("FAILED");
+    // The disabled branch of the refusal, which is only reachable when the setting arrived.
+    expect(run.terminalReason?.question).toContain("sandbox.installDependencies");
+    expect(run.terminalReason?.summary).toContain("dependency install is disabled");
+  });
+
   it("INTEGRATING terminates the run when the integration workspace cannot be prepared", async () => {
     // A manifest declaring a package that nothing installed, committed on the winner branch.
-    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-unpreparable", "pass", {
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-unpreparable", "fail", {
       "package.json": JSON.stringify({ name: "demo", devDependencies: { vitest: "^4" } }),
     });
     const { runId } = seedIntegratingRun(store, clock, fixture, winner);

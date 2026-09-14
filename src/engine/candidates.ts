@@ -4,13 +4,13 @@ import type { ArtifactRef, ModelRef } from "../domain/common.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { ProtectedChangeScope, ProtectedChangeWaiver } from "../domain/protectedChangeWaiver.js";
 import type { Task } from "../domain/task.js";
-import type { CheckOutputPersister, EnsureDependenciesResult, GateResult } from "../project/checkRunner.js";
-import { ensureProjectDependencies, runIndependentGates } from "../project/checkRunner.js";
+import type { CheckOutputPersister, DependencyPreparation, EnsureDependenciesResult, GateResult } from "../project/checkRunner.js";
+import { runIndependentGates } from "../project/checkRunner.js";
 import type { ProjectProfile } from "../project/profile.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { DiffStat } from "../sandbox/git.js";
 import type { Sandbox, SandboxHandle } from "../sandbox/worktree.js";
-import { errorToString, PolishError } from "../shared/errors.js";
+import { errorToString } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 
 export type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../agents/types.js";
@@ -55,9 +55,12 @@ export interface CandidateGates {
   protectedChangeScope?: Omit<ProtectedChangeScope, "relativePath">;
   validateProtectedChangeWaiver?: (waiver: ProtectedChangeWaiver) => boolean;
   /**
-   * A candidate's gate checkout is a fresh worktree, so it needs the project's dependencies for
-   * the same reason the baseline does. Without this the wall moves from BASELINING to GATING
-   * rather than going away. Finding 54.
+   * The operator's setting for preparing a gate checkout, which is a fresh worktree and so needs
+   * the project's dependencies for the same reason the baseline does.
+   *
+   * Omitting it does **not** skip preparation — `runChecks` prepares with defaults either way.
+   * This field only carries the configured values, so losing it loses the setting, not the step.
+   * Finding 54.
    */
   prepareDependencies?: { enabled: boolean; timeoutMs: number };
   /** Fired before the install command runs, so a crash mid-install still leaves a record. */
@@ -252,23 +255,11 @@ async function runOneCandidate<TTask>(
 }
 
 /**
- * A gate checkout could not be made able to produce evidence. Distinct from every other sandbox
- * error because it is not the candidate's fault and no retry of this run will change it: the
- * driver must turn it into a terminal, operator-readable state rather than let it recur on every
- * tick. Finding 54.
+ * Re-exported where the gate paths already look for it. It is defined in `project/checkRunner.ts`
+ * because that is what throws it — `runChecks` refuses there, so a gate checkout, an integration
+ * workspace and a baseline all get the same refusal without engine having to agree to it.
  */
-export class EnvironmentNotReadyError extends PolishError {
-  readonly prepared: EnsureDependenciesResult;
-
-  constructor(prepared: EnsureDependenciesResult) {
-    super("SANDBOX_ERROR", `gates not run: ${prepared.detail ?? "dependencies unavailable"}`, {
-      environmentNotReady: true,
-      repositorySide: prepared.repositorySide ?? false,
-    });
-    this.name = "EnvironmentNotReadyError";
-    this.prepared = prepared;
-  }
-}
+export { EnvironmentNotReadyError } from "../project/checkRunner.js";
 
 export async function runGates(input: {
   runId: string;
@@ -278,21 +269,13 @@ export async function runGates(input: {
   corpus?: MissionAcceptanceCorpus;
   signal?: AbortSignal;
 }): Promise<GateResult> {
-  if (input.gates.prepareDependencies !== undefined) {
-    const prepared = await ensureProjectDependencies(input.sandbox, input.gates.profile, {
-      ...input.gates.prepareDependencies,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      ...(input.gates.onDependencyInstallStart === undefined ? {} : { onStart: input.gates.onDependencyInstallStart }),
-    });
-    input.gates.onDependencyInstall?.(prepared);
-    if (!prepared.ready) {
-      // Do not run the checks. Their failures would describe this checkout's environment, and a
-      // candidate marked `failed_gates` for that reason is being judged on the wrong thing — the
-      // same confusion as a false baseline, one layer down. Finding 54.
-      throw new EnvironmentNotReadyError(prepared);
-    }
-  }
+  const prepareDependencies: DependencyPreparation = {
+    ...input.gates.prepareDependencies,
+    ...(input.gates.onDependencyInstallStart === undefined ? {} : { onStart: input.gates.onDependencyInstallStart }),
+    ...(input.gates.onDependencyInstall === undefined ? {} : { onResult: input.gates.onDependencyInstall }),
+  };
   return runIndependentGates({
+    prepareDependencies,
     runId: input.runId,
     commitHash: input.commitHash,
     sandbox: input.sandbox,

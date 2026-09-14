@@ -748,7 +748,7 @@ otherwise look like unfinished work.
     with this baseline than the wording above would suggest.
     **Not scheduled in P2.3.** That contract is a two-phase smoke with no production change, so
     this was recorded rather than repaired there.
-    **FIXED 2026-09-14 by F54** (`docs/ledger/F54.md` rev 3, run record `docs/ledger/F54-run.md`).
+    **FIXED 2026-09-14 by F54** (`docs/ledger/F54.md` rev 4, run record `docs/ledger/F54-run.md`).
     Both halves, because the first review round showed the refusal alone was unclearable: every
     baseline attempt creates a fresh worktree, so an operator told to install could never make the
     instruction take effect.
@@ -763,3 +763,8 @@ otherwise look like unfinished work.
     The availability test walks up the directory tree as Node resolution does and recognises Yarn
     Plug'n'Play, so a workspace package with no local `node_modules` is not refused, and an empty
     `node_modules` is no longer mistaken for an install.
+    **Revision 4 moved the step rather than adding a seventh call site.** Preparation lives inside
+    `runChecks`, and omitting the option means prepare: the finding's shape turned out to be one
+    idea with six consumers who each forgot it, which a mutant proved by deleting the assignment in
+    `resolveGates` and keeping 93 tests green. The refusal is decided from the results, after the
+    checks run, because a check that passes is evidence whatever the environment looked like.

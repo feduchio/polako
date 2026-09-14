@@ -21,6 +21,7 @@ import {
   buildBaselineSnapshot,
   detectSilencing,
   ensureProjectDependencies,
+  EnvironmentNotReadyError,
   runChecks,
   untrustedChecks,
   runIndependentGates,
@@ -774,6 +775,20 @@ describe("runChecks and runIndependentGates", () => {
     for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
   });
 
+  /**
+   * A checkout whose `vitest run` script can actually resolve its runner. Tests about silencing
+   * and comparison want a *trusted* environment: without the binary the check results say nothing
+   * about the project, and `runChecks` refuses them before the subject of the test is reached.
+   */
+  function installedCheckout(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", ".bin", "vitest"), "#!/bin/sh\n");
+    return dir;
+  }
+
   it("runChecks honors check cwd and maps process results", async () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-run-"));
     cleanup.push(dir);
@@ -810,15 +825,16 @@ describe("runChecks and runIndependentGates", () => {
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
     const profile = discoverProject(dir);
-    const results = await runChecks({
+    const refusal = await runChecks({
       runId: id("run"),
       commitHash: "a".repeat(40),
       sandbox: mockSandbox(async () => {
         throw new Error("failed to spawn pnpm: ENOENT");
       }, [], dir),
       profile,
-    });
-    const test = results.find((check) => check.name === "test");
+    }).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(EnvironmentNotReadyError);
+    const test = (refusal as EnvironmentNotReadyError).checks.find((check) => check.name === "test");
     expect(test?.status).toBe("error");
     expect(test?.failureFingerprint).toBeUndefined();
   });
@@ -828,15 +844,14 @@ describe("runChecks and runIndependentGates", () => {
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
     const profile = discoverProject(dir);
-    const results = await runChecks({
+    const refusal = await runChecks({
       runId: id("run"),
       commitHash: "a".repeat(40),
       sandbox: mockSandbox(async () => processResult({ exitCode: 1, stderr: "sh: vitest: command not found\n" }), [], dir),
       profile,
-    });
-    const test = results.find((check) => check.name === "test");
-    expect(test?.status).toBe("error");
-    expect(test?.failureFingerprint).toBeUndefined();
+    }).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(EnvironmentNotReadyError);
+    expect((refusal as EnvironmentNotReadyError).untrusted.map((check) => check.name)).toEqual(["test"]);
   });
 
   describe("ensureProjectDependencies", () => {
@@ -984,17 +999,68 @@ describe("runChecks and runIndependentGates", () => {
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
     const profile = discoverProject(dir);
-    const results = await runChecks({
+    const refusal = await runChecks({
       runId: id("run"),
       commitHash: "a".repeat(40),
       sandbox: mockSandbox(async () => processResult({ exitCode: 1, stderr: "sh: vitest: command not found\n" }), [], dir),
       profile,
-    });
-    const test = results.find((check) => check.name === "test");
-    // `fail` would be a claim about the project. The missing fingerprint is the load-bearing half:
-    // it is the handle compareToBaseline uses to call two failures the same one. Finding 54.
+    }).catch((error: unknown) => error);
+    // The refusal is the outer fact: no caller receives this result set at all. Finding 54.
+    expect(refusal).toBeInstanceOf(EnvironmentNotReadyError);
+    const test = (refusal as EnvironmentNotReadyError).checks.find((check) => check.name === "test");
+    // And what it carries is still not a claim about the project. `fail` would be one, and the
+    // missing fingerprint is the load-bearing half: it is the handle compareToBaseline uses to
+    // call two failures the same one, so nothing downstream can equate this with a real failure.
     expect(test).toMatchObject({ status: "error", exitCode: 1 });
     expect(test?.failureFingerprint).toBeUndefined();
+  });
+
+  it("refuses only on the checks that ran, so `only` does not report an absent one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-only-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({
+      scripts: { test: "vitest run", lint: "vitest --lint" },
+      devDependencies: { vitest: "^4" },
+    }));
+    const profile = discoverProject(dir);
+    profile.checks = [
+      { name: "test", kind: "test", command: ["pnpm", "run", "test"], mandatory: true },
+      { name: "lint", kind: "lint", command: ["pnpm", "run", "lint"], mandatory: true },
+    ];
+    const refusal = await runChecks({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      sandbox: mockSandbox(async () => processResult({ exitCode: 1, stderr: "sh: vitest: command not found\n" }), [], dir),
+      profile,
+      only: ["test"],
+    }).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(EnvironmentNotReadyError);
+    expect((refusal as EnvironmentNotReadyError).untrusted.map((check) => check.name)).toEqual(["test"]);
+  });
+
+  it("prepares by default, so a caller that says nothing still gets an installed sandbox", async () => {
+    // Omission means prepare. The wiring at a call site can be deleted without silently turning
+    // preparation off, which is how finding 54 kept coming back. Finding 54.
+    const dir = mkdtempSync(join(tmpdir(), "polish-default-prepare-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    const issued: string[][] = [];
+    const results = await runChecks({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      sandbox: mockSandbox(async (argv: readonly string[]) => {
+        issued.push([...argv]);
+        if (argv[1] === "install") {
+          mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+          writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
+        }
+        return processResult({ stdout: " Tests  1 passed (1)\n" });
+      }, [], dir),
+      profile: discoverProject(dir),
+    });
+    expect(issued[0]).toEqual(["pnpm", "install", "--frozen-lockfile"]);
+    expect(results.find((check) => check.name === "test")?.status).toBe("pass");
   });
 
   it("keeps a genuine failure as fail with a fingerprint once packages are installed", async () => {
@@ -1364,9 +1430,7 @@ describe("runChecks and runIndependentGates", () => {
   });
 
   it("fails independent gates when a failing test is deleted and the count is padded", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "polish-silence-gate-"));
-    cleanup.push(dir);
-    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    const dir = installedCheckout("polish-silence-gate-");
     const profile = discoverProject(dir);
     const failingOutput = " Tests  1 failed | 1 passed (2)\n FAIL  src/legacy.test.ts\n";
     const captured = await runChecks({
@@ -1407,9 +1471,7 @@ describe("runChecks and runIndependentGates", () => {
   });
 
   it("fails independent gates when skipIf wraps a baseline failure without reindenting it()", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "polish-skipif-gate-"));
-    cleanup.push(dir);
-    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    const dir = installedCheckout("polish-skipif-gate-");
     const profile = discoverProject(dir);
     const failingOutput = " Tests  1 failed (1)\n FAIL  src/legacy.test.ts > legacy fails\n";
     const captured = await runChecks({

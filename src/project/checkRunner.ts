@@ -23,8 +23,10 @@ import {
   type ProtectedChangeScope,
   type ProtectedChangeWaiver,
 } from "../domain/protectedChangeWaiver.js";
+import { DEFAULT_INSTALL_DEPENDENCIES, DEFAULT_INSTALL_TIMEOUT_MS } from "../domain/config.js";
 import type { ProcessResult } from "../sandbox/process.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
+import { PolishError } from "../shared/errors.js";
 import { canonicalJson, sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import { installCommandFor, untrustedForMissingDependencies } from "../shared/projectDependencies.js";
@@ -44,6 +46,63 @@ export interface CheckRunOptions {
   persistOutput?: CheckOutputPersister;
   /** Fired immediately before a check command starts so operators can see in-flight work. */
   onCheckStart?: (info: { name: string; command: readonly string[] }) => void;
+  /**
+   * How to make the sandbox able to produce evidence before any check runs.
+   *
+   * **Omitting this prepares with defaults.** It is not a switch a caller opts into: three call
+   * sites each remembering to ask is what made finding 54 survive six rounds of patches, and a
+   * fourth would have forgotten too. Saying nothing means "prepare", so deleting the wiring at any
+   * call site changes nothing; the only way to not prepare is to say `enabled: false`, which is a
+   * refusal, not a skip — the checks still do not run.
+   */
+  prepareDependencies?: DependencyPreparation;
+}
+
+export interface DependencyPreparation {
+  /** Default `true`. `false` keeps the refusal and declines the install that would clear it. */
+  enabled?: boolean;
+  timeoutMs?: number;
+  /** Fired before the command runs, so a crash mid-install still leaves a record of it. */
+  onStart?: (info: { command: readonly string[]; timeoutMs: number }) => void;
+  /** Fired once preparation has settled, ready or not, for forensics. */
+  onResult?: (result: EnsureDependenciesResult) => void;
+}
+
+/**
+ * A sandbox produced results that say nothing about the project, so there is nothing to return.
+ *
+ * Thrown rather than returned because the alternative is exactly the defect: a `CheckResult`
+ * describing the environment, which every consumer downstream reads as the project's own status.
+ * Distinct from every other sandbox error because no retry of this run will change it — the caller
+ * must turn it into a terminal, operator-readable state rather than let it recur on every tick.
+ * The results are carried along so the refusal can be forensically explained. Finding 54.
+ */
+export class EnvironmentNotReadyError extends PolishError {
+  readonly prepared: EnsureDependenciesResult;
+  /** The checks whose results are not evidence, and why. Never empty. */
+  readonly untrusted: readonly { name: string; reason: string }[];
+  /** What those checks did produce. Recorded, but never as the project's status. */
+  readonly checks: readonly CheckResult[];
+  /** The most specific statement available of what is wrong. */
+  readonly detail: string;
+
+  constructor(
+    prepared: EnsureDependenciesResult,
+    untrusted: readonly { name: string; reason: string }[],
+    checks: readonly CheckResult[],
+  ) {
+    const detail = prepared.detail ?? untrusted[0]?.reason ?? "dependencies unavailable";
+    const names = untrusted.map((check) => check.name).join(", ");
+    super("SANDBOX_ERROR", `no evidence from ${names}: ${detail}`, {
+      environmentNotReady: true,
+      repositorySide: prepared.repositorySide ?? false,
+    });
+    this.name = "EnvironmentNotReadyError";
+    this.prepared = prepared;
+    this.untrusted = untrusted;
+    this.checks = checks;
+    this.detail = detail;
+  }
 }
 
 export interface ForensicCheckOutput {
@@ -82,11 +141,27 @@ export interface CheckRunEvaluation {
 export function runChecks(opts: BaselineCheckRunOptions): Promise<CheckRunEvaluation>;
 export function runChecks(opts: CheckRunOptions): Promise<CheckResult[]>;
 export async function runChecks(opts: CheckRunOptions | BaselineCheckRunOptions): Promise<CheckResult[] | CheckRunEvaluation> {
+  // Inside the function that runs the checks, so that no caller can produce a CheckResult from a
+  // sandbox nobody prepared. Three call sites each remembering to ask is how finding 54 survived
+  // six rounds of patches.
+  const prepared = await ensureProjectDependencies(opts.sandbox, opts.profile, {
+    enabled: opts.prepareDependencies?.enabled ?? DEFAULT_INSTALL_DEPENDENCIES,
+    timeoutMs: opts.prepareDependencies?.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS,
+    ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+    ...(opts.prepareDependencies?.onStart === undefined ? {} : { onStart: opts.prepareDependencies.onStart }),
+  });
+  opts.prepareDependencies?.onResult?.(prepared);
   const checks = opts.only ? opts.profile.checks.filter((c) => opts.only?.includes(c.name)) : opts.profile.checks;
   const out: CheckResult[] = [];
   for (const def of checks) {
     out.push(await runOneCheck(opts, def));
   }
+  // Here rather than before the commands, even when preparation already failed: a check that
+  // **passed** is evidence whatever the environment looked like, and refusing it would discard a
+  // real observation — MC11, which review round 1 had to teach this item once already. Only the
+  // results can say whether this sandbox spoke about the project. Finding 54.
+  const untrusted = untrustedAmong(opts.sandbox, checks, out);
+  if (untrusted.length > 0) throw new EnvironmentNotReadyError(prepared, untrusted, out);
   if ("baseline" in opts) {
     const regression = compareToBaseline(opts.baseline, out);
     return { checks: out, regression, passed: !hasRegression(regression) };
@@ -101,7 +176,7 @@ export async function runChecks(opts: CheckRunOptions | BaselineCheckRunOptions)
  * and it is the script that says whether packages are needed. Without it the command-shape test
  * could never fire for a profile check.
  */
-function untrustedCheckReason(sandbox: SandboxHandle, profile: ProjectProfile, def: CheckDefinition): string | null {
+function untrustedCheckReason(sandbox: SandboxHandle, def: CheckDefinition): string | null {
   const cwd = resolve(sandbox.path, def.cwd ?? ".");
   return untrustedForMissingDependencies(cwd, def.command, resolvedScriptText(cwd, def));
 }
@@ -132,11 +207,23 @@ export function untrustedChecks(
   profile: ProjectProfile,
   results: readonly CheckResult[],
 ): { name: string; reason: string }[] {
+  return untrustedAmong(sandbox, profile.checks, results);
+}
+
+/**
+ * The same question over a given set of definitions, which is what a run with `only` produced.
+ * Asking it over the whole profile there would report a check that never ran.
+ */
+function untrustedAmong(
+  sandbox: SandboxHandle,
+  defs: readonly CheckDefinition[],
+  results: readonly CheckResult[],
+): { name: string; reason: string }[] {
   const out: { name: string; reason: string }[] = [];
   const byName = new Map(results.map((result) => [result.name, result]));
-  for (const def of profile.checks) {
+  for (const def of defs) {
     if (byName.get(def.name)?.status === "pass") continue;
-    const reason = untrustedCheckReason(sandbox, profile, def);
+    const reason = untrustedCheckReason(sandbox, def);
     if (reason !== null) out.push({ name: def.name, reason });
   }
   return out;
@@ -145,7 +232,7 @@ export function untrustedChecks(
 /** Whether any of a profile's checks cannot produce evidence here, before any of them has run. */
 export function dependenciesUnavailableFor(sandbox: SandboxHandle, profile: ProjectProfile): string | null {
   for (const def of profile.checks) {
-    const reason = untrustedCheckReason(sandbox, profile, def);
+    const reason = untrustedCheckReason(sandbox, def);
     if (reason !== null) return reason;
   }
   return null;
@@ -174,8 +261,9 @@ export interface EnsureDependenciesResult {
  *
  * This is the half of finding 54's remedy that makes a *trusted* baseline obtainable. It is not the
  * whole remedy: install can be disabled, can fail, or can leave the project still unusable, and in
- * every one of those cases the caller must refuse to record rather than run the checks and believe
- * them. The install's output is returned as forensics; it is not one of the project's checks.
+ * every one of those cases the checks must not run. `runChecks` calls this and refuses on its
+ * result, which is why no caller has to. The install's output is returned as forensics; it is not
+ * one of the project's checks.
  */
 export async function ensureProjectDependencies(
   sandbox: SandboxHandle,
@@ -251,7 +339,11 @@ async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise
     // environment, so it is recorded as `error` rather than as the project's `fail`, and carries
     // no fingerprint: a fingerprint is the handle by which two failures are asserted to be the
     // same one, and withholding it makes the baseline comparison fail closed. Finding 54.
-    const untrusted = processStatus === "pass" ? null : untrustedCheckReason(opts.sandbox, opts.profile, def);
+    //
+    // `runChecks` refuses before the first command, so this is the backstop for what it cannot
+    // see: an environment that stops being usable *while* the checks run — a script that clears
+    // `node_modules`, a check whose own directory differs from the one preparation examined.
+    const untrusted = processStatus === "pass" ? null : untrustedCheckReason(opts.sandbox, def);
     const status = untrusted === null ? processStatus : "error";
     const summary = def.kind === "test" ? parseTestOutput(opts.profile.framework, result.stdout, result.stderr) : null;
     const forensic: ForensicCheckOutput = {
@@ -311,7 +403,7 @@ async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise
     }
     // A failure to start the command in an environment that cannot produce evidence gets no
     // fingerprint either: the fingerprint is what lets two failures be called the same one.
-    const spawnUntrusted = untrustedCheckReason(opts.sandbox, opts.profile, def);
+    const spawnUntrusted = untrustedCheckReason(opts.sandbox, def);
     return {
       name: def.name,
       kind: def.kind,
@@ -800,6 +892,8 @@ export async function runIndependentGates(input: {
   signal?: AbortSignal;
   persistOutput?: CheckOutputPersister;
   onCheckStart?: (info: { name: string; command: readonly string[] }) => void;
+  /** Forwarded to `runChecks`; omitting it prepares with defaults, as everywhere else. */
+  prepareDependencies?: DependencyPreparation;
   protectedChangeWaivers?: readonly ProtectedChangeWaiver[];
   protectedChangeScope?: Omit<ProtectedChangeScope, "relativePath">;
   /** Store-backed authority check; schema-valid waiver objects alone are never trusted. */
@@ -895,6 +989,7 @@ export async function runIndependentGates(input: {
   if (input.signal !== undefined) checkOpts.signal = input.signal;
   if (input.persistOutput !== undefined) checkOpts.persistOutput = input.persistOutput;
   if (input.onCheckStart !== undefined) checkOpts.onCheckStart = input.onCheckStart;
+  if (input.prepareDependencies !== undefined) checkOpts.prepareDependencies = input.prepareDependencies;
   const evaluation = await runChecks(checkOpts);
   const checks = evaluation.checks;
   const waivedSilencingPaths = new Set(

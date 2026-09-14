@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 const REQUIRED_FIELDS = ["dependencies", "devDependencies"] as const;
 
 /** Command shapes whose result depends on installed packages even when the manifest declares none. */
-const NEEDS_INSTALLED_PACKAGES = /node_modules|(?<![a-z])(vitest|jest|mocha|ava)(?![a-z])/i;
+const NEEDS_INSTALLED_PACKAGES = /node_modules|(?<![a-z])(vitest|jest|mocha|ava|tsx)(?![a-z])/i;
 
 /** Yarn Plug'n'Play resolves without a `node_modules` directory at all. */
 const PNP_MARKERS = [".pnp.cjs", ".pnp.js", ".pnp.mjs"] as const;

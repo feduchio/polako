@@ -222,7 +222,15 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
         // which EXECUTING treats as in-flight and would wait on forever if the task were retried.
         // DISCARDED is the terminal non-verdict, and IMPLEMENTED -> DISCARDED is a legal edge.
         unpreparable = error;
-        gated.push({ ...candidate, state: "DISCARDED", updatedAt: ctx.clock.now() });
+        // `Candidate.error` exists so a discard is not mistaken for infrastructure noise, and this
+        // is exactly that case: without the reason, a candidate discarded because its checkout
+        // could not be prepared is indistinguishable from one discarded for budget.
+        gated.push({
+          ...candidate,
+          state: "DISCARDED",
+          error: `gate checkout produced no evidence: ${error.detail}`,
+          updatedAt: ctx.clock.now(),
+        });
       } finally {
         await checkout.destroy().catch(() => undefined);
       }
@@ -1005,7 +1013,7 @@ function persistRuntimeCapture(
  */
 function environmentTerminalReason(error: unknown, commitHash: string | null): RunTerminalReason | null {
   if (!(error instanceof EnvironmentNotReadyError)) return null;
-  const why = error.prepared.detail ?? "dependencies unavailable";
+  const why = error.detail;
   const pinned = commitHash === null ? "this checkpoint" : commitHash.slice(0, 8);
   const question =
     error.prepared.repositorySide === true
