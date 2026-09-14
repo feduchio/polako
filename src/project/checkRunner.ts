@@ -26,6 +26,7 @@ import {
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import { canonicalJson, sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
+import { untrustedForMissingDependencies } from "../shared/projectDependencies.js";
 import { inspectManifestHashes } from "./discovery.js";
 import { parseTestOutput, statusFromProcess } from "./parsers.js";
 import type { ProjectProfile } from "./profile.js";
@@ -92,6 +93,25 @@ export async function runChecks(opts: CheckRunOptions | BaselineCheckRunOptions)
   return out;
 }
 
+/**
+ * Why a check run here would say nothing about the project, or `null` when it would. Exported
+ * through `untrustedChecks` so a caller can refuse to record a whole snapshot rather than store
+ * a per-check verdict it cannot support.
+ */
+function untrustedCheckReason(opts: Pick<CheckRunOptions, "sandbox">, def: CheckDefinition): string | null {
+  return untrustedForMissingDependencies(resolve(opts.sandbox.path, def.cwd ?? "."), def.command);
+}
+
+/** The checks of a profile whose results would describe the environment rather than the project. */
+export function untrustedChecks(sandbox: SandboxHandle, profile: ProjectProfile): { name: string; reason: string }[] {
+  const out: { name: string; reason: string }[] = [];
+  for (const def of profile.checks) {
+    const reason = untrustedCheckReason({ sandbox }, def);
+    if (reason !== null) out.push({ name: def.name, reason });
+  }
+  return out;
+}
+
 async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise<CheckResult> {
   const started = Date.now();
   opts.onCheckStart?.({ name: def.name, command: def.command });
@@ -101,7 +121,13 @@ async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise
     if (opts.signal !== undefined) runOpts.signal = opts.signal;
     if (def.cwd !== undefined) runOpts.cwd = def.cwd;
     const result = await opts.sandbox.run(def.command, runOpts);
-    const status = statusFromProcess(result.timedOut, result.aborted, result.exitCode);
+    const processStatus = statusFromProcess(result.timedOut, result.aborted, result.exitCode);
+    // A failure produced where the project's packages are not installed is a statement about the
+    // environment, so it is recorded as `error` rather than as the project's `fail`, and carries
+    // no fingerprint: a fingerprint is the handle by which two failures are asserted to be the
+    // same one, and withholding it makes the baseline comparison fail closed. Finding 54.
+    const untrusted = processStatus === "pass" ? null : untrustedCheckReason(opts, def);
+    const status = untrusted === null ? processStatus : "error";
     const summary = def.kind === "test" ? parseTestOutput(opts.profile.framework, result.stdout, result.stderr) : null;
     const forensic: ForensicCheckOutput = {
       runId: opts.runId,
@@ -117,7 +143,7 @@ async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise
     };
     const outputRef = opts.persistOutput ? await opts.persistOutput(forensic) : null;
     const failureFingerprint =
-      status === "pass"
+      status === "pass" || untrusted !== null
         ? undefined
         : computeFailureFingerprint({
             kind: def.kind,

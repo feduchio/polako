@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalJson } from "../shared/hash.js";
 import type { ArtifactRef } from "../domain/common.js";
@@ -9,6 +9,7 @@ import { FixtureRuntimeValidator } from "../runtime/fixtureRunner.js";
 import { bindNodeScenario } from "../runtime/corpus.js";
 import { runProcess, type ProcessResult } from "../sandbox/process.js";
 import { PolishError } from "../shared/errors.js";
+import { untrustedForMissingDependencies } from "../shared/projectDependencies.js";
 import type { EvidenceAttempt, FindingEvidenceWorker } from "./validator.js";
 
 export interface ProjectEvidenceWorkerOptions {
@@ -205,14 +206,7 @@ function testCommand(finding: Finding): string[] | null {
 }
 
 function missingInstalledDependencies(cwd: string, argv: readonly string[]): string | null {
-  if (existsSync(join(cwd, "node_modules"))) return null;
-  if (!existsSync(join(cwd, "package.json"))) return null;
-  const script = packageTestScript(cwd);
-  const haystack = `${argv.join(" ")}\n${script ?? ""}`;
-  if (/node_modules|(?<![a-z])(vitest|jest|mocha|ava)(?![a-z])/i.test(haystack)) {
-    return "missing installed dependencies";
-  }
-  return null;
+  return untrustedForMissingDependencies(cwd, argv, packageTestScript(cwd));
 }
 
 function packageTestScript(cwd: string): string | null {

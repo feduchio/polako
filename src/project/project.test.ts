@@ -791,6 +791,41 @@ describe("runChecks and runIndependentGates", () => {
     expect(results[0]).toMatchObject({ name: "test", status: "pass", summary: { total: 1, passed: 1, failed: 0 } });
   });
 
+  it("records a failure in an uninstalled project as error without a fingerprint", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-untrusted-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
+    const profile = discoverProject(dir);
+    const results = await runChecks({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      sandbox: mockSandbox(async () => processResult({ exitCode: 1, stderr: "sh: vitest: command not found\n" }), [], dir),
+      profile,
+    });
+    const test = results.find((check) => check.name === "test");
+    // `fail` would be a claim about the project. The missing fingerprint is the load-bearing half:
+    // it is the handle compareToBaseline uses to call two failures the same one. Finding 54.
+    expect(test).toMatchObject({ status: "error", exitCode: 1 });
+    expect(test?.failureFingerprint).toBeUndefined();
+  });
+
+  it("keeps a genuine failure as fail with a fingerprint once packages are installed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-installed-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
+    mkdirSync(join(dir, "node_modules"));
+    const profile = discoverProject(dir);
+    const results = await runChecks({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      sandbox: mockSandbox(async () => processResult({ exitCode: 1, stdout: " Tests  1 failed (1)\n FAIL  src/a.test.ts\n" }), [], dir),
+      profile,
+    });
+    const test = results.find((check) => check.name === "test");
+    expect(test?.status).toBe("fail");
+    expect(test?.failureFingerprint).toBeTypeOf("string");
+  });
+
   it("persists complete forensic output through an injected callback", async () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-output-"));
     cleanup.push(dir);

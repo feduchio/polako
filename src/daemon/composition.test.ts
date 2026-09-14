@@ -1352,4 +1352,42 @@ describe("DISCOVERING_PROJECT and BASELINING drivers", () => {
     expect(store.events.list(run.id, { types: ["baseline.snapshotted"] })).toHaveLength(1);
     expect(store.repos.baselines.listByRun(run.id)).toHaveLength(1);
   });
+
+  it("refuses to record a baseline when the project's packages are not installed", async () => {
+    // The defect finding 54 records: checks run in a worktree with no node_modules, fail on
+    // missing binaries, and the failures were stored as the project's own check statuses.
+    writeFileSync(
+      join(repoDir, "package.json"),
+      JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }),
+    );
+    const git = new Git(repoDir);
+    await git.commitAll("declare dependencies");
+    const provider = new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }]);
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    const deps = buildProductionDeps({
+      store,
+      clock,
+      config,
+      home: join(dir, "home"),
+      providers: [provider],
+      resolveSandbox: (ctx) => new WorktreeSandbox(ctx.run.projectPath, join(dir, "worktrees", ctx.run.id), config.sandbox),
+    });
+    installProductionDrivers(engine, deps);
+    const run = engine.createRun({ projectPath: repoDir });
+    engine.setCurrentCheckpoint(run.id, await git.revParse("HEAD"));
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+
+    expect(store.events.list(run.id, { types: ["baseline.snapshotted"] })).toHaveLength(0);
+    expect(store.repos.baselines.listByRun(run.id)).toHaveLength(0);
+    const stopped = store.repos.runs.get(run.id);
+    expect(stopped?.phase).toBe("NEEDS_HUMAN");
+    expect(stopped?.terminalReason?.code).toBe("environment_not_ready");
+    expect(stopped?.terminalReason?.summary).toContain("test");
+    // The checks still ran, so the operator has the real output to act on.
+    expect(store.events.list(run.id, { types: ["shell.command_started"] }).length).toBeGreaterThan(0);
+  });
 });

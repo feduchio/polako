@@ -26,6 +26,7 @@ export {
   inspectCanonicalAcceptance,
   runChecks,
   runIndependentGates,
+  untrustedChecks,
   type CheckRunOptions,
   type BaselineCheckRunOptions,
   type CheckRunEvaluation,

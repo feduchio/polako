@@ -140,6 +140,8 @@ export const TerminalReasonSchema = z.object({
     "pathology_detected",
     "budget_exhausted",
     "providers_unavailable",
+    /** the project's checks cannot produce evidence here — e.g. its packages are not installed */
+    "environment_not_ready",
     "internal_error",
   ]),
   summary: z.string(),
