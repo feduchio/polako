@@ -251,6 +251,25 @@ async function runOneCandidate<TTask>(
   }
 }
 
+/**
+ * A gate checkout could not be made able to produce evidence. Distinct from every other sandbox
+ * error because it is not the candidate's fault and no retry of this run will change it: the
+ * driver must turn it into a terminal, operator-readable state rather than let it recur on every
+ * tick. Finding 54.
+ */
+export class EnvironmentNotReadyError extends PolishError {
+  readonly prepared: EnsureDependenciesResult;
+
+  constructor(prepared: EnsureDependenciesResult) {
+    super("SANDBOX_ERROR", `gates not run: ${prepared.detail ?? "dependencies unavailable"}`, {
+      environmentNotReady: true,
+      repositorySide: prepared.repositorySide ?? false,
+    });
+    this.name = "EnvironmentNotReadyError";
+    this.prepared = prepared;
+  }
+}
+
 export async function runGates(input: {
   runId: string;
   commitHash: string;
@@ -269,9 +288,8 @@ export async function runGates(input: {
     if (!prepared.ready) {
       // Do not run the checks. Their failures would describe this checkout's environment, and a
       // candidate marked `failed_gates` for that reason is being judged on the wrong thing — the
-      // same confusion as a false baseline, one layer down. The throw makes the candidate an
-      // `error`, which is what an environment that could not be prepared is. Finding 54.
-      throw new PolishError("SANDBOX_ERROR", `candidate gates not run: ${prepared.detail ?? "dependencies unavailable"}`);
+      // same confusion as a false baseline, one layer down. Finding 54.
+      throw new EnvironmentNotReadyError(prepared);
     }
   }
   return runIndependentGates({

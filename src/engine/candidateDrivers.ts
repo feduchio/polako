@@ -11,6 +11,7 @@ import type { GateFailureReason } from "../domain/candidate.js";
 import { emptyFindingCounts, type Checkpoint, type EvidenceVector } from "../domain/checkpoint.js";
 import { SYSTEM_ACTOR, type ArtifactRef } from "../domain/common.js";
 import type { PolishConfig } from "../domain/config.js";
+import type { TerminalReason as RunTerminalReason } from "../domain/run.js";
 import type { NewEvent } from "../domain/event.js";
 import type { CheckpointChangeRecord } from "../domain/convergence.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
@@ -51,6 +52,7 @@ import { incompleteCodingWorkTerminal } from "../convergence/antiFakeDone.js";
 import {
   runCandidatesParallel,
   runGates,
+  EnvironmentNotReadyError,
   type CandidateGates,
   type CandidateResult,
 } from "./candidates.js";
@@ -185,6 +187,7 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
     const gates = await resolveGates(ctx, options, task);
     const corpus = await resolveCorpus(ctx, options);
     const gated: Candidate[] = [];
+    try {
     for (const candidate of pending) {
       const headCommit = candidate.headCommit;
       if (headCommit === null) continue;
@@ -213,6 +216,16 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
       } finally {
         await checkout.destroy().catch(() => undefined);
       }
+    }
+    } catch (error) {
+      // An unpreparable gate checkout is not a candidate verdict and not a transient fault: every
+      // tick would repeat the same install in the same fresh worktree. Terminate with something an
+      // operator can act on. GATING may not reach NEEDS_HUMAN (`RUN_PHASE_TABLE`), so this follows
+      // finding 37's precedent and terminates through FAILED with the reason on the run.
+      const terminal = environmentTerminalReason(error, ctx.run.currentCheckpointHash);
+      if (terminal === null) throw error;
+      appendCandidateEvents(ctx, gated, "candidate.gated");
+      return { status: "complete", nextPhase: "FAILED", terminalReason: terminal };
     }
     appendCandidateEvents(ctx, gated, "candidate.gated");
     const survivors = passedCandidates(ctx, task.id);
@@ -380,7 +393,9 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
     const corpus = await resolveCorpus(ctx, options);
     const runHead = await (options.resolveRunHead ?? defaultRunHead)(ctx);
     let runtimeCapture: RuntimeValidationCapture = { passed: true, records: [] };
-    const result = await integrateWinner({
+    let result;
+    try {
+      result = await integrateWinner({
       runId: ctx.run.id,
       winnerCommit: winner.headCommit,
       sandbox,
@@ -393,7 +408,13 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
         runtimeCapture = await validateRuntimeIfNeeded(ctx, options, commitHash, workspace.path);
         return runtimeCapture.passed;
       },
-    });
+      });
+    } catch (error) {
+      // Same reasoning as GATING: the integration workspace is a fresh checkout too.
+      const terminal = environmentTerminalReason(error, ctx.run.currentCheckpointHash);
+      if (terminal === null) throw error;
+      return { status: "complete", nextPhase: "FAILED", terminalReason: terminal };
+    }
 
     const integrated = result.advanced && result.status === "integrated";
     appendIntegrationEvent(ctx, "integration.finished", {
@@ -964,6 +985,27 @@ function persistRuntimeCapture(
  * carry it, and a check on `acceptanceArtifactsForGate` alone would pass with this call site
  * reverted.
  */
+/**
+ * The terminal reason for a gate or integration checkout that could not be made able to produce
+ * evidence, or `null` when the error is something else and must keep propagating.
+ *
+ * The three branches mirror the `BASELINING` refusal, because the operator's next move is the same
+ * question one layer down: a repository-side cause needs a commit and a new run, an attempted
+ * install that failed could be either, and a disabled install is a setting.
+ */
+function environmentTerminalReason(error: unknown, commitHash: string | null): RunTerminalReason | null {
+  if (!(error instanceof EnvironmentNotReadyError)) return null;
+  const why = error.prepared.detail ?? "dependencies unavailable";
+  const pinned = commitHash === null ? "this checkpoint" : commitHash.slice(0, 8);
+  const question =
+    error.prepared.repositorySide === true
+      ? `A candidate checkout cannot produce evidence about this project: ${why}. Fix it in the repository, commit, and start a new run — this run is pinned to ${pinned}.`
+      : error.prepared.attempted
+        ? `A candidate checkout cannot produce evidence about this project: ${why}. The install ran and did not succeed; the cause may be environmental (registry, network, auth, disk), or the repository's own lockfile or manifest, in which case commit the repair and start a new run. The install's output is in the run's artifacts.`
+        : `A candidate checkout cannot produce evidence about this project: ${why}. Make the install possible here — check the network and sandbox.installDependencies — then start a new run.`;
+  return { code: "environment_not_ready", summary: `gates not run: ${why}`, question };
+}
+
 export async function resolveGates(ctx: PhaseContext, options: CandidateDriverOptions, task: Task): Promise<CandidateGates> {
   if (options.resolveGates !== undefined) return options.resolveGates(ctx, task);
   const profile = await (options.resolveProfile ?? defaultProfile)(ctx);

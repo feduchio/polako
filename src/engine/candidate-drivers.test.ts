@@ -96,6 +96,50 @@ describe("B2 production candidate drivers", () => {
     expect(await fixture.sandbox.list()).toHaveLength(0);
   });
 
+  it("GATING terminates the run when a gate checkout cannot be made able to produce evidence", async () => {
+    // Finding 54, one layer down from the baseline. A candidate must not be judged on an
+    // environment it never controlled, and the failure must not recur on every tick.
+    const options = buildDriverOptions(fixture, () =>
+      new ScriptedCandidateWorker((_task, worktree) => {
+        writeFileSync(join(worktree.path, "outcome.txt"), "pass");
+        // A manifest that declares a package nothing installed here.
+        writeFileSync(
+          join(worktree.path, "package.json"),
+          JSON.stringify({ name: "demo", devDependencies: { vitest: "^4" } }),
+        );
+        return { status: "completed" };
+      }),
+    );
+    const gateEngine = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    gateEngine.registerPhase("EXECUTING", createExecutingDriver(options));
+    gateEngine.registerPhase(
+      "GATING",
+      createGatingDriver({
+        ...options,
+        // Install disabled, so preparation cannot succeed and no command is issued.
+        resolveGates: async (ctx, task) => ({
+          ...(await options.resolveGates!(ctx, task)),
+          prepareDependencies: { enabled: false, timeoutMs: 1000 },
+        }),
+      }),
+    );
+    const { runId } = seedRun(store, clock, fixture);
+    await gateEngine.tickRun(runId);
+    await gateEngine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("FAILED");
+    expect(run.terminalReason?.code).toBe("environment_not_ready");
+    expect(run.terminalReason?.question).toContain("sandbox.installDependencies");
+    // No candidate was judged on it, and a further tick cannot repeat the attempt.
+    expect(store.repos.candidates.listByRun(runId).some((c) => c.state === "GATED")).toBe(false);
+    await gateEngine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("FAILED");
+  });
+
   it("records the model that ran each candidate, everywhere the run reports one", async () => {
     // B-selfhost-9. The router-selected ref already reached AgentRunner and the transcript; the
     // Candidate record and every event actor carried `worker/candidate-N` instead. Nothing in the
