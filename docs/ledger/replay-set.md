@@ -123,13 +123,20 @@ PENDING > READY > RUNNING > GATED > READY > RUNNING > GATED > READY > RUNNING > 
 > RUNNING > GATED > BLOCKED
 ```
 
-`task_01m2fmszpqrm2vpf19yy4z` is the other post-cut-off one, and it **integrated twice**:
-`… SELECTED > INTEGRATING > INTEGRATED > GATED > SELECTED > INTEGRATING > INTEGRATED`.
+`task_01m2fmszpqrm2vpf19yy4z` is the other post-cut-off one, and it **integrated twice** — two
+distinct `task.state_changed` events reaching `INTEGRATED`, with a full gate-and-select cycle
+between them:
+
+```
+PENDING > READY > RUNNING > GATED > READY > RUNNING > GATED > READY > RUNNING > GATED > READY
+> RUNNING > GATED > READY > RUNNING > GATED > READY > RUNNING > GATED > SELECTED > INTEGRATING
+> INTEGRATED > GATED > SELECTED > INTEGRATING > INTEGRATED
+```
 
 The `reached INTEGRATED` column exists because of those two. An earlier version of this file said
 three of four reached `INTEGRATED` and that one task integrated inside a `FAILED` run — both a
-count short — and then described the first task's history as `INTEGRATED > BLOCKED`, which skipped
-nine transitions. The GPT lane found all three errors; the third came from a query that printed
+count short — and then described the first task's history as `INTEGRATED > BLOCKED`, which omitted the ten
+state changes between them. The GPT lane found all three errors; the third came from a query that printed
 distinct states rather than the sequence.
 
 **Excluded: 4 of 4.** The reason is the same for all four and it is not a judgement about them:
