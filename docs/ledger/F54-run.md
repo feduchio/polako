@@ -6,7 +6,7 @@
 | Base | HOST `ef11a00` (accepted P2 block) |
 | Finding | 54, from P2.3 |
 | Implementation | `cf7c804`, then fourteen fix rounds beginning at `6634348` |
-| Change against base | 30 files, +3,211 / −87 |
+| Change against base | 30 files, +3,222 / −87 |
 | Gate | Node 24.20.0; **95 files, 1,077 tests**, exit 0 (was 93 / 1,022) |
 
 This record is written after the fourteenth round. Earlier versions of it described revision 2 —
@@ -87,7 +87,7 @@ candidate reproducing the same failures look regression-free. With no fingerprin
 fails closed on its own terms, without touching `compareToBaseline`, `hasRegression` or the `passed`
 fold — which MC6 forbids.
 
-## The contract changed nine times, and why none of it is tuning
+## The contract changed ten times, and why none of it is tuning
 
 **Revision 1 → 2.** The trigger was "argv[0] is a Node package manager". The suite falsified it
 immediately — 13 failures — and the counter-example is in the tree: `fixtures/resume-dup-fetch`
@@ -281,15 +281,14 @@ manager we do not drive: `NEEDS_HUMAN` from baselining, terminal `FAILED` from g
 integration. That is the correct outcome rather than a dead end, because the operator can fix the
 install itself and the terminal reason says which of the three cases it is.
 
-**The baseline's hashes are from another moment, and that is finding 55.** The snapshot records
-the manifest hashes of the project's working copy, while its checks run in a prepared sandbox; a
-lifecycle script that rewrites a tracked manifest during install would therefore charge every
-candidate for the installer's work. F54 closed its own half of this — the settled capture carries
-no hashes — but the baseline's half needs phase-aware captures in `BaselineSnapshot`, a schema
-change to a comparison path MC6 froze. Recorded as finding 55 with its reproduction, and agreed
-with the reviewing lane as a deferral rather than a fifteenth patch here. The four install commands
-this system issues are all the non-mutating variants, and the first external target declares no
-lifecycle script.
+**The baseline's hashes come from the project's working copy.** `buildBaselineSnapshot` is given
+the discovered `ProjectProfile`, whose `manifestHashes` and `scriptsHash` were read at
+`DISCOVERING_PROJECT` from `run.projectPath` — not from the sandbox its checks ran in. Today those
+agree, because a run refuses to start on a dirty repository and the checkpoint is that working
+copy's HEAD, and because the candidate side compares with *its* source-moment hashes while the
+settled side compares with none. So this is a coupling to `assertProjectClean` rather than a defect:
+there is no reproduction, and the reviewing lane confirmed the one it had is now fixed. Stated here
+so the next person to weaken that guard knows what else it was holding up.
 
 **Worker worktrees are not prepared.** This item covers sandboxes that run *project checks*. A
 candidate worker's own worktree is a fourth sandbox, and it gets no `node_modules`; a worker that

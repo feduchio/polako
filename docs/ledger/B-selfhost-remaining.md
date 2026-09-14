@@ -775,26 +775,3 @@ otherwise look like unfinished work.
     capture can only answer what its own moment supports. A gate now reads the checkout twice, and
     each read is judged whole against its own metadata.
 
-55. **A baseline snapshot records manifest hashes from a different moment than its checks.**
-    `createBaseliningDriver` (`src/daemon/composition.ts`) builds the snapshot from the discovered
-    `ProjectProfile`, whose `manifestHashes` and `scriptsHash` were read from the project's working
-    copy during `DISCOVERING_PROJECT`. Its checks run in a sandbox, after dependencies are
-    installed there. Candidate gating then compares a candidate's own hashes against that baseline.
-    **The exposure.** An install that rewrites a tracked manifest — a `postinstall` script, or a
-    package manager that stamps `package.json` — does so in the baseline's checkout and in every
-    candidate's. The baseline never sees it, because its hashes predate the install; each candidate
-    does. Every candidate is then charged with `scripts_changed` or `weakened_config` for the
-    installer's work, and the gate fails for all of them identically.
-    **Why it is not F54's to fix.** F54 closed its own half of this: the settled capture carries no
-    hashes, precisely because there is nothing at the same moment to compare them with
-    (`docs/ledger/F54.md` MC19, revision 10). Closing the baseline's half means the snapshot must
-    carry *phase-aware* captures — a source-moment set and a settled-moment set — which is a change
-    to `BaselineSnapshot` in `src/domain/checks.ts` and to what `compareToBaseline` is given. That
-    is a schema change, and F54's MC6 froze the comparison path deliberately.
-    **Exposure today is narrow.** The four install commands this system issues are `npm ci`,
-    `pnpm install --frozen-lockfile`, `yarn install --immutable` and `bun install
-    --frozen-lockfile`, all the non-mutating variants, so only a project's own lifecycle script
-    reaches it. `screen-audit-toolkit`, the first external target, declares none.
-    **Found 2026-09-14** by the GPT lane in F54 review round 13, with a reproduction: an install
-    mutating `package.json` identically in the baseline and in candidate gating made an unchanged
-    candidate receive `scripts_changed` and `weakened_config`.
