@@ -2,14 +2,14 @@
 
 | Field | Value |
 |---|---|
-| Contract | revision 10; frozen at `fde4530`, amended at `cf7c804` (rev 2), `6c539f8` (rev 3), and in rounds 7 through 13 |
+| Contract | revision 11; frozen at `fde4530`, amended at `cf7c804` (rev 2), `6c539f8` (rev 3), and in rounds 7 through 14 |
 | Base | HOST `ef11a00` (accepted P2 block) |
 | Finding | 54, from P2.3 |
-| Implementation | `cf7c804`, then thirteen fix rounds beginning at `6634348` |
-| Change against base | 30 files, +3,103 / −87 |
-| Gate | Node 24.20.0; **95 files, 1,076 tests**, exit 0 (was 93 / 1,022) |
+| Implementation | `cf7c804`, then fourteen fix rounds beginning at `6634348` |
+| Change against base | 30 files, +3,211 / −87 |
+| Gate | Node 24.20.0; **95 files, 1,077 tests**, exit 0 (was 93 / 1,022) |
 
-This record is written after the thirteenth round. Earlier versions of it described revision 2 —
+This record is written after the fourteenth round. Earlier versions of it described revision 2 —
 1,046 tests, "five production files", and a story that ended at `BASELINING → NEEDS_HUMAN` — while
 what had actually shipped spanned the predicate, the check runner, two drivers, the integration
 path, the allowlist, the config, the status projection and the report. A run record that
@@ -147,6 +147,7 @@ difference between an amendment and a tuned criterion is exactly whether the cou
 | 11 | the two reads were concatenated before parsing, and a failed read fell back silently |
 | 12 | both diffs were judged against the *final* manifest hashes, losing what a check had undone |
 | 13 | the settled capture compared hashes with a baseline taken at a different moment |
+| 14 | the capture's file list was unobserved, and I had argued it was unobservable |
 
 ## Round 8: what the ordering change cost, and four clauses nothing observed
 
@@ -232,6 +233,7 @@ against the full suite, not asserted from reading:
 | a failing settled read falls back instead of refusing | 1 |
 | both captures are judged against the settled manifest hashes | 1 |
 | the settled capture carries hashes and compares them to the baseline | 1 |
+| one capture's file list is used for the other's diff | 1 |
 | the checks run despite an unverifiable acceptance artifact | 1 |
 | the memo holds the settled result instead of the in-flight promise | 1 |
 | the runner never marks a result untrusted | 1 |
@@ -254,6 +256,21 @@ restores it; a reproduction in a project with a partial `node_modules` returns `
 not ignore it produces no silencing finding, on a real git worktree; two concurrent check runs on
 one sandbox issue one install.
 
+## Round 14: being wrong about what could not be observed
+
+I told the lane that substituting one capture's file list for another's was unobservable, because
+both rules that read the list have diff-based neighbours. That was wrong, and the lane produced the
+case: `removed_test_file` reads the list, and its neighbour `removed_test` fires only on a removed
+line that *declares* a test. A check that restores a deleted file **and stages it** empties the
+settled list and the settled diff both, so only the candidate's own list still carries the
+deletion. The fixture is now in the suite and it fails under the substitution.
+
+Worth recording how the argument failed, because it is the same failure the item keeps finding:
+reasoning about what a detector reads, instead of running the case. My first two attempts at this
+fixture passed under their own mutant — the first because a restored-but-unstaged file still shows
+as deleted, the second because the candidate's deletion had removed `src/` and the restore threw
+where nothing was looking. Neither told me the claim was true; they told me the fixture was wrong.
+
 ## Known cost, stated rather than discovered later
 
 **MC2's residual false positive.** A project that declares dependencies, does not need them for a
@@ -264,6 +281,16 @@ manager we do not drive: `NEEDS_HUMAN` from baselining, terminal `FAILED` from g
 integration. That is the correct outcome rather than a dead end, because the operator can fix the
 install itself and the terminal reason says which of the three cases it is.
 
+**The baseline's hashes are from another moment, and that is finding 55.** The snapshot records
+the manifest hashes of the project's working copy, while its checks run in a prepared sandbox; a
+lifecycle script that rewrites a tracked manifest during install would therefore charge every
+candidate for the installer's work. F54 closed its own half of this — the settled capture carries
+no hashes — but the baseline's half needs phase-aware captures in `BaselineSnapshot`, a schema
+change to a comparison path MC6 froze. Recorded as finding 55 with its reproduction, and agreed
+with the reviewing lane as a deferral rather than a fifteenth patch here. The four install commands
+this system issues are all the non-mutating variants, and the first external target declares no
+lifecycle script.
+
 **Worker worktrees are not prepared.** This item covers sandboxes that run *project checks*. A
 candidate worker's own worktree is a fourth sandbox, and it gets no `node_modules`; a worker that
 wants to run the suite while it works will have to install for itself. Recorded here rather than
@@ -273,4 +300,4 @@ widened into this item.
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result: 95 test files, 1,076 tests, exit 0.
+Result: 95 test files, 1,077 tests, exit 0.

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1579,6 +1580,64 @@ describe("runChecks and runIndependentGates", () => {
       { path: artifact.relativePath, reason: "modified" },
     ]);
     expect(materialize).not.toHaveBeenCalled();
+  });
+
+  it("keeps the candidate's own file list, which a staged restore erases from the settled one", async () => {
+    // Each capture brings the file list from its own moment. A check that restores a deleted test
+    // **and stages it** leaves the settled read with nothing to report, and `removed_test_file`
+    // reads the file list rather than the diff — its diff-side neighbour, `removed_test`, only
+    // fires on a removed line that declares a test, and this file declares none. So pairing the
+    // candidate's diff with the settled list loses the deletion entirely. Finding 54.
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-staged-restore-repo-"));
+    const wtRoot = mkdtempSync(join(tmpdir(), "polish-staged-restore-wt-"));
+    cleanup.push(repoDir, wtRoot);
+    const repo = await Git.init(repoDir);
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+    writeFileSync(join(repoDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    mkdirSync(join(repoDir, "src"), { recursive: true });
+    const legacy = "throw new Error('legacy is broken');\n";
+    writeFileSync(join(repoDir, "src/legacy.test.ts"), legacy);
+    const base = (await repo.commitAll("baseline"))!;
+    const profile = discoverProject(repoDir);
+    const baseline = buildBaselineSnapshot({
+      runId: id("run"),
+      commitHash: base,
+      checks: [{ name: "test", kind: "test", status: "pass", exitCode: 0, durationMs: 1, summary: null, outputRef: null }],
+      profile,
+    });
+    const sandbox = new WorktreeSandbox(repoDir, wtRoot, defaultConfig().sandbox);
+    const candidate = await sandbox.create({ id: "staged-cand", baseCommit: base, branch: "polish/staged", policy: CommandPolicy.forProject([], null) });
+    rmSync(join(candidate.path, "src/legacy.test.ts"));
+    const head = (await candidate.commitAll("drop the broken test"))!;
+    const gate = await sandbox.create({ id: "staged-gate", baseCommit: head, policy: CommandPolicy.forProject([], null) });
+    const ran: string[][] = [];
+    try {
+      const result = await runIndependentGates({
+        runId: baseline.runId,
+        commitHash: head,
+        sandbox: {
+          ...gate,
+          run: async (argv) => {
+            ran.push([...argv]);
+            mkdirSync(join(gate.path, "src"), { recursive: true });
+            writeFileSync(join(gate.path, "src/legacy.test.ts"), legacy);
+            execFileSync("git", ["add", "-A"], { cwd: gate.path });
+            return processResult({ stdout: " Tests  1 passed (1)\n" });
+          },
+        },
+        profile,
+        acceptanceArtifacts: [],
+        materializeAcceptance: vi.fn(),
+        verifyAcceptance: vi.fn(() => []),
+        baseline,
+      });
+      expect(ran).toEqual([["pnpm", "run", "test"]]);
+      expect(result.silencing.some((finding) => finding.kind === "removed_test_file")).toBe(true);
+      expect(result.passed).toBe(false);
+    } finally {
+      await gate.destroy();
+      await candidate.destroy();
+    }
   });
 
   it("does not charge the candidate for a manifest the install rewrote", async () => {
