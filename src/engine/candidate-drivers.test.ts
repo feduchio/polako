@@ -484,7 +484,7 @@ describe("B2 production candidate drivers", () => {
     expect(store.repos.runs.get(runId)?.currentCheckpointHash).toBe(fixture.base);
   });
 
-  it("finishes the integrated task and stops explicitly when corpus inventory fails", async () => {
+  it("finishes the integrated task and stops explicitly when corpus admission throws", async () => {
     const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-corpus-inventory-error", "pass", {
       "tests/regression.test.mjs": "process.exit(0);\n",
     });
@@ -530,19 +530,19 @@ describe("B2 production candidate drivers", () => {
       ...productionOptions,
       resolveProfile: () => fixture.gates.profile,
     }));
-    const inventory = vi.spyOn(Git.prototype, "changedFileStatusesBetween")
-      .mockRejectedValueOnce(new Error("inventory unavailable"));
+    const admission = vi.spyOn(store.acceptance, "putContent")
+      .mockImplementationOnce(() => { throw new Error("CAS unavailable"); });
     try {
       await integration.tickRun(runId);
     } finally {
-      inventory.mockRestore();
+      admission.mockRestore();
     }
 
     expect(store.repos.tasks.get(taskId)?.state).toBe("INTEGRATED");
     expect(store.repos.runs.get(runId)?.phase).toBe("FAILED");
-    expect(store.repos.runs.get(runId)?.terminalReason?.summary).toContain("test_file_inventory_unavailable");
+    expect(store.repos.runs.get(runId)?.terminalReason?.summary).toContain("admission_exception: CAS unavailable");
     expect(store.repos.acceptanceCorpus.get(pending.id)?.metadata["executableStatus"])
-      .toBe("test_file_inventory_unavailable");
+      .toBe(CORPUS_EXECUTABLE_STATUS.pendingIntegration);
   });
 
   it("revalidates a stale winner against the moved head and leaves head unchanged on conflict", async () => {

@@ -433,7 +433,15 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       ...classified,
     });
     appendRunCheckpoint(ctx, checkpoint.commitHash);
-    const admission = await admitCorpusExecutable(ctx, integrating, integratedCommit, changes);
+    let admission: Awaited<ReturnType<typeof admitCorpusExecutable>>;
+    try {
+      admission = await admitCorpusExecutable(ctx, integrating, integratedCommit, changes);
+    } catch (error) {
+      admission = {
+        ok: false,
+        reason: `admission_exception: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
     appendTaskEvent(ctx, {
       ...integrating,
       state: "INTEGRATED",
