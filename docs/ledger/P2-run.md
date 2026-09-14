@@ -3,10 +3,10 @@
 | Field | Value |
 |---|---|
 | Entry base | HOST `f9195d1` (accepted P1 block) |
-| Block candidate | `c6ce72f` |
+| Block candidate | `bc8c6c3`, reviewed by GPT-5.6-sol and then Grok |
 | Plan | `docs/PLAN.md` §4 |
 | Gate | Node 24.20.0; 93 files; 1,022 tests; exit 0 |
-| Production change across the whole block | **none** — `git diff f9195d1..c6ce72f -- src/` is empty |
+| Production change across the whole block | **none** — `git diff f9195d1..bc8c6c3 -- src/` is empty |
 
 ## The three verdicts
 
@@ -27,8 +27,10 @@
 
 ## What the block establishes, and it is not what the plan expected
 
-**Every gate P2 exists to feed is `inconclusive`, and each for a different reason.** That is the
-result, and it is worth stating as one sentence rather than three:
+**Every gate P2 exists to feed is `inconclusive`, and each for a different reason.** Note what this
+does and does not say about the items: P2.1 and P2.2 returned `inconclusive` verdicts, while **P2.3
+succeeded** — it produced the smoke record §4 asked for and found a defect doing so. What is
+`inconclusive` is the three P3 gates, not the three P2 items.
 
 | P3 item | Blocked by | Why |
 |---|---|---|
@@ -42,12 +44,19 @@ no existing path may be removed. So `review.skipAdversarialWhenClean` stays `fal
 reasoning default stays `false`, and P3 cannot remove anything even if its mechanisms land behind
 flags. P1's cost mechanisms remain mechanisms.
 
-**Why the three came out inconclusive is one fact seen from three sides.** The store has never held
-a post-plumbing review round. P2.1 says so directly — 11 of 17 runs began after finding 41's fix
-and none reached `REVIEWING`. P2.2 says so by consequence: with no real runs to draw on, the replay
-corpus is four scripted scenarios of one mission on one fixture. P2.3 says so about the future: the
-first external project cannot even produce a trustworthy baseline. The bottleneck is not
-measurement design, it is that the system has not completed a review round on the current tree.
+**The three outcomes are separate, and an earlier version of this record wrongly made them one.**
+It claimed a single bottleneck — that the store has never held a post-plumbing review round — and
+the block reviewer rejected that synthesis. Each needs a different thing, and pretending otherwise
+would mislead whoever tries to unblock P3:
+
+| Item | What it is actually blocked by | What would unblock it |
+|---|---|---|
+| P2.1 | no post-plumbing review execution exists: 11 of 17 runs began after finding 41's fix and none reached `REVIEWING` | **one** completed review round on the current tree. A round returning no findings still counts; it is a measured zero |
+| P2.2 | the corpus is four committed scripted scenarios of one mission on one fixture, against a floor of five | **not** more store review rounds — those are barred from this set by MC5's first bar anyway. It needs distinct scenarios, or a second fixture, or a plan revision that decides what "evaluable" requires |
+| P2.3 | nothing — it **succeeded** | it is not an inconclusive verdict at all: it did what it set out to do and found finding 54 doing it |
+
+The one thing they do share is context rather than cause: the system has completed very little on
+the current tree, and each item ran into a different consequence of that.
 
 ## Finding 54, and why it outranks the two inconclusive verdicts
 
@@ -73,13 +82,17 @@ Under process v3 each item ran GPT-5.6-sol as the entry gate to a clean verdict,
 same commit, with any Grok finding returning to GPT first. Rounds: P2.1 eight, P2.2 eight, P2.3
 nine.
 
-**The second lane changed the result of all three items, and the pattern is worth recording.** In
-every case the entry gate had made the record internally consistent and the second lane found that
-the top-line named the wrong object:
+**The second lane changed the top-line claim of all three items, and in two of them it changed the
+recorded result.** The distinction matters and the block reviewer insisted on it: in P2.1 every
+number and the verdict itself were unaffected — the fix changed what the instrument would say about
+the *next* eligible execution, not what it said about this store. In P2.2 the verdict string
+changed. In P2.3 the named defect changed and with it what a fix must do. In every case the entry
+gate had made the record internally consistent first, and the second lane found that the top-line
+named the wrong object:
 
 | Item | What the entry gate found | What the second lane found |
 |---|---|---|
-| P2.1 | fifteen defects over five rounds: eligibility fallback, timestamp classification, `RAW` triage, fixed-axis verdict, string token totals, prototype-colliding axis names | the MC3 verdict fired on zero *findings* rather than zero eligible *executions*, so the first real post-plumbing round would have been reported as an absence of rows |
+| P2.1 | fifteen defects over five rounds: eligibility fallback, timestamp classification, `RAW` triage, fixed-axis verdict, string token totals, prototype-colliding axis names | the MC3 verdict fired on zero *findings* rather than zero eligible *executions*, so the first real post-plumbing round would have been reported as an absence of rows. The current numbers and verdict were unaffected; what changed is the semantics for the next measurement |
 | P2.2 | every arithmetic defect, and it adjudicated and upheld the verdict twice when asked | the count was four, not five, because a two-arm `it.each` is one committed scenario — and "floor met" was never one of MC4's two authorised strings |
 | P2.3 | the rendered phase chain, the unaccounted probe attempts, the registration claim, and the gate consequence it insisted on tracing | the broken object was the persisted *meaning*, not the missing install; the isolation is the design, so a fix that only installs leaves the hole open |
 
@@ -99,4 +112,4 @@ Finding 54 is recorded, not repaired.
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result at `c6ce72f`: 93 test files, 1,022 tests, exit 0.
+Result at `bc8c6c3`: 93 test files, 1,022 tests, exit 0.
