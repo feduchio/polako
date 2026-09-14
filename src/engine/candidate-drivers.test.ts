@@ -135,7 +135,9 @@ describe("B2 production candidate drivers", () => {
     expect(run.terminalReason?.code).toBe("environment_not_ready");
     expect(run.terminalReason?.question).toContain("sandbox.installDependencies");
     // No candidate was judged on it, and a further tick cannot repeat the attempt.
-    expect(store.repos.candidates.listByRun(runId).some((c) => c.state === "GATED")).toBe(false);
+    const states = store.repos.candidates.listByRun(runId).map((candidate) => candidate.state);
+    expect(states).not.toContain("PASSED_GATES");
+    expect(states).not.toContain("FAILED_GATES");
     await gateEngine.tickRun(runId);
     expect(store.repos.runs.get(runId)?.phase).toBe("FAILED");
   });
