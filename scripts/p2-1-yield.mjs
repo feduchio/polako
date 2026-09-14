@@ -138,10 +138,20 @@ function measure(data, cutoff) {
     if (prior === undefined || event.ts < prior) map.set(execution.id, event.ts);
   }
 
+  // Duplicate review.finished events resolve to the EARLIEST, above: the parse happened at the
+  // first finish, and taking the earliest can only move an execution out of `eligible`, never into
+  // it. Recorded as a decision because the contract does not specify duplicates.
   const bucketOfExecution = new Map();
   for (const execution of data.executions) {
     const finished = finishedTs.get(execution.id);
-    const bucket = finished === undefined ? "unfinished" : finished >= cutoff ? "eligible" : "ineligible";
+    const bucket =
+      finished !== undefined
+        ? finished >= cutoff
+          ? "eligible"
+          : "ineligible"
+        : startedTs.has(execution.id)
+          ? "unfinished"
+          : "unattributed";
     bucketOfExecution.set(execution.id, bucket);
   }
 
@@ -231,8 +241,12 @@ function measure(data, cutoff) {
     if (event.type !== "model.call") continue;
     const payload = event.value.payload ?? {};
     if (payload.role !== "reviewer") continue;
+    // MC2 attributes by `purpose == "review_<axis>"`. A purpose without that prefix names no axis,
+    // so it cannot be attributed to one: it is counted under its raw purpose in `unattributed`
+    // rather than silently becoming an axis of the same name.
     const purpose = typeof payload.purpose === "string" ? payload.purpose : "unknown";
-    const axis = purpose.startsWith("review_") ? purpose.slice("review_".length) : purpose;
+    const attributable = purpose.startsWith("review_") && purpose.length > "review_".length;
+    const axis = attributable ? purpose.slice("review_".length) : `purpose:${purpose}`;
     const usage = payload.usage ?? null;
     const tokens = usage === null ? 0 : (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
     whole.reviewerCalls += 1;
@@ -244,7 +258,7 @@ function measure(data, cutoff) {
       baselineRunsOnly.tokens += tokens;
       if (usage === null) baselineRunsOnly.nullUsageCalls += 1;
     }
-    const executionId = openExecution.get(`${event.runId}\u0000${axis}`);
+    const executionId = attributable ? openExecution.get(`${event.runId}\u0000${axis}`) : undefined;
     const bucket = executionId === undefined ? "unattributed" : bucketOfExecution.get(executionId) ?? "unattributed";
     const row = rowFor(populations[bucket], axis);
     row.reviewerCalls += 1;
@@ -444,7 +458,8 @@ function render(report) {
     const label = {
       ineligible: "Ineligible — review.finished before the cut-off; discarded parser output",
       unfinished: "Unfinished — review.started with no review.finished; never parsed at all",
-      unattributed: "Unattributed — no execution could be joined; never counted as eligible",
+      unattributed:
+        "Unattributed — could not be classified: an execution row with no events, a finding with no execution cause, or a call with no open execution or no review_ purpose. Never eligible",
     }[bucket];
     out.push(`${label}. Executions: ${population.executions}. Runs: ${population.runs.join(", ") || "none"}`);
     out.push(renderAxisTable(population.axes));
@@ -544,6 +559,21 @@ function buildSelfcheckStore(path) {
   event(1600, "review.started", { execution: unfin });
   call(1700, "review_adversarial", null);
 
+  // An execution row with no events at all is not "unfinished" — there is no review.started to say
+  // it began. It cannot be classified, so it is unattributed.
+  execution("rex_eventless", "performance", 1600, null, false, []);
+
+  // Two review.finished events for one execution, one either side of the cut-off. The earliest
+  // wins, so this execution is ineligible.
+  const dup = execution("rex_dup", "security", 900, 950, true, []);
+  event(900, "review.started", { execution: dup });
+  event(950, "review.finished", { execution: dup });
+  event(1900, "review.finished", { execution: dup });
+
+  // A reviewer call whose purpose names no axis, issued while an eligible correctness execution is
+  // open. It must not land in that execution's tokens.
+  call(1500, "correctness", { inputTokens: 3, outputTokens: 2 });
+
   finding("fnd_elig_valid", "correctness", "VALID");
   validation("fval_1", "fnd_elig_valid", "VALID");
   event(1500, "finding.raised", { finding: { id: "fnd_elig_valid" } }, ["rex_elig"]);
@@ -581,14 +611,18 @@ function selfcheck() {
   const path = join(dir, "polish.db");
   try {
     const cutoff = buildSelfcheckStore(path);
-    const report = measure(read(path), cutoff);
+    const data = read(path);
+    const report = measure(data, cutoff);
     const v = verdict(report);
     const p = report.populations;
     const axis = (bucket, name) => p[bucket].axes[name] ?? emptyAxisRow();
+    const emptyReport = measure(data, cutoff * 1000);
+    const emptyVerdict = verdict(emptyReport);
+    const emptyRender = render(emptyReport);
     const checks = [
       ["eligible executions are the two that finished after the cut-off", p.eligible.executions, 2],
       ["an execution with no review.finished is never eligible", p.unfinished.executions, 1],
-      ["unfinished execution is not counted as ineligible either", p.ineligible.executions, 1],
+      ["the unfinished execution is not counted as ineligible either", axis("ineligible", "adversarial").executions, 0],
       ["a finding follows its execution, not its own ts", axis("ineligible", "regression").findingsRaised, 1],
       ["that late-raised finding is not eligible", axis("eligible", "regression").findingsRaised, 0],
       ["its VALID validation is not eligible either", axis("eligible", "regression").survivedReproduction, 0],
@@ -605,6 +639,18 @@ function selfcheck() {
       ["the verdict sums every eligible axis, not a fixed three", v.eligibleFindings, 3],
       ["a non-empty eligible set is measured, not inconclusive", v.verdict, "measured"],
       ["a non-empty eligible set reports its table", v.eligibleTableReported, true],
+      ["an execution row with no events is not unfinished", axis("unfinished", "performance").executions, 0],
+      ["an execution row with no events cannot be classified", axis("unattributed", "performance").executions, 1],
+      ["duplicate review.finished resolves to the earliest", axis("ineligible", "security").executions, 1],
+      ["so a later duplicate finish does not make it eligible", axis("eligible", "security").executions, 0],
+      ["a purpose with no review_ prefix names no axis", axis("eligible", "correctness").reviewerCalls, 1],
+      ["and is counted under its raw purpose, unattributed", axis("unattributed", "purpose:correctness").reviewerTokens, 5],
+      // AC2's render path: the same store measured with a cut-off nothing reaches must print the
+      // verdict without the eligible table. Restoring the zero table would fail this.
+      ["an empty eligible set is inconclusive", emptyVerdict.verdict, "inconclusive — no post-plumbing production findings"],
+      ["an empty eligible set reports no table", emptyVerdict.eligibleTableReported, false],
+      ["and the rendered report says so instead of tabulating zeros", emptyRender.includes("no per-axis yield table is reported"), true],
+      ["the rendered empty report has no eligible axis table", emptyRender.split("Ineligible —")[0].includes("| axis |"), false],
     ];
     const failures = checks.filter(([, actual, expected]) => actual !== expected);
     for (const [name, actual, expected] of checks) {
