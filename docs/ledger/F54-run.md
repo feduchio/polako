@@ -295,6 +295,24 @@ candidate worker's own worktree is a fourth sandbox, and it gets no `node_module
 wants to run the suite while it works will have to install for itself. Recorded here rather than
 widened into this item.
 
+## Accepted
+
+Both lanes clean on `43f6d7a`. The GPT-5.6-sol lane cleared it after nine review rounds; the Grok
+lane, which had blocked the item at `4837179` on the design, judged the current shape coherent:
+two objects, *a checkout moment* and *a result that is or is not evidence*, rather than call sites
+that must remember.
+
+Two non-blocking notes from the Grok lane are recorded rather than fixed, because fixing them would
+mean a source change after both lanes cleared the same commit:
+
+1. Three comments in `src/project/checkRunner.ts` still describe the pre-round-9 rule — that the
+   checks do not run when preparation fails. MC17 replaced it, and the suite holds the new rule: an
+   early refusal kills two tests. A reader trusting those comments would try to re-break MC11 and
+   be caught.
+2. `sameCapture` is unreachable in production: the settled capture's hashes are always `null` and
+   the candidate's are not, so two captures never compare equal and both are always judged. Dead,
+   and conservative in the safe direction.
+
 ## Gate
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
