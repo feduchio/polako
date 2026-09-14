@@ -1,4 +1,4 @@
-import type { CorpusEntry } from "../domain/acceptance.js";
+import { CORPUS_EXECUTABLE_STATUS, type CorpusEntry } from "../domain/acceptance.js";
 import type { Actor, ArtifactRef } from "../domain/common.js";
 import {
   FindingSchema,
@@ -146,7 +146,14 @@ export class FindingValidator {
       summary: `Validated finding: ${finding.claim}`,
       evidenceRefs: attempt.corpusEvidenceRefs ?? [],
       artifactHashes: validation.evidenceRefs.map((ref) => ref.sha256),
-      metadata: { findingId: finding.id, validationId: validation.id, method: validation.method },
+      metadata: {
+        findingId: finding.id,
+        validationId: validation.id,
+        method: validation.method,
+        executableStatus: finding.blocking
+          ? CORPUS_EXECUTABLE_STATUS.pendingIntegration
+          : CORPUS_EXECUTABLE_STATUS.noFixingTask,
+      },
     });
 
     if (!finding.blocking) {

@@ -19,6 +19,11 @@ export interface DiffStat {
   deletions: number;
 }
 
+export interface ChangedFileStatus {
+  status: string;
+  path: string;
+}
+
 /**
  * Thin, argv-based git wrapper bound to one working directory. No shell, fixed identity,
  * no prompts. Every call is a subprocess so it is trivially loggable by callers.
@@ -96,13 +101,34 @@ export class Git {
   }
 
   /** File content at a commit, without checking anything out. */
-  showFile(commit: string, path: string): Promise<string> {
-    return this.out(["show", `${commit}:${path}`]);
+  async showFile(commit: string, path: string): Promise<string> {
+    return (await this.run(["show", `${commit}:${path}`])).stdout;
   }
 
   async changedFilesBetween(base: string, head: string): Promise<string[]> {
     const text = await this.out(["diff", "--name-only", "-z", `${base}..${head}`]);
     return text.split("\0").filter((path) => path.length > 0);
+  }
+
+  async changedFileStatusesBetween(base: string, head: string): Promise<ChangedFileStatus[]> {
+    const fields = (await this.out(["diff", "--name-status", "-z", `${base}..${head}`]))
+      .split("\0")
+      .filter((field) => field.length > 0);
+    const changes: ChangedFileStatus[] = [];
+    for (let index = 0; index < fields.length;) {
+      const status = fields[index++];
+      if (status === undefined) break;
+      const firstPath = fields[index++];
+      if (firstPath === undefined) break;
+      if (status.startsWith("R") || status.startsWith("C")) {
+        const destination = fields[index++];
+        if (destination === undefined) break;
+        changes.push({ status, path: destination });
+      } else {
+        changes.push({ status, path: firstPath });
+      }
+    }
+    return changes;
   }
 
   async diffStat(base: string, head = "HEAD"): Promise<DiffStat> {

@@ -237,4 +237,67 @@ describe("an admitted corpus executable reaches a later candidate's gate", () =>
     expect(result.candidateProtectedPathProblems.map((problem) => problem.path))
       .toContain("tests/corpus-regression.test.mjs");
   });
+
+  it("carries task and corpus artifacts through protection, materialization, and verification", async () => {
+    const { store, artifacts, runId } = setUp();
+    const ownContent = "export const own = true;\n";
+    const own = {
+      id: id("acc", NOW + 1),
+      runId,
+      taskId: id("task", NOW + 1),
+      kind: "regression_test" as const,
+      relativePath: "acceptance/own.mjs",
+      sha256: store.acceptance.putContent(ownContent, "task:own"),
+      evidenceFor: null,
+      createdAt: NOW,
+    };
+    const union = acceptanceArtifactsForGate(
+      [own],
+      store.repos.acceptanceCorpus.forMission(store.repos.runs.get(runId)!.missionId),
+      (artifactId) => store.repos.acceptance.get(artifactId) ?? undefined,
+    );
+    const expectedPaths = ["acceptance/own.mjs", "tests/corpus-regression.test.mjs"];
+    expect(union.map((artifact) => artifact.relativePath).sort()).toEqual(expectedPaths);
+
+    const dir = checkoutFor();
+    mkdirSync(join(dir, "acceptance"), { recursive: true });
+    mkdirSync(join(dir, "tests"), { recursive: true });
+    writeFileSync(join(dir, own.relativePath), ownContent);
+    writeFileSync(join(dir, artifacts[0]!.relativePath), CORPUS_TEST);
+    const profile = discoverProject(dir);
+    profile.checks = [{
+      name: "corpus-regression",
+      kind: "custom",
+      command: ["node", "tests/corpus-regression.test.mjs"],
+      mandatory: true,
+    }];
+    const baseline = buildBaselineSnapshot({
+      runId,
+      commitHash: "a".repeat(40),
+      checks: [],
+      profile,
+    });
+    const verified: string[][] = [];
+    const materialized: string[][] = [];
+    const result = await runIndependentGates({
+      runId,
+      commitHash: baseline.commitHash,
+      sandbox: checkoutSandbox(dir, expectedPaths),
+      profile,
+      acceptanceArtifacts: union,
+      materializeAcceptance: (checkoutDir, list) => {
+        materialized.push(list.map((artifact) => artifact.relativePath).sort());
+        store.acceptance.materialize(checkoutDir, list);
+      },
+      verifyAcceptance: (checkoutDir, list) => {
+        verified.push(list.map((artifact) => artifact.relativePath).sort());
+        return store.acceptance.verify(checkoutDir, list);
+      },
+      baseline,
+    });
+
+    expect(result.passed).toBe(true);
+    expect(materialized).toEqual([expectedPaths]);
+    expect(verified).toEqual([expectedPaths, expectedPaths]);
+  });
 });

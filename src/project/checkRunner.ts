@@ -667,18 +667,29 @@ export async function runIndependentGates(input: {
   )].sort();
   const changedArtifacts = input.acceptanceArtifacts.filter((artifact) =>
     changedProtectedPaths.includes(normalizeChangedPath(artifact.relativePath)));
-  const inspectedProblems = changedArtifacts.length === 0
-    ? []
-    : inspectProtectedPaths(
-        input.sandbox.path,
-        changedArtifacts,
-        input.verifyAcceptance,
-      );
-  const inspectedByPath = new Map(
-    inspectedProblems.map((problem) => [normalizeChangedPath(problem.path), problem]),
-  );
-  const candidateProtectedPathProblems = changedProtectedPaths
-    .map((path) => inspectedByPath.get(path) ?? { path, reason: "modified" })
+  const candidateProtectedPathProblems = (() => {
+    if (changedArtifacts.length === 0) return [];
+    const byPath = new Map<string, { path: string; reason: string }>();
+    for (const problem of inspectCanonicalAcceptance(input.sandbox.path, changedArtifacts)) {
+      byPath.set(normalizeChangedPath(problem.path), {
+        path: normalizeChangedPath(problem.path),
+        reason: "modified",
+      });
+    }
+    // Keep callback diagnostics when both inspectors reject the same path, but never let an
+    // empty/forged callback erase the independent canonical result.
+    for (const problem of inspectProtectedPaths(
+      input.sandbox.path,
+      changedArtifacts,
+      input.verifyAcceptance,
+    )) {
+      byPath.set(normalizeChangedPath(problem.path), {
+        path: normalizeChangedPath(problem.path),
+        reason: problem.reason,
+      });
+    }
+    return [...byPath.values()];
+  })()
     .filter((problem) => !hasMatchingProtectedChangeWaiver(
       normalizeChangedPath(problem.path),
       input.protectedChangeWaivers,

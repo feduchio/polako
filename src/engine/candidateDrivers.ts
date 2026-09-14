@@ -1,6 +1,9 @@
 import type { CandidateWorkerFactory } from "../agents/types.js";
-import type { MissionAcceptanceCorpus } from "../domain/acceptance.js";
-import { runtimeAllowsDone } from "../domain/acceptance.js";
+import {
+  CORPUS_EXECUTABLE_STATUS,
+  runtimeAllowsDone,
+  type MissionAcceptanceCorpus,
+} from "../domain/acceptance.js";
 import type { GateReport, Candidate, CandidateState } from "../domain/candidate.js";
 import type { GateFailureReason } from "../domain/candidate.js";
 import { emptyFindingCounts, type Checkpoint, type EvidenceVector } from "../domain/checkpoint.js";
@@ -33,7 +36,7 @@ import { MissionAcceptanceService, acceptanceArtifactsForGate } from "../store/m
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { Sandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
-import { Git } from "../sandbox/git.js";
+import { Git, type ChangedFileStatus } from "../sandbox/git.js";
 import { classifyCheckpointPaths, isTestPath } from "../convergence/pathology/changeClassification.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
 import type { Task } from "../domain/task.js";
@@ -409,14 +412,14 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
     }
 
     const checkpoint = createCheckpoint(ctx, integrating, integratedCommit, gateResult, result.previousHead);
+    let changes: ChangedFileStatus[] | null = null;
     let classified: ReturnType<typeof classifyCheckpointPaths> = {
       paths: [],
       classification: "unknown",
     };
     try {
-      classified = classifyCheckpointPaths(
-        await new Git(ctx.run.projectPath).changedFilesBetween(result.previousHead, integratedCommit),
-      );
+      changes = await new Git(ctx.run.projectPath).changedFileStatusesBetween(result.previousHead, integratedCommit);
+      classified = classifyCheckpointPaths(changes.map((change) => change.path));
     } catch {
       // The integration is already durable. Missing path evidence must fail safe, not fail integration.
     }
@@ -427,7 +430,7 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       ...classified,
     });
     appendRunCheckpoint(ctx, checkpoint.commitHash);
-    await admitCorpusExecutable(ctx, integrating, integratedCommit, classified.paths);
+    await admitCorpusExecutable(ctx, integrating, integratedCommit, changes);
     appendTaskEvent(ctx, {
       ...integrating,
       state: "INTEGRATED",
@@ -458,38 +461,51 @@ async function admitCorpusExecutable(
   ctx: PhaseContext,
   task: Task,
   integratedCommit: string,
-  changedPaths: readonly string[],
+  changes: readonly ChangedFileStatus[] | null,
 ): Promise<void> {
   if (task.origin.kind !== "valid_finding") return;
   const findingId = task.origin.findingId;
   const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
   const pending = corpus.get(ctx.run.missionId).entries.filter((entry) =>
     entry.executable === null &&
-    typeof entry.metadata["executableStatus"] !== "string" &&
+    entry.metadata["executableStatus"] === CORPUS_EXECUTABLE_STATUS.pendingIntegration &&
     entry.metadata["findingId"] === findingId);
   if (pending.length === 0) return;
 
-  const testPaths = changedPaths.filter((path) => isTestPath(path)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  const chosen = testPaths[0];
-  if (chosen === undefined) {
+  if (changes === null) {
+    const reason = "test_file_inventory_unavailable";
+    for (const entry of pending) corpus.recordExecutableAbsent({ entryId: entry.id, reason });
+    throw new Error(reason);
+  }
+  const testPaths = changes
+    .filter((change) => change.status !== "D" && isTestPath(change.path))
+    .map((change) => change.path)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  if (testPaths.length === 0) {
     for (const entry of pending) {
-      corpus.recordExecutableAbsent({ entryId: entry.id, reason: "no_test_file_in_diff" });
+      corpus.recordExecutableAbsent({ entryId: entry.id, reason: CORPUS_EXECUTABLE_STATUS.noTestFile });
     }
     return;
   }
-  let content: string;
-  try {
-    content = await new Git(ctx.run.projectPath).showFile(integratedCommit, chosen);
-  } catch (error) {
-    for (const entry of pending) {
-      corpus.recordExecutableAbsent({
-        entryId: entry.id,
-        reason: `test_file_unreadable: ${error instanceof Error ? error.message : String(error)}`,
-      });
+  const git = new Git(ctx.run.projectPath);
+  let selected: { path: string; content: string } | null = null;
+  const failures: string[] = [];
+  for (const path of testPaths) {
+    try {
+      selected = { path, content: await git.showFile(integratedCommit, path) };
+      break;
+    } catch (error) {
+      failures.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return;
   }
-  const sha256 = ctx.store.acceptance.putContent(content, `corpus:${task.id}:${chosen}`);
+  if (selected === null) {
+    const reason = `test_file_unreadable: ${failures.join("; ")}`;
+    for (const entry of pending) {
+      corpus.recordExecutableAbsent({ entryId: entry.id, reason });
+    }
+    throw new Error(reason);
+  }
+  const sha256 = ctx.store.acceptance.putContent(selected.content, `corpus:${task.id}:${selected.path}`);
   for (const entry of pending) {
     corpus.admitExecutable({
       entryId: entry.id,
@@ -500,7 +516,7 @@ async function admitCorpusExecutable(
         // corpus, not the run-scoped lookup, is what carries it forward.
         taskId: task.id,
         kind: "regression_test",
-        relativePath: chosen,
+        relativePath: selected.path,
         sha256,
         evidenceFor: findingId,
         createdAt: ctx.clock.now(),
@@ -863,6 +879,7 @@ export async function resolveGates(ctx: PhaseContext, options: CandidateDriverOp
       ctx.store.repos.acceptance.forTask(ctx.run.id, task.id),
       ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId),
       (artifactId) => ctx.store.repos.acceptance.get(artifactId) ?? undefined,
+      task.origin.kind === "valid_finding" ? task.origin.findingId : undefined,
     ),
     materializeAcceptance: (checkoutDir, artifacts) => { ctx.store.acceptance.materialize(checkoutDir, artifacts); },
     verifyAcceptance: (checkoutDir, artifacts) => ctx.store.acceptance.verify(checkoutDir, artifacts),

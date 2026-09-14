@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { RuntimeEvidence } from "../domain/acceptance.js";
+import { CORPUS_EXECUTABLE_STATUS, type RuntimeEvidence } from "../domain/acceptance.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { defaultConfig } from "../domain/config.js";
 import { createTaskFromRequirement } from "../domain/task.js";
@@ -18,6 +18,7 @@ import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
+import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import { Scheduler } from "../scheduler/index.js";
 import { stubDriverFor } from "./stubs.js";
 import { RunEngine } from "./engine.js";
@@ -254,6 +255,137 @@ describe("B2 production candidate drivers", () => {
     });
     const runHead = new GitBranchRunHead(fixture.repoDir, "run");
     expect(await runHead.read()).toBe(run.currentCheckpointHash);
+  });
+
+  it("admits a fixing task's test after integration and executes it for the next task", async () => {
+    const testPath = "tests/corpus-regression.test.mjs";
+    const corpusCommand = ["node", testPath];
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-corpus", "pass", {
+      [testPath]: "process.stdout.write('CORPUS-REGRESSION-RAN\\n');\n",
+    });
+    const { runId, taskId } = seedIntegratingRun(store, clock, fixture, winner);
+    const findingId = id("find", clock.now());
+    const validationId = id("fval", clock.now());
+    const fixingTask = {
+      ...store.repos.tasks.get(taskId)!,
+      origin: { kind: "valid_finding" as const, findingId, validationId, verdict: "VALID" as const },
+    };
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId,
+      ts: clock.now(),
+      type: "task.state_changed",
+      payload: { task: fixingTask },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
+    const run = store.repos.runs.get(runId)!;
+    const corpus = new MissionAcceptanceService(store, clock);
+    const pending = corpus.record({
+      missionId: run.missionId,
+      sourceRunId: runId,
+      requirementRef: "R1",
+      kind: "regression_test",
+      summary: "Validated finding",
+      evidenceRefs: [],
+      artifactHashes: ["a".repeat(64)],
+      metadata: {
+        findingId,
+        validationId,
+        executableStatus: CORPUS_EXECUTABLE_STATUS.pendingIntegration,
+      },
+    });
+    const profile = {
+      ...fixture.gates.profile,
+      checks: [
+        ...fixture.gates.profile.checks,
+        { name: "corpus-regression", kind: "custom" as const, command: corpusCommand, mandatory: true },
+      ],
+    };
+    const policy = CommandPolicy.forProject(profile.checks.map((check) => check.command), null);
+    const { resolveGates: _testOverride, ...productionOptions } = driverOptions;
+    let candidateIndex = 0;
+    const options: CandidateDriverOptions = {
+      ...productionOptions,
+      policy,
+      resolveProfile: () => profile,
+      workerFactory: () => () => {
+        const value = candidateIndex++ === 0 ? "pass-again" : "fail";
+        return new ScriptedCandidateWorker((_task, worktree) => {
+          writeFileSync(join(worktree.path, "outcome.txt"), value);
+          return { status: "completed" };
+        });
+      },
+    };
+    const lifecycle = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    lifecycle.registerPhase("INTEGRATING", createIntegratingDriver(options));
+    lifecycle.registerPhase("EXECUTING", createExecutingDriver(options));
+    lifecycle.registerPhase("GATING", createGatingDriver(options));
+
+    await lifecycle.tickRun(runId);
+
+    const admitted = store.repos.acceptanceCorpus.get(pending.id);
+    expect(admitted?.executable?.relativePath).toBe(testPath);
+    expect(admitted?.executable?.sha256).not.toBe(pending.artifactHashes[0]);
+    expect(store.events.list(runId, { types: ["acceptance.recorded"] })).toHaveLength(1);
+    const checkpoint = store.repos.runs.get(runId)!.currentCheckpointHash!;
+
+    const second = createTaskFromRequirement(id("interp", clock.now()), "R2", {
+      id: id("task", clock.now()),
+      runId,
+      title: "Change outcome again",
+      description: "WHAT: update outcome.txt again",
+      kind: "bugfix",
+      acceptance: ["Checks pass"],
+      complexity: "normal",
+      baseCheckpointHash: checkpoint,
+      now: clock.now(),
+    });
+    store.events.append([
+      {
+        id: id("evt", clock.now()),
+        runId,
+        ts: clock.now(),
+        type: "task.created",
+        payload: { task: { ...second, state: "READY" as const } },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
+      {
+        id: id("evt", clock.now() + 1),
+        runId,
+        ts: clock.now() + 1,
+        type: "run.phase_changed",
+        payload: {
+          run: {
+            ...store.repos.runs.get(runId)!,
+            phase: "EXECUTING" as const,
+            updatedAt: clock.now() + 1,
+          },
+        },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
+    ]);
+
+    await lifecycle.tickRun(runId);
+    await lifecycle.tickRun(runId);
+
+    const secondCandidates = store.repos.candidates.listByTask(second.id);
+    const passed = secondCandidates.find((candidate) => candidate.state === "PASSED_GATES");
+    expect(passed, JSON.stringify(secondCandidates.map((candidate) => ({
+      state: candidate.state,
+      error: candidate.error,
+      gateReport: candidate.gateReport,
+    })), null, 2)).toBeDefined();
+    expect(passed?.gateReport?.checks)
+      .toContainEqual(expect.objectContaining({ name: "corpus-regression", status: "pass" }));
   });
 
   it("leaves the run head unchanged when integration gates fail", async () => {

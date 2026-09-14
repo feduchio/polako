@@ -135,6 +135,14 @@ export function corpusRuntimeEvidenceAllowsDone(
   return current.length === 0 || current.some((evidence) => runtimeAllowsDone(mode, evidence, checkpointHash));
 }
 
+export const CORPUS_EXECUTABLE_STATUS = {
+  pendingIntegration: "pending_integration",
+  noTestFile: "no_test_file_in_diff",
+  noFixingTask: "no_fixing_task",
+  runtimeOnly: "not_applicable_runtime_entry",
+  admitted: "admitted",
+} as const;
+
 export const CorpusEntrySchema = z.object({
   id: IdSchema,
   missionId: IdSchema,
@@ -152,10 +160,10 @@ export const CorpusEntrySchema = z.object({
    * the fixing task has integrated. `artifactHashes` cannot serve: they are command-output blobs
    * from validation evidence, and `AcceptanceStorage.materialize` needs a path.
    *
-   * `null` **with** `metadata.executableStatus` means the decision was made and there was nothing
-   * to admit — the fixing task's diff carried no test file. `null` **without** one is a legacy
-   * entry that predates this descriptor, and the gate fails closed on it rather than guessing a
-   * path.
+   * `metadata.executableStatus` distinguishes a fixing task that has not integrated yet, a
+   * recorded non-executable outcome, and an admitted artifact. `null` **without** a recognised
+   * status is a legacy entry that predates this descriptor, and the gate fails closed on it
+   * rather than guessing a path.
    */
   executable: z
     .object({

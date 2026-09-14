@@ -12,7 +12,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AcceptanceArtifact, CorpusEntry } from "../domain/acceptance.js";
+import {
+  CORPUS_EXECUTABLE_STATUS,
+  type AcceptanceArtifact,
+  type CorpusEntry,
+} from "../domain/acceptance.js";
 import { SYSTEM_ACTOR } from "../domain/common.js";
 import { createMission } from "../domain/mission.js";
 import { FakeClock } from "../shared/clock.js";
@@ -90,7 +94,10 @@ describe("executable mission acceptance corpus", () => {
     summary: "Validated finding: the guard admits an equal value",
     evidenceRefs: [],
     artifactHashes: ["a".repeat(64)],
-    metadata: { findingId: id("find", NOW) },
+    metadata: {
+      findingId: id("find", NOW),
+      executableStatus: CORPUS_EXECUTABLE_STATUS.pendingIntegration,
+    },
   });
 
   const artifactFor = (relativePath: string, content: string): AcceptanceArtifact => ({
@@ -178,8 +185,32 @@ describe("executable mission acceptance corpus", () => {
 
     it("fails closed on a legacy entry that carries no decision", () => {
       const legacy = entry();
+      const stored = store.repos.acceptanceCorpus.get(legacy.id)!;
+      corpus.record({
+        ...stored,
+        metadata: { findingId: stored.metadata["findingId"] },
+      });
       expect(() => acceptanceArtifactsForGate([], corpus.get(missionId), resolve))
         .toThrow(new RegExp(`unmappable_legacy_corpus_entry: ${legacy.id}`));
+    });
+
+    it("permits a pending entry only while gating its own fixing task", () => {
+      const pending = entry();
+      const findingId = pending.metadata["findingId"] as string;
+      expect(acceptanceArtifactsForGate([], corpus.get(missionId), resolve, findingId)).toEqual([]);
+      expect(() => acceptanceArtifactsForGate([], corpus.get(missionId), resolve, id("find", NOW + 1)))
+        .toThrow(new RegExp(`unmappable_legacy_corpus_entry: ${pending.id}`));
+    });
+
+    it("does not classify a newly recorded runtime-only entry as legacy", () => {
+      corpus.recordRuntimeScenario({
+        missionId,
+        sourceRunId: runId,
+        requirementRef: "runtime.check",
+        scenarioId: "check",
+        summary: "runtime evidence",
+      });
+      expect(acceptanceArtifactsForGate([], corpus.get(missionId), resolve)).toEqual([]);
     });
 
     it("fails closed when an admitted artifact is not in the store", () => {

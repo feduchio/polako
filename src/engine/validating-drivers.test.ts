@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { defaultConfig } from "../domain/config.js";
+import { CORPUS_EXECUTABLE_STATUS } from "../domain/acceptance.js";
 import { findingFingerprint, type Finding } from "../domain/finding.js";
 import { ScriptedFindingEvidenceWorker, type EvidenceAttempt } from "../findings/index.js";
 import { FakeClock } from "../shared/clock.js";
@@ -71,6 +72,9 @@ describe("B5 production VALIDATING driver", () => {
     const corpus = store.repos.acceptanceCorpus.forMission(run.missionId);
     expect(corpus.entries).toHaveLength(1);
     expect(corpus.entries[0]?.artifactHashes).toEqual([SHA]);
+    expect(corpus.entries[0]?.metadata["executableStatus"])
+      .toBe(CORPUS_EXECUTABLE_STATUS.pendingIntegration);
+    expect(store.events.list(runId, { types: ["acceptance.recorded"] })).toEqual([]);
     expect(store.events.list(runId, { types: ["finding.validated"] })).toHaveLength(1);
   });
 

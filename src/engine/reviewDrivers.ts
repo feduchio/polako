@@ -1,7 +1,7 @@
 import { assertReviewerRolesResolvable } from "../review/reviewerProtocol.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { SYSTEM_ACTOR, modelRefKey, type ModelRef } from "../domain/common.js";
-import type { CorpusEntry } from "../domain/acceptance.js";
+import { CORPUS_EXECUTABLE_STATUS, type CorpusEntry } from "../domain/acceptance.js";
 import type { Event, NewEvent } from "../domain/event.js";
 import { FINDING_TABLE, FindingSchema, FindingValidationStrictSchema, findingStatusFromVerdict, type Finding, type FindingValidation, type ValidationVerdict } from "../domain/finding.js";
 import type { ReviewAxis } from "../domain/finding.js";
@@ -656,7 +656,14 @@ function applyDebateOutcome(
       summary: `Debate-validated finding: ${terminalFinding.claim}`,
       evidenceRefs: [debateValidatedId],
       artifactHashes: preDebateRefs.map((ref) => ref.sha256),
-      metadata: { findingId: terminalFinding.id, validationId: validation.id, method: DEBATE_METHOD },
+      metadata: {
+        findingId: terminalFinding.id,
+        validationId: validation.id,
+        method: DEBATE_METHOD,
+        executableStatus: task === null
+          ? CORPUS_EXECUTABLE_STATUS.noFixingTask
+          : CORPUS_EXECUTABLE_STATUS.pendingIntegration,
+      },
     });
   }
 

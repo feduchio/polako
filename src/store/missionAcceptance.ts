@@ -1,5 +1,6 @@
 import {
   AcceptanceArtifactSchema,
+  CORPUS_EXECUTABLE_STATUS,
   CorpusEntrySchema,
   RuntimeEvidenceSchema,
   type AcceptanceArtifact,
@@ -19,6 +20,12 @@ interface MissionAcceptanceStore {
   events: EventLog;
   repos: Repositories;
 }
+
+const NON_EXECUTABLE_TERMINAL_STATUSES = new Set<string>([
+  CORPUS_EXECUTABLE_STATUS.noTestFile,
+  CORPUS_EXECUTABLE_STATUS.noFixingTask,
+  CORPUS_EXECUTABLE_STATUS.runtimeOnly,
+]);
 
 export class MissionAcceptanceService {
   constructor(
@@ -78,7 +85,11 @@ export class MissionAcceptanceService {
       summary: input.summary,
       evidenceRefs: input.evidenceRefs ?? [],
       artifactHashes: input.artifactHashes ?? [],
-      metadata: { scenarioId: input.scenarioId, ...(input.metadata ?? {}) },
+      metadata: {
+        scenarioId: input.scenarioId,
+        ...(input.metadata ?? {}),
+        executableStatus: CORPUS_EXECUTABLE_STATUS.runtimeOnly,
+      },
     });
   }
 
@@ -111,6 +122,7 @@ export class MissionAcceptanceService {
         validator: evidence.validator,
         status: evidence.status,
         checkpointHash: evidence.checkpointHash,
+        executableStatus: CORPUS_EXECUTABLE_STATUS.runtimeOnly,
       },
       runtimeEvidence: evidence,
     });
@@ -139,7 +151,7 @@ export class MissionAcceptanceService {
         relativePath: artifact.relativePath,
         sha256: artifact.sha256,
       },
-      metadata: { ...existing.metadata, executableStatus: "admitted" },
+      metadata: { ...existing.metadata, executableStatus: CORPUS_EXECUTABLE_STATUS.admitted },
     });
     this.store.events.append([
       {
@@ -167,9 +179,8 @@ export class MissionAcceptanceService {
   }
 
   /**
-   * Record that the decision was made and there was nothing to admit. Without this the entry is
-   * indistinguishable from one that predates the descriptor, and the gate fails closed on those
-   * rather than guessing a path.
+   * Record a terminal non-executable outcome or an admission error. Recognised absence statuses
+   * are skipped; every other status remains fail-closed at the next gate.
    */
   recordExecutableAbsent(input: { entryId: string; reason: string }): CorpusEntry {
     const existing = this.store.repos.acceptanceCorpus.get(input.entryId);
@@ -205,22 +216,31 @@ export class MissionAcceptanceService {
  * The artifacts a candidate's gate must inject, protect and hash-verify: the task's own plus
  * every executable the mission corpus has admitted.
  *
- * A **legacy** entry — one with no `executable` and no recorded decision — throws. `docs/PLAN.md`
- * P1.8 says to fail closed on an entry that cannot be mapped to a path rather than guess one,
- * and a silent skip is how the corpus stopped being cumulative in the first place.
+ * A **legacy** entry — one with no `executable` and no recognised status — throws. The current
+ * fixing task may pass its own `pending_integration` entry; a different task may not. `docs/PLAN.md`
+ * P1.8 says to fail closed on an entry that cannot be mapped to a path rather than guess one.
  */
 export function acceptanceArtifactsForGate(
   taskArtifacts: readonly AcceptanceArtifact[],
   corpus: MissionAcceptanceCorpus | undefined,
   resolveArtifact: (artifactId: string) => AcceptanceArtifact | undefined,
+  pendingFindingId?: string,
 ): AcceptanceArtifact[] {
   const byId = new Map(taskArtifacts.map((artifact) => [artifact.id, artifact]));
   for (const entry of corpus?.entries ?? []) {
     if (entry.executable === null) {
-      if (typeof entry.metadata["executableStatus"] === "string") continue;
+      const status = entry.metadata["executableStatus"];
+      if (typeof status === "string" && NON_EXECUTABLE_TERMINAL_STATUSES.has(status)) continue;
+      if (
+        status === CORPUS_EXECUTABLE_STATUS.pendingIntegration &&
+        entry.metadata["findingId"] === pendingFindingId
+      ) {
+        continue;
+      }
       throw new PolishError("INVARIANT_VIOLATION", `unmappable_legacy_corpus_entry: ${entry.id}`, {
         entryId: entry.id,
         kind: entry.kind,
+        ...(typeof status === "string" ? { executableStatus: status } : {}),
       });
     }
     const artifact = resolveArtifact(entry.executable.artifactId);

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -251,6 +251,24 @@ describe("WorktreeSandbox", () => {
     expect(await h.changedFiles(base)).toEqual(["planted-protected.test.ts"]);
     expect(await h.git.diffAgainst(base)).toContain("+++ b/planted-protected.test.ts");
     expect(await h.git.diffAgainst(base)).toContain("+untracked plant");
+    await h.destroy();
+  });
+
+  it("preserves add/delete status between commits", async () => {
+    writeFileSync(join(repoDir, "a.test.ts"), "old test\n");
+    const withTest = await repo.commitAll("add old test");
+    expect(withTest).not.toBeNull();
+    const policy = CommandPolicy.forProject([], null);
+    const h = await sandbox.create({ id: "statuses", baseCommit: withTest!, policy });
+    unlinkSync(join(h.path, "a.test.ts"));
+    writeFileSync(join(h.path, "z.test.ts"), "test\n");
+    const head = await h.commitAll("replace a file");
+    expect(head).not.toBeNull();
+    expect(await h.git.changedFileStatusesBetween(withTest!, head!)).toEqual([
+      { status: "D", path: "a.test.ts" },
+      { status: "A", path: "z.test.ts" },
+    ]);
+    expect(await h.git.showFile(head!, "z.test.ts")).toBe("test\n");
     await h.destroy();
   });
 
