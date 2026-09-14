@@ -11,6 +11,7 @@ import {
   mkdirSync,
   rmSync,
   readFileSync,
+
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -558,33 +559,47 @@ describe("B10 positive path – production E2E", () => {
     engine.setCurrentCheckpoint(run.id, head);
     expect((await driveToTerminal(engine, run.id, store, 300)).phase).toBe("DONE");
 
+    // Keyed by `(role, purpose)` and not by role: the entry-gate lane applied the flag to the
+    // tools probe alone and a per-role set still read `{off, unset}`, because the strict probes
+    // supply `off` and the JSON probe supplies `unset` whatever the tools probe does.
+    //
+    // And the whole signature, not just `reasoning`: `temperature` and `maxTokens` were both
+    // mutated inside the wrappers with the key set unchanged, and every check passed. MC1's claim
+    // is that the default request is what it is at base, so the values are pinned, absolutely,
+    // rather than only compared between arms — a wrapper that changes a value in both arms is
+    // invisible to a cross-arm comparison.
     const off = JSON.stringify(DISABLED_REASONING);
     const unset = "null";
     const flagged = disableReasoning ? off : unset;
-    // `worker` and the three council roles follow the flag. The other two are unconditional and
-    // must be unmoved by either arm: `reviewer` (`swarm.ts`) always disables it, and `probe`
-    // (`capabilityProbe.ts`) disables it on the strict-schema probes and sends nothing on the
-    // tools and JSON probes. Every role's whole observed set is pinned, so a site that changes
-    // what it sends fails here rather than being averaged away.
-    const expectedByRole: Record<string, string[]> = {
-      worker: [flagged],
-      planner: [flagged],
-      scope_guardian: [flagged],
-      judge: [flagged],
-      reviewer: [off],
-      probe: [off, unset],
-    };
-    const seen = new Map<string, Set<string>>();
-    for (const call of provider.calls) {
-      const role = call.metadata.role;
-      const set = seen.get(role) ?? new Set<string>();
-      set.add(JSON.stringify(call.reasoning ?? null));
-      seen.set(role, set);
-    }
-    expect([...seen.keys()].sort()).toEqual(Object.keys(expectedByRole).sort());
-    for (const [role, expected] of Object.entries(expectedByRole)) {
-      expect([...(seen.get(role) ?? new Set())].sort(), `role ${role}`).toEqual([...expected].sort());
-    }
+    const expected = [
+      // role | purpose | reasoning | temperature | maxTokens | responseFormat | responseSchema
+      `judge|council_decompose_judge|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
+      `judge|council_intake_judge|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
+      `planner|council_decompose_planner|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
+      `planner|council_intake_planner|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
+      `scope_guardian|council_decompose_scope|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
+      `scope_guardian|council_intake_scope|${flagged}|t=0|mt=undefined|rf=json|rs=undefined`,
+      `worker|agent_run|${flagged}|t=undefined|mt=32000|rf=undefined|rs=undefined`,
+      `worker|agent_run|${flagged}|t=undefined|mt=31985|rf=undefined|rs=undefined`,
+      // Unconditional, and identical in both arms.
+      `reviewer|review_correctness|${off}|t=0|mt=1500|rf=undefined|rs=review_findings`,
+      `probe|capability_probe_strict_progress|${off}|t=0|mt=256|rf=undefined|rs=agent_progress_score`,
+      `probe|capability_probe_strict_review|${off}|t=0|mt=256|rf=undefined|rs=review_findings`,
+      `probe|capability_probe_strict_score|${off}|t=0|mt=256|rf=undefined|rs=empirical_pair_score`,
+      `probe|capability_probe_json|${unset}|t=0|mt=256|rf=json|rs=undefined`,
+      `probe|capability_probe_tools|${unset}|t=0|mt=256|rf=undefined|rs=undefined`,
+    ].sort();
+    const seen = [...new Set(provider.calls.map((call) =>
+      [
+        call.metadata.role,
+        call.metadata.purpose,
+        JSON.stringify(call.reasoning ?? null),
+        `t=${String(call.temperature)}`,
+        `mt=${String(call.maxTokens)}`,
+        `rf=${String(call.responseFormat)}`,
+        `rs=${String(call.responseSchema?.name)}`,
+      ].join("|")))].sort();
+    expect(seen).toEqual(expected);
   });
 });
 

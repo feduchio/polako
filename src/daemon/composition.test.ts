@@ -34,6 +34,7 @@ import { AgentRunner } from "../agents/runner.js";
 import { ModelObservationRepository } from "../broker/observations.js";
 import {
   EMPIRICAL_SCORE_RESPONSE_SCHEMA,
+  DISABLED_REASONING,
   PROGRESS_SCORE_RESPONSE_SCHEMA,
   REVIEW_FINDINGS_RESPONSE_SCHEMA,
 } from "../broker/responseSchemas.js";
@@ -456,8 +457,19 @@ describe("production composition", () => {
     expect(provider.calls).toHaveLength(8);
   });
 
-  it("injects task-attributed progress only for normal or complex coding workers", async () => {
+  /**
+   * Run under both `routing.disableReasoning` arms (P1.5 MC5/AC5). Progress scoring is a
+   * production model call the B10 pipeline does not reach — it needs two strict-probed progress
+   * models and a non-trivial coding task — and its unconditional `DISABLED_REASONING` was
+   * unobserved in production: the entry-gate lane deleted it here and every check passed.
+   */
+  it.each([
+    { arm: "default", disableReasoning: false },
+    { arm: "disabled", disableReasoning: true },
+  ])("injects task-attributed progress only for normal or complex coding workers ($arm reasoning)", async ({ disableReasoning }) => {
     const config = defaultConfig();
+    if (disableReasoning) config.routing.disableReasoning = true;
+    else expect(config.routing.disableReasoning).toBe(false);
     config.agent.maxTurns = 8;
     const freeWorker = {
       ...FAKE_CAPABILITIES.frontier,
@@ -568,6 +580,18 @@ describe("production composition", () => {
     });
     const normalOutcome = await createWorkerFactory(deps, ctx)(0).run(normal, normalHandle);
     expect(normalOutcome).toMatchObject({ status: "failed", error: "ABANDONED_PROGRESS" });
+
+    // P1.5 MC5. Progress scoring is not routed through the flag and must be identical in both
+    // arms; the worker calls beside it follow the flag, which is what makes this discriminating
+    // rather than a restatement of the unit check.
+    const scoreRequests = provider.calls.filter((call) => call.metadata.purpose === "agent_progress_score");
+    expect(scoreRequests.length).toBeGreaterThan(0);
+    for (const call of scoreRequests) expect(call.reasoning).toEqual(DISABLED_REASONING);
+    const workerRequests = provider.calls.filter((call) => call.metadata.purpose === "agent_run");
+    expect(workerRequests.length).toBeGreaterThan(0);
+    for (const call of workerRequests) {
+      expect(call.reasoning).toEqual(disableReasoning ? DISABLED_REASONING : undefined);
+    }
     if (normalOutcome.transcriptRef === null || normalOutcome.transcriptRef === undefined) {
       throw new Error("missing progress transcript");
     }

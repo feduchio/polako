@@ -104,7 +104,16 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
     }
   });
 
-  it("enabled micro-tasks invoke the auditioner through the broker and skip a second pass", async () => {
+  /**
+   * Both `routing.disableReasoning` arms (P1.5 MC5/AC5a). Audition is a production model call the
+   * B10 pipeline never reaches, because audition is off by default, and a check that builds
+   * `MicroTaskAuditionStrategy` directly never sees `brokerAuditionTransport`: the entry-gate lane
+   * threaded the flag through that transport and every check passed.
+   */
+  it.each([
+    { arm: "default", disableReasoning: false },
+    { arm: "disabled", disableReasoning: true },
+  ])("enabled micro-tasks invoke the auditioner through the broker and skip a second pass ($arm reasoning)", async ({ disableReasoning }) => {
     const config = PolishConfigSchema.parse({
       audition: {
         enabled: true,
@@ -114,7 +123,9 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
         maxTasks: 1,
         tasks: [{ id: "echo", prompt: "Reply with exactly: ok", expected: "ok" }],
       },
+      ...(disableReasoning ? { routing: { disableReasoning: true } } : {}),
     });
+    expect(config.routing.disableReasoning).toBe(disableReasoning);
     const provider = discoveryProvider([{ name: "free", capabilities: FREE }]);
     const deps = buildProductionDeps({
       store,
@@ -137,6 +148,10 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
     expect(first).toHaveLength(1);
     expect(first[0]?.metadata.purpose).toBe("model-audition:echo");
     expect(first[0]?.metadata.runId).toBe(ctx.run.id);
+    // The flag is wired to the worker and the council and to nothing else, so this request is
+    // the same in both arms.
+    expect(first[0]?.reasoning).toBeUndefined();
+    expect("reasoning" in (first[0] ?? {})).toBe(false);
     await installed!(ctx);
     expect(auditionCalls(provider)).toHaveLength(first.length);
     expect(provider.calls.filter((call) => call.metadata.purpose.startsWith("capability_probe_strict_"))).toHaveLength(strictCalls);
