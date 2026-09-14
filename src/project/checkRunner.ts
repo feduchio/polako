@@ -927,12 +927,9 @@ export async function runIndependentGates(input: {
   /** Store-backed authority check; schema-valid waiver objects alone are never trusted. */
   validateProtectedChangeWaiver?: (waiver: ProtectedChangeWaiver) => boolean;
 }): Promise<GateResult> {
-  // Before the acceptance artifacts are materialized and hashed, not after. An install runs the
-  // project's own lifecycle scripts, so verifying first would verify bytes the install is still
-  // free to replace, and the gate would certify a protected file that no longer exists in the form
-  // it checked. `runChecks` prepares too, and gets this same settled result rather than a second
-  // install. Finding 54.
-  await prepareSandbox(input.sandbox, input.profile, input.prepareDependencies, input.signal);
+  // What the candidate did is read from the checkout **before** anything is installed into it.
+  // An install writes an untracked `node_modules`, and a repository that does not ignore it would
+  // hand git's answer to the silencing detector as the candidate's own work. Finding 54.
   const protectedSet = protectedPaths(input.acceptanceArtifacts);
   let actualChangedFiles: string[];
   try {
@@ -944,6 +941,25 @@ export async function runIndependentGates(input: {
       silencing: [],
       acceptanceProblems: [],
       candidateProtectedPathProblems: [{ path: "<candidate-checkout>", reason }],
+      regression: compareToBaseline(input.baseline, []),
+      passed: false,
+    };
+  }
+  let actualDiffText: string;
+  let actualConfigHashes: Record<string, string>;
+  let actualScriptsHash: string;
+  try {
+    actualDiffText = await inspectCandidateDiff(input.sandbox, input.baseline.commitHash);
+    const hashes = inspectManifestHashes(input.sandbox.path);
+    actualConfigHashes = hashes.manifestHashes;
+    actualScriptsHash = hashes.scriptsHash;
+  } catch (error) {
+    const reason = `candidate silencing inspection failed: ${error instanceof Error ? error.message : String(error)}`;
+    return {
+      checks: [],
+      silencing: [{ kind: "weakened_config", path: "<candidate-checkout>", detail: reason }],
+      acceptanceProblems: [],
+      candidateProtectedPathProblems: [],
       regression: compareToBaseline(input.baseline, []),
       passed: false,
     };
@@ -993,6 +1009,13 @@ export async function runIndependentGates(input: {
     };
   }
 
+  // Install before the artifacts are put in place, not after. An install runs the project's own
+  // lifecycle scripts, so materializing and verifying first would certify bytes the install is
+  // still free to replace, and the checks would then run against the replacement. Materialization
+  // after it means the checks see canonical bytes even when an install overwrote them, and the
+  // verification below is of what is actually on disk when the commands run. `runChecks` prepares
+  // too and receives this same settled result rather than a second install. Finding 54.
+  await prepareSandbox(input.sandbox, input.profile, input.prepareDependencies, input.signal);
   const acceptanceProblems: { path: string; reason: string }[] = (() => {
     try {
       input.materializeAcceptance(input.sandbox.path, input.acceptanceArtifacts);
@@ -1036,25 +1059,6 @@ export async function runIndependentGates(input: {
         input.validateProtectedChangeWaiver,
       )),
   );
-  let actualDiffText: string;
-  let actualConfigHashes: Record<string, string>;
-  let actualScriptsHash: string;
-  try {
-    actualDiffText = await inspectCandidateDiff(input.sandbox, input.baseline.commitHash);
-    const hashes = inspectManifestHashes(input.sandbox.path);
-    actualConfigHashes = hashes.manifestHashes;
-    actualScriptsHash = hashes.scriptsHash;
-  } catch (error) {
-    const reason = `candidate silencing inspection failed: ${error instanceof Error ? error.message : String(error)}`;
-    return {
-      checks,
-      silencing: [{ kind: "weakened_config", path: "<candidate-checkout>", detail: reason }],
-      acceptanceProblems,
-      candidateProtectedPathProblems,
-      regression: evaluation.regression,
-      passed: false,
-    };
-  }
   const silencing = [
     ...detectSilencing({
       baseline: input.baseline,

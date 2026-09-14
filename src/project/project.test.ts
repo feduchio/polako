@@ -1015,6 +1015,38 @@ describe("runChecks and runIndependentGates", () => {
     expect(test?.failureFingerprint).toBeUndefined();
   });
 
+  it("installs once for a sandbox, even when two check runs ask at the same time", async () => {
+    // The memo holds the in-flight promise, not the settled result. Holding the result lets two
+    // concurrent askers both find nothing cached and both start a ten-minute `npm ci` in the same
+    // checkout — two package managers writing one `node_modules`. Finding 54.
+    const dir = mkdtempSync(join(tmpdir(), "polish-one-install-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    const profile = discoverProject(dir);
+    const issued: string[][] = [];
+    let releaseInstall: (() => void) | null = null;
+    const installStarted = new Promise<void>((resolve) => {
+      releaseInstall = resolve;
+    });
+    const sandbox = mockSandbox(async (argv: readonly string[]) => {
+      issued.push([...argv]);
+      if (argv[1] === "install") {
+        releaseInstall?.();
+        // Hold the install open so the second caller cannot simply arrive after it finished.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+        writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
+      }
+      return processResult({ stdout: " Tests  1 passed (1)\n" });
+    }, [], dir);
+    const first = runChecks({ runId: id("run"), commitHash: "a".repeat(40), sandbox, profile });
+    await installStarted;
+    const second = runChecks({ runId: id("run"), commitHash: "a".repeat(40), sandbox, profile });
+    await Promise.all([first, second]);
+    expect(issued.filter((argv) => argv[1] === "install")).toHaveLength(1);
+  });
+
   it("refuses only on the checks that ran, so `only` does not report an absent one", async () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-only-"));
     cleanup.push(dir);
@@ -1389,11 +1421,72 @@ describe("runChecks and runIndependentGates", () => {
     expect(newFailure.regression.newlyFailing).toContain(JSON.stringify(["test", "src/new.test.ts"]));
   });
 
-  it("verifies acceptance artifacts against the filesystem the install left behind", async () => {
-    // An install runs the project's own lifecycle scripts. Verifying the artifact's bytes before
-    // that and never again would certify a file the install is still free to replace, and the
-    // checks would then run against the replacement. Finding 54.
+  it("runs the checks against canonical acceptance bytes even when the install replaced them", async () => {
+    // An install runs the project's own lifecycle scripts. Materializing and verifying before it
+    // would certify a file the install is still free to replace, and the checks would then run
+    // against the replacement. The order is install, materialize, verify, run. Finding 54.
     const dir = mkdtempSync(join(tmpdir(), "polish-install-clobber-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({
+      scripts: { test: "vitest run" },
+      devDependencies: { vitest: "^4" },
+    }));
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    mkdirSync(join(dir, "tests"), { recursive: true });
+    const body = "it('protected', () => { expect(1).toBe(1); });\n";
+    writeFileSync(join(dir, "tests", "protected.test.ts"), body);
+    const artifact: AcceptanceArtifact = {
+      id: id("acc"),
+      runId: id("run"),
+      taskId: null,
+      kind: "regression_test",
+      relativePath: "tests/protected.test.ts",
+      sha256: sha256Hex(body),
+      evidenceFor: null,
+      createdAt: NOW,
+    };
+    const profile = discoverProject(dir);
+    const baseline = buildBaselineSnapshot({
+      runId: artifact.runId,
+      commitHash: "a".repeat(40),
+      checks: [],
+      profile,
+    });
+    const seenByCheck: string[] = [];
+    const result = await runIndependentGates({
+      runId: baseline.runId,
+      commitHash: baseline.commitHash,
+      sandbox: mockSandbox(async (argv: readonly string[]) => {
+        if (argv[1] === "install") {
+          mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+          writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
+          // What a postinstall script can do.
+          writeFileSync(join(dir, "tests", "protected.test.ts"), "it.skip('protected', () => {});\n");
+        } else {
+          seenByCheck.push(readFileSync(join(dir, "tests", "protected.test.ts"), "utf8"));
+        }
+        return processResult({ stdout: " Tests  1 passed (1)\n" });
+      }, [], dir),
+      profile,
+      acceptanceArtifacts: [artifact],
+      // What the store's materializer does: write the canonical bytes from the CAS.
+      materializeAcceptance: (checkoutDir, artifacts) => {
+        for (const each of artifacts) writeFileSync(join(checkoutDir, each.relativePath), body);
+      },
+      verifyAcceptance: vi.fn(() => []),
+      baseline,
+    });
+    // The repair happened, and it happened in time: the command saw the canonical file, not the
+    // one the install wrote. Asserting only `passed` would hold for the wrong order too.
+    expect(seenByCheck).toEqual([body]);
+    expect(result.acceptanceProblems).toEqual([]);
+    expect(result.passed).toBe(true);
+  });
+
+  it("fails the gate when the install replaced an artifact and materialization cannot repair it", async () => {
+    // The other half of the same order: verification happens against what is on disk after the
+    // install, so a materializer that does not restore the file is caught rather than trusted.
+    const dir = mkdtempSync(join(tmpdir(), "polish-install-clobber-unrepaired-"));
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify({
       scripts: { test: "vitest run" },
@@ -1427,7 +1520,6 @@ describe("runChecks and runIndependentGates", () => {
         if (argv[1] === "install") {
           mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
           writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
-          // What a postinstall script can do, and what the gate must still notice.
           writeFileSync(join(dir, "tests", "protected.test.ts"), "it.skip('protected', () => {});\n");
         }
         return processResult({ stdout: " Tests  1 passed (1)\n" });
@@ -1768,6 +1860,65 @@ describe("runChecks and runIndependentGates", () => {
     } finally {
       await gate.destroy();
       await candidate.destroy();
+    }
+  });
+
+  it("does not read an installed node_modules as the candidate's own work", async () => {
+    // A repository that does not ignore `node_modules` — which is legal, and which the gate does
+    // not get to require — would otherwise hand git's answer straight to the silencing detector:
+    // one `it.skip` inside an installed dependency and the candidate is accused of muting a test.
+    // The candidate's diff is therefore read before anything is installed into the checkout.
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-nodemodules-repo-"));
+    const wtRoot = mkdtempSync(join(tmpdir(), "polish-nodemodules-wt-"));
+    cleanup.push(repoDir, wtRoot);
+    const repo = await Git.init(repoDir);
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({
+      scripts: { test: "vitest run" },
+      devDependencies: { vitest: "^4" },
+    }));
+    writeFileSync(join(repoDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    mkdirSync(join(repoDir, "src"), { recursive: true });
+    writeFileSync(join(repoDir, "src/a.test.ts"), "it('a', () => { expect(1).toBe(1); });\n");
+    const base = (await repo.commitAll("baseline"))!;
+    const profile = discoverProject(repoDir);
+    const baseline = buildBaselineSnapshot({
+      runId: id("run"),
+      commitHash: base,
+      checks: [{ name: "test", kind: "test", status: "pass", exitCode: 0, durationMs: 1, summary: null, outputRef: null }],
+      profile,
+    });
+    const sandbox = new WorktreeSandbox(repoDir, wtRoot, defaultConfig().sandbox);
+    const gate = await sandbox.create({ id: "nm-gate", baseCommit: base, policy: CommandPolicy.forProject([], null) });
+    try {
+      const installed: SandboxHandle = {
+        ...gate,
+        run: async (argv) => {
+          if (argv[1] === "install" || argv[1] === "ci") {
+            const dep = join(gate.path, "node_modules", "flaky-dep");
+            mkdirSync(dep, { recursive: true });
+            writeFileSync(join(dep, "package.json"), '{"name":"flaky-dep"}');
+            writeFileSync(join(dep, "index.test.js"), "it.skip('dependency test', () => {});\n");
+            const vitest = join(gate.path, "node_modules", "vitest");
+            mkdirSync(vitest, { recursive: true });
+            writeFileSync(join(vitest, "package.json"), '{"name":"vitest"}');
+          }
+          return processResult({ stdout: " Tests  1 passed (1)\n" });
+        },
+      };
+      const result = await runIndependentGates({
+        runId: baseline.runId,
+        commitHash: base,
+        sandbox: installed,
+        profile,
+        acceptanceArtifacts: [],
+        materializeAcceptance: vi.fn(),
+        verifyAcceptance: vi.fn(() => []),
+        baseline,
+      });
+      expect(result.silencing).toEqual([]);
+      expect(result.passed).toBe(true);
+    } finally {
+      await gate.destroy();
     }
   });
 

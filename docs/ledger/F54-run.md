@@ -2,14 +2,14 @@
 
 | Field | Value |
 |---|---|
-| Contract | revision 5; rev 1 frozen at `fde4530`, rev 2 at `cf7c804`, rev 3 at `6634348` |
+| Contract | revision 6; frozen at `fde4530`, amended at `cf7c804` (rev 2), `6c539f8` (rev 3), and in rounds 7, 8 and 9 |
 | Base | HOST `ef11a00` (accepted P2 block) |
 | Finding | 54, from P2.3 |
-| Implementation | `cf7c804` (rev 2), `6634348` (rev 3), then eight fix rounds |
-| Change against base | 29 files, +2,326 / −49 |
-| Gate | Node 24.20.0; **95 files, 1,068 tests**, exit 0 (was 93 / 1,022) |
+| Implementation | `cf7c804`, then nine fix rounds beginning at `6634348` |
+| Change against base | 29 files, +2,563 / −68 |
+| Gate | Node 24.20.0; **95 files, 1,071 tests**, exit 0 (was 93 / 1,022) |
 
-This record is written after the seventh round. Earlier versions of it described revision 2 —
+This record is written after the ninth round. Earlier versions of it described revision 2 —
 1,046 tests, "five production files", and a story that ended at `BASELINING → NEEDS_HUMAN` — while
 what had actually shipped spanned the predicate, the check runner, two drivers, the integration
 path, the allowlist, the config, the status projection and the report. A run record that
@@ -87,7 +87,7 @@ candidate reproducing the same failures look regression-free. With no fingerprin
 fails closed on its own terms, without touching `compareToBaseline`, `hasRegression` or the `passed`
 fold — which MC6 forbids.
 
-## The contract changed three times, and why none of it is tuning
+## The contract changed five times, and why none of it is tuning
 
 **Revision 1 → 2.** The trigger was "argv[0] is a Node package manager". The suite falsified it
 immediately — 13 failures — and the counter-example is in the tree: `fixtures/resume-dup-fetch`
@@ -101,6 +101,16 @@ instruction take effect. The reviewer demonstrated it — `NEEDS_HUMAN`, install
 resume, `NEEDS_HUMAN` again. **User decision 2026-09-14: do the install half now.**
 
 **Revision 3 → 4.** The design correction above, forced by a surviving mutant rather than by taste.
+
+**Revision 4 → 5.** The install had moved to a point after acceptance artifacts were verified, so
+the gate could certify bytes the install then replaced. Four clauses were also stated and
+unobserved. Both found by the first lane, both reproduced before being believed.
+
+**Revision 5 → 6.** Revision 5's own AC17 was false: it said an install that replaces an artifact
+fails the gate, which held only against a test double. Against the production materializer the
+artifact is *restored*, and what matters is that the restoration happens before the commands run.
+The lane that found it had to replace the double with production-equivalent behaviour to show it —
+which is the difference between a clause that is observed and one that is merely asserted.
 
 Each amendment is recorded with its counter-example rather than applied quietly, because the
 difference between an amendment and a tuned criterion is exactly whether the counter-example exists.
@@ -117,6 +127,7 @@ difference between an amendment and a tuned criterion is exactly whether the cou
 | 6 | `INTERRUPTED` was non-terminal, so a retry deadlocked |
 | 7 | the design: preparation was optional, and a deleted call site kept 93 tests green |
 | 8 | preparation ran *after* acceptance artifacts were verified, and four clauses nothing observed |
+| 9 | the install's own `node_modules` was read as the candidate's work, and AC17 was false as written |
 
 ## Round 8: what the ordering change cost, and four clauses nothing observed
 
@@ -130,6 +141,31 @@ The fix is not a second call site. `prepareSandbox` memoizes the preparation *pr
 handle, so `runIndependentGates` can settle the filesystem before it verifies anything and
 `runChecks` still prepares unconditionally — the second ask returns the first answer rather than a
 second `npm ci`. Both callers are now guaranteed; neither is the only one.
+
+## Round 9: the install is a third party in the checkout, and it is neither the candidate nor us
+
+Round 8 put the install first. That was too far. The gate reads three things from a checkout and
+they do not want the same moment:
+
+| Read | When | Why |
+|---|---|---|
+| what the candidate changed — files, diff, manifest hashes | **before** the install | an install writes an untracked `node_modules`, and a repository is entitled not to ignore it; git would otherwise report installed dependencies as the candidate's work, and one `it.skip` inside a dependency accuses the candidate of muting a test |
+| acceptance artifacts materialized and verified | **after** the install | an install runs lifecycle scripts, so canonical bytes written before it are bytes the install may replace |
+| the checks | after both | they must see the canonical files and a usable environment |
+
+The first lane demonstrated the first row on a real worktree: a passing candidate failed its gate
+with `skip_only` at `node_modules/dependency/index.test.js`.
+
+It also showed that round 8's own acceptance clause was **false**. In the corrected order the
+materializer *restores* what an install overwrote, so the honest invariant is not "an overwrite
+fails the gate" but "the commands see canonical bytes". The round-8 test only produced `modified`
+because its materializer was a no-op; with production-equivalent materialization the gate passes,
+and passing is correct. Both statements are now tested: one asserts the bytes the check command
+actually read, the other keeps the no-op case and asserts the gate fails it.
+
+The memo was also unobserved as a *promise* memo: storing the settled result instead let two
+concurrent askers each start an install in the same checkout, with the whole suite green. A
+concurrency case now holds the first install open and asserts the second run issues none.
 
 The same round closed four clauses that were stated and unobserved, each demonstrated by a mutant
 that kept the whole suite green: the reproduction path's use of the shared predicate (MC1/AC1),
@@ -147,7 +183,9 @@ against the full suite, not asserted from reading:
 | `runChecks` does not prepare unless asked | 2 |
 | the `resolveGates` assignment is deleted | 1 |
 | the refusal happens before the checks run | 2 |
-| `runIndependentGates` verifies acceptance before preparing | 1 |
+| `runIndependentGates` verifies acceptance before preparing | 2 |
+| `runIndependentGates` prepares before reading the candidate's diff | 1 |
+| the memo holds the settled result instead of the in-flight promise | 1 |
 | the runner never marks a result untrusted | 1 |
 | an untrusted result keeps its fingerprint | 1 |
 | the predicate ignores declared dependencies | 4 |
@@ -162,8 +200,11 @@ The new cases are: preparation happens when the caller says nothing (`project.te
 candidate whose checks pass in an unpreparable checkout is gated rather than discarded; the
 operator's `installDependencies` setting reaches candidate gating, observed through the branch of
 the refusal message that is reachable only when the setting arrived; an install that rewrites a
-protected artifact is caught; a reproduction in a project with a partial `node_modules` returns
-`UNCERTAIN` (`src/findings/reproduce.test.ts`, new file).
+protected artifact does not reach the check command, and is failed as `modified` when nothing
+restores it; a reproduction in a project with a partial `node_modules` returns `UNCERTAIN`
+(`src/findings/reproduce.test.ts`, new file); an installed `node_modules` in a repository that does
+not ignore it produces no silencing finding, on a real git worktree; two concurrent check runs on
+one sandbox issue one install.
 
 ## Known cost, stated rather than discovered later
 
@@ -184,4 +225,4 @@ widened into this item.
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result: 95 test files, 1,068 tests, exit 0.
+Result: 95 test files, 1,071 tests, exit 0.
