@@ -495,29 +495,37 @@ export interface SilencingFinding {
   detail: string;
 }
 
-/** Compare a candidate diff + configs against baseline artifacts to detect silencing. */
+/**
+ * Compare a candidate diff + configs against baseline artifacts to detect silencing.
+ *
+ * `null` hashes mean this observation has nothing to compare them with — see `CheckoutCapture` —
+ * and the hash rules are skipped rather than run against a reference from another moment.
+ */
 export function detectSilencing(input: {
   baseline: BaselineSnapshot;
-  candidateConfigHashes: Record<string, string>;
-  candidateScriptsHash: string;
+  candidateConfigHashes: Record<string, string> | null;
+  candidateScriptsHash: string | null;
   changedFiles: readonly string[];
   diffText: string;
 }): SilencingFinding[] {
   const findings: SilencingFinding[] = [];
-  if (input.candidateScriptsHash !== input.baseline.scriptsHash) {
+  const candidateConfigHashes = input.candidateConfigHashes;
+  if (input.candidateScriptsHash !== null && input.candidateScriptsHash !== input.baseline.scriptsHash) {
     findings.push({ kind: "scripts_changed", path: "package.json", detail: "scripts block hash changed vs baseline" });
   }
-  for (const [path, hash] of Object.entries(input.baseline.configHashes)) {
-    const cand = input.candidateConfigHashes[path];
-    if (cand === undefined) {
-      findings.push({ kind: "weakened_config", path, detail: "config file removed vs baseline" });
-    } else if (cand !== hash) {
-      findings.push({ kind: "weakened_config", path, detail: "config file hash changed vs baseline" });
+  if (candidateConfigHashes !== null) {
+    for (const [path, hash] of Object.entries(input.baseline.configHashes)) {
+      const cand = candidateConfigHashes[path];
+      if (cand === undefined) {
+        findings.push({ kind: "weakened_config", path, detail: "config file removed vs baseline" });
+      } else if (cand !== hash) {
+        findings.push({ kind: "weakened_config", path, detail: "config file hash changed vs baseline" });
+      }
     }
-  }
-  for (const path of Object.keys(input.candidateConfigHashes)) {
-    if (isTestConfigPath(path) && input.baseline.configHashes[path] === undefined) {
-      findings.push({ kind: "weakened_config", path, detail: "test config introduced vs baseline" });
+    for (const path of Object.keys(candidateConfigHashes)) {
+      if (isTestConfigPath(path) && input.baseline.configHashes[path] === undefined) {
+        findings.push({ kind: "weakened_config", path, detail: "test config introduced vs baseline" });
+      }
     }
   }
   const baselineFailingNames = baselineFailingIdentities(input.baseline);
@@ -1130,8 +1138,15 @@ interface CheckoutCapture {
   phase: "candidate" | "settled";
   changedFiles: string[];
   diffText: string;
-  configHashes: Record<string, string>;
-  scriptsHash: string;
+  /**
+   * `null` for the settled capture, and that is a statement rather than a gap: the baseline's
+   * hashes were taken from the project's source, so a hash read after an install has nothing at
+   * the same moment to be compared with, and comparing anyway reports the installer's own work as
+   * the candidate's. The settled capture answers with its diff, which *is* relative to the commit
+   * the baseline describes.
+   */
+  configHashes: Record<string, string> | null;
+  scriptsHash: string | null;
 }
 
 /**
@@ -1144,14 +1159,21 @@ async function captureCheckout(
   base: string,
   input: { phase: "candidate"; changedFiles: readonly string[] } | { phase: "settled" },
 ): Promise<CheckoutCapture> {
-  const trackedOnly = input.phase === "settled";
-  const diffText = await inspectCandidateDiff(sandbox, base, { trackedOnly });
+  if (input.phase === "settled") {
+    const diffText = await inspectCandidateDiff(sandbox, base, { trackedOnly: true });
+    return {
+      phase: "settled",
+      changedFiles: changedPathsInDiff(diffText),
+      diffText,
+      configHashes: null,
+      scriptsHash: null,
+    };
+  }
+  const diffText = await inspectCandidateDiff(sandbox, base, { trackedOnly: false });
   const hashes = inspectManifestHashes(sandbox.path);
   return {
-    phase: input.phase,
-    changedFiles: input.phase === "candidate"
-      ? input.changedFiles.map(normalizeChangedPath)
-      : changedPathsInDiff(diffText),
+    phase: "candidate",
+    changedFiles: input.changedFiles.map(normalizeChangedPath),
     diffText,
     configHashes: hashes.manifestHashes,
     scriptsHash: hashes.scriptsHash,
@@ -1171,7 +1193,8 @@ function changedPathsInDiff(diffText: string): string[] {
 function sameCapture(a: CheckoutCapture, b: CheckoutCapture): boolean {
   return a.diffText === b.diffText &&
     a.scriptsHash === b.scriptsHash &&
-    canonicalJson(a.configHashes) === canonicalJson(b.configHashes);
+    canonicalJson(a.configHashes) === canonicalJson(b.configHashes) &&
+    canonicalJson(a.changedFiles) === canonicalJson(b.changedFiles);
 }
 
 /** Two captures of one checkout report the same tracked edit twice; it is still one finding. */

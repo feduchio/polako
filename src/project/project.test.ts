@@ -1581,6 +1581,67 @@ describe("runChecks and runIndependentGates", () => {
     expect(materialize).not.toHaveBeenCalled();
   });
 
+  it("does not charge the candidate for a manifest the install rewrote", async () => {
+    // The settled capture has no hashes, because the baseline's were taken from the project's
+    // source and there is nothing at the settled moment to compare them with. An install that
+    // rewrites `package.json` does so in the baseline's checkout too, and a candidate that changed
+    // nothing must not be accused of changing the scripts block. Finding 54.
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-install-manifest-repo-"));
+    const wtRoot = mkdtempSync(join(tmpdir(), "polish-install-manifest-wt-"));
+    cleanup.push(repoDir, wtRoot);
+    const repo = await Git.init(repoDir);
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({
+      scripts: { test: "vitest run" },
+      devDependencies: { vitest: "^4" },
+    }));
+    writeFileSync(join(repoDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    mkdirSync(join(repoDir, "src"), { recursive: true });
+    writeFileSync(join(repoDir, "src/a.test.ts"), "it('a', () => { expect(1).toBe(1); });\n");
+    const base = (await repo.commitAll("baseline"))!;
+    const profile = discoverProject(repoDir);
+    const baseline = buildBaselineSnapshot({
+      runId: id("run"),
+      commitHash: base,
+      checks: [{ name: "test", kind: "test", status: "pass", exitCode: 0, durationMs: 1, summary: null, outputRef: null }],
+      profile,
+    });
+    const sandbox = new WorktreeSandbox(repoDir, wtRoot, defaultConfig().sandbox);
+    const gate = await sandbox.create({ id: "install-manifest-gate", baseCommit: base, policy: CommandPolicy.forProject([], null) });
+    try {
+      const result = await runIndependentGates({
+        runId: baseline.runId,
+        commitHash: base,
+        sandbox: {
+          ...gate,
+          run: async (argv) => {
+            if (argv[1] === "install" || argv[1] === "ci") {
+              const vitest = join(gate.path, "node_modules", "vitest");
+              mkdirSync(vitest, { recursive: true });
+              writeFileSync(join(vitest, "package.json"), '{"name":"vitest"}');
+              // A package manager that stamps the manifest — it does this in every checkout,
+              // including the one the baseline was taken in.
+              writeFileSync(join(gate.path, "package.json"), JSON.stringify({
+                scripts: { test: "vitest run" },
+                devDependencies: { vitest: "^4" },
+                packageManager: "pnpm@9.0.0",
+              }));
+            }
+            return processResult({ stdout: " Tests  1 passed (1)\n" });
+          },
+        },
+        profile,
+        acceptanceArtifacts: [],
+        materializeAcceptance: vi.fn(),
+        verifyAcceptance: vi.fn(() => []),
+        baseline,
+      });
+      expect(result.silencing).toEqual([]);
+      expect(result.passed).toBe(true);
+    } finally {
+      await gate.destroy();
+    }
+  });
+
   it("keeps the candidate's own manifest evidence, which a check can undo before anyone looks", async () => {
     // Each capture carries the hashes from its own moment. Reading the manifest only at the end
     // loses whatever the candidate changed and then put back: a script that widens `test`, runs,
