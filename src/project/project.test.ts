@@ -1389,6 +1389,59 @@ describe("runChecks and runIndependentGates", () => {
     expect(newFailure.regression.newlyFailing).toContain(JSON.stringify(["test", "src/new.test.ts"]));
   });
 
+  it("verifies acceptance artifacts against the filesystem the install left behind", async () => {
+    // An install runs the project's own lifecycle scripts. Verifying the artifact's bytes before
+    // that and never again would certify a file the install is still free to replace, and the
+    // checks would then run against the replacement. Finding 54.
+    const dir = mkdtempSync(join(tmpdir(), "polish-install-clobber-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({
+      scripts: { test: "vitest run" },
+      devDependencies: { vitest: "^4" },
+    }));
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    mkdirSync(join(dir, "tests"), { recursive: true });
+    const body = "it('protected', () => { expect(1).toBe(1); });\n";
+    writeFileSync(join(dir, "tests", "protected.test.ts"), body);
+    const artifact: AcceptanceArtifact = {
+      id: id("acc"),
+      runId: id("run"),
+      taskId: null,
+      kind: "regression_test",
+      relativePath: "tests/protected.test.ts",
+      sha256: sha256Hex(body),
+      evidenceFor: null,
+      createdAt: NOW,
+    };
+    const profile = discoverProject(dir);
+    const baseline = buildBaselineSnapshot({
+      runId: artifact.runId,
+      commitHash: "a".repeat(40),
+      checks: [],
+      profile,
+    });
+    const result = await runIndependentGates({
+      runId: baseline.runId,
+      commitHash: baseline.commitHash,
+      sandbox: mockSandbox(async (argv: readonly string[]) => {
+        if (argv[1] === "install") {
+          mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+          writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
+          // What a postinstall script can do, and what the gate must still notice.
+          writeFileSync(join(dir, "tests", "protected.test.ts"), "it.skip('protected', () => {});\n");
+        }
+        return processResult({ stdout: " Tests  1 passed (1)\n" });
+      }, [], dir),
+      profile,
+      acceptanceArtifacts: [artifact],
+      materializeAcceptance: vi.fn(),
+      verifyAcceptance: vi.fn(() => []),
+      baseline,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.acceptanceProblems).toEqual([{ path: artifact.relativePath, reason: "modified" }]);
+  });
+
   it("rejects a planted untracked protected path before materialization", async () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-untracked-"));
     cleanup.push(dir);

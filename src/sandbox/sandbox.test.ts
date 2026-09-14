@@ -118,6 +118,10 @@ describe("CommandPolicy", () => {
     expect(policy.check(["npm", "ci"])).toMatch(/not in allowlist/);
     expect(CommandPolicy.forProject([], "npm").check(["npm", "ci"])).toBeNull();
     expect(CommandPolicy.forProject([], "npm").check(["pnpm", "install", "--frozen-lockfile"])).toMatch(/not in allowlist/);
+    // Every package manager the runner can drive, because the policy and the runner read the same
+    // definition: one admitting a command the other cannot issue, or the reverse, is the bug.
+    expect(CommandPolicy.forProject([], "yarn").check(["yarn", "install", "--immutable"])).toBeNull();
+    expect(CommandPolicy.forProject([], "bun").check(["bun", "install", "--frozen-lockfile"])).toBeNull();
     // A package manager we do not drive gains no install rule at all.
     expect(CommandPolicy.forProject([], "cargo").check(["cargo", "build"])).toMatch(/not in allowlist/);
   });

@@ -137,9 +137,22 @@ describe("B2 production candidate drivers", () => {
     expect(run.terminalReason?.code).toBe("environment_not_ready");
     expect(run.terminalReason?.question).toContain("sandbox.installDependencies");
     // No candidate was judged on it, and a further tick cannot repeat the attempt.
-    const states = store.repos.candidates.listByRun(runId).map((candidate) => candidate.state);
+    const candidates = store.repos.candidates.listByRun(runId);
+    const states = candidates.map((candidate) => candidate.state);
     expect(states).not.toContain("PASSED_GATES");
     expect(states).not.toContain("FAILED_GATES");
+    // And each discard says why. `Candidate.error` exists so a discard is not mistaken for
+    // infrastructure noise, which is exactly what this one would look like without it. MC18.
+    for (const candidate of candidates.filter((each) => each.state === "DISCARDED")) {
+      expect(candidate.error).toContain("no evidence");
+      expect(candidate.error).toContain("dependency install is disabled");
+    }
+    const gated = store.events.list(runId, { types: ["candidate.gated"] });
+    expect(gated.length).toBeGreaterThan(0);
+    for (const event of gated) {
+      const payload = event.payload as { candidate: { state: string; error: string | null } };
+      expect(payload.candidate.error).toContain("no evidence");
+    }
     await gateEngine.tickRun(runId);
     expect(store.repos.runs.get(runId)?.phase).toBe("FAILED");
   });

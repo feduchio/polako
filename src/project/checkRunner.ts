@@ -144,13 +144,7 @@ export async function runChecks(opts: CheckRunOptions | BaselineCheckRunOptions)
   // Inside the function that runs the checks, so that no caller can produce a CheckResult from a
   // sandbox nobody prepared. Three call sites each remembering to ask is how finding 54 survived
   // six rounds of patches.
-  const prepared = await ensureProjectDependencies(opts.sandbox, opts.profile, {
-    enabled: opts.prepareDependencies?.enabled ?? DEFAULT_INSTALL_DEPENDENCIES,
-    timeoutMs: opts.prepareDependencies?.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS,
-    ...(opts.signal === undefined ? {} : { signal: opts.signal }),
-    ...(opts.prepareDependencies?.onStart === undefined ? {} : { onStart: opts.prepareDependencies.onStart }),
-  });
-  opts.prepareDependencies?.onResult?.(prepared);
+  const prepared = await prepareSandbox(opts.sandbox, opts.profile, opts.prepareDependencies, opts.signal);
   const checks = opts.only ? opts.profile.checks.filter((c) => opts.only?.includes(c.name)) : opts.profile.checks;
   const out: CheckResult[] = [];
   for (const def of checks) {
@@ -323,6 +317,40 @@ export async function ensureProjectDependencies(
         detail: "install succeeded but dependencies are still unreachable",
         output: result,
       };
+}
+
+/**
+ * One preparation per sandbox, whoever asks for it.
+ *
+ * A sandbox is a one-shot checkout, so the answer cannot change between two callers and a second
+ * install would be a second ten-minute `npm ci` for nothing. Memoizing the *promise* also makes
+ * concurrent askers share one install rather than race it.
+ *
+ * This exists because two steps need it at different moments and neither may be the only one:
+ * `runIndependentGates` needs the filesystem settled before it verifies acceptance artifacts,
+ * and `runChecks` needs it settled before any command runs. Finding 54.
+ */
+const PREPARED_SANDBOXES = new WeakMap<SandboxHandle, Promise<EnsureDependenciesResult>>();
+
+function prepareSandbox(
+  sandbox: SandboxHandle,
+  profile: ProjectProfile,
+  prepare: DependencyPreparation | undefined,
+  signal: AbortSignal | undefined,
+): Promise<EnsureDependenciesResult> {
+  const existing = PREPARED_SANDBOXES.get(sandbox);
+  if (existing !== undefined) return existing;
+  const running = ensureProjectDependencies(sandbox, profile, {
+    enabled: prepare?.enabled ?? DEFAULT_INSTALL_DEPENDENCIES,
+    timeoutMs: prepare?.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS,
+    ...(signal === undefined ? {} : { signal }),
+    ...(prepare?.onStart === undefined ? {} : { onStart: prepare.onStart }),
+  }).then((result) => {
+    prepare?.onResult?.(result);
+    return result;
+  });
+  PREPARED_SANDBOXES.set(sandbox, running);
+  return running;
 }
 
 async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise<CheckResult> {
@@ -899,6 +927,12 @@ export async function runIndependentGates(input: {
   /** Store-backed authority check; schema-valid waiver objects alone are never trusted. */
   validateProtectedChangeWaiver?: (waiver: ProtectedChangeWaiver) => boolean;
 }): Promise<GateResult> {
+  // Before the acceptance artifacts are materialized and hashed, not after. An install runs the
+  // project's own lifecycle scripts, so verifying first would verify bytes the install is still
+  // free to replace, and the gate would certify a protected file that no longer exists in the form
+  // it checked. `runChecks` prepares too, and gets this same settled result rather than a second
+  // install. Finding 54.
+  await prepareSandbox(input.sandbox, input.profile, input.prepareDependencies, input.signal);
   const protectedSet = protectedPaths(input.acceptanceArtifacts);
   let actualChangedFiles: string[];
   try {

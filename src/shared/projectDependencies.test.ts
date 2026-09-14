@@ -107,10 +107,23 @@ describe("untrustedForMissingDependencies", () => {
     expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "test"], "vitest run")).toBe(MISSING_DEPENDENCIES_REASON);
   });
 
+  it("flags a script that loads its runner through tsx, which is itself a package", () => {
+    // `node --test` needs nothing installed, but `node --import tsx` does, and a manifest
+    // declaring nothing would otherwise make the whole command look self-sufficient.
+    const dir = project({ name: "x", scripts: { test: "node --import tsx --test src/a.test.ts" } });
+    expect(untrustedForMissingDependencies(dir, ["npm", "run", "test"], "node --import tsx --test src/a.test.ts"))
+      .toBe(MISSING_DEPENDENCIES_REASON);
+    mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", ".bin", "tsx"), "#!/bin/sh\n");
+    expect(untrustedForMissingDependencies(dir, ["npm", "run", "test"], "node --import tsx --test src/a.test.ts"))
+      .toBeNull();
+  });
+
   it("names an install command only for package managers it knows how to drive", () => {
     expect(installCommandFor("pnpm")).toEqual(["pnpm", "install", "--frozen-lockfile"]);
     expect(installCommandFor("npm")).toEqual(["npm", "ci"]);
     expect(installCommandFor("yarn")).toEqual(["yarn", "install", "--immutable"]);
+    expect(installCommandFor("bun")).toEqual(["bun", "install", "--frozen-lockfile"]);
     expect(installCommandFor(null)).toBeNull();
     expect(installCommandFor("cargo")).toBeNull();
   });

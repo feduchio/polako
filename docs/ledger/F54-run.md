@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Contract | revision 4; rev 1 frozen at `fde4530`, rev 2 at `cf7c804`, rev 3 at `6634348` |
+| Contract | revision 5; rev 1 frozen at `fde4530`, rev 2 at `cf7c804`, rev 3 at `6634348` |
 | Base | HOST `ef11a00` (accepted P2 block) |
 | Finding | 54, from P2.3 |
-| Implementation | `cf7c804`, `6634348`, then seven fix rounds |
-| Change against base | 28 files |
-| Gate | Node 24.20.0; **94 files, 1,065 tests**, exit 0 (was 93 / 1,022) |
+| Implementation | `cf7c804` (rev 2), `6634348` (rev 3), then eight fix rounds |
+| Change against base | 29 files, +2,326 / −49 |
+| Gate | Node 24.20.0; **95 files, 1,068 tests**, exit 0 (was 93 / 1,022) |
 
 This record is written after the seventh round. Earlier versions of it described revision 2 —
 1,046 tests, "five production files", and a story that ended at `BASELINING → NEEDS_HUMAN` — while
@@ -116,19 +116,44 @@ difference between an amendment and a tuned criterion is exactly whether the cou
 | 5 | `FAILED` hid the reason, and the report said "DONE: Mission complete" for a failed run |
 | 6 | `INTERRUPTED` was non-terminal, so a retry deadlocked |
 | 7 | the design: preparation was optional, and a deleted call site kept 93 tests green |
+| 8 | preparation ran *after* acceptance artifacts were verified, and four clauses nothing observed |
+
+## Round 8: what the ordering change cost, and four clauses nothing observed
+
+The refactor moved preparation into `runChecks`, which runs **after** `runIndependentGates` has
+inspected protected paths, materialized acceptance artifacts and hashed their bytes. The first lane
+reproduced the consequence: an install runs the project's own lifecycle scripts, so it can replace
+an acceptance artifact that was verified a moment earlier, and the gate passed on a file it had
+certified in a form that no longer existed.
+
+The fix is not a second call site. `prepareSandbox` memoizes the preparation *promise* per sandbox
+handle, so `runIndependentGates` can settle the filesystem before it verifies anything and
+`runChecks` still prepares unconditionally — the second ask returns the first answer rather than a
+second `npm ci`. Both callers are now guaranteed; neither is the only one.
+
+The same round closed four clauses that were stated and unobserved, each demonstrated by a mutant
+that kept the whole suite green: the reproduction path's use of the shared predicate (MC1/AC1),
+`tsx` in the runner-shape pattern (MC13), Bun's install command in the runner and in the policy
+that admits it (MC8), and the reason carried by a candidate discarded for its environment
+(MC18/AC16) — which the previous version of this record claimed a test would catch, and none did.
 
 ## Observation
 
-New and changed checks, and the mutants they kill:
+New and changed checks, and the mutants they kill. Every row below was run as a planted defect
+against the full suite, not asserted from reading:
 
 | Planted defect | Tests that fail |
 |---|---|
 | `runChecks` does not prepare unless asked | 2 |
 | the `resolveGates` assignment is deleted | 1 |
 | the refusal happens before the checks run | 2 |
+| `runIndependentGates` verifies acceptance before preparing | 1 |
 | the runner never marks a result untrusted | 1 |
 | an untrusted result keeps its fingerprint | 1 |
 | the predicate ignores declared dependencies | 4 |
+| the reproduction path keeps its own predicate | 1 |
+| `tsx` leaves the runner-shape pattern | 1 |
+| Bun loses its install command | 2 |
 | the driver records the baseline anyway | 1 |
 | a discarded candidate carries no reason | 1 |
 
@@ -136,7 +161,9 @@ The new cases are: preparation happens when the caller says nothing (`project.te
 `candidates.integration.test.ts`); a refusal names only the checks that ran, under `only`; a
 candidate whose checks pass in an unpreparable checkout is gated rather than discarded; the
 operator's `installDependencies` setting reaches candidate gating, observed through the branch of
-the refusal message that is reachable only when the setting arrived.
+the refusal message that is reachable only when the setting arrived; an install that rewrites a
+protected artifact is caught; a reproduction in a project with a partial `node_modules` returns
+`UNCERTAIN` (`src/findings/reproduce.test.ts`, new file).
 
 ## Known cost, stated rather than discovered later
 
@@ -157,4 +184,4 @@ widened into this item.
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result: 94 test files, 1,065 tests, exit 0.
+Result: 95 test files, 1,068 tests, exit 0.
