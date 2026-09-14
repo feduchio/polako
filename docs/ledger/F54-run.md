@@ -10,7 +10,7 @@
 
 ## What changed
 
-Three production files and one new module.
+Five production files and one new module, across revisions 2 and 3.
 
 **`src/shared/projectDependencies.ts` — the predicate, defined once.**
 `untrustedForMissingDependencies(cwd, argv, scriptText?)` returns a reason or `null`. The condition
@@ -159,4 +159,4 @@ because the operator can fix the install itself, and the terminal reason says wh
 
 `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
 
-Result: 94 test files, 1,032 tests, exit 0.
+Result: 94 test files, 1,046 tests, exit 0.
