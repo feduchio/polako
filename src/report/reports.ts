@@ -7,6 +7,8 @@ export interface InterimReportInput {
 
 export interface FinalReportInput {
   summary: string;
+  /** What actually happened. Defaults to `done` so existing callers are unchanged. */
+  outcome?: "done" | "failed";
   changes?: readonly string[];
   reasons?: readonly string[];
   rejected?: readonly string[];
@@ -33,7 +35,9 @@ export function renderInterimReport(input: InterimReportInput): string {
 }
 
 export function renderFinalReport(input: FinalReportInput): string {
-  const lines = [`DONE: ${input.summary}`];
+  // The outcome is part of the report, not an assumption of it: a run that failed and rendered
+  // "DONE: Mission complete" told the operator the opposite of what happened. Finding 54.
+  const lines = [`${(input.outcome ?? "done").toUpperCase()}: ${input.summary}`];
   appendNumbered(lines, "Changed", input.changes ?? []);
   appendNumbered(lines, "Why", input.reasons ?? []);
   appendNumbered(lines, "Rejected", input.rejected ?? []);

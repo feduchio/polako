@@ -187,7 +187,10 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
     const gates = await resolveGates(ctx, options, task);
     const corpus = await resolveCorpus(ctx, options);
     const gated: Candidate[] = [];
-    try {
+    // Per candidate, not per run: a candidate can make its own install fail by editing
+    // `package.json` without its lockfile, and that is a fact about that candidate. Only when no
+    // candidate could be prepared at all is the cause shared, and only then is it the run's.
+    let unpreparable: EnvironmentNotReadyError | null = null;
     for (const candidate of pending) {
       const headCommit = candidate.headCommit;
       if (headCommit === null) continue;
@@ -213,21 +216,25 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
           ctx.clock.now(),
         );
         gated.push({ ...applyGateResult(ctx, candidate, headCommit, gateResult), diffRef });
+      } catch (error) {
+        if (!(error instanceof EnvironmentNotReadyError)) throw error;
+        // Not a verdict on the work: INTERRUPTED, not FAILED_GATES. A candidate judged on an
+        // environment it never controlled is the same confusion as a false baseline.
+        unpreparable = error;
+        gated.push({ ...candidate, state: "INTERRUPTED", updatedAt: ctx.clock.now() });
       } finally {
         await checkout.destroy().catch(() => undefined);
       }
     }
-    } catch (error) {
-      // An unpreparable gate checkout is not a candidate verdict and not a transient fault: every
-      // tick would repeat the same install in the same fresh worktree. Terminate with something an
-      // operator can act on. GATING may not reach NEEDS_HUMAN (`RUN_PHASE_TABLE`), so this follows
-      // finding 37's precedent and terminates through FAILED with the reason on the run.
-      const terminal = environmentTerminalReason(error, ctx.run.currentCheckpointHash);
-      if (terminal === null) throw error;
-      appendCandidateEvents(ctx, gated, "candidate.gated");
-      return { status: "complete", nextPhase: "FAILED", terminalReason: terminal };
-    }
     appendCandidateEvents(ctx, gated, "candidate.gated");
+    if (unpreparable !== null && gated.every((candidate) => candidate.state === "INTERRUPTED")) {
+      // No candidate could be prepared, so the cause is shared and no tick will change it: every
+      // attempt builds the same fresh worktree. Terminate with something an operator can act on.
+      // GATING may not reach NEEDS_HUMAN (`RUN_PHASE_TABLE`), so this follows finding 37's
+      // precedent and terminates through FAILED with the reason on the run.
+      const terminal = environmentTerminalReason(unpreparable, ctx.run.currentCheckpointHash);
+      if (terminal !== null) return { status: "complete", nextPhase: "FAILED", terminalReason: terminal };
+    }
     const survivors = passedCandidates(ctx, task.id);
     if (survivors.length === 0) return handleZeroSurvivors(ctx, task);
     return { status: "complete", nextPhase: "COMPARING" };

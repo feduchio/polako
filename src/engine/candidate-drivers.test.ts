@@ -142,6 +142,79 @@ describe("B2 production candidate drivers", () => {
     expect(store.repos.runs.get(runId)?.phase).toBe("FAILED");
   });
 
+  it("does not terminate the run when only one candidate's checkout is unpreparable", async () => {
+    // A candidate can break its own install by editing package.json without its lockfile. That is
+    // a fact about that candidate, not about the mission.
+    let seq = 0;
+    const options = buildDriverOptions(fixture, () => {
+      const poison = seq++ === 0;
+      return new ScriptedCandidateWorker((_task, worktree) => {
+        writeFileSync(join(worktree.path, "outcome.txt"), "pass");
+        if (poison) {
+          writeFileSync(
+            join(worktree.path, "package.json"),
+            JSON.stringify({ name: "demo", devDependencies: { vitest: "^4" } }),
+          );
+        }
+        return { status: "completed" };
+      });
+    });
+    const gateEngine = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    gateEngine.registerPhase("EXECUTING", createExecutingDriver(options));
+    gateEngine.registerPhase(
+      "GATING",
+      createGatingDriver({
+        ...options,
+        resolveGates: async (ctx, task) => ({
+          ...(await options.resolveGates!(ctx, task)),
+          prepareDependencies: { enabled: false, timeoutMs: 1000 },
+        }),
+      }),
+    );
+    const { runId, taskId } = seedRun(store, clock, fixture);
+    await gateEngine.tickRun(runId);
+    await gateEngine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).not.toBe("FAILED");
+    const states = store.repos.candidates.listByTask(taskId).map((candidate) => candidate.state);
+    expect(states).toContain("INTERRUPTED");
+    expect(states).toContain("PASSED_GATES");
+  });
+
+  it("INTEGRATING terminates the run when the integration workspace cannot be prepared", async () => {
+    // A manifest declaring a package that nothing installed, committed on the winner branch.
+    const winner = await commitOnBranch(fixture.repoDir, fixture.base, "winner-unpreparable", "pass", {
+      "package.json": JSON.stringify({ name: "demo", devDependencies: { vitest: "^4" } }),
+    });
+    const { runId } = seedIntegratingRun(store, clock, fixture, winner);
+    const intEngine = new RunEngine(
+      { store, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined },
+      false,
+    );
+    intEngine.registerPhase(
+      "INTEGRATING",
+      createIntegratingDriver({
+        ...driverOptions,
+        resolveGates: async (ctx, task) => ({
+          ...(await driverOptions.resolveGates!(ctx, task)),
+          prepareDependencies: { enabled: false, timeoutMs: 1000 },
+        }),
+      }),
+    );
+    await intEngine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("FAILED");
+    expect(run.terminalReason?.code).toBe("environment_not_ready");
+    // And it does not retry the same fresh workspace on the next tick.
+    await intEngine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("FAILED");
+  });
+
   it("records the model that ran each candidate, everywhere the run reports one", async () => {
     // B-selfhost-9. The router-selected ref already reached AgentRunner and the transcript; the
     // Candidate record and every event actor carried `worker/candidate-N` instead. Nothing in the

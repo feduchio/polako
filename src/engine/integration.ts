@@ -6,7 +6,7 @@ import type { Sandbox, SandboxHandle } from "../sandbox/worktree.js";
 import { errorToString } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import type { CandidateGates } from "./candidates.js";
-import { runGates } from "./candidates.js";
+import { EnvironmentNotReadyError, runGates } from "./candidates.js";
 
 /**
  * Atomic boundary for the durable run branch/checkpoint. Implementations must change the
@@ -168,6 +168,10 @@ async function integrateWinnerExclusive(input: IntegrateWinnerInput): Promise<In
       error: null,
     };
   } catch (error) {
+    // An unpreparable workspace is not an integration outcome: converting it to `status: "error"`
+    // would hide it inside a per-integration result the driver reads as a normal failure, and the
+    // run would retry the same fresh workspace on every tick. Finding 54.
+    if (error instanceof EnvironmentNotReadyError) throw error;
     return {
       status: "error",
       previousHead,

@@ -64,6 +64,12 @@ export interface RunStatusView {
   active: ActiveOperation | null;
   waiting: WaitingState | null;
   humanRequest: HumanRequest | null;
+  /**
+   * Why a terminal run ended, for any terminal phase. `humanRequest` covers NEEDS_HUMAN only, so
+   * without this a FAILED run rendered as a bare phase name and the operator saw nothing to act
+   * on — which is what made terminating through FAILED unusable. Finding 54.
+   */
+  terminal: { code: string; summary: string; question: string | null } | null;
   verification: {
     gatesRunning: string | null;
     latestGate: string | null;

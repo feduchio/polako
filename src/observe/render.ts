@@ -125,6 +125,11 @@ function renderHuman(view: RunStatusView): string[] {
   if (view.phase === "NEEDS_HUMAN" && view.waiting?.kind === "output_contract") {
     return ["", "HUMAN", "not a human question · planner output failed the schema contract"];
   }
+  if (view.terminal !== null && view.humanRequest === null) {
+    const lines = ["", `${view.terminal.code.toUpperCase()}: ${view.terminal.summary}`];
+    if (view.terminal.question !== null) lines.push(view.terminal.question);
+    return lines;
+  }
   if (view.humanRequest === null) {
     if (view.phase === "NEEDS_HUMAN") {
       return ["", "HUMAN", "decision required (see report)"];

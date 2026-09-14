@@ -25,6 +25,7 @@ export function projectRunStatus(run: Run, events: readonly Event[], now: number
   const council = COUNCIL_ROLES.map((role) => projectCouncilRole(role, ordered, now));
   const waiting = projectWaiting(run, ordered, now);
   const humanRequest = projectHumanRequest(run, ordered);
+  const terminal = projectTerminal(run);
   const active = projectActive(ordered, now);
   const stallKind = projectStall(run, active, waiting, lastActivity?.ageMs ?? null);
   const warning =
@@ -54,6 +55,7 @@ export function projectRunStatus(run: Run, events: readonly Event[], now: number
     active,
     waiting,
     humanRequest,
+    terminal,
     verification: {
       gatesRunning: active?.kind === "shell" ? active.label : null,
       latestGate: latestGateSummary(ordered),
@@ -168,6 +170,13 @@ function projectWaiting(run: Run, events: readonly Event[], now: number): Waitin
     };
   }
   return null;
+}
+
+function projectTerminal(run: Run): { code: string; summary: string; question: string | null } | null {
+  const reason = run.terminalReason;
+  if (reason === null) return null;
+  if (run.phase !== "FAILED" && run.phase !== "DONE" && run.phase !== "NEEDS_HUMAN") return null;
+  return { code: reason.code, summary: reason.summary, question: reason.question ?? null };
 }
 
 function projectHumanRequest(run: Run, events: readonly Event[]): HumanRequest | null {

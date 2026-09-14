@@ -36,10 +36,13 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
   const corpus = store.repos.acceptanceCorpus.forMission(run.missionId);
 
   const checkpointHash = run.currentCheckpointHash;
+  const failure = run.phase === "FAILED" ? run.terminalReason : null;
   const summary =
-    checkpointHash === null
-      ? "Mission complete"
-      : `Mission complete at checkpoint ${checkpointHash}`;
+    failure !== null
+      ? failure.summary
+      : checkpointHash === null
+        ? "Mission complete"
+        : `Mission complete at checkpoint ${checkpointHash}`;
 
   const changes: string[] = [];
   if (mission !== null) changes.push(`Mission: ${mission.text}`);
@@ -131,6 +134,7 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
   const reasons = whyChainLines(ctx, seedEntityId(candidates, checkpointHash));
 
   return {
+    ...(failure === null ? {} : { outcome: "failed" as const }),
     summary,
     changes,
     reasons,
