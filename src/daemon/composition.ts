@@ -53,8 +53,10 @@ import {
   buildBaselineSnapshot,
   createCheckOutputPersister,
   discoverProject,
+  ensureProjectDependencies,
   runChecks,
   untrustedChecks,
+  type EnsureDependenciesResult,
   type ProjectProfile,
 } from "../project/index.js";
 import type { FinalReportInput } from "../report/reports.js";
@@ -67,7 +69,7 @@ import { CommandPolicy } from "../sandbox/allowlist.js";
 import { WorktreeSandbox, type Sandbox } from "../sandbox/worktree.js";
 import type { Clock } from "../shared/clock.js";
 import { PolishError, type PolishErrorCode } from "../shared/errors.js";
-import { hashJson } from "../shared/hash.js";
+import { canonicalJson, hashJson } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import type { Store } from "../store/index.js";
 import type { FacadeRunMetadata } from "./types.js";
@@ -278,6 +280,13 @@ export function createBaseliningDriver(deps: ProductionDeps): PhaseDriver {
       policy,
     });
     try {
+      // Make the sandbox able to produce evidence before asking it to. A fresh worktree carries no
+      // node_modules, so without this the checks below would describe the environment. Finding 54.
+      const prepared = await ensureProjectDependencies(sandbox, profile, {
+        enabled: ctx.config.sandbox.installDependencies,
+        timeoutMs: ctx.config.sandbox.installTimeoutMs,
+      });
+      if (prepared.output !== undefined) recordDependencyInstall(ctx, prepared);
       const checks = await runChecks({
         runId: ctx.run.id,
         commitHash,
@@ -293,14 +302,15 @@ export function createBaseliningDriver(deps: ProductionDeps): PhaseDriver {
       // worse than none: a candidate reproducing the same failures would show no regression.
       // The checks still ran and their output is in the CAS, which is what the human needs.
       // Finding 54.
-      const untrusted = untrustedChecks(sandbox, profile);
+      const untrusted = untrustedChecks(sandbox, profile, checks);
       if (untrusted.length > 0) {
         const names = untrusted.map((check) => check.name).join(", ");
+        const why = prepared.detail ?? untrusted[0]?.reason ?? "environment not ready";
         patchRun(ctx, {
           terminalReason: {
             code: "environment_not_ready",
-            summary: `baseline not recorded: ${untrusted[0]?.reason ?? "environment not ready"} for ${names}`,
-            question: `Checks ${names} cannot produce evidence about this project here. Install the project's dependencies in ${ctx.run.projectPath} and resume.`,
+            summary: `baseline not recorded for ${names}: ${why}`,
+            question: `Checks ${names} cannot produce evidence about this project: ${why}. Fix the project's dependency install, or set sandbox.installDependencies and retry.`,
           },
         });
         return { status: "complete", nextPhase: "NEEDS_HUMAN" };
@@ -1072,6 +1082,29 @@ function patchRun(ctx: PhaseContext, patch: Partial<typeof ctx.run>): void {
     artifacts: [],
   };
   ctx.store.events.append([event]);
+}
+
+/** Forensics for a dependency install. It is not one of the project's checks and is not stored as one. */
+function recordDependencyInstall(ctx: PhaseContext, prepared: EnsureDependenciesResult): void {
+  const output = prepared.output;
+  if (output === undefined) return;
+  const artifact = ctx.store.artifacts.put(
+    canonicalJson({ runId: ctx.run.id, ...output, ready: prepared.ready, detail: prepared.detail }),
+    "check_output",
+    `${ctx.run.id}:dependency_install`,
+  );
+  ctx.store.events.append([
+    {
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "shell.command_started",
+      payload: { check: "dependency_install", command: output.argv, ready: prepared.ready, detail: prepared.detail },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [artifact],
+    },
+  ]);
 }
 
 function recordCheckStart(ctx: PhaseContext, info: { name: string; command: readonly string[] }): void {

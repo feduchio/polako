@@ -2,7 +2,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MISSING_DEPENDENCIES_REASON, untrustedForMissingDependencies } from "./projectDependencies.js";
+import { installCommandFor, MISSING_DEPENDENCIES_REASON, untrustedForMissingDependencies } from "./projectDependencies.js";
 
 describe("untrustedForMissingDependencies", () => {
   const cleanup: string[] = [];
@@ -10,11 +10,11 @@ describe("untrustedForMissingDependencies", () => {
     for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
   });
 
-  function project(manifest: Record<string, unknown>, options: { installed?: boolean } = {}): string {
+  function project(manifest: Record<string, unknown>, options: { installed?: string } = {}): string {
     const dir = mkdtempSync(join(tmpdir(), "polish-deps-"));
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
-    if (options.installed === true) mkdirSync(join(dir, "node_modules"));
+    if (options.installed !== undefined) mkdirSync(join(dir, "node_modules", options.installed), { recursive: true });
     return dir;
   }
 
@@ -42,7 +42,7 @@ describe("untrustedForMissingDependencies", () => {
   });
 
   it("does not flag once the packages are installed", () => {
-    const dir = project({ name: "x", devDependencies: { vitest: "^4" } }, { installed: true });
+    const dir = project({ name: "x", devDependencies: { vitest: "^4" } }, { installed: "vitest" });
     expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "test"], "vitest run")).toBeNull();
   });
 
@@ -50,6 +50,36 @@ describe("untrustedForMissingDependencies", () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-deps-"));
     cleanup.push(dir);
     expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "test"])).toBeNull();
+  });
+
+  it("resolves a declared dependency from an ancestor node_modules, as Node does", () => {
+    // A workspace package legitimately has no node_modules of its own.
+    const root = mkdtempSync(join(tmpdir(), "polish-ws-"));
+    cleanup.push(root);
+    mkdirSync(join(root, "node_modules", "vitest"), { recursive: true });
+    const pkg = join(root, "packages", "leaf");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "leaf", devDependencies: { vitest: "^4" } }));
+    expect(untrustedForMissingDependencies(pkg, ["pnpm", "run", "test"], "vitest run")).toBeNull();
+  });
+
+  it("treats a Plug'n'Play marker as available, since PnP has no node_modules at all", () => {
+    const dir = project({ name: "x", devDependencies: { vitest: "^4" } });
+    writeFileSync(join(dir, ".pnp.cjs"), "// pnp");
+    expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "test"], "vitest run")).toBeNull();
+  });
+
+  it("does not accept a node_modules that lacks the declared package", () => {
+    const dir = project({ name: "x", devDependencies: { vitest: "^4" } }, { installed: "something-else" });
+    expect(untrustedForMissingDependencies(dir, ["pnpm", "run", "test"], "vitest run")).toBe(MISSING_DEPENDENCIES_REASON);
+  });
+
+  it("names an install command only for package managers it knows how to drive", () => {
+    expect(installCommandFor("pnpm")).toEqual(["pnpm", "install", "--frozen-lockfile"]);
+    expect(installCommandFor("npm")).toEqual(["npm", "ci"]);
+    expect(installCommandFor("yarn")).toEqual(["yarn", "install", "--immutable"]);
+    expect(installCommandFor(null)).toBeNull();
+    expect(installCommandFor("cargo")).toBeNull();
   });
 
   it("treats an unreadable manifest as declaring nothing rather than throwing", () => {

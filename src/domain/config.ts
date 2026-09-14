@@ -205,6 +205,14 @@ export const SandboxConfigSchema = z.object({
   maxOutputBytes: z.number().int().min(1024).default(2 * 1024 * 1024),
   /** worker may run arbitrary commands (beyond the project profile allowlist) */
   allowArbitraryCommands: z.boolean().default(false),
+  /**
+   * Install the project's dependencies in a sandbox before its checks run, when they are not
+   * reachable there. Default on: a check run without them produces evidence about the environment
+   * rather than the project, and the alternative — refusing to record a baseline — cannot be
+   * cleared by an operator, because every attempt uses a fresh worktree. Finding 54.
+   */
+  installDependencies: z.boolean().default(true),
+  installTimeoutMs: z.number().int().min(1000).default(10 * 60_000),
   envAllowlist: z.array(z.string()).default(["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "SHELL", "USER"]),
   envDenyPatterns: z
     .array(z.string())

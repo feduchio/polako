@@ -2,7 +2,7 @@ import { estimateTokens } from "../context/types.js";
 import type { Finding } from "../domain/finding.js";
 import { findingFingerprint } from "../domain/finding.js";
 import type { CompletionRequest } from "../broker/types.js";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -1353,15 +1353,119 @@ describe("DISCOVERING_PROJECT and BASELINING drivers", () => {
     expect(store.repos.baselines.listByRun(run.id)).toHaveLength(1);
   });
 
-  it("refuses to record a baseline when the project's packages are not installed", async () => {
-    // The defect finding 54 records: checks run in a worktree with no node_modules, fail on
-    // missing binaries, and the failures were stored as the project's own check statuses.
+  /** A repo that declares a dependency and has none installed, like any freshly cloned project. */
+  async function uninstalledRepo(): Promise<Git> {
     writeFileSync(
       join(repoDir, "package.json"),
       JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }),
     );
+    writeFileSync(join(repoDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
     const git = new Git(repoDir);
     await git.commitAll("declare dependencies");
+    return git;
+  }
+
+  /**
+   * A sandbox backend whose install command succeeds by creating the package, so the test needs no
+   * network. Everything else runs for real.
+   */
+  function scriptedInstallBackend(
+    ctx: { run: { id: string; projectPath: string } },
+    config: ReturnType<typeof defaultConfig>,
+    install: "creates packages" | "changes nothing",
+  ): WorktreeSandbox {
+    const backend = new WorktreeSandbox(ctx.run.projectPath, join(dir, "worktrees", ctx.run.id), config.sandbox);
+    const create = backend.create.bind(backend);
+    backend.create = async (input) => {
+      const handle = await create(input);
+      const run = handle.run.bind(handle);
+      // Every package-manager command is scripted. Letting the real pnpm run would reach the
+      // network — pnpm v10 installs before `run` when node_modules is missing — which would make
+      // these tests measure the registry rather than the driver.
+      handle.run = async (argv, opts) => {
+        if (argv[0] !== "pnpm") return run(argv, opts);
+        const done = { cwd: handle.path, signal: null, startedAt: 0, timedOut: false, aborted: false, truncated: false, durationMs: 1 };
+        if (argv[1] === "install") {
+          if (install === "creates packages") mkdirSync(join(handle.path, "node_modules", "vitest"), { recursive: true });
+          return { argv: [...argv], exitCode: 0, stdout: "installed\n", stderr: "", ...done };
+        }
+        return existsSync(join(handle.path, "node_modules", "vitest"))
+          ? { argv: [...argv], exitCode: 0, stdout: " Tests  1 passed (1)\n", stderr: "", ...done }
+          : { argv: [...argv], exitCode: 1, stdout: "", stderr: "sh: vitest: command not found\n", ...done };
+      };
+      return handle;
+    };
+    return backend;
+  }
+
+  it("installs the project's dependencies and then records a baseline", async () => {
+    const git = await uninstalledRepo();
+    const provider = new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }]);
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    installProductionDrivers(
+      engine,
+      buildProductionDeps({
+        store,
+        clock,
+        config,
+        home: join(dir, "home"),
+        providers: [provider],
+        resolveSandbox: (ctx) => scriptedInstallBackend(ctx, config, "creates packages"),
+      }),
+    );
+    const run = engine.createRun({ projectPath: repoDir });
+    engine.setCurrentCheckpoint(run.id, await git.revParse("HEAD"));
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+
+    // The refusal is clearable: installing is what makes the baseline obtainable.
+    expect(store.repos.runs.get(run.id)?.phase).not.toBe("NEEDS_HUMAN");
+    expect(store.events.list(run.id, { types: ["baseline.snapshotted"] })).toHaveLength(1);
+    const installs = store.events
+      .list(run.id, { types: ["shell.command_started"] })
+      .filter((event) => (event.payload as { check?: string }).check === "dependency_install");
+    expect(installs).toHaveLength(1);
+    expect(installs[0]?.artifacts).toHaveLength(1);
+  });
+
+  it("refuses when dependency install is turned off, and says which knob", async () => {
+    const git = await uninstalledRepo();
+    const provider = new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }]);
+    const config = defaultConfig();
+    config.sandbox.installDependencies = false;
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    installProductionDrivers(
+      engine,
+      buildProductionDeps({
+        store,
+        clock,
+        config,
+        home: join(dir, "home"),
+        providers: [provider],
+        resolveSandbox: (ctx) => scriptedInstallBackend(ctx, config, "changes nothing"),
+      }),
+    );
+    const run = engine.createRun({ projectPath: repoDir });
+    engine.setCurrentCheckpoint(run.id, await git.revParse("HEAD"));
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+
+    expect(store.events.list(run.id, { types: ["baseline.snapshotted"] })).toHaveLength(0);
+    const stopped = store.repos.runs.get(run.id);
+    expect(stopped?.phase).toBe("NEEDS_HUMAN");
+    expect(stopped?.terminalReason?.summary).toContain("dependency install is disabled");
+  });
+
+  it("refuses to record a baseline when the install cannot make the project usable", async () => {
+    // The defect finding 54 records: checks run in a worktree with no node_modules, fail on
+    // missing binaries, and the failures were stored as the project's own check statuses. Here the
+    // install runs and changes nothing, which is the case the guard exists for.
+    const git = await uninstalledRepo();
     const provider = new ScriptedProvider("scripted", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }]);
     const config = defaultConfig();
     const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
@@ -1372,7 +1476,7 @@ describe("DISCOVERING_PROJECT and BASELINING drivers", () => {
       config,
       home: join(dir, "home"),
       providers: [provider],
-      resolveSandbox: (ctx) => new WorktreeSandbox(ctx.run.projectPath, join(dir, "worktrees", ctx.run.id), config.sandbox),
+      resolveSandbox: (ctx) => scriptedInstallBackend(ctx, config, "changes nothing"),
     });
     installProductionDrivers(engine, deps);
     const run = engine.createRun({ projectPath: repoDir });
@@ -1386,7 +1490,7 @@ describe("DISCOVERING_PROJECT and BASELINING drivers", () => {
     const stopped = store.repos.runs.get(run.id);
     expect(stopped?.phase).toBe("NEEDS_HUMAN");
     expect(stopped?.terminalReason?.code).toBe("environment_not_ready");
-    expect(stopped?.terminalReason?.summary).toContain("test");
+    expect(stopped?.terminalReason?.summary).toContain("still unreachable");
     // The checks still ran, so the operator has the real output to act on.
     expect(store.events.list(run.id, { types: ["shell.command_started"] }).length).toBeGreaterThan(0);
   });

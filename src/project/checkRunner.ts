@@ -26,7 +26,7 @@ import {
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import { canonicalJson, sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
-import { untrustedForMissingDependencies } from "../shared/projectDependencies.js";
+import { installCommandFor, untrustedForMissingDependencies } from "../shared/projectDependencies.js";
 import { inspectManifestHashes } from "./discovery.js";
 import { parseTestOutput, statusFromProcess } from "./parsers.js";
 import type { ProjectProfile } from "./profile.js";
@@ -94,22 +94,109 @@ export async function runChecks(opts: CheckRunOptions | BaselineCheckRunOptions)
 }
 
 /**
- * Why a check run here would say nothing about the project, or `null` when it would. Exported
- * through `untrustedChecks` so a caller can refuse to record a whole snapshot rather than store
- * a per-check verdict it cannot support.
+ * Why a check run here would say nothing about the project, or `null` when it would.
+ *
+ * The resolved script text is passed as well as the argv: a profile check is `<pm> run <script>`,
+ * and it is the script that says whether packages are needed. Without it the command-shape test
+ * could never fire for a profile check.
  */
-function untrustedCheckReason(opts: Pick<CheckRunOptions, "sandbox">, def: CheckDefinition): string | null {
-  return untrustedForMissingDependencies(resolve(opts.sandbox.path, def.cwd ?? "."), def.command);
+function untrustedCheckReason(sandbox: SandboxHandle, profile: ProjectProfile, def: CheckDefinition): string | null {
+  const cwd = resolve(sandbox.path, def.cwd ?? ".");
+  return untrustedForMissingDependencies(cwd, def.command, resolvedScriptText(cwd, def));
 }
 
-/** The checks of a profile whose results would describe the environment rather than the project. */
-export function untrustedChecks(sandbox: SandboxHandle, profile: ProjectProfile): { name: string; reason: string }[] {
+/** The text of the package script a `<pm> run <name>` check invokes, when it is one. */
+function resolvedScriptText(cwd: string, def: CheckDefinition): string | null {
+  const [, verb, name] = def.command;
+  if (verb !== "run" || name === undefined) return null;
+  try {
+    const manifest = JSON.parse(readFileSync(resolve(cwd, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    return manifest.scripts?.[name] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The checks of a profile whose results would describe the environment rather than the project.
+ *
+ * `results` is required rather than optional: a check that **passed** is evidence whatever the
+ * environment looked like, so refusing a snapshot because of it would discard a real observation.
+ * Only a non-passing result can be untrusted.
+ */
+export function untrustedChecks(
+  sandbox: SandboxHandle,
+  profile: ProjectProfile,
+  results: readonly CheckResult[],
+): { name: string; reason: string }[] {
   const out: { name: string; reason: string }[] = [];
+  const byName = new Map(results.map((result) => [result.name, result]));
   for (const def of profile.checks) {
-    const reason = untrustedCheckReason({ sandbox }, def);
+    if (byName.get(def.name)?.status === "pass") continue;
+    const reason = untrustedCheckReason(sandbox, profile, def);
     if (reason !== null) out.push({ name: def.name, reason });
   }
   return out;
+}
+
+/** Whether any of a profile's checks cannot produce evidence here, before any of them has run. */
+export function dependenciesUnavailableFor(sandbox: SandboxHandle, profile: ProjectProfile): string | null {
+  for (const def of profile.checks) {
+    const reason = untrustedCheckReason(sandbox, profile, def);
+    if (reason !== null) return reason;
+  }
+  return null;
+}
+
+export interface EnsureDependenciesResult {
+  /** whether an install was issued */
+  attempted: boolean;
+  /** whether the project's checks can now produce evidence */
+  ready: boolean;
+  detail: string | null;
+  output?: { argv: readonly string[]; exitCode: number | null; stdout: string; stderr: string };
+}
+
+/**
+ * Make a sandbox able to produce evidence about the project, by installing its dependencies when
+ * they are not reachable there.
+ *
+ * This is the half of finding 54's remedy that makes a *trusted* baseline obtainable. It is not the
+ * whole remedy: install can be disabled, can fail, or can leave the project still unusable, and in
+ * every one of those cases the caller must refuse to record rather than run the checks and believe
+ * them. The install's output is returned as forensics; it is not one of the project's checks.
+ */
+export async function ensureProjectDependencies(
+  sandbox: SandboxHandle,
+  profile: ProjectProfile,
+  options: { enabled: boolean; timeoutMs: number; signal?: AbortSignal },
+): Promise<EnsureDependenciesResult> {
+  const missing = dependenciesUnavailableFor(sandbox, profile);
+  if (missing === null) return { attempted: false, ready: true, detail: null };
+  if (!options.enabled) return { attempted: false, ready: false, detail: "dependency install is disabled" };
+  const argv = installCommandFor(profile.packageManager);
+  if (argv === null) {
+    return { attempted: false, ready: false, detail: `no install command for package manager ${profile.packageManager ?? "unknown"}` };
+  }
+  const runOpts: { timeoutMs: number; signal?: AbortSignal } = { timeoutMs: options.timeoutMs };
+  if (options.signal !== undefined) runOpts.signal = options.signal;
+  let result;
+  try {
+    result = await sandbox.run(argv, runOpts);
+  } catch (error) {
+    const stderr = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    return { attempted: true, ready: false, detail: `install failed to start: ${stderr}`, output: { argv, exitCode: null, stdout: "", stderr } };
+  }
+  const output = { argv, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+  if (result.exitCode !== 0) {
+    return { attempted: true, ready: false, detail: `install exited ${String(result.exitCode)}`, output };
+  }
+  const stillMissing = dependenciesUnavailableFor(sandbox, profile);
+  return stillMissing === null
+    ? { attempted: true, ready: true, detail: null, output }
+    : { attempted: true, ready: false, detail: "install succeeded but dependencies are still unreachable", output };
 }
 
 async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise<CheckResult> {
@@ -126,7 +213,7 @@ async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise
     // environment, so it is recorded as `error` rather than as the project's `fail`, and carries
     // no fingerprint: a fingerprint is the handle by which two failures are asserted to be the
     // same one, and withholding it makes the baseline comparison fail closed. Finding 54.
-    const untrusted = processStatus === "pass" ? null : untrustedCheckReason(opts, def);
+    const untrusted = processStatus === "pass" ? null : untrustedCheckReason(opts.sandbox, opts.profile, def);
     const status = untrusted === null ? processStatus : "error";
     const summary = def.kind === "test" ? parseTestOutput(opts.profile.framework, result.stdout, result.stderr) : null;
     const forensic: ForensicCheckOutput = {
@@ -184,6 +271,9 @@ async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise
         // The check result must still be returned when forensic persistence itself fails.
       }
     }
+    // A failure to start the command in an environment that cannot produce evidence gets no
+    // fingerprint either: the fingerprint is what lets two failures be called the same one.
+    const spawnUntrusted = untrustedCheckReason(opts.sandbox, opts.profile, def);
     return {
       name: def.name,
       kind: def.kind,
@@ -192,13 +282,17 @@ async function runOneCheck(opts: CheckRunOptions, def: CheckDefinition): Promise
       durationMs: Date.now() - started,
       summary: null,
       outputRef,
-      failureFingerprint: computeFailureFingerprint({
-        kind: def.kind,
-        status: "error",
-        exitCode: null,
-        summary: null,
-        diagnostics: [normalizeDiagnostics(stderr)],
-      }),
+      ...(spawnUntrusted !== null
+        ? {}
+        : {
+            failureFingerprint: computeFailureFingerprint({
+              kind: def.kind,
+              status: "error",
+              exitCode: null,
+              summary: null,
+              diagnostics: [normalizeDiagnostics(stderr)],
+            }),
+          }),
     };
   }
 }

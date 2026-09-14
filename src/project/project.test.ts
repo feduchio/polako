@@ -20,7 +20,9 @@ import {
   assessBaselineStability,
   buildBaselineSnapshot,
   detectSilencing,
+  ensureProjectDependencies,
   runChecks,
+  untrustedChecks,
   runIndependentGates,
   silencingFromDistantWrap,
 } from "./checkRunner.js";
@@ -791,6 +793,113 @@ describe("runChecks and runIndependentGates", () => {
     expect(results[0]).toMatchObject({ name: "test", status: "pass", summary: { total: 1, passed: 1, failed: 0 } });
   });
 
+  it("never calls a passing check untrusted, whatever the environment looks like", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-passing-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
+    const profile = discoverProject(dir);
+    const sandbox = mockSandbox(async () => processResult({ stdout: " Tests  1 passed (1)\n" }), [], dir);
+    const results = await runChecks({ runId: id("run"), commitHash: "a".repeat(40), sandbox, profile });
+    expect(results.find((check) => check.name === "test")?.status).toBe("pass");
+    // A check that passed is evidence; refusing a snapshot because of it discards an observation.
+    expect(untrustedChecks(sandbox, profile, results)).toEqual([]);
+  });
+
+  it("gives a spawn failure in an untrusted environment no fingerprint either", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-spawn-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
+    const profile = discoverProject(dir);
+    const results = await runChecks({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      sandbox: mockSandbox(async () => {
+        throw new Error("failed to spawn pnpm: ENOENT");
+      }, [], dir),
+      profile,
+    });
+    const test = results.find((check) => check.name === "test");
+    expect(test?.status).toBe("error");
+    expect(test?.failureFingerprint).toBeUndefined();
+  });
+
+  it("uses the resolved script, so a check needing packages is untrusted with no declarations", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-script-"));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    const profile = discoverProject(dir);
+    const results = await runChecks({
+      runId: id("run"),
+      commitHash: "a".repeat(40),
+      sandbox: mockSandbox(async () => processResult({ exitCode: 1, stderr: "sh: vitest: command not found\n" }), [], dir),
+      profile,
+    });
+    const test = results.find((check) => check.name === "test");
+    expect(test?.status).toBe("error");
+    expect(test?.failureFingerprint).toBeUndefined();
+  });
+
+  describe("ensureProjectDependencies", () => {
+    function uninstalled(): string {
+      const dir = mkdtempSync(join(tmpdir(), "polish-ensure-"));
+      cleanup.push(dir);
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
+      writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      return dir;
+    }
+
+    it("attempts nothing when the dependencies are already reachable", async () => {
+      const dir = uninstalled();
+      mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+      const run = vi.fn(async () => processResult({}));
+      const result = await ensureProjectDependencies(mockSandbox(run, [], dir), discoverProject(dir), { enabled: true, timeoutMs: 1000 });
+      expect(result).toMatchObject({ attempted: false, ready: true });
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it("installs and reports ready once the packages appear", async () => {
+      const dir = uninstalled();
+      const run = vi.fn(async (argv: readonly string[]) => {
+        expect(argv).toEqual(["pnpm", "install", "--frozen-lockfile"]);
+        mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+        return processResult({ stdout: "done\n" });
+      });
+      const result = await ensureProjectDependencies(mockSandbox(run, [], dir), discoverProject(dir), { enabled: true, timeoutMs: 1000 });
+      expect(result).toMatchObject({ attempted: true, ready: true, detail: null });
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not install when disabled, and says so", async () => {
+      const dir = uninstalled();
+      const run = vi.fn(async () => processResult({}));
+      const result = await ensureProjectDependencies(mockSandbox(run, [], dir), discoverProject(dir), { enabled: false, timeoutMs: 1000 });
+      expect(result).toMatchObject({ attempted: false, ready: false, detail: "dependency install is disabled" });
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it("reports not ready when the install fails", async () => {
+      const dir = uninstalled();
+      const result = await ensureProjectDependencies(
+        mockSandbox(async () => processResult({ exitCode: 1, stderr: "ERR_PNPM_OUTDATED_LOCKFILE\n" }), [], dir),
+        discoverProject(dir),
+        { enabled: true, timeoutMs: 1000 },
+      );
+      expect(result).toMatchObject({ attempted: true, ready: false });
+      expect(result.detail).toContain("install exited 1");
+      expect(result.output?.stderr).toContain("ERR_PNPM_OUTDATED_LOCKFILE");
+    });
+
+    it("reports not ready when the install succeeds and changes nothing", async () => {
+      const dir = uninstalled();
+      const result = await ensureProjectDependencies(
+        mockSandbox(async () => processResult({ stdout: "up to date\n" }), [], dir),
+        discoverProject(dir),
+        { enabled: true, timeoutMs: 1000 },
+      );
+      expect(result).toMatchObject({ attempted: true, ready: false, detail: "install succeeded but dependencies are still unreachable" });
+    });
+  });
+
   it("records a failure in an uninstalled project as error without a fingerprint", async () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-untrusted-"));
     cleanup.push(dir);
@@ -813,7 +922,7 @@ describe("runChecks and runIndependentGates", () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-installed-"));
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, devDependencies: { vitest: "^4" } }));
-    mkdirSync(join(dir, "node_modules"));
+    mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
     const profile = discoverProject(dir);
     const results = await runChecks({
       runId: id("run"),
@@ -1090,6 +1199,9 @@ describe("runChecks and runIndependentGates", () => {
     const dir = mkdtempSync(join(tmpdir(), "polish-regression-"));
     cleanup.push(dir);
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    // The comparison under test needs a trustworthy environment: a `vitest run` script with no
+    // vitest present is an environment failure, not a project failure (finding 54).
+    mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
     const profile = discoverProject(dir);
     const failingOutput = " Tests  1 failed (1)\n FAIL  src/legacy.test.ts\n";
     const captured = await runChecks({

@@ -2,6 +2,8 @@
  * Command policy for worker-initiated shell commands. Grants are exact argv vectors.
  * Dedicated validators cover a deliberately small read-only git/search vocabulary.
  */
+import { installCommandFor } from "../shared/projectDependencies.js";
+
 export interface CommandRule {
   prefix: readonly string[];
   description: string;
@@ -181,6 +183,13 @@ export class CommandPolicy {
       rules.push({ prefix: argv, description: `project check: ${argv.join(" ")}`, match: "exact" });
     }
     if (packageManager !== null) {
+      // Exactly the install command for this package manager, exact-match. A project whose
+      // dependencies are not installed cannot produce evidence about itself (finding 54), and the
+      // command that fixes that must be nameable by the policy that admits it.
+      const install = installCommandFor(packageManager);
+      if (install !== null) {
+        rules.push({ prefix: install, description: `${packageManager} dependency install`, match: "exact" });
+      }
       const trailing = new Set(capabilities.packageScriptsAllowTrailingArgs ?? []);
       for (const script of capabilities.packageScripts ?? []) {
         rules.push({
