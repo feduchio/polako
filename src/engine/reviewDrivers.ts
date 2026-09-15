@@ -48,7 +48,7 @@ import type { TerminalReason } from "../domain/run.js";
 import { PolishError } from "../shared/errors.js";
 import { buildCheckpointReviewArtifact, type CheckpointReviewArtifact } from "../review/artifact.js";
 import { REVIEW_TRUNCATED_MESSAGE, runAxisReview, type ReviewProvider, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
-import { runReviewerCanary, type ReviewerCanaryResult } from "../review/canary.js";
+import { canaryVerdicts, runReviewerCanary, CANARY_EVENT_TYPE, type ReviewerCanaryResult } from "../review/canary.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { id } from "../shared/ids.js";
 import {
@@ -776,7 +776,7 @@ async function verifyReviewersOrExplain(
   }
   if (produced.size === 0) return null;
 
-  const verdicts = canaryVerdicts(ctx);
+  const verdicts = canaryVerdicts(ctx.store.events.list(ctx.run.id, { types: [CANARY_EVENT_TYPE] }));
   const pending = [...produced.values()].filter((model) => !verdicts.has(modelRefKey(model)));
   if (pending.length > 0) {
     const reviewers = await options.resolveReviewers(ctx);
@@ -787,7 +787,7 @@ async function verifyReviewersOrExplain(
         // The model that produced the round is not among today's reviewers, so it cannot be asked.
         // Unverified: an unanswerable question is not a pass.
         verdicts.set(modelRefKey(model), false);
-        recordCanary(ctx, { model, findings: 0, verified: false, promptDigest: "", error: "reviewer no longer selectable" });
+        recordCanary(ctx, { model, findings: 0, located: 0, verified: false, promptDigest: "", error: "reviewer no longer selectable" });
         continue;
       }
       const result = await runReviewerCanary({
@@ -813,26 +813,16 @@ async function verifyReviewersOrExplain(
   };
 }
 
-function canaryVerdicts(ctx: PhaseContext): Map<string, boolean> {
-  const verdicts = new Map<string, boolean>();
-  for (const event of ctx.store.events.list(ctx.run.id, { types: ["review.canary_recorded"] })) {
-    const model = event.payload["model"];
-    if (typeof model !== "object" || model === null) continue;
-    const ref = model as ModelRef;
-    verdicts.set(modelRefKey(ref), event.payload["verified"] === true);
-  }
-  return verdicts;
-}
-
 function recordCanary(ctx: PhaseContext, result: ReviewerCanaryResult): void {
   ctx.store.events.append([{
     id: id("evt", ctx.clock.now()),
     runId: ctx.run.id,
     ts: ctx.clock.now(),
-    type: "review.canary_recorded",
+    type: CANARY_EVENT_TYPE,
     payload: {
       model: result.model,
       findings: result.findings,
+      located: result.located,
       verified: result.verified,
       promptDigest: result.promptDigest,
       ...(result.error === undefined ? {} : { error: result.error }),

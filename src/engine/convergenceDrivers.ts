@@ -1,7 +1,8 @@
 import { corpusRuntimeEvidenceAllowsDone } from "../domain/acceptance.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
 import type { ModelRef } from "../domain/common.js";
-import { SYSTEM_ACTOR } from "../domain/common.js";
+import { SYSTEM_ACTOR, modelRefKey } from "../domain/common.js";
+import { canaryVerdicts } from "../review/canary.js";
 import { PATHOLOGY_DECISION_VERSION } from "../domain/convergence.js";
 import type { Run } from "../domain/run.js";
 import { currentReviewRoundIndex } from "../domain/review.js";
@@ -67,6 +68,15 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
     }
 
     if (acceptedB6Done(ctx, controller, hash)) {
+      // R2, at the place the verdict is actually granted. The VALIDATING gate stops a clean round
+      // being recorded, but a run resumed or recovered in this phase already has its rounds: three
+      // clean rounds recorded before R2 existed would otherwise be `DONE` with no reviewer ever
+      // having been shown able to find anything.
+      const unverified = unverifiedCleanRoundModels(ctx, hash);
+      if (unverified !== null) {
+        emitNeedsHumanReport(ctx, unverified);
+        return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: unverified };
+      }
       emitFinalReport(ctx);
       return { status: "complete", nextPhase: "DONE" };
     }
@@ -206,6 +216,30 @@ function acceptedB6Decision(ctx: PhaseContext, controller: ConvergenceController
     simplifyAfterNoProgress: ctx.config.convergence.noProgressAttempts,
     simplificationAvailable: true,
   });
+}
+
+/**
+ * The models whose reviews are about to be counted as `DONE` and that have not been shown able to
+ * find a planted defect, or `null` when every one of them has. Reads the clean rounds' own
+ * recorded ensembles, so what is checked is what the verdict rests on.
+ */
+function unverifiedCleanRoundModels(ctx: PhaseContext, hash: string): TerminalReason | null {
+  const verdicts = canaryVerdicts(ctx.store.events.list(ctx.run.id));
+  const unverified = new Map<string, ModelRef>();
+  for (const round of ctx.store.repos.cleanRounds.listByRun(ctx.run.id)) {
+    if (round.checkpointHash !== hash) continue;
+    for (const model of round.ensemble) {
+      if (verdicts.get(modelRefKey(model)) !== true) unverified.set(modelRefKey(model), model);
+    }
+  }
+  if (unverified.size === 0) return null;
+  const names = [...unverified.values()].map((model) => `${model.provider}:${model.model}`).join(", ");
+  return {
+    code: "review_unverifiable",
+    summary: `review unverifiable: ${names} produced a clean round without being shown able to find a seeded defect, so DONE would rest on nothing`,
+    question: "The clean rounds behind this DONE were produced by reviewers that have not passed the seeded-defect canary. How should the run proceed?",
+    options: ["Review again with reviewers that can be verified", "Stop the run"],
+  };
 }
 
 function budgetStopResult(): PhaseDriverResult {

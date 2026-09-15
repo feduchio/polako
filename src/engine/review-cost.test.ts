@@ -572,7 +572,7 @@ describe("R2 reviewer canary", () => {
   it("records the clean round when the reviewer finds the seeded defect", async () => {
     const { runId } = seedValidatingRun(store, clock, fixture);
     seedCleanRound(runId);
-    const { engine } = validatingEngine(reviewJson("correctness", "src/cache.ts"));
+    const { engine } = validatingEngine(reviewJson("correctness", "src/cache.ts", 8));
     await engine.tickRun(runId);
 
     expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
@@ -580,6 +580,61 @@ describe("R2 reviewer canary", () => {
     const canary = store.events.list(runId, { types: ["review.canary_recorded"] });
     expect(canary).toHaveLength(1);
     expect(canary[0]?.payload["verified"]).toBe(true);
+  });
+
+  // Counting findings is not enough: a reviewer that answers "something is wrong" to anything
+  // passes that, and its clean verdict still carries no information.
+  it("does not accept a finding that does not point at the seeded defect", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    seedCleanRound(runId);
+    const { engine } = validatingEngine(reviewJson("correctness", "src/elsewhere.ts", 8));
+    await engine.tickRun(runId);
+
+    expect(store.repos.runs.get(runId)?.terminalReason?.code).toBe("review_unverifiable");
+    const canary = store.events.list(runId, { types: ["review.canary_recorded"] })[0];
+    expect(canary?.payload["findings"]).toBe(1);
+    expect(canary?.payload["located"]).toBe(0);
+  });
+
+  it("does not accept a finding on the right file but outside the planted hunk", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    seedCleanRound(runId);
+    const { engine } = validatingEngine(reviewJson("correctness", "src/cache.ts", 1));
+    await engine.tickRun(runId);
+
+    expect(store.repos.runs.get(runId)?.terminalReason?.code).toBe("review_unverifiable");
+  });
+
+  // Every model that produced the round, not the first one: a default round has three.
+  it("requires every model behind the round, not just one", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    (["correctness", "regression", "adversarial"] as const).forEach((axis, index) => {
+      appendExecution(store, clock, runId, {
+        roundIndex: 1,
+        axis,
+        requestedModel: { provider: "reviews", model: `m${index}` },
+        completed: true,
+        hash: fixture.integrated,
+        at: clock.now() + index + 1,
+      });
+    });
+    const provider = new ScriptedProvider("reviews", ["m0", "m1", "m2"].map((name) => ({ name, capabilities: FAKE_CAPABILITIES.strong })));
+    provider.script("m0", [{ kind: "reply", content: reviewJson("correctness", "src/cache.ts", 8) }]);
+    provider.script("m1", [{ kind: "reply", content: reviewJson("correctness", "src/cache.ts", 8) }]);
+    provider.script("m2", [{ kind: "reply", content: emptyReview() }]);
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of NON_VALIDATING_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
+    engine.registerPhase("VALIDATING", createValidatingDriver({
+      resolveReviewers: () => ["m0", "m1", "m2"].map((name) => ({ provider, model: { provider: "reviews", model: name } })),
+    }));
+    await engine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.terminalReason?.code).toBe("review_unverifiable");
+    expect(run.terminalReason?.summary).toContain("reviews:m2");
+    expect(run.terminalReason?.summary).not.toContain("reviews:m0");
   });
 
   // Silence is not an answer: a reviewer that could not be asked has not earned anything either.
@@ -600,7 +655,7 @@ describe("R2 reviewer canary", () => {
   it("asks a model once per run, not once per round", async () => {
     const { runId } = seedValidatingRun(store, clock, fixture);
     seedCleanRound(runId);
-    const { engine, provider } = validatingEngine(reviewJson("correctness", "src/cache.ts"));
+    const { engine, provider } = validatingEngine(reviewJson("correctness", "src/cache.ts", 8));
     await engine.tickRun(runId);
     expect(provider.calls).toHaveLength(1);
 
@@ -1002,13 +1057,13 @@ function emptyReview(): string {
   return JSON.stringify({ findings: [] });
 }
 
-function reviewJson(criterion: string, path: string): string {
+function reviewJson(criterion: string, path: string, line = 1): string {
   return JSON.stringify([{
     criterion,
     severity: "medium",
     blocking: false,
     claim: `${criterion} finding`,
-    evidence: [{ path, line: 1 }],
+    evidence: [{ path, line }],
     reproduction: ["open file"],
   }]);
 }

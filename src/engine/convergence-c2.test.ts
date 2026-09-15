@@ -391,6 +391,18 @@ function seed(
         actor: { kind: "system" },
         artifacts: [],
       },
+      // R2: `DONE` requires that every model behind a clean round has passed the seeded-defect
+      // canary. These fixtures seed the rounds directly, so they seed the verdicts the same way.
+      ...cleanRound.ensemble.map((model, index) => ({
+        id: id("evt", clock.now() + 200 + i * 10 + index),
+        runId,
+        ts: clock.now() + 200 + i * 10 + index,
+        type: "review.canary_recorded",
+        payload: { model, findings: 1, located: 1, verified: true, promptDigest: "d" },
+        causedBy: [],
+        actor: { kind: "system" as const },
+        artifacts: [],
+      })),
     ]);
   }
   if (options.runtime === true) {

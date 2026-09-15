@@ -1,8 +1,14 @@
+import { isBudgetError } from "../broker/quota.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
-import type { ModelRef } from "../domain/common.js";
+import { modelRefKey, type ModelRef } from "../domain/common.js";
 import type { ProtocolRegistry } from "../protocols/loader.js";
+import { PolishError, isAbortError } from "../shared/errors.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
 import { runAxisReview, type ReviewProvider } from "./swarm.js";
+
+function isCancellation(error: unknown): boolean {
+  return isAbortError(error) || (error instanceof PolishError && error.code === "CANCELLED");
+}
 
 /**
  * A diff with one planted defect, used to ask a reviewer the only question that makes a clean
@@ -35,13 +41,32 @@ export const CANARY_DIFF = `--- a/src/cache.ts
 /** A valid 40-hex commit hash that no repository will hold. `GitHashSchema` accepts hex only. */
 export const CANARY_COMMIT = "ca4a24" + "0".repeat(32) + "ca";
 
+/** Where the planted defect is. A finding that does not point here has not found it. */
+export const CANARY_DEFECT = { path: "src/cache.ts", firstLine: 5, lastLine: 12 } as const;
+
+export const CANARY_EVENT_TYPE = "review.canary_recorded";
+
 export interface ReviewerCanaryResult {
   model: ModelRef;
   /** How many findings came back. Zero is the failure this exists to catch. */
   findings: number;
+  /** How many of them point at the planted defect. */
+  located: number;
   verified: boolean;
   promptDigest: string;
   error?: string;
+}
+
+/** Verified models, from a run's own event log. Read by both the clean-round gate and the DONE gate. */
+export function canaryVerdicts(events: readonly { type: string; payload: Record<string, unknown> }[]): Map<string, boolean> {
+  const verdicts = new Map<string, boolean>();
+  for (const event of events) {
+    if (event.type !== CANARY_EVENT_TYPE) continue;
+    const model = event.payload["model"];
+    if (typeof model !== "object" || model === null) continue;
+    verdicts.set(modelRefKey(model as ModelRef), event.payload["verified"] === true);
+  }
+  return verdicts;
 }
 
 /**
@@ -75,18 +100,32 @@ export async function runReviewerCanary(input: {
       now: input.now,
       ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
     });
+    // Counting findings is not enough: a reviewer that answers "something is wrong" to anything
+    // passes that, and its clean verdict still carries no information. A finding has to point at
+    // the planted defect.
+    const located = result.findings.filter((finding) =>
+      finding.evidence.some((entry) =>
+        entry.path === CANARY_DEFECT.path &&
+        entry.line !== undefined &&
+        entry.line >= CANARY_DEFECT.firstLine &&
+        entry.line <= CANARY_DEFECT.lastLine)).length;
     return {
       model: result.model,
       findings: result.findings.length,
-      verified: result.findings.length > 0,
+      located,
+      verified: located > 0,
       promptDigest: result.promptDigest,
     };
   } catch (error) {
+    // The run has no money left, or is being cancelled. Neither is a statement about the reviewer,
+    // and recording one as a verdict would make it permanent: the verdict cache never retries.
+    if (isBudgetError(error) || isCancellation(error)) throw error;
     // A reviewer that could not be asked is not a reviewer that answered. Unverified either way:
     // the whole point is that a clean round must be earned, and silence is not an answer.
     return {
       model: input.provider.model,
       findings: 0,
+      located: 0,
       verified: false,
       promptDigest: "",
       error: error instanceof Error ? error.message : String(error),

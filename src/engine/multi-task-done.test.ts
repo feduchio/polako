@@ -763,6 +763,10 @@ function seedB6Proof(store: Store, clock: FakeClock, runId: string, checkpointHa
       createdAt: clock.now() + roundIndex,
     };
     store.events.append([event(runId, clock, "clean_round.recorded", { cleanRound }, clock.now() + 100 + roundIndex)]);
+      // R2: `DONE` requires that every model behind a clean round has passed the seeded-defect
+      // canary. These fixtures seed the rounds directly, so they seed the verdicts the same way.
+    store.events.append(cleanRound.ensemble.map((model, index) =>
+      event(runId, clock, "review.canary_recorded", { model, findings: 1, located: 1, verified: true, promptDigest: "d" }, clock.now() + 200 + roundIndex * 10 + index)));
   }
 }
 

@@ -57,6 +57,38 @@ describe("B6 production CONVERGENCE_CHECK driver", () => {
     expect(store.repos.runs.get(runId)?.phase).toBe("FAILED");
   });
 
+  // R2 at the gate that grants the verdict. A run recovered or resumed in this phase already has
+  // its clean rounds; three recorded before R2 existed would otherwise be DONE with no reviewer
+  // ever having been shown able to find anything.
+  it("refuses DONE when the models behind the clean rounds have no canary verdict", async () => {
+    const { runId } = seedConvergenceRun(store, clock, fixture, {
+      withProductionEvidence: true,
+      cleanRounds: 3,
+      withRuntimeEvidence: true,
+      canaried: false,
+    });
+    await engine.tickRun(runId);
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("NEEDS_HUMAN");
+    expect(run.terminalReason?.code).toBe("review_unverifiable");
+    expect(run.terminalReason?.summary).toContain("p:m1");
+  });
+
+  it("refuses DONE when one model of three is unverified", async () => {
+    const { runId } = seedConvergenceRun(store, clock, fixture, {
+      withProductionEvidence: true,
+      cleanRounds: 3,
+      withRuntimeEvidence: true,
+      canaried: false,
+    });
+    recordCanaryVerdicts(store, clock, runId, [{ provider: "p", model: "m1" }, { provider: "p", model: "m2" }]);
+    await engine.tickRun(runId);
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("NEEDS_HUMAN");
+    expect(run.terminalReason?.summary).toContain("p:m3");
+    expect(run.terminalReason?.summary).not.toContain("p:m1");
+  });
+
   it("stays in REVIEWING when required clean rounds are not met", async () => {
     const { runId } = seedConvergenceRun(store, clock, fixture, { withProductionEvidence: true, cleanRounds: 1 });
     await engine.tickRun(runId);
@@ -208,6 +240,8 @@ function seedConvergenceRun(
     cleanRounds?: number;
     withRuntimeEvidence?: boolean;
     runtimeEvidenceStatus?: RuntimeEvidence["status"];
+    /** R2: seed the canary verdicts the clean rounds' models would have earned. */
+    canaried?: boolean;
   },
 ): { runId: string } {
   const runId = id("run", clock.now());
@@ -323,7 +357,7 @@ function seedConvergenceRun(
   }
 
   if (options.cleanRounds !== undefined && options.cleanRounds > 0) {
-    recordCleanRounds(store, clock, runId, fixture.integrated, options.cleanRounds);
+    recordCleanRounds(store, clock, runId, fixture.integrated, options.cleanRounds, { canaried: options.canaried !== false });
   }
 
   if (options.withRuntimeEvidence) {
@@ -418,7 +452,34 @@ function reviewRound(runId: string, checkpointHash: string, roundIndex: number):
   }));
 }
 
-function recordCleanRounds(store: Store, clock: FakeClock, runId: string, checkpointHash: string, count: number): void {
+/**
+ * R2: `DONE` requires that every model behind a clean round has passed the seeded-defect canary.
+ * These fixtures seed the rounds directly, so they seed the verdicts the same way.
+ */
+function recordCanaryVerdicts(store: Store, clock: FakeClock, runId: string, models: readonly { provider: string; model: string }[]): void {
+  store.events.append(models.map((model, index) => ({
+    id: id("evt", clock.now() + 200 + index),
+    runId,
+    ts: clock.now() + 200 + index,
+    type: "review.canary_recorded",
+    payload: { model, findings: 1, located: 1, verified: true, promptDigest: "d" },
+    causedBy: [],
+    actor: { kind: "system" as const },
+    artifacts: [],
+  })));
+}
+
+function recordCleanRounds(
+  store: Store,
+  clock: FakeClock,
+  runId: string,
+  checkpointHash: string,
+  count: number,
+  options: { canaried?: boolean } = {},
+): void {
+  if (options.canaried !== false) {
+    recordCanaryVerdicts(store, clock, runId, reviewRound(runId, checkpointHash, 1).map((execution) => execution.requestedModel));
+  }
   for (let i = 1; i <= count; i += 1) {
     const proof = reviewRound(runId, checkpointHash, i);
     const cleanRound: CleanRound = {

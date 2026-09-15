@@ -65,9 +65,37 @@ down a different path would verify a path the reviewer does not use.
 ## Gates and size
 
 Node 24.20.0, `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run --maxWorkers=2`
-→ exit 0, 95 files, **1136 tests** (1131 before this item).
-`git diff --numstat fe686f0 -- src`: 126 production insertions, 152 test — 278 total, inside the
-plan's 300.
+→ exit 0, 96 files, **1146 tests** (1131 before this item).
+
+`git diff --numstat fe686f0..HEAD -- src`: **310 production insertions, 419 test — 729 total**,
+against the plan's ceiling of 300.
+
+*(The first version of this line said 278. It was measured with `git diff` while `canary.ts` was
+still untracked, so the 120 lines of the item's central file were not counted, and neither were the
+E2E changes. Round 1 caught it. A size claim measured before `git add` is not a size claim.)*
+
+## Review round 1 — GPT lane, on commit `4aa8fb7`. R2 stops at the ceiling.
+
+Verdict FAIL, 4 blocking and 5 notes.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | The size figure is wrong: 448 insertions at that commit, not 278 | **actionable** — corrected above, with why |
+| 2 | **A run can reach `DONE` with no reviewer ever canaried.** `CONVERGENCE_CHECK` never reads the canary verdicts; a run recovered after a restart, resumed through `polish answer`, or entering from `PLANNING`/`SIMPLIFYING` already has its clean rounds and bypasses the gate entirely. The existing convergence test reaches `DONE` with three seeded clean rounds and no canary event | **actionable, and the item's central defect** — the gate was in the place that *records* a clean round, not the place that *grants the verdict*. `CONVERGENCE_CHECK` now refuses `DONE` when any model in any consumed clean round's ensemble is unverified. Two tests: none verified, and one of three unverified |
+| 3 | **Any finding passed.** `verified` was `findings.length > 0`, so a reviewer returning "correctness finding" at line 1 of any file passed — and the cheapest reviewer that passes is the new E2E fixture itself | **actionable** — a finding must point at the planted defect: `src/cache.ts`, lines 5–12. Five boundary cases, each on its own side |
+| 4 | Once-per-run caching trusts a model forever | **partly upheld, partly declined** — the cache key is the model, and that is deliberate: the question is whether this reviewer on this transport can report anything, which is not a per-round property. What round 1 demonstrated as "the failure" is the intended case: a verified reviewer that then reports nothing on a real diff **is** a clean round. What is genuinely uncovered is drift in the prompt, schema or protocol between rounds, and that is named below rather than fixed |
+| 5 | The catch-all turned budget and cancellation errors into permanent reviewer failures | **actionable** — both propagate; neither is a statement about the reviewer, and the verdict cache never retries a recorded one |
+| 6 | The five tests did not establish the every-model requirement: every execution used one model | **actionable** — a round produced by three models, one of which fails, names that one and not the others |
+
+**Size: 729 insertions against 300.** This is the fourth item in a row to breach it, and R2 stops
+here as R0, R0a and R1 did. Half of the excess is fixture repair: six E2E tests and three
+convergence fixtures were reaching `DONE` with reviewers that answer `{"findings":[]}` to
+everything, and each had to be taught to answer the canary. That repair is not optional — those
+fixtures were asserting the very thing R2 forbids — but it is also not this item's subject.
+
+One further observation, recorded because it cost a rerun: `src/engine/candidate-drivers.test.ts`
+failed once under `--maxWorkers=2` and passed in isolation and on rerun. Flaky under load, not a
+regression from this item, and not investigated here.
 
 ## Not covered
 
@@ -76,3 +104,10 @@ plan's 300.
   `docs/PLAN.md` item 42; it becomes an item when a run shows invented findings.
 - The canary is one defect. A reviewer tuned to it would pass while seeing nothing else — which no
   observed run makes likely, and which a second seeded defect would only postpone.
+- **Drift between rounds.** A verdict is keyed by model alone. If the reviewer prompt, the response
+  schema, the protocol text or `review.maxOutputTokens` changes mid-run, the model is not re-asked
+  under the new conditions. Naming it here rather than keying the cache on a digest of all four,
+  which is the shape of the successor if a run ever shows it.
+- **The cost.** Three distinct reviewers add three canary calls per run, each reserving about
+  $0.0028 at the configured ceiling — under $0.01 per run, and zero when no clean round is pending.
+  Measured by the reviewer against `~/.polish/polish.toml`, not estimated here.
