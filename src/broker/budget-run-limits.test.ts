@@ -68,6 +68,26 @@ describe("BudgetTracker admission reserves what a call may cost", () => {
     expect(budgetErrorOf(() => { tracker.admit("run_a", 0.000001); }).details["budget"]).toBe("run_usd");
   });
 
+  it("keeps the slack absolute, so a large limit does not buy a large overspend", () => {
+    // A slack proportional to the limit was the first attempt: at $1e9 it admitted $1 too much.
+    const tracker = new BudgetTracker({ maxRunUsd: 1_000_000_000, maxRunTokens: null, maxTaskTokens: null });
+    tracker.admit("run_a", 999_999_999);
+    expect(budgetErrorOf(() => { tracker.admit("run_a", 2); }).details["estimate"]).toBe(2);
+    expect(() => tracker.admit("run_a", 1)).not.toThrow();
+  });
+
+  it("does not let a stale release delete a live hold's accounting", () => {
+    const tracker = new BudgetTracker(usdOnly);
+    const stale = tracker.admit("run_a", 0.4);
+    stale();
+    const live = tracker.admit("run_a", 0.4);
+    stale();
+    // The stale release must not remove the entry the live hold is counted in.
+    expect(budgetErrorOf(() => { tracker.admit("run_a", 0.4); }).details["spent"]).toBe(0.4);
+    live();
+    expect(() => tracker.admit("run_a", 0.4)).not.toThrow();
+  });
+
   it("returns the whole reservation on release, with no floating-point residue", () => {
     const tracker = new BudgetTracker({ maxRunUsd: 1, maxRunTokens: null, maxTaskTokens: null });
     // 0.18 + 0.21 + 0.41 subtracted back one at a time leaves 1.665e-16 behind, and a run that

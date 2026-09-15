@@ -93,13 +93,19 @@ export class QuotaTracker {
 }
 
 /**
- * Relative slack on the "one more call would exceed the limit" comparison. Sums of doubles land a
- * few units in the last place away from the decimal answer — 0.1 + 0.2 is 0.30000000000000004 —
- * and without this a $0.10 and a $0.20 hold do not fit a $0.30 limit. A billionth is orders of
- * magnitude below any price a provider quotes and orders of magnitude above the error of summing a
- * handful of terms.
+ * Slack on the "one more call would exceed the limit" comparison. Sums of doubles land a few units
+ * in the last place from the decimal answer — 0.1 + 0.2 is 0.30000000000000004 — and without it a
+ * $0.10 and a $0.20 hold do not fit a $0.30 limit.
+ *
+ * A billionth of a dollar is three orders below the smallest cost this store has ever recorded
+ * ($4.556e-06) and cannot be a real overspend. It is a floor rather than the whole answer because
+ * at large limits the representation error is itself larger than a billionth: the second term
+ * tracks it and stays proportional. A purely relative slack was the first attempt and let $1
+ * through at a limit of $1e9.
  */
-const BUDGET_SLACK = 1e-9;
+function budgetSlack(limit: number): number {
+  return Math.max(1e-9, Math.abs(limit) * Number.EPSILON * 8);
+}
 
 /** Token/USD budgets per run and per task. Exceeding a budget throws before the call is made. */
 export class BudgetTracker {
@@ -172,10 +178,16 @@ export class BudgetTracker {
     const hold = { usd };
     holds.add(hold);
     this.reserved.set(runId, holds);
+    let released = false;
     return () => {
+      if (released) return;
+      released = true;
       holds.delete(hold);
-      // A finished run must not leave a key behind: the daemon outlives thousands of them.
-      if (holds.size === 0) this.reserved.delete(runId);
+      // A finished run must not leave a key behind: the daemon outlives thousands of them. Both
+      // guards are load-bearing. Without the first, a release called twice after the set emptied
+      // deletes whatever set replaced it; without the second, it deletes a set it never belonged
+      // to. Either way a live hold stops counting and the run is admitted twice over.
+      if (holds.size === 0 && this.reserved.get(runId) === holds) this.reserved.delete(runId);
     };
   }
 
@@ -199,7 +211,7 @@ export class BudgetTracker {
     if (limits.maxRunUsd !== null && committed >= limits.maxRunUsd) {
       throw new PolishError("CONFLICT", "run USD budget exhausted", { runId, spent: committed, limit: limits.maxRunUsd, budget: "run_usd" });
     }
-    if (limits.maxRunUsd !== null && committed + incomingUsd > limits.maxRunUsd * (1 + BUDGET_SLACK)) {
+    if (limits.maxRunUsd !== null && committed + incomingUsd > limits.maxRunUsd + budgetSlack(limits.maxRunUsd)) {
       // Distinct from exhaustion, and said differently: the run has money and this call is too
       // large for what is left. Reporting it as "exhausted" at a spend of $0 is how an operator
       // ends up looking for spend that never happened.

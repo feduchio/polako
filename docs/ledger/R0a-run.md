@@ -58,7 +58,7 @@ can reach that, so the rule is not unreachable in practice; when it fires the op
    recorded yet and only the reservation can refuse; `releases the reservation when the provider
    call fails` covers the error path.
 4. Gate: Node 24.20.0, `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run
-   --maxWorkers=2` → exit 0, 95 files, **1107 tests** (1094 before this item).
+   --maxWorkers=2` → exit 0, 95 files, **1109 tests** (1094 before this item).
 
 ## Review round 1 — GPT lane, on commit `61fbf96`
 
@@ -88,6 +88,32 @@ Verdict FAIL, 2 blocking and 3 notes.
 Round 1's finding 1 is closed narrowly and the residual is now stated accurately: the reviewer's
 own measurement of 1.15 characters per token came from repeated Japanese prose, not from JSON, and
 the text said JSON.
+
+## Review round 3 — GPT lane, on commit `ac4e256`. The line ceiling is breached.
+
+Verdict FAIL, 3 blocking. Round 2's two findings were confirmed closed by reproducing each failure
+against `a8075d4` and showing it gone at `ac4e256`.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | The slack was relative to the limit, so a large limit bought a large overspend: at $1e9, holds of $999,999,999 and $2 were both admitted — $1 over — and the next admission then said "exhausted", so the two rules disagreed at the boundary | **actionable** — the slack is a billionth of a dollar, floored, plus a term proportional to the representation error of the limit itself. A billionth is three orders below the smallest cost this store has recorded ($4.556e-06) |
+| 2 | A release invoked twice, after its set had emptied and been deleted, deleted whatever set had replaced it — erasing a live hold's accounting | **actionable** — the release runs once, and deletes the key only when the map still holds the same set it belongs to. Both guards have a test |
+| 3 | The item exceeds the plan's 300-line ceiling | **upheld** — see below |
+
+`git diff --shortstat 85911d8 -- src` reports **348 insertions**, of which 151 are production
+(`broker.ts` 70, `quota.ts` 81) and 197 are tests. The ceiling is breached either way.
+
+**R0a stops here.** `docs/RECOVERY.md` §4 rule 4 says a fourth round is not forbidden but is
+*recorded as a signal*, and the item stops rather than being pushed. This is that record. The two
+defects above were repaired rather than deferred, because both are money-safety holes of three
+lines each and shipping a known one is worse than the ceiling; a fourth review confirms only those
+two changes and adds nothing else to the item.
+
+What the item does **not** cover, named so the gap is visible rather than implied: cancellation
+during backoff, `BudgetTracker.restore` interleaved with live holds, lazily-resolved run limits at
+the moment of admission, and the estimate's own arithmetic. None has a test. They are the natural
+content of a successor item, if a real run ever produces a failure in one of them — and by rule 5,
+not before.
 
 ## Not verified here
 
