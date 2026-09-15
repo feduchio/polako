@@ -937,6 +937,7 @@ describe("B2 production candidate drivers", () => {
       expect(run.phase).toBe("NEEDS_HUMAN");
       expect(run.terminalReason?.code).toBe("provider_budget_exhausted");
       expect(run.terminalReason?.summary).toContain("refused all 2");
+      expect(run.terminalReason?.summary).toContain("attempt 5");
       expect(run.terminalReason?.summary).toContain("openrouter_free_tier_daily");
       s.close();
     });
@@ -949,8 +950,84 @@ describe("B2 production candidate drivers", () => {
       const run = s.repos.runs.get(runId)!;
       expect(run.phase).toBe("FAILED");
       expect(run.terminalReason?.code).toBe("repeated_failure");
-      expect(run.terminalReason?.summary).toContain("failed its gates");
+      expect(run.terminalReason?.summary).toContain("2 reached a gate and failed");
+      expect(run.terminalReason?.summary).toContain("0 were refused by the provider");
       s.close();
+    });
+
+    // A mixed attempt is where "every candidate failed its gates" becomes a false sentence, and
+    // where the operator most needs the breakdown.
+    // R3 at the one place every phase advance passes through: eight runs in the store are terminal
+    // with no reason, from three different call sites.
+    it("gives a terminal phase a reason even when the driver supplies none", async () => {
+      const emptyFixture = await repositoryFixture();
+      const emptyStore = openStore({ artifactsDir: join(emptyFixture.root, "artifacts") });
+      const engine = new RunEngine({ store: emptyStore, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined }, false);
+      engine.registerPhase("GATING", () => Promise.resolve({ status: "complete" as const, nextPhase: "FAILED" as const }));
+      const { runId } = seedRun(emptyStore, clock, emptyFixture);
+      const run = emptyStore.repos.runs.get(runId)!;
+      emptyStore.events.append([{
+        id: id("evt", clock.now() + 40),
+        runId,
+        ts: clock.now() + 40,
+        type: "run.phase_changed",
+        payload: { run: { ...run, phase: "GATING", updatedAt: clock.now() + 40 } },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      }]);
+      await engine.tickRun(runId);
+
+      const failed = emptyStore.repos.runs.get(runId)!;
+      expect(failed.phase).toBe("FAILED");
+      expect(failed.terminalReason?.code).toBe("internal_error");
+      expect(failed.terminalReason?.summary).toContain("from GATING without a stated reason");
+      emptyStore.close();
+    });
+
+    // A recorder that can fail is a recorder that can replace the error it was recording.
+    it("records a driver failure as an event before the engine does anything else", async () => {
+      const emptyFixture = await repositoryFixture();
+      const emptyStore = openStore({ artifactsDir: join(emptyFixture.root, "artifacts") });
+      const engine = new RunEngine({ store: emptyStore, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined }, false);
+      engine.registerPhase("PLANNING", () => { throw new Error("council exploded"); });
+      const { runId } = seedRun(emptyStore, clock, emptyFixture);
+      const run = emptyStore.repos.runs.get(runId)!;
+      emptyStore.events.append([{
+        id: id("evt", clock.now() + 40),
+        runId,
+        ts: clock.now() + 40,
+        type: "run.phase_changed",
+        payload: { run: { ...run, phase: "PLANNING", updatedAt: clock.now() + 40 } },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      }]);
+      await expect(engine.tickRun(runId)).rejects.toThrow("council exploded");
+
+      const recorded = emptyStore.events.list(runId, { types: ["run.driver_failed"] });
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]?.payload["phase"]).toBe("PLANNING");
+      expect(recorded[0]?.payload["error"]).toContain("council exploded");
+      // Paused, and now the pause has a cause an operator can read.
+      expect(emptyStore.repos.runs.get(runId)?.control).toBe("PAUSED");
+      emptyStore.close();
+    });
+
+    it("counts a mixed attempt instead of generalising it", async () => {
+      const { store: s2, engine, runId, taskId } = await seedGating();
+      exhaust(s2, runId, taskId, [
+        { state: "FAILED_GATES", gated: true },
+        { state: "DISCARDED", error: "ProviderError: rate limited: 429", gated: false },
+      ]);
+      await engine.tickRun(runId);
+
+      const run = s2.repos.runs.get(runId)!;
+      expect(run.phase).toBe("FAILED");
+      expect(run.terminalReason?.code).toBe("repeated_failure");
+      expect(run.terminalReason?.summary).toContain("1 reached a gate and failed");
+      expect(run.terminalReason?.summary).toContain("1 were refused by the provider");
+      s2.close();
     });
 
     // Neither judged nor refused by a provider: still a reason, never `null`.

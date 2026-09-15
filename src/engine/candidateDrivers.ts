@@ -665,21 +665,32 @@ function handleZeroSurvivors(
 ): { status: "complete"; nextPhase: "PLANNING" | "NEEDS_HUMAN" | "FAILED"; terminalReason?: RunTerminalReason } {
   const attempts = task.attempts;
   const retry = attempts < ctx.config.retry.maxAttempts;
-  const nextState: Task["state"] = retry ? "READY" : "BLOCKED";
-  appendTaskEvent(ctx, { ...task, state: nextState, updatedAt: ctx.clock.now() });
-  if (retry) return { status: "complete", nextPhase: "PLANNING" };
+  if (retry) {
+    appendTaskEvent(ctx, { ...task, state: "READY", updatedAt: ctx.clock.now() });
+    return { status: "complete", nextPhase: "PLANNING" };
+  }
+  appendTaskEvent(ctx, { ...task, state: "BLOCKED", updatedAt: ctx.clock.now() });
 
-  const candidates = ctx.store.repos.candidates.listByTask(task.id);
+  // This attempt only. `listByTask` returns every attempt the task ever made, and telling an
+  // operator that 22 candidates were refused when the last attempt made 6 is not a number, it is
+  // the sum of every number.
+  const candidates = ctx.store.repos.candidates
+    .listByTask(task.id)
+    .filter((candidate) => candidate.attempt === attempts);
   const judged = candidates.filter((candidate) => candidate.gateReport !== null);
   const refused = candidates.filter((candidate) => candidate.gateReport === null && providerRefusal(candidate.error));
-  if (judged.length === 0 && refused.length > 0) {
-    // The provider refused every candidate, so nothing was built and nothing was judged. An
-    // allowance lifts on its own, which is why this asks rather than terminates.
+  const other = candidates.length - judged.length - refused.length;
+
+  if (judged.length === 0 && refused.length > 0 && other === 0) {
+    // Every candidate was refused before it produced anything, so nothing was built and nothing
+    // was judged. An allowance lifts on its own, which is why this asks rather than terminates.
     const reason: RunTerminalReason = {
       code: "provider_budget_exhausted",
-      summary: `no candidate for task ${task.id} reached a gate: the provider refused all ${String(refused.length)} of them (${firstLine(refused[0]?.error)})`,
+      summary: `no candidate for task ${task.id} reached a gate on attempt ${String(attempts)}: the provider refused all ${String(refused.length)} of them (${firstLine(refused[0]?.error)})`,
       question: "No work was produced, because the provider refused every candidate. How should the run proceed?",
-      options: ["Wait for the allowance to reset and resume", "Stop the run"],
+      // Deliberately not "wait and resume": resuming re-enters GATING with the task still gated and
+      // the same candidates discarded, so it returns here. `docs/ledger/R3-run.md`, round 1.
+      options: ["Stop the run, and start a new run once the allowance has reset"],
     };
     emitNeedsHumanReport(ctx, reason);
     return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
@@ -687,19 +698,32 @@ function handleZeroSurvivors(
   return {
     status: "complete",
     nextPhase: "FAILED",
+    // Counted, not generalised: "every candidate failed its gates" is false when one of them never
+    // reached a gate, and a mixed attempt is the case where the operator most needs the breakdown.
     terminalReason: {
       code: "repeated_failure",
-      summary: judged.length === 0
-        ? `no candidate for task ${task.id} reached a gate after ${String(attempts)} attempts (${firstLine(candidates.at(-1)?.error) || "no reason recorded"})`
-        : `every candidate for task ${task.id} failed its gates after ${String(attempts)} attempts`,
+      summary: `task ${task.id} produced no survivor on attempt ${String(attempts)} of ${String(candidates.length)} candidates: ` +
+        `${String(judged.length)} reached a gate and failed, ${String(refused.length)} were refused by the provider, ` +
+        `${String(other)} ended otherwise` +
+        (firstLine(candidates.find((candidate) => candidate.error !== null)?.error) === ""
+          ? ""
+          : ` (${firstLine(candidates.find((candidate) => candidate.error !== null)?.error)})`),
     },
   };
 }
 
-/** A provider that would not answer, as opposed to work that was answered and found wanting. */
+/**
+ * A provider that would not answer, as opposed to work that was answered and found wanting.
+ *
+ * Text, because that is all a discarded candidate keeps: `Candidate.error` is a string and the
+ * shapes it actually holds are `ProviderError: …`, `BUDGET_EXCEEDED` and `STOPPED`, all of which
+ * appear in the store. It is a heuristic and it is used only to choose between two true
+ * statements — both branches name what they counted, so a misclassification changes which one is
+ * emphasised, not whether the operator is told the truth.
+ */
 function providerRefusal(error: string | null | undefined): boolean {
   if (error === null || error === undefined) return false;
-  return /ProviderError|rate limit|\b429\b|budget/i.test(error);
+  return /^ProviderError\b|BUDGET_EXCEEDED|rate.?limit|\b429\b|quota/i.test(error.trim());
 }
 
 function firstLine(error: string | null | undefined): string {

@@ -227,11 +227,18 @@ export class RunEngine {
       // no log — the daemon is spawned with `stdio: "ignore"` — so a run paused here looked like a
       // run the operator had paused themselves, with the cause unavailable anywhere. Finding 55's
       // second shape (`docs/ledger/R0-run.md`).
-      this.append(runId, "run.driver_failed", {
-        phase,
-        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-        ...(err instanceof PolishError ? { code: err.code } : {}),
-      }, SYSTEM_ACTOR);
+      //
+      // Best effort by construction: a recorder that can fail is a recorder that can replace the
+      // error it was recording, and the driver's error is the one worth keeping.
+      try {
+        this.append(runId, "run.driver_failed", {
+          phase,
+          error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          ...(err instanceof PolishError ? { code: err.code } : {}),
+        }, SYSTEM_ACTOR);
+      } catch {
+        // deliberately swallowed
+      }
       if (
         councilPhase ||
         (err instanceof PolishError && (err.code === "PROVIDERS_UNAVAILABLE" || err.code === "OUTPUT_CONTRACT"))
@@ -253,16 +260,27 @@ export class RunEngine {
     const run = this.requireRun(runId);
     if (isTerminal(RUN_CONTROL_TABLE, run.control) || run.control !== "RUNNING") return;
     if (isTerminal(RUN_PHASE_TABLE, run.phase)) return;
+    // R3, at the one place every phase advance passes through. Individual drivers are the right
+    // place to say *why* a run stops, and most of them do; this is the place that guarantees one of
+    // them did. Eight runs in the store are terminal with `terminalReason: null`, from three
+    // different call sites, and an operator reading any of them learns nothing.
+    const resolved = terminalReason ?? (
+      isTerminal(RUN_PHASE_TABLE, nextPhase) && nextPhase !== "DONE" && run.terminalReason === null
+        ? {
+            code: "internal_error" as const,
+            summary: `run reached ${nextPhase} from ${run.phase} without a stated reason`,
+          }
+        : undefined);
     const next = {
       ...transitionPhase(run, nextPhase, this.clock.now()),
-      ...(terminalReason === undefined ? {} : { terminalReason }),
+      ...(resolved === undefined ? {} : { terminalReason: resolved }),
     };
     this.append(runId, "run.phase_changed", { run: next }, SYSTEM_ACTOR);
     if (nextPhase === "DONE") {
       this.terminate(next, { code: "converged", summary: "required clean rounds reached" });
     }
-    if (nextPhase === "FAILED" && terminalReason !== undefined) {
-      this.terminate(next, terminalReason);
+    if (nextPhase === "FAILED" && resolved !== undefined) {
+      this.terminate(next, resolved);
     }
   }
 

@@ -11,6 +11,10 @@ export const KNOWN_EVENT_TYPES = [
   "run.created",
   "run.phase_changed",
   "run.control_changed",
+  /** A phase driver threw. Recorded before the engine does anything else with the run. R3. */
+  "run.driver_failed",
+  /** A reviewer's verdict on the seeded defect. R2. */
+  "review.canary_recorded",
   "run.terminated",
   "run.answer_recorded",
   "run.settings_fallback",
