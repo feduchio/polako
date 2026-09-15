@@ -1,4 +1,4 @@
-import type { CompletionRequest } from "../broker/types.js";
+import { isAccountScopedLimit, type CompletionRequest } from "../broker/types.js";
 import type { ModelRef } from "../domain/common.js";
 import { modelRefKey } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
@@ -38,9 +38,12 @@ export function createResilientCouncilClient(options: ResilientCouncilClientOpti
     async complete(request) {
       const attempted: AttemptedCouncilModel[] = [];
       let lastError: unknown;
+      /** Providers whose whole allowance is spent: another of their models cannot answer either. */
+      const exhaustedProviders = new Set<string>();
       for (let index = 0; index < models.length; index++) {
         const model = models[index];
         if (model === undefined) continue;
+        if (exhaustedProviders.has(model.provider)) continue;
         if (index > 0) {
           const previous = models[index - 1];
           if (previous !== undefined) {
@@ -65,6 +68,10 @@ export function createResilientCouncilClient(options: ResilientCouncilClientOpti
         } catch (err) {
           lastError = err;
           attempted.push({ model, kind: operationalKind(err), error: errorToString(err) });
+          // A different provider is still worth trying — an OpenRouter allowance says nothing
+          // about Gemini, and that is exactly what completed the judge role in
+          // `run_01m2h3hpe2f6f4ra1ywcg7` — but a different model of this one is not.
+          if (isAccountScopedLimit(err)) exhaustedProviders.add(model.provider);
           if (!isCouncilFallbackWorthy(err)) throw err;
         }
       }

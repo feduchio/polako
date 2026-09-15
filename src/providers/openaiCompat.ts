@@ -1,4 +1,4 @@
-import type { ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ModelInfo, ModelTier, ProviderAdapter, ProviderHealth, ToolCall } from "../broker/types.js";
+import type { ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ModelInfo, ModelTier, ProviderAdapter, ProviderHealth, RateLimitScope, ToolCall } from "../broker/types.js";
 import { ProviderError } from "../broker/types.js";
 
 export type FetchLike = (input: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<{
@@ -153,7 +153,13 @@ export class OpenAICompatProvider implements ProviderAdapter {
     const retryAfterMs = retryAfter ? (Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : null) : null;
     if (status === 401 || status === 403) return new ProviderError(this.id, "auth", `auth failed (${status}): ${snippet}`, { status });
     if (status === 404) return new ProviderError(this.id, "not_found", `not found: ${snippet}`, { status });
-    if (status === 429) return new ProviderError(this.id, "rate_limit", `rate limited: ${snippet}`, { status, retryAfterMs });
+    if (status === 429) {
+      return new ProviderError(this.id, "rate_limit", `rate limited: ${snippet}`, {
+        status,
+        retryAfterMs,
+        limitScope: rateLimitScope(body),
+      });
+    }
     if (status === 408 || status === 504) return new ProviderError(this.id, "timeout", `timeout (${status}): ${snippet}`, { status });
     if (status >= 500) return new ProviderError(this.id, "server", `server error (${status}): ${snippet}`, { status, retryAfterMs });
     if (/context|too many tokens|maximum context length/i.test(body)) return new ProviderError(this.id, "context_length", snippet, { status });
@@ -179,6 +185,28 @@ export class OpenAICompatProvider implements ProviderAdapter {
     };
     return { ref: { provider: this.id, model: row.id }, displayName: row.name ?? row.id, capabilities, source: "provider" };
   }
+}
+
+/**
+ * Whose allowance the 429 spent, read from OpenRouter's `error.metadata.limit_source` rather than
+ * from the message text. Observed value on the funded key:
+ * `openrouter_free_tier_daily`, with `X-RateLimit-Limit: 1000` and `X-RateLimit-Remaining: 0`.
+ * Every `openrouter_free_tier_*` variant is one allowance shared by every free route on the
+ * account, so rotating to another model cannot help. `upstream_provider_shared_pool` belongs to
+ * the route (`docs/RECOVERY.md` R1). Anything else is `unknown` and is handled as model-scoped,
+ * which is the behaviour that already existed.
+ */
+function rateLimitScope(body: string): RateLimitScope {
+  let source: unknown;
+  try {
+    source = (JSON.parse(body) as { error?: { metadata?: { limit_source?: unknown } } }).error?.metadata?.limit_source;
+  } catch {
+    return "unknown";
+  }
+  if (typeof source !== "string") return "unknown";
+  if (source.startsWith("openrouter_free_tier")) return "account";
+  if (source === "upstream_provider_shared_pool") return "model";
+  return "unknown";
 }
 
 /**

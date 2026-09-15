@@ -27,6 +27,63 @@ const APPROVE = JSON.stringify({
 });
 
 describe("council operational fallback", () => {
+  // R1 AC4. A spent account allowance is not a reason to try the account's next model, and is not
+  // a reason to skip a different provider: this is the shape that completed the judge role in
+  // `run_01m2h3hpe2f6f4ra1ywcg7`, which 429'd on OpenRouter and answered on Gemini.
+  it("skips the rest of a provider's chain on an account-scoped 429, but not another provider", async () => {
+    const calls: string[] = [];
+    const inner: CouncilCompletionClient = {
+      complete(request) {
+        calls.push(`${request.model.provider}:${request.model.model}`);
+        if (request.model.provider === "openrouter") {
+          throw new ProviderError("openrouter", "rate_limit", "429", { status: 429, limitScope: "account" });
+        }
+        return Promise.resolve(reply(APPROVE));
+      },
+    };
+    const client = createResilientCouncilClient({
+      inner,
+      models: [
+        { provider: "openrouter", model: "first" },
+        { provider: "openrouter", model: "second" },
+        { provider: "gemini", model: "flash" },
+      ],
+      role: "judge",
+      clock: systemClock,
+      retry: { maxAttemptsPerModel: 1, baseBackoffMs: 0, maxBackoffMs: 0 },
+    });
+
+    await client.complete(requestFor("first"));
+    expect(calls).toEqual(["openrouter:first", "gemini:flash"]);
+  });
+
+  it("still walks the whole chain when the limit belongs to the model", async () => {
+    const calls: string[] = [];
+    const inner: CouncilCompletionClient = {
+      complete(request) {
+        calls.push(`${request.model.provider}:${request.model.model}`);
+        if (request.model.provider === "openrouter") {
+          throw new ProviderError("openrouter", "rate_limit", "429", { status: 429, limitScope: "model" });
+        }
+        return Promise.resolve(reply(APPROVE));
+      },
+    };
+    const client = createResilientCouncilClient({
+      inner,
+      models: [
+        { provider: "openrouter", model: "first" },
+        { provider: "openrouter", model: "second" },
+        { provider: "gemini", model: "flash" },
+      ],
+      role: "judge",
+      clock: systemClock,
+      retry: { maxAttemptsPerModel: 1, baseBackoffMs: 0, maxBackoffMs: 0 },
+    });
+
+    await client.complete(requestFor("first"));
+    expect(calls).toEqual(["openrouter:first", "openrouter:second", "gemini:flash"]);
+  });
+
   it("falls back after a preferred judge 429 and completes interpretation", async () => {
     const calls: string[] = [];
     const events: NewEvent[] = [];

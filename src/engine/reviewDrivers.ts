@@ -7,7 +7,7 @@ import { FINDING_TABLE, FindingSchema, FindingValidationStrictSchema, findingSta
 import type { ReviewAxis } from "../domain/finding.js";
 import { assertTransition } from "../domain/fsm.js";
 import { createInvestigationTask, createTaskFromValidFinding, type Task } from "../domain/task.js";
-import { ProviderError } from "../broker/types.js";
+import { ProviderError, isAccountScopedLimit } from "../broker/types.js";
 import {
   DEBATE_ARGUMENT,
   DEBATE_METHOD,
@@ -802,12 +802,26 @@ function excludedReviewModels(ctx: PhaseContext): { model: ModelRef; error: stri
   }
   for (const execution of latest.values()) {
     if (execution.completed || execution.error === undefined) continue;
+    // The model did nothing wrong: the account's allowance was spent. Excluding it here would make
+    // the next tick rotate for a reason that rotation cannot address.
+    if (isAccountScopedLimitMessage(execution.error)) continue;
     if (!isStickyReviewSkip(undefined, execution.error)) continue;
     const key = modelRefKey(execution.requestedModel);
     if (completedKeys.has(key)) continue;
     excluded.push({ model: execution.requestedModel, error: execution.error });
   }
   return excluded;
+}
+
+/**
+ * Marks a recorded execution error as an account-wide limit. A `ReviewExecution` keeps its error as
+ * a string, and the scope has to survive into the next tick, which reads only that string; written
+ * and read by these two functions so the two spellings cannot drift apart.
+ */
+const ACCOUNT_LIMIT_TAG = "[account-scoped rate limit]";
+
+function isAccountScopedLimitMessage(message: string): boolean {
+  return message.startsWith(ACCOUNT_LIMIT_TAG);
 }
 
 function isRateLimitMessage(message: string): boolean {
@@ -869,6 +883,13 @@ async function reviewAxisWithFallback(
       return "ok";
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (isAccountScopedLimit(err)) {
+        // Every remaining reviewer is behind the same exhausted allowance. Rotating walks the whole
+        // list and marks each model dead in turn, which is how 2,465 of 2,600 review executions
+        // never reached a model. Record the attempt, keep the model usable, and wait.
+        failExecution(ctx, started, `${ACCOUNT_LIMIT_TAG} ${message}`);
+        return "waiting";
+      }
       failExecution(ctx, started, message);
       input.rateLimited.add(key);
     }

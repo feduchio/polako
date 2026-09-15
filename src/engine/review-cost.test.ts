@@ -386,6 +386,93 @@ describe("P1.1 MC5", () => {
   });
 });
 
+/**
+ * R1. An account-scoped 429 is not a property of the model. Contract: `docs/ledger/R1.md`.
+ * Placed beside the sticky-exclusion tests above, which are what this changes.
+ */
+describe("R1 account-scoped rate limits", () => {
+  let store: Store;
+  let clock: FakeClock;
+  let fixture: Fixture;
+
+  beforeEach(async () => {
+    fixture = await repositoryFixture();
+    store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    clock = new FakeClock(1_700_000_000_000);
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  const limited = (scope: "account" | "model") =>
+    new ProviderError("reviews", "rate_limit", "rate limited: 429", { status: 429, limitScope: scope });
+
+  const engineWithFive = (scope: "account" | "model"): { engine: RunEngine; provider: ScriptedProvider } => {
+    const names = ["m0", "m1", "m2", "m3", "m4"];
+    const provider = new ScriptedProvider("reviews", names.map((name) => ({ name, capabilities: FAKE_CAPABILITIES.strong })));
+    for (const name of names) {
+      provider.script(name, Array.from({ length: 8 }, () => ({ kind: "error" as const, error: limited(scope) })));
+    }
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of NON_REVIEW_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
+    engine.registerPhase("REVIEWING", createReviewingDriver(
+      reviewingOptions(fixture, () => names.map((name) => ({ provider, model: { provider: "reviews", model: name } }))),
+    ));
+    return { engine, provider };
+  };
+
+  // AC1, against the number the plan names: 2,465 of 2,600 executions never reached a model,
+  // because each axis walked the whole reviewer list marking every model dead in turn.
+  it("calls one model per axis, not one per model, when the account allowance is spent", async () => {
+    const { engine, provider } = engineWithFive("account");
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+
+    expect(provider.calls).toHaveLength(1);
+    expect(store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash)).toHaveLength(1);
+    // AC3: and nothing is excluded, so the next tick has its reviewers back.
+    expect(excludedModels(store, clock, runId)).toEqual([]);
+  });
+
+  // AC2. The model-scoped case is the behaviour that already existed and must not move.
+  it("still rotates and still excludes when the limit belongs to the model", async () => {
+    const { engine, provider } = engineWithFive("model");
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+
+    expect(provider.calls).toHaveLength(5);
+    expect(excludedModels(store, clock, runId).sort()).toEqual(["m0", "m1", "m2", "m3", "m4"]);
+  });
+
+  // AC3 at the level the next tick actually reads: a recorded execution error, not an exception.
+  it("does not let a recorded account-scoped failure exclude the model on the next tick", () => {
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    appendExecution(store, clock, runId, {
+      roundIndex: 1,
+      axis: "correctness",
+      requestedModel: { provider: "reviews", model: "m0" },
+      completed: false,
+      error: "[account-scoped rate limit] rate limited: 429",
+      hash: fixture.integrated,
+      at: clock.now() + 1,
+    });
+    appendExecution(store, clock, runId, {
+      roundIndex: 1,
+      axis: "regression",
+      requestedModel: { provider: "reviews", model: "m1" },
+      completed: false,
+      error: "rate limited: 429",
+      hash: fixture.integrated,
+      at: clock.now() + 2,
+    });
+
+    expect(excludedModels(store, clock, runId)).toEqual(["m1"]);
+  });
+});
+
 function sourceFiles(root: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(root)) {

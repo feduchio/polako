@@ -177,6 +177,24 @@ describe("ModelBroker", () => {
     expect(tryAdmit(budget, runId, 0.95)).toBe(true);
   });
 
+  // R1 AC5. Nine models probed under one exhausted account quota otherwise each carry a routing
+  // penalty for a condition none of them caused.
+  it.each([
+    ["account", 0],
+    ["model", 1],
+    ["unknown", 1],
+  ] as const)("records a %s-scoped 429 as %i routing failures", async (limitScope, failures) => {
+    provider.script("mid", [{ kind: "error", error: new ProviderError("p1", "rate_limit", "429", { status: 429, limitScope }) }]);
+    await expect(broker.complete({
+      ...req(runId, "mid"),
+      metadata: { runId, purpose: "test", role: "worker", retryPolicy: { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 } },
+    })).rejects.toThrow(ProviderError);
+    expect(catalog.get({ provider: "p1", model: "mid" })?.stats.failures).toBe(failures);
+    expect(store.events.list(runId, { types: ["model.observation.recorded"] })).toHaveLength(failures);
+    // Recorded as a call either way: what happened is not in question, only whose fault it was.
+    expect(store.events.list(runId, { types: ["model.call"] })).toHaveLength(1);
+  });
+
   it("charges a probe to the budget and records its event, but not its routing statistics", async () => {
     provider.script("big", [{ kind: "error", error: new ProviderError("p1", "rate_limit", "429", { status: 429 }) }]);
     provider.script("mid", [{ kind: "reply", content: "ok", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.002 } }]);

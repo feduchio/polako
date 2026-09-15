@@ -100,18 +100,31 @@ export interface CompletionResponse {
 
 export type ProviderErrorKind = "rate_limit" | "auth" | "server" | "timeout" | "bad_request" | "context_length" | "network" | "not_found";
 
+/**
+ * Whose allowance a 429 spent.
+ *
+ * `account` — every model of that provider is behind the same exhausted allowance, so trying
+ * another one cannot succeed. `model` — the limit belongs to this route. `unknown` is kept
+ * distinct from `model` at the point of parsing even though the two are handled alike: the
+ * difference between "the provider said so" and "we assumed" is the difference this whole item is
+ * about, and a later reader must be able to tell which one produced a decision.
+ */
+export type RateLimitScope = "account" | "model" | "unknown";
+
 export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
   readonly retryable: boolean;
   readonly retryAfterMs: number | null;
   readonly provider: string;
   readonly status: number | null;
+  /** Non-null only for `rate_limit`. */
+  readonly limitScope: RateLimitScope | null;
 
   constructor(
     provider: string,
     kind: ProviderErrorKind,
     message: string,
-    opts: { retryAfterMs?: number | null; status?: number | null; cause?: unknown } = {},
+    opts: { retryAfterMs?: number | null; status?: number | null; cause?: unknown; limitScope?: RateLimitScope } = {},
   ) {
     super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
     this.name = "ProviderError";
@@ -120,7 +133,13 @@ export class ProviderError extends Error {
     this.retryable = kind === "rate_limit" || kind === "server" || kind === "timeout" || kind === "network";
     this.retryAfterMs = opts.retryAfterMs ?? null;
     this.status = opts.status ?? null;
+    this.limitScope = kind === "rate_limit" ? opts.limitScope ?? "unknown" : null;
   }
+}
+
+/** An account-wide allowance, which no other model of the same provider can escape. */
+export function isAccountScopedLimit(error: unknown): boolean {
+  return error instanceof ProviderError && error.limitScope === "account";
 }
 
 export interface ProviderHealth {

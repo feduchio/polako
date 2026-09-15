@@ -7,6 +7,7 @@ import { GroqProvider } from "./groq.js";
 import { OpenRouterProvider } from "./openrouter.js";
 import { RecordReplayProvider } from "./recordReplay.js";
 import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { ProviderError } from "../broker/types.js";
 
 const FIXTURES = join(import.meta.dirname, "../../fixtures/providers");
 
@@ -94,6 +95,53 @@ describe("OpenRouterProvider", () => {
     expect(priced["vendor/tiny"]).toEqual([0.001, 0]);
     expect(priced["vendor/priced"]).toEqual([0.15, 0.5]);
     expect(priced["vendor/free"]).toEqual([0, 0]);
+  });
+
+  // R1. The scope comes from `error.metadata.limit_source`, not from the human-readable message.
+  it.each([
+    ["openrouter_free_tier_daily", "account"],
+    ["openrouter_free_tier_per_minute", "account"],
+    ["upstream_provider_shared_pool", "model"],
+    ["something_new", "unknown"],
+    [undefined, "unknown"],
+  ] as const)("reads limit_source %s as a %s-scoped rate limit", async (limitSource, scope) => {
+    const provider = new OpenRouterProvider({
+      id: "openrouter",
+      apiKey: "test-key",
+      baseUrl: "https://openrouter.test/api/v1",
+      fetch: fakeFetch(() => ({
+        status: 429,
+        body: {
+          error: {
+            message: "Rate limit exceeded: free-models-per-day-high-balance. ",
+            code: 429,
+            metadata: {
+              headers: { "X-RateLimit-Limit": "1000", "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1789430400000" },
+              ...(limitSource === undefined ? {} : { limit_source: limitSource }),
+            },
+          },
+        },
+      })),
+    });
+    const error = await provider
+      .complete({ model: { provider: "openrouter", model: "m" }, messages: [{ role: "user", content: "x" }], metadata: { runId: "r", purpose: "p", role: "worker" } })
+      .catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).kind).toBe("rate_limit");
+    expect((error as ProviderError).limitScope).toBe(scope);
+  });
+
+  it("leaves limitScope null on errors that are not rate limits", async () => {
+    const provider = new OpenRouterProvider({
+      id: "openrouter",
+      apiKey: "test-key",
+      baseUrl: "https://openrouter.test/api/v1",
+      fetch: fakeFetch(() => ({ status: 500, body: { error: { message: "boom" } } })),
+    });
+    const error = await provider
+      .complete({ model: { provider: "openrouter", model: "m" }, messages: [{ role: "user", content: "x" }], metadata: { runId: "r", purpose: "p", role: "worker" } })
+      .catch((err: unknown) => err);
+    expect((error as ProviderError).limitScope).toBeNull();
   });
 
   it("sends strict JSON Schema and reasoning options as distinct request fields", async () => {

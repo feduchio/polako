@@ -9,7 +9,7 @@ import { foldModelCallUsage, budgetSnapshotFromUsage } from "../convergence/path
 import type { BudgetSnapshot } from "./quota.js";
 import type { BudgetTracker, QuotaTracker } from "./quota.js";
 import type { SecretStore } from "./secrets.js";
-import { ProviderError, type CompletionRequest, type CompletionResponse, type ProviderAdapter } from "./types.js";
+import { ProviderError, isAccountScopedLimit, type CompletionRequest, type CompletionResponse, type ProviderAdapter } from "./types.js";
 import { ModelObservationRepository } from "./observations.js";
 
 export interface RetryPolicy {
@@ -186,7 +186,7 @@ export class ModelBroker {
         const kind = isCancel(err) ? "cancelled" : err instanceof ProviderError ? err.kind : "unknown";
         const outcome: AttemptOutcome = { ok: false, latencyMs: clock.now() - started, errorKind: kind, at: clock.now() };
         outcomes.push(outcome);
-        this.recordRoutingStats(tagged, outcome);
+        this.recordRoutingStats(tagged, outcome, err);
         if (isCancel(err)) {
           this.recordEvent(tagged, null, attempt, outcomes, errorToString(err), budget.snapshot(tagged.metadata.runId).runUsd, callId);
           throw err;
@@ -222,8 +222,11 @@ export class ModelBroker {
    * models probed under one exhausted quota would otherwise each carry a routing penalty for it.
    * The probe's own verdict is recorded by the discovery driver, as `model.probed`.
    */
-  private recordRoutingStats(request: CompletionRequest, outcome: AttemptOutcome): void {
+  private recordRoutingStats(request: CompletionRequest, outcome: AttemptOutcome, error?: unknown): void {
     if (request.metadata.role === "probe") return;
+    // The account's allowance is spent. Charging that to whichever model happened to ask is how a
+    // whole ensemble ends up down-ranked for one condition none of them caused.
+    if (isAccountScopedLimit(error)) return;
     this.deps.catalog.recordCall(request.model, outcome);
     this.observations.recordCall(request.model, outcome, request.metadata.runId);
   }
