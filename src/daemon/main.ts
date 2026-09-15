@@ -25,10 +25,13 @@ export function polishPidPath(home = polishHome()): string {
 export async function runDaemon(): Promise<void> {
   const home = polishHome();
   mkdirSync(home, { recursive: true, mode: 0o700 });
-  writeFileSync(polishPidPath(home), `${process.pid}\n`, { mode: 0o600 });
   const service = new DaemonService({ home });
   const server = new RpcServer(polishSocketPath(home), service);
+  // The pid file is claimed only once this process owns the socket. Claiming it first meant a
+  // second daemon that then failed to listen had already overwritten a live daemon's pid, leaving
+  // the file pointing at a corpse and the live process unstoppable through `polish`.
   await server.listen();
+  writeFileSync(polishPidPath(home), `${process.pid}\n`, { mode: 0o600 });
   service.start();
 
   let stopping = false;

@@ -84,6 +84,8 @@ export class DaemonService implements RpcHandler {
    * Facade metadata is the durable source.
    */
   private readonly runSettings = new Map<string, ResolvedRunSettings>();
+  // Last report signature per run, so `tick` does not re-render a terminal run that has not moved.
+  private readonly reportSignatures = new Map<string, string>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
 
@@ -487,16 +489,28 @@ export class DaemonService implements RpcHandler {
   }
 
   private writeReport(run: Run): void {
-    const metadata = this.readMetadata(run.id);
     const generated = this.store.events.list(run.id, { types: ["report.generated"] }).at(-1);
-    const artifact = generated?.artifacts[0];
-    if (artifact !== undefined) {
-      const body = this.store.artifacts.getText(artifact.sha256);
-      writeFileSync(metadata.reportPath, body.endsWith("\n") ? body : `${body}\n`);
-      return;
-    }
+    // `tick` offers every terminal run on every tick, and rendering one reads its whole history.
+    // A run that has not moved since its last report does not need a second one: without this a
+    // store holding a run with 2,432 review executions keeps a core at 100% indefinitely.
+    const signature = `${run.updatedAt}:${generated?.id ?? ""}`;
+    if (this.reportSignatures.get(run.id) === signature) return;
 
-    const ctx = { run, store: this.store, clock: this.clock, config: this.resolveRunSettings(run.id).config };
+    const metadata = this.readMetadata(run.id);
+    const body = this.renderReportBody(run, metadata, generated?.artifacts[0]);
+    writeFileSync(metadata.reportPath, body);
+    this.reportSignatures.set(run.id, signature);
+  }
+
+  private renderReportBody(
+    run: Run,
+    metadata: FacadeRunMetadata,
+    artifact: { sha256: string } | undefined,
+  ): string {
+    if (artifact !== undefined) {
+      const stored = this.store.artifacts.getText(artifact.sha256);
+      return stored.endsWith("\n") ? stored : `${stored}\n`;
+    }
     if (run.phase === "NEEDS_HUMAN") {
       const reason = run.terminalReason ?? {
         code: "product_decision_required" as const,
@@ -504,10 +518,10 @@ export class DaemonService implements RpcHandler {
         question: "How should polish continue this mission?",
         options: ["Continue with the current plan", "Stop the run"],
       };
-      writeFileSync(metadata.reportPath, `${renderNeedsHumanReport(buildNeedsHumanReportInput(reason))}\n`);
-      return;
+      return `${renderNeedsHumanReport(buildNeedsHumanReportInput(reason))}\n`;
     }
-    writeFileSync(metadata.reportPath, `${renderFinalReport(buildFinalReportInput(ctx))}\n`);
+    const ctx = { run, store: this.store, clock: this.clock, config: this.resolveRunSettings(run.id).config };
+    return `${renderFinalReport(buildFinalReportInput(ctx))}\n`;
   }
 
   private resolveProject(reference: string): ProjectRecord {

@@ -382,3 +382,100 @@ async function commitOnBranch(
   await git.run(["checkout", "-q", "main"]);
   return commit;
 }
+
+describe("the checkout a worker is handed", () => {
+  it("is prepared, and reported, before the worker starts", async () => {
+    const fixture = await unpreparedRepositoryFixture();
+    const order: string[] = [];
+    const reported: { ready: boolean; detail: string | null }[] = [];
+    const worker = new ScriptedCandidateWorker<{ id: string }>((_task, worktree) => {
+      order.push("worker");
+      writeFileSync(join(worktree.path, "outcome.txt"), "pass");
+      return { status: "completed" };
+    });
+
+    await runCandidatesParallel({
+      runId: id("run"),
+      task: { id: "task" },
+      baseCheckpoint: fixture.base,
+      n: 1,
+      worker,
+      sandbox: fixture.sandbox,
+      policy: fixture.policy,
+      skipGates: true,
+      gates: {
+        ...fixture.gates,
+        // Disabled, so the case is hermetic: no install runs and no network is touched. What is
+        // under test is that the worker's own checkout is inspected and the verdict recorded
+        // before the worker is handed it, not that an install succeeds.
+        prepareDependencies: { enabled: false, timeoutMs: 1_000 },
+        onDependencyInstall: (result) => {
+          order.push("prepare");
+          reported.push({ ready: result.ready, detail: result.detail });
+        },
+      },
+    });
+
+    // Deleting the preparation call site leaves this empty: nothing else reports on the worker's
+    // checkout, because the gate checkout is a different sandbox and runs afterwards.
+    expect(order).toEqual(["prepare", "worker"]);
+    expect(reported).toEqual([{ ready: false, detail: "dependency install is disabled" }]);
+  });
+});
+
+async function unpreparedRepositoryFixture(): Promise<{
+  base: string;
+  sandbox: WorktreeSandbox;
+  policy: CommandPolicy;
+  gates: CandidateGates;
+}> {
+  const root = mkdtempSync(join(tmpdir(), "polish-worker-prep-"));
+  cleanup.push(root);
+  const repoDir = join(root, "repo");
+  mkdirSync(repoDir);
+  const git = await Git.init(repoDir);
+  // A declared dependency and no `node_modules` is what a fresh worktree of a real project looks
+  // like, and it is the state that made a worker read a module-resolution error as a test verdict.
+  writeFileSync(
+    join(repoDir, "package.json"),
+    `${JSON.stringify({ name: "fixture", devDependencies: { tsx: "^4.0.0" } }, null, 2)}\n`,
+  );
+  writeFileSync(join(repoDir, "outcome.txt"), "base");
+  const base = await git.commitAll("base");
+  if (base === null) throw new Error("fixture base commit missing");
+  await git.createBranch("run", base);
+
+  const command = ["npm", "test"];
+  const hashes = inspectManifestHashes(repoDir);
+  const profile: ProjectProfile = {
+    projectPath: repoDir,
+    alias: null,
+    packageManager: "npm",
+    framework: "unknown",
+    checks: [{ name: "test", kind: "test", command, mandatory: true }],
+    manifestHashes: hashes.manifestHashes,
+    scriptsHash: hashes.scriptsHash,
+    discoveredAt: Date.now(),
+  };
+  return {
+    base,
+    sandbox: new WorktreeSandbox(repoDir, join(root, "worktrees"), defaultConfig().sandbox),
+    policy: CommandPolicy.forProject([command], "npm"),
+    gates: {
+      profile,
+      baseline: {
+        id: id("base"),
+        runId: id("run"),
+        commitHash: base,
+        checks: [],
+        configHashes: hashes.manifestHashes,
+        scriptsHash: hashes.scriptsHash,
+        toolchain: {},
+        createdAt: Date.now(),
+      },
+      acceptanceArtifacts: [],
+      materializeAcceptance: () => undefined,
+      verifyAcceptance: () => [],
+    },
+  };
+}

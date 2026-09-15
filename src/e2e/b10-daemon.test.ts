@@ -6,6 +6,7 @@
  */
 
 import {
+  existsSync,
   readFileSync,
   mkdtempSync,
   mkdirSync,
@@ -701,5 +702,34 @@ describe("B10 daemon path – production RPC E2E", () => {
     expect(service.store.repos.runs.get(runId)?.phase).toBe("DONE");
     assertCausality(service, runId);
     await assertNoWorktrees(service, env, runId);
+  });
+  it("writes a terminal run's report once, not on every tick", async () => {
+    const { repoDir, home, clock } = env;
+    service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
+    const provider = service.productionComposition().providers[0] as ScriptedProvider;
+    scriptProvider(provider);
+    const created = await service.handle("run", {
+      project: repoDir,
+      mission: "Fix duplicate request after resume: clear #pending before retry",
+      runtime: "auto",
+    });
+    const runId = (created as { id: string }).id;
+    await driveToTerminal(service, runId);
+
+    // The engine ticks above write no report; `service.start()` is what offers the run to the
+    // report loop, and it offers every terminal run on every tick.
+    const reportPath = join(home, "runs", runId, "report.md");
+    service.start();
+    for (let i = 0; i < 200 && !existsSync(reportPath); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(existsSync(reportPath)).toBe(true);
+
+    // Rendering one report reads the run's whole history, so re-rendering an unmoved run on every
+    // tick held a core at 100% for 28 hours against a store with one long-lived run. The sentinel
+    // survives only if later ticks decline to rebuild a run that has not moved.
+    writeFileSync(reportPath, "sentinel\n");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(readFileSync(reportPath, "utf8")).toBe("sentinel\n");
   });
 });

@@ -2,10 +2,11 @@ import type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../
 import type { AcceptanceArtifact, MissionAcceptanceCorpus } from "../domain/acceptance.js";
 import type { ArtifactRef, ModelRef } from "../domain/common.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
+import { DEFAULT_INSTALL_DEPENDENCIES, DEFAULT_INSTALL_TIMEOUT_MS } from "../domain/config.js";
 import type { ProtectedChangeScope, ProtectedChangeWaiver } from "../domain/protectedChangeWaiver.js";
 import type { Task } from "../domain/task.js";
 import type { CheckOutputPersister, DependencyPreparation, EnsureDependenciesResult, GateResult } from "../project/checkRunner.js";
-import { runIndependentGates } from "../project/checkRunner.js";
+import { ensureProjectDependencies, runIndependentGates } from "../project/checkRunner.js";
 import type { ProjectProfile } from "../project/profile.js";
 import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { DiffStat } from "../sandbox/git.js";
@@ -159,6 +160,13 @@ async function runOneCandidate<TTask>(
       policy: input.policy,
       ...(input.projectEnv === undefined ? {} : { projectEnv: input.projectEnv }),
     });
+    // A worker's own worktree is the fourth sandbox, and finding 54 prepared only the three that
+    // run project checks. An unprepared one cannot run the project's test command, so a worker
+    // that writes a test sees a module-resolution error instead of a verdict and keeps going until
+    // its token allowance is gone. Preparation is not fatal here: the gate checkout prepares
+    // itself, so a worker can still produce a candidate. The result is reported so a failure to
+    // prepare is on the record rather than inferred from the worker's confusion.
+    await prepareWorkerCheckout(candidate, input.gates, input.signal);
     input.onWorkerStart?.({ candidateId, index, model });
     workerOutcome = await worker.run(input.task, candidate);
     if (workerOutcome.status !== "completed") {
@@ -260,6 +268,29 @@ async function runOneCandidate<TTask>(
  * workspace and a baseline all get the same refusal without engine having to agree to it.
  */
 export { EnvironmentNotReadyError } from "../project/checkRunner.js";
+
+/**
+ * Prepare the checkout a worker is handed. Same command definition and same operator settings as
+ * a gate checkout, because it is the same kind of fresh worktree; it differs only in that nothing
+ * downstream refuses when it is not ready, so the result is reported instead of thrown.
+ */
+async function prepareWorkerCheckout(
+  checkout: SandboxHandle,
+  gates: CandidateGates,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  try {
+    const result = await ensureProjectDependencies(checkout, gates.profile, {
+      enabled: gates.prepareDependencies?.enabled ?? DEFAULT_INSTALL_DEPENDENCIES,
+      timeoutMs: gates.prepareDependencies?.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS,
+      ...(signal === undefined ? {} : { signal }),
+      ...(gates.onDependencyInstallStart === undefined ? {} : { onStart: gates.onDependencyInstallStart }),
+    });
+    gates.onDependencyInstall?.(result);
+  } catch (error) {
+    gates.onDependencyInstall?.({ attempted: true, ready: false, detail: errorToString(error) });
+  }
+}
 
 export async function runGates(input: {
   runId: string;
