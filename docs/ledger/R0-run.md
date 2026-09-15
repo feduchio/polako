@@ -151,7 +151,7 @@ open and R3's acceptance re-runs this check. What was observed:
   does D1 (`run_01m2gy5yg30631j247sn13`). Three FAILED runs, three absent reasons. This is
   finding 55 and belongs to **R3**.
 - Run 3 (`run_01m2h3hpe2f6f4ra1ywcg7`, `--budget-usd 0.003`) produced a **second reasonless shape**:
-  it did not fail, it went to `PLANNING / PAUSED` and sat there for ten minutes until killed. Its
+  it did not fail, it went to `PLANNING / PAUSED` and sat there for 11.3 minutes until killed. Its
   recorded spend is $0, so its budget never bound and the pause has some other cause. The pause is
   `run.control_changed` carrying `actor: {"kind":"user"}`, and no `polish pause` was issued in this
   session. `engine.ts:230` pauses any run whose driver throws in a council phase and `engine.ts:235`
@@ -163,11 +163,22 @@ open and R3's acceptance re-runs this check. What was observed:
 
 ## What R0 did not fix, and where it goes
 
-**Free routes remain cost-eligible and still take most of the routing.** A ceiling permits paid
-models; it does not prefer them. Run 2's last worker attempts went to
-`nvidia/nemotron-3.5-lightning:free` and `dots-studio/dots-3-note-preview:free`, and the run
-recorded 34 `model.retry_scheduled` events. §1.2's cause is therefore still live, which is what
-**R1** is for.
+**Free routes remain cost-eligible and are still routed to.** A ceiling permits paid models; it
+does not prefer them. Run 2 routed workers to both, and the free ones are the ones that failed:
+
+```
+sqlite3 -header "file:$HOME/.polish/polish.db?mode=ro" \
+  "select json_extract(json,'$.payload.model.model') m, json_extract(json,'$.payload.ok') ok,
+          count(*) from events where run_id='run_01m2h3ck0v06t7596n0fh7' and type='model.call'
+      and json_extract(json,'$.payload.role')='worker' group by m, ok;"
+z-ai/glm-4.6v                   | 1 | 13      # paid, every call succeeded
+mistralai/codestral-2508        | 1 |  3      # paid, every call succeeded
+nvidia/nemotron-3.5-lightning:free | 0 | 5    # free, every call failed
+dots-studio/dots-3-note-preview:free | 0 | 5  # free, every call failed
+```
+
+Ten worker calls out of 26 were spent on routes that returned nothing, and the run recorded 34
+`model.retry_scheduled` events. §1.2's cause is therefore still live, which is what **R1** is for.
 
 **The free-tier limit is no longer the one §1.2 describes.** The 429 body captured in run 3 reads:
 
@@ -198,8 +209,11 @@ none is eligible to review. R0 does not touch it; it is named because R5's accep
 exhausted. Either R1 changes what gets probed, or the pins do.
 
 **What `maxRunUsd` actually is.** An admission threshold checked before each call
-(`BudgetTracker.assertWithin`, `quota.ts:145-157`), not a hard cap: the call that crosses the line
-is the one already allowed, so a run may finish above its limit by the cost of one call. Calls with
+(`BudgetTracker.assertWithin`, `quota.ts:145-157`), not a hard cap. The check reads spend recorded
+so far and the cost is recorded only when the call returns (`broker.ts:70` against `broker.ts:118`),
+so **every call already in flight was admitted against the same spend figure**: ten concurrent
+calls of $0.49 all pass a $0.50 limit and the run ends at $4.90. The overshoot is bounded by
+concurrency times the largest call, not by one call. Calls with
 `costUsd: null` — every Gemini call in these runs — add nothing to `runUsd` at all and so are
 outside it entirely; they are counted separately as `unknownCostCalls`. And `--budget-usd`
 **replaces** the configured value rather than clamping it (`applyRunBudgetOverrides`,
@@ -245,7 +259,8 @@ Verdict FAIL, 4 blocking and 3 notes.
 | 6 | `metadata.role` is a free-form string, so the probe exemption is not an enforced boundary | **note** — no non-probe caller sets it; recorded rather than typed, because narrowing `role` touches every call site in the system and belongs to no item here |
 | 7 | `Infinity - Infinity` is `NaN`, which `sort` reads as equal, skipping the name tie-break between two unknown-priced models | **actionable** — compared rather than subtracted, with a two-unknown case in the test |
 
-**On finding 1, and why it goes to R1.** The number reproduces:
+**On finding 1 — the round-2 ruling below is wrong, and round 3 proved it.** It is kept as written
+so the error is visible. The number reproduces:
 
 ```
 sqlite3 "file:$HOME/.polish/polish.db?mode=ro" \
@@ -264,6 +279,59 @@ does not carry today — and the reason 51 of those 67 failures are `rate_limit`
 §1.2's: an account-wide limit recorded as a model property. That is **R1's** subject, stated in
 this sentence so it cannot be lost: *R1 must make `restoreCatalog` obey the same rule as
 `recordRoutingStats`, and must say what it does with the 76 observations already written.*
+
+> **Correction, round 3.** "It neither created nor worsened these" is false, and the ruling
+> rested on it. Half of the residue is this item's own:
+>
+> ```
+> sqlite3 "file:$HOME/.polish/polish.db?mode=ro" \
+>   "select run_id, json_extract(json,'$.payload.purpose'), count(*) from events
+>     where type='model.call' and json_extract(json,'$.payload.role')='probe'
+>    group by 1,2 order by min(ts);"
+> run_01m2f93fdescrs2qrtq01f | capability_probe_strict_*    | 36   # before this item
+> run_01m2h2vmy5qj0648tcn2fn | capability_probe_strict_*    |  4   # before this item
+> run_01m2h3ck0v06t7596n0fh7 | capability_probe_tools/json  | 18   # created by this item
+> run_01m2h3hpe2f6f4ra1ywcg7 | capability_probe_tools/json  | 18   # created by this item
+> ```
+>
+> `capability_probe_tools` and `capability_probe_json` are exactly the two paths this item moved
+> onto the broker, and it moved them in `11ec918`, three commits before `6fe729d` added the
+> suppression. So 36 of the 76 were written by R0 itself, in the two runs R0 used as evidence.
+> The handoff to R1 stands, because the replay rule is R1's to write; the claim that R0 was not
+> a cause does not. Checking git history before ruling would have cost one command.
+
+## Review round 3 — GPT lane, on commit `1316af8`. R0 is reformulated.
+
+Verdict FAIL, 4 blocking. Two were defects in code this item wrote and are fixed here; two are the
+reason the item stops.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | The round-2 ruling that R0 did not create any of the 76 probe observations is false: R0 created 36 | **upheld** — the correction is inline above, in the round-2 section it refutes |
+| 2 | `"1e303"` overflows to `Infinity` only after the multiplication, and the underflow guard reads the exponent, so `"0e999"` is rejected although it is zero | **actionable, fixed** — finiteness is now checked after the multiplication and the underflow guard reads only the mantissa. No route in today's 445-model catalogue changes classification either way |
+| 3 | The comparator is not antisymmetric for `NaN`, which reaches it because catalogue entries are not schema-parsed | **actionable, fixed** — a non-finite price is an unknown price; the test asserts one order and its reverse produce the same list |
+| 4 | `maxRunUsd` does not bound a run to one call above the line: concurrent calls are all admitted against the same recorded spend, so ten $0.49 calls pass a $0.50 limit and the run ends at $4.90 | **upheld, and it is a real money-safety defect** — the text is corrected above; the repair is not made here |
+
+**Both ceilings in `docs/RECOVERY.md` §3 are now breached: three review rounds, and
+`git diff --shortstat e594bbc..1316af8 -- src` reports 317 insertions against a limit of 300.**
+The plan says that means the item is formulated wrongly and is reformulated rather than pushed. The
+reviewer reached the same conclusion independently. R0 is therefore split:
+
+- **R0 keeps its original subject**: put a cost ceiling and a run budget in place, and show that a
+  paid model is selected. Acceptance check 1 passes. Acceptance check 2 remains open with R3. The
+  code already committed under R0 stays committed — it is correct and gated — but R0 grows no
+  further.
+- **R0a — "admission is not a reservation"**: the budget overshoot of round-3 finding 4. A control
+  that permits $4.90 against a $0.50 limit is the one thing R0 existed to provide, and it is not
+  provided. New item, its own contract, reviewed on its own.
+- **R1 inherits the replay rule** as already written above, now with the correction that 36 of the
+  76 observations are R0's own.
+
+What this item should have been, stated so the next one is not shaped the same way: *the config
+change and its evidence* is one item of a dozen lines. *Pricing and probe hygiene in the broker* is
+a second, and it is the one that grew — because it was discovered mid-item and absorbed rather than
+named. Rule 5 of §4 says a new item is created from a failure observed in a real run; it does not
+say the item that observed the failure must also repair it.
 
 ## Gates
 

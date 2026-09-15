@@ -526,6 +526,12 @@ describe("buildDiscoveryShortlist", () => {
         capabilities: { ...FAKE_CAPABILITIES.fast, inputCostPerM: 1, outputCostPerM: null },
         source: "provider" as const,
       },
+      {
+        ref: { provider: "p", model: "b-nan-price" },
+        displayName: "b-nan-price",
+        capabilities: { ...FAKE_CAPABILITIES.fast, inputCostPerM: Number.NaN, outputCostPerM: 0 },
+        source: "provider" as const,
+      },
       model("dearest", FAKE_CAPABILITIES.fast, 9),
       model("cheapest", FAKE_CAPABILITIES.fast, 1),
     ];
@@ -538,11 +544,16 @@ describe("buildDiscoveryShortlist", () => {
     });
     // Two unknown prices tie, and the tie-break is the model name - subtracting Infinity from
     // Infinity yields NaN, which `sort` reads as equal and which leaves provider order in place.
-    expect(shortlist.map((entry) => entry.ref.model)).toEqual([
-      "cheapest",
-      "dearest",
-      "another-unknown-price",
-      "unknown-price",
-    ]);
+    // `NaN` joins them: a comparator that admits it is not antisymmetric, because `NaN < x` and
+    // `NaN > x` are both false and the two input orders then disagree.
+    const order = ["cheapest", "dearest", "another-unknown-price", "b-nan-price", "unknown-price"];
+    expect(shortlist.map((entry) => entry.ref.model)).toEqual(order);
+    expect(
+      buildDiscoveryShortlist([...models].reverse(), "p", [], 8, {
+        mode: "unrestricted",
+        maxInputCostPerM: 0,
+        maxOutputCostPerM: 0,
+      }).map((entry) => entry.ref.model),
+    ).toEqual(order);
   });
 });

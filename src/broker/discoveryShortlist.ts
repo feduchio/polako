@@ -15,8 +15,10 @@ import type { ModelInfo } from "./types.js";
 function estimatedCostPerM(cap: ModelInfo["capabilities"]): number {
   const input = cap.inputCostPerM;
   const output = cap.outputCostPerM;
-  if (input === null || output === null) return Number.POSITIVE_INFINITY;
-  return input + output;
+  // `NaN` is not a small number, and a comparator that lets one through is not antisymmetric:
+  // NaN < x and NaN > x are both false, so both orderings would return the same answer.
+  if (!Number.isFinite(input) || !Number.isFinite(output)) return Number.POSITIVE_INFINITY;
+  return (input ?? 0) + (output ?? 0);
 }
 
 /**

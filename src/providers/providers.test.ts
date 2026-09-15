@@ -67,6 +67,8 @@ describe("OpenRouterProvider", () => {
             { id: "vendor/hex", pricing: { prompt: "0x10", completion: "0" }, context_length: 131_072 },
             { id: "vendor/infinite", pricing: { prompt: "Infinity", completion: "0" }, context_length: 131_072 },
             { id: "vendor/underflow", pricing: { prompt: "1e-324", completion: "0" }, context_length: 131_072 },
+            { id: "vendor/overflow", pricing: { prompt: "1e303", completion: "0" }, context_length: 131_072 },
+            { id: "vendor/zero-exponent", pricing: { prompt: "0e999", completion: "0.0e-7" }, context_length: 131_072 },
             { id: "vendor/tiny", pricing: { prompt: "1e-9", completion: "0e0" }, context_length: 131_072 },
             { id: "vendor/priced", pricing: { prompt: "0.00000015", completion: "0.0000005" }, context_length: 131_072 },
             { id: "vendor/free", pricing: { prompt: "0", completion: "0" }, context_length: 131_072 },
@@ -85,6 +87,10 @@ describe("OpenRouterProvider", () => {
     expect(priced["vendor/infinite"]).toEqual([null, 0]);
     // "1e-324" is a price too small for a double, not the price zero.
     expect(priced["vendor/underflow"]).toEqual([null, 0]);
+    // Finite before the multiplication by 1e6, not after.
+    expect(priced["vendor/overflow"]).toEqual([null, 0]);
+    // Zero written with an exponent is still zero; only the mantissa says whether it underflowed.
+    expect(priced["vendor/zero-exponent"]).toEqual([0, 0]);
     expect(priced["vendor/tiny"]).toEqual([0.001, 0]);
     expect(priced["vendor/priced"]).toEqual([0.15, 0.5]);
     expect(priced["vendor/free"]).toEqual([0, 0]);

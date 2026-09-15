@@ -192,14 +192,16 @@ function advertisedPricePerM(raw: string | undefined): number | null {
   // `Number` is not a price parser: it reads "" and "   " as 0, "0x10" as 16, and "Infinity" as a
   // number. Only an unsigned decimal, with an optional fraction and exponent, is a price.
   if (raw === undefined) return null;
-  const text = raw.trim();
-  if (!/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) return null;
-  const value = Number(text);
-  if (!Number.isFinite(value)) return null;
-  // A mantissa carrying a non-zero digit that evaluates to 0 has underflowed. "1e-324" is a price
-  // too small for a double, not the price zero, and zero is the one value that means "free".
-  if (value === 0 && /[1-9]/.test(text)) return null;
-  return value * 1_000_000;
+  const mantissa = /^(\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.exec(raw.trim());
+  if (mantissa === null) return null;
+  const perM = Number(raw) * 1_000_000;
+  // After the multiplication, not before: "1e303" is a finite double that stops being one here.
+  if (!Number.isFinite(perM)) return null;
+  // A mantissa carrying a non-zero digit that reaches zero has underflowed. "1e-324" is a price
+  // too small for a double, not the price zero, and zero is the one value that means "free". The
+  // exponent is excluded from the test, or "0e999" would look non-zero because of its exponent.
+  if (perM === 0 && /[1-9]/.test(mantissa[1] ?? "")) return null;
+  return perM;
 }
 
 function toOpenAIMessage(m: ChatMessage): Record<string, unknown> {
