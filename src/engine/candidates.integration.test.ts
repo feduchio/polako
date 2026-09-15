@@ -385,7 +385,7 @@ async function commitOnBranch(
 
 describe("the checkout a worker is handed", () => {
   it("is prepared, and reported, before the worker starts", async () => {
-    const fixture = await unpreparedRepositoryFixture();
+    const fixture = await unpreparedRepositoryFixture({ admitInstall: true });
     const order: string[] = [];
     const reported: { ready: boolean; detail: string | null }[] = [];
     const worker = new ScriptedCandidateWorker<{ id: string }>((_task, worktree) => {
@@ -421,9 +421,49 @@ describe("the checkout a worker is handed", () => {
     expect(order).toEqual(["prepare", "worker"]);
     expect(reported).toEqual([{ ready: false, detail: "dependency install is disabled" }]);
   });
+
+  it("issues the install command for it, and does not merely report on it", async () => {
+    // The case above fixes the order and nothing else: a preparation step whose body always
+    // reported "disabled" without looking at the checkout satisfies it, and a reviewer found
+    // exactly that mutant surviving. This one observes the install being issued. It stays hermetic
+    // by withholding the install command from the policy, so the sandbox refuses it before a
+    // process is spawned -- `npm ci` never runs, and `attempted: true` is reachable only by
+    // entering the install path.
+    const fixture = await unpreparedRepositoryFixture({ admitInstall: false });
+    const started: string[][] = [];
+    const attempts: boolean[] = [];
+    const worker = new ScriptedCandidateWorker<{ id: string }>((_task, worktree) => {
+      writeFileSync(join(worktree.path, "outcome.txt"), "pass");
+      return { status: "completed" };
+    });
+
+    await runCandidatesParallel({
+      runId: id("run"),
+      task: { id: "task" },
+      baseCheckpoint: fixture.base,
+      n: 1,
+      worker,
+      sandbox: fixture.sandbox,
+      policy: fixture.policy,
+      skipGates: true,
+      gates: {
+        ...fixture.gates,
+        prepareDependencies: { enabled: true, timeoutMs: 1_000 },
+        onDependencyInstallStart: (info) => {
+          started.push([...info.command]);
+        },
+        onDependencyInstall: (result) => {
+          attempts.push(result.attempted);
+        },
+      },
+    });
+
+    expect(started).toEqual([["npm", "ci"]]);
+    expect(attempts).toEqual([true]);
+  });
 });
 
-async function unpreparedRepositoryFixture(): Promise<{
+async function unpreparedRepositoryFixture(options: { admitInstall?: boolean } = {}): Promise<{
   base: string;
   sandbox: WorktreeSandbox;
   policy: CommandPolicy;
@@ -460,7 +500,9 @@ async function unpreparedRepositoryFixture(): Promise<{
   return {
     base,
     sandbox: new WorktreeSandbox(repoDir, join(root, "worktrees"), defaultConfig().sandbox),
-    policy: CommandPolicy.forProject([command], "npm"),
+    // `forProject` admits the install command only when it is told the package manager, so
+    // withholding it is how a case observes a refused install without spawning one.
+    policy: CommandPolicy.forProject([command], options.admitInstall === false ? null : "npm"),
     gates: {
       profile,
       baseline: {
