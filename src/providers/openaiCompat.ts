@@ -189,10 +189,17 @@ export class OpenAICompatProvider implements ProviderAdapter {
  * for 745 input tokens — 17x the ceiling that admitted it (`docs/ledger/R0-run.md`).
  */
 function advertisedPricePerM(raw: string | undefined): number | null {
-  // `Number("")` and `Number("   ")` are 0, which would publish a blank field as "free".
-  if (raw === undefined || raw.trim() === "") return null;
-  const perM = Number(raw) * 1_000_000;
-  return Number.isFinite(perM) && perM >= 0 ? perM : null;
+  // `Number` is not a price parser: it reads "" and "   " as 0, "0x10" as 16, and "Infinity" as a
+  // number. Only an unsigned decimal, with an optional fraction and exponent, is a price.
+  if (raw === undefined) return null;
+  const text = raw.trim();
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) return null;
+  const value = Number(text);
+  if (!Number.isFinite(value)) return null;
+  // A mantissa carrying a non-zero digit that evaluates to 0 has underflowed. "1e-324" is a price
+  // too small for a double, not the price zero, and zero is the one value that means "free".
+  if (value === 0 && /[1-9]/.test(text)) return null;
+  return value * 1_000_000;
 }
 
 function toOpenAIMessage(m: ChatMessage): Record<string, unknown> {

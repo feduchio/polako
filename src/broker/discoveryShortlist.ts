@@ -47,8 +47,11 @@ export function buildDiscoveryShortlist(
     .filter((model) => model.capabilities.supportsTools)
     .filter((model) => isCostEligible(model.capabilities, costEligibility))
     .sort((left, right) => {
-      const costDelta = estimatedCostPerM(left.capabilities) - estimatedCostPerM(right.capabilities);
-      if (costDelta !== 0) return costDelta;
+      // Compared, not subtracted: two unknown prices are both Infinity, and Infinity - Infinity is
+      // NaN, which `sort` reads as "equal" and which silently skips the name tie-break.
+      const leftCost = estimatedCostPerM(left.capabilities);
+      const rightCost = estimatedCostPerM(right.capabilities);
+      if (leftCost !== rightCost) return leftCost < rightCost ? -1 : 1;
       return left.ref.model.localeCompare(right.ref.model);
     });
 

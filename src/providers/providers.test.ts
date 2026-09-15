@@ -64,6 +64,10 @@ describe("OpenRouterProvider", () => {
             { id: "openrouter/fusion", pricing: { prompt: "-1", completion: "-1" }, context_length: 1_048_576 },
             { id: "vendor/blank", pricing: { prompt: "", completion: "   " }, context_length: 131_072 },
             { id: "vendor/unparseable", pricing: { prompt: "tbd", completion: "0" }, context_length: 131_072 },
+            { id: "vendor/hex", pricing: { prompt: "0x10", completion: "0" }, context_length: 131_072 },
+            { id: "vendor/infinite", pricing: { prompt: "Infinity", completion: "0" }, context_length: 131_072 },
+            { id: "vendor/underflow", pricing: { prompt: "1e-324", completion: "0" }, context_length: 131_072 },
+            { id: "vendor/tiny", pricing: { prompt: "1e-9", completion: "0e0" }, context_length: 131_072 },
             { id: "vendor/priced", pricing: { prompt: "0.00000015", completion: "0.0000005" }, context_length: 131_072 },
             { id: "vendor/free", pricing: { prompt: "0", completion: "0" }, context_length: 131_072 },
           ],
@@ -77,6 +81,11 @@ describe("OpenRouterProvider", () => {
     // `Number("")` is 0, so a blank field would otherwise be published as a free price.
     expect(priced["vendor/blank"]).toEqual([null, null]);
     expect(priced["vendor/unparseable"]).toEqual([null, 0]);
+    expect(priced["vendor/hex"]).toEqual([null, 0]);
+    expect(priced["vendor/infinite"]).toEqual([null, 0]);
+    // "1e-324" is a price too small for a double, not the price zero.
+    expect(priced["vendor/underflow"]).toEqual([null, 0]);
+    expect(priced["vendor/tiny"]).toEqual([0.001, 0]);
     expect(priced["vendor/priced"]).toEqual([0.15, 0.5]);
     expect(priced["vendor/free"]).toEqual([0, 0]);
   });

@@ -34,7 +34,14 @@ maxRunUsd = 0.50
 Ceiling justification, from the catalogue of this date and from the store, not from memory:
 
 ```
-curl -s https://openrouter.ai/api/v1/models      # 150 paid routes at or below 0.30/1.20
+curl -s https://openrouter.ai/api/v1/models > /tmp/or-models.json && node -e '
+const d=JSON.parse(require("fs").readFileSync("/tmp/or-models.json","utf8")).data;
+const price=(s)=>/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(String(s).trim())?Number(s)*1e6:null;
+const r=d.map(m=>({i:price(m.pricing?.prompt),o:price(m.pricing?.completion)}))
+         .filter(x=>x.i!==null&&x.o!==null&&x.i<=0.30&&x.o<=1.20);
+console.log(r.length, r.filter(x=>x.i>0).length);'
+# 172 routes at or below 0.30/1.20, of which 150 are paid. A live catalogue moves; this is the
+# reading of 2026-09-15 and the command that reproduces whatever it reads today.
 sqlite3 "file:$HOME/.polish/polish.db?mode=ro" \
   "select run_id, sum(coalesce(json_extract(json,'\$.payload.usage.inputTokens'),0)) inTok,
           sum(coalesce(json_extract(json,'\$.payload.usage.outputTokens'),0)) outTok
@@ -42,8 +49,9 @@ sqlite3 "file:$HOME/.polish/polish.db?mode=ro" \
 # run_01m2fms2rgx22qjckxrz66 | 707,466 | 73,094
 ```
 
-At the ceiling, a run of that size costs $0.30. `maxRunUsd = 0.50` sits above it and divides the
-$5 on the key into ten runs.
+At the ceiling, a run of that size costs $0.2999526. `maxRunUsd = 0.50` sits above it. What that
+guards, and what it does not, is set out under "What `maxRunUsd` actually is" below; it is not a
+guarantee about the $5 on the key.
 
 ## R0 was not "0 lines of code". The first run falsified that in 45 seconds.
 
@@ -129,7 +137,8 @@ worker | mistralai/codestral-2508 |  3 | 0.005993
 Both advertise 0.30 input / 0.90 output per 1M — inside the ceiling, and non-zero, so a paid model
 was selected and charged. Both findings above are also closed by this run's evidence: no
 `auto-beta`/`fusion` probe appears at all, and `capability_probe_tools` / `capability_probe_json`
-now appear as `model.call` events (36 probe events against 4 in run 1).
+now appear as `model.call` events: 18 probe `model.call` events in run 2 against 4 in run 1, for
+nine probed models against two.
 
 ## Acceptance check 2 — a run that hits `maxRunUsd` is rejected with a named reason: NOT MET
 
@@ -208,7 +217,7 @@ Verdict FAIL, 6 blocking and 7 notes. Dispositions, in the reconcile precedence
 |---|---|---|
 | 1 | `Number("")` is 0, so a blank advertised price was published as free | **actionable** — `advertisedPricePerM` rejects a blank or unparseable field; test covers `""`, `"   "`, `"tbd"` |
 | 2 | A budget error thrown by a now-brokered probe became the verdict `probe_failed` | **actionable** — budget errors propagate from all five probes and abort `ModelCatalog.discover` instead of being blamed on the model or the provider |
-| 3 | Brokered probe failures now penalise every probed model's routing score, including for an account-wide 429 | **actionable** — probe-role calls no longer feed `catalog.recordCall` or `model.observation.recorded`. This also removes the same effect from the three strict probes, which had it before this item |
+| 3 | Brokered probe failures now penalise every probed model's routing score, including for an account-wide 429 | **actionable, partially** — probe-role calls no longer feed `catalog.recordCall` or `model.observation.recorded`. That closes it for new calls only; see round 2 finding 1 |
 | 4 | `maxRunUsd` is an admission threshold, `--budget-usd` replaces rather than clamps, null-cost calls are outside it | **actionable on the text, trade-off on the behaviour** — see "What `maxRunUsd` actually is" above; the claim "divides the $5 into ten runs" was wrong and is withdrawn |
 | 5 | Deferring acceptance check 2 to R3 waives it rather than meeting it | **contract-misread, upheld** — `R0.md` amended: R0 stays open until check 2 passes |
 | 6 | The $0.0187 total and the quoted run-1 query are not reproducible | **actionable** — total corrected to $0.020655498 with its query; the probe query was missing `type='model.call'` and is corrected, with all four rows |
@@ -221,6 +230,40 @@ Verdict FAIL, 6 blocking and 7 notes. Dispositions, in the reconcile precedence
 
 Finding 11 and 13 confirmed the sentinel fix, production reachability, paid selection, one-attempt
 retry behaviour, and the gate.
+
+## Review round 2 — GPT lane, on commit `6fe729d`
+
+Verdict FAIL, 4 blocking and 3 notes.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | The 76 probe observations already in the store replay into catalogue statistics on restart, so round 1's finding 3 is closed only for new calls | **upheld, and it is not R0's** — see below |
+| 2 | The withdrawn "divides the $5 into ten runs" claim was still in the text | **actionable** — removed; the paragraph now points at what `maxRunUsd` actually guards |
+| 3 | `Number` still reads `"0x10"` as 16 and `"1e-324"` as 0, publishing a hex string and an underflow as prices | **actionable** — only an unsigned decimal with optional fraction and exponent is a price, and a mantissa with a non-zero digit that evaluates to 0 has underflowed, not become free |
+| 4 | "36 probe events against 4" sums two event types; the "150 paid routes" claim carries no filtering command | **actionable** — 18 against 4, and the catalogue count now carries the command that produces it |
+| 5 | A budget error out of discovery is caught silently by `service.ts`, leaving the run in `DISCOVERING_MODELS/RUNNING` retrying forever | **note, recorded for R3** — better than blaming a model, still an error no operator can see. Third shape of the same defect |
+| 6 | `metadata.role` is a free-form string, so the probe exemption is not an enforced boundary | **note** — no non-probe caller sets it; recorded rather than typed, because narrowing `role` touches every call site in the system and belongs to no item here |
+| 7 | `Infinity - Infinity` is `NaN`, which `sort` reads as equal, skipping the name tie-break between two unknown-priced models | **actionable** — compared rather than subtracted, with a two-unknown case in the test |
+
+**On finding 1, and why it goes to R1.** The number reproduces:
+
+```
+sqlite3 "file:$HOME/.polish/polish.db?mode=ro" \
+  "select json from events where type='model.call'
+    and json_extract(json,'$.payload.role')='probe';" | node -e '…sum attemptOutcomes…'
+76 attempts, 67 failures: 51 rate_limit, 16 bad_request, across 11 models
+```
+
+One observation was recorded per attempt, so 76 call observations in the event log are probe
+outcomes, and `ModelObservationRepository.restoreCatalog` replays every one of them into
+`catalog.recordCall` on daemon start. R0's change stopped new ones; it neither created nor
+worsened these, and the event log is append-only.
+
+Closing it needs the rule applied at the replay, which needs the observation to carry the role it
+does not carry today — and the reason 51 of those 67 failures are `rate_limit` is precisely
+§1.2's: an account-wide limit recorded as a model property. That is **R1's** subject, stated in
+this sentence so it cannot be lost: *R1 must make `restoreCatalog` obey the same rule as
+`recordRoutingStats`, and must say what it does with the 76 observations already written.*
 
 ## Gates
 
