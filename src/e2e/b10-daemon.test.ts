@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ScriptedProvider } from "../providers/scripted.js";
+import { reply } from "../providers/scripted.js";
 import { FakeClock } from "../shared/clock.js";
 import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
@@ -305,7 +306,7 @@ function scriptProvider(provider: ScriptedProvider): void {
 
   // Review — 1 reviewer, clean round.
   provider.script("wkr", [
-    { kind: "reply", content: JSON.stringify({ findings: [] }) },
+    ...reviewSteps(),
   ]);
 }
 
@@ -345,7 +346,7 @@ function scriptHumanThenDone(provider: ScriptedProvider): void {
       content: "",
       toolCalls: [{ id: "t2", name: "finish", arguments: JSON.stringify({ summary: "Fixed #pending" }) }],
     },
-    { kind: "reply", content: JSON.stringify({ findings: [] }) },
+    ...reviewSteps(),
   ]);
 }
 
@@ -377,6 +378,26 @@ function scriptUntilBlockingWorker(provider: ScriptedProvider): void {
 // ---------------------------------------------------------------------------
 // B10 daemon happy path
 // ---------------------------------------------------------------------------
+
+
+/**
+ * R2: a clean round now requires its reviewers to find a defect planted for them. These reviewers
+ * answer the canary and stay silent on the real diff, which is what the runs below assert.
+ */
+function reviewSteps(count = 12): { kind: "fn"; fn: (request: { messages: unknown }) => ReturnType<typeof reply> }[] {
+  return Array.from({ length: count }, () => ({
+    kind: "fn" as const,
+    fn: (request: { messages: unknown }) => reply(
+      JSON.stringify({
+        findings: JSON.stringify(request.messages).includes("evictStale")
+          ? [{ criterion: "correctness", severity: "high", blocking: false, claim: "evictStale reads one past the end", evidence: [{ path: "src/cache.ts", line: 8 }], reproduction: ["call evictStale([], 0)"] }]
+          : [],
+      }),
+      10,
+      5,
+    ),
+  }));
+}
 
 describe("B10 daemon path – production RPC E2E", () => {
   let env: TestEnv;

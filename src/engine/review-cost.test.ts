@@ -14,7 +14,7 @@ import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
 import { RunEngine } from "./engine.js";
-import { createReviewingDriver, recentlyRateLimitedReviewModels, type ReviewDriverOptions } from "./reviewDrivers.js";
+import { createReviewingDriver, createValidatingDriver, recentlyRateLimitedReviewModels, type ReviewDriverOptions } from "./reviewDrivers.js";
 import { stubDriverFor } from "./stubs.js";
 
 const cleanup: string[] = [];
@@ -501,6 +501,133 @@ describe("R1 account-scoped rate limits", () => {
   });
 });
 
+/**
+ * R2. A clean round is not clean until the reviewers that produced it have found a defect put
+ * there for them to find. Contract: `docs/ledger/R2.md`.
+ */
+describe("R2 reviewer canary", () => {
+  let store: Store;
+  let clock: FakeClock;
+  let fixture: Fixture;
+
+  beforeEach(async () => {
+    fixture = await repositoryFixture();
+    store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    clock = new FakeClock(1_700_000_000_000);
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  /** A round of completed, finding-free executions: the shape that used to become a clean round. */
+  const seedCleanRound = (runId: string, model = "m0"): void => {
+    const axes = ["correctness", "regression", "adversarial"] as const;
+    axes.forEach((axis, index) => {
+      appendExecution(store, clock, runId, {
+        roundIndex: 1,
+        axis,
+        requestedModel: { provider: "reviews", model },
+        completed: true,
+        hash: fixture.integrated,
+        at: clock.now() + index + 1,
+      });
+    });
+  };
+
+  const validatingEngine = (canaryReply: string | ProviderError): { engine: RunEngine; provider: ScriptedProvider } => {
+    const provider = new ScriptedProvider("reviews", [{ name: "m0", capabilities: FAKE_CAPABILITIES.strong }]);
+    provider.script("m0", [
+      canaryReply instanceof ProviderError
+        ? { kind: "error", error: canaryReply }
+        : { kind: "reply", content: canaryReply },
+    ]);
+    const config = defaultConfig();
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of NON_VALIDATING_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
+    engine.registerPhase("VALIDATING", createValidatingDriver({
+      resolveReviewers: () => [{ provider, model: { provider: "reviews", model: "m0" } }],
+    }));
+    return { engine, provider };
+  };
+
+  // The acceptance check the plan names: a reviewer that returns an empty result on a seeded
+  // defect does not reach DONE. It does not even reach a clean round.
+  it("stops the run when a reviewer reports nothing on the seeded defect", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    seedCleanRound(runId);
+    const { engine, provider } = validatingEngine(emptyReview());
+    await engine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("NEEDS_HUMAN");
+    expect(run.terminalReason?.code).toBe("review_unverifiable");
+    expect(run.terminalReason?.summary).toContain("reviews:m0");
+    expect(store.repos.cleanRounds.listByRun(runId)).toHaveLength(0);
+    // The canary went through the same review call path, with the seeded diff in the pack.
+    expect(JSON.stringify(provider.calls[0]?.messages)).toContain("evictStale");
+  });
+
+  it("records the clean round when the reviewer finds the seeded defect", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    seedCleanRound(runId);
+    const { engine } = validatingEngine(reviewJson("correctness", "src/cache.ts"));
+    await engine.tickRun(runId);
+
+    expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
+    expect(store.repos.cleanRounds.listByRun(runId)).toHaveLength(1);
+    const canary = store.events.list(runId, { types: ["review.canary_recorded"] });
+    expect(canary).toHaveLength(1);
+    expect(canary[0]?.payload["verified"]).toBe(true);
+  });
+
+  // Silence is not an answer: a reviewer that could not be asked has not earned anything either.
+  it("treats a failed canary call as unverified", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    seedCleanRound(runId);
+    const { engine } = validatingEngine(new ProviderError("reviews", "server", "boom"));
+    await engine.tickRun(runId);
+
+    expect(store.repos.runs.get(runId)?.terminalReason?.code).toBe("review_unverifiable");
+    const canary = store.events.list(runId, { types: ["review.canary_recorded"] });
+    expect(canary[0]?.payload["verified"]).toBe(false);
+    expect(canary[0]?.payload["error"]).toContain("boom");
+  });
+
+  // One canary per model per run: the question is whether this reviewer can report anything on
+  // this transport, and that does not change between rounds.
+  it("asks a model once per run, not once per round", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    seedCleanRound(runId);
+    const { engine, provider } = validatingEngine(reviewJson("correctness", "src/cache.ts"));
+    await engine.tickRun(runId);
+    expect(provider.calls).toHaveLength(1);
+
+    store.repos.runs.get(runId);
+    appendExecution(store, clock, runId, {
+      roundIndex: 2,
+      axis: "correctness",
+      requestedModel: { provider: "reviews", model: "m0" },
+      completed: true,
+      hash: fixture.integrated,
+      at: clock.now() + 10,
+    });
+    await engine.tickRun(runId);
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  // Nothing would be recorded clean, so there is nothing to have earned and nothing to spend.
+  it("asks nothing when no clean round is pending", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    const { engine, provider } = validatingEngine(emptyReview());
+    await engine.tickRun(runId);
+
+    expect(provider.calls).toHaveLength(0);
+    expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
+  });
+});
+
 function sourceFiles(root: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(root)) {
@@ -551,6 +678,28 @@ async function repositoryFixture(): Promise<Fixture> {
   const integrated = await git.commitAll("integrated");
   if (integrated === null) throw new Error("fixture integrated commit missing");
   return { root, repoDir, base, integrated };
+}
+
+const NON_VALIDATING_PHASES = [
+  "CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS",
+  "PLANNING", "EXECUTING", "GATING", "COMPARING", "INTEGRATING", "REVIEWING", "CONVERGENCE_CHECK",
+] as const;
+
+/** The same seeding, parked in VALIDATING, which is where the canary gate sits. */
+function seedValidatingRun(store: Store, clock: FakeClock, fixture: Fixture): { runId: string; checkpointHash: string } {
+  const seeded = seedReviewingRun(store, clock, fixture);
+  const run = store.repos.runs.get(seeded.runId)!;
+  store.events.append([{
+    id: id("evt", clock.now() + 3),
+    runId: seeded.runId,
+    ts: clock.now() + 3,
+    type: "run.phase_changed",
+    payload: { run: { ...run, phase: "VALIDATING", updatedAt: clock.now() + 3 } },
+    causedBy: [],
+    actor: { kind: "system" },
+    artifacts: [],
+  }]);
+  return seeded;
 }
 
 function seedReviewingRun(store: Store, clock: FakeClock, fixture: Fixture): { runId: string; checkpointHash: string } {
@@ -819,7 +968,7 @@ function appendExecution(
     axis: "correctness" | "regression" | "adversarial";
     requestedModel: { provider: string; model: string };
     completed: boolean;
-    error: string;
+    error?: string;
     hash: string;
     at: number;
   },
@@ -833,7 +982,7 @@ function appendExecution(
     requestedModel: input.requestedModel,
     completed: input.completed,
     findings: [],
-    error: input.error,
+    ...(input.error === undefined ? {} : { error: input.error }),
     startedAt: input.at,
     finishedAt: input.at,
   };

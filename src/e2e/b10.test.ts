@@ -22,7 +22,7 @@ import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { reviewerSystemPrompt } from "../review/reviewerProtocol.js";
 import { defaultConfig, type PolishConfig } from "../domain/config.js";
 import { RunEngine } from "../engine/engine.js";
-import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { FAKE_CAPABILITIES, ScriptedProvider, reply } from "../providers/scripted.js";
 import { FakeClock } from "../shared/clock.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
@@ -302,6 +302,26 @@ async function buildTestEngine(
 // B10 positive path
 // ---------------------------------------------------------------------------
 
+
+/**
+ * R2: a clean round now requires its reviewers to find a defect planted for them. These reviewers
+ * answer the canary and stay silent on the real diff, which is what the runs below assert.
+ */
+function reviewSteps(count = 12): { kind: "fn"; fn: (request: { messages: unknown }) => ReturnType<typeof reply> }[] {
+  return Array.from({ length: count }, () => ({
+    kind: "fn" as const,
+    fn: (request: { messages: unknown }) => reply(
+      JSON.stringify({
+        findings: JSON.stringify(request.messages).includes("evictStale")
+          ? [{ criterion: "correctness", severity: "high", blocking: false, claim: "evictStale reads one past the end", evidence: [{ path: "src/cache.ts", line: 8 }], reproduction: ["call evictStale([], 0)"] }]
+          : [],
+      }),
+      10,
+      5,
+    ),
+  }));
+}
+
 describe("B10 positive path – production E2E", () => {
   let env: TestEnv;
 
@@ -367,7 +387,7 @@ describe("B10 positive path – production E2E", () => {
 
     // Review (1 reviewer via Router requireJson → "sup", clean round – no findings).
     provider.script("sup", [
-      { kind: "reply", content: JSON.stringify({ findings: [] }) },
+      ...reviewSteps(),
     ]);
 
     // Run setup.
@@ -554,7 +574,7 @@ describe("B10 positive path – production E2E", () => {
         toolCalls: [{ id: "t2", name: "finish", arguments: JSON.stringify({ summary: "Fixed #pending not cleared before retry" }) }],
       },
     ]);
-    provider.script("sup", [{ kind: "reply", content: JSON.stringify({ findings: [] }) }]);
+    provider.script("sup", reviewSteps());
 
     const run = engine.createRun({ projectPath: repoDir, runBranch: "polish/main" });
     recordMission(store, run.id, run.missionId, repoDir, clock);
@@ -592,6 +612,10 @@ describe("B10 positive path – production E2E", () => {
       `worker|agent_run|${flagged}|t=undefined|mt=budget|rf=undefined|rs=undefined|m=user,assistant,tool`,
       // Unconditional, and identical in both arms. Each probe runs once per candidate model, and
       // this fixture has two, so each appears twice: the count is part of the claim.
+      // Two reviewer rows, not one: the round's review, and R2's canary, which is deliberately the
+      // same shape — same role, same schema, same disabled reasoning — because a canary down a
+      // different path would verify a path the reviewer does not use.
+      `reviewer|review_correctness|${off}|t=0|mt=1500|rf=undefined|rs=review_findings|m=system,user`,
       `reviewer|review_correctness|${off}|t=0|mt=1500|rf=undefined|rs=review_findings|m=system,user`,
       ...["wkr", "sup"].flatMap(() => [
         `probe|capability_probe_strict_progress|${off}|t=0|mt=256|rf=undefined|rs=agent_progress_score|m=user`,

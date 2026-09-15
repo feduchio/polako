@@ -428,6 +428,10 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
         resolveDebateRoles: (ctx) => selectDebateRoles(deps, ctx),
         completeDebate: async (ctx, request) => completeDebateRole(deps, ctx, request),
         sandbox: sandboxFor,
+        // R2: the same reviewers REVIEWING used, so the canary asks the models that produced the
+        // round rather than whichever ones routing would pick at this moment.
+        resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
+        protocols: deps.protocols,
       }),
     ),
   );

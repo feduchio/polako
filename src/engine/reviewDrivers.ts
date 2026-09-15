@@ -48,6 +48,7 @@ import type { TerminalReason } from "../domain/run.js";
 import { PolishError } from "../shared/errors.js";
 import { buildCheckpointReviewArtifact, type CheckpointReviewArtifact } from "../review/artifact.js";
 import { REVIEW_TRUNCATED_MESSAGE, runAxisReview, type ReviewProvider, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
+import { runReviewerCanary, type ReviewerCanaryResult } from "../review/canary.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { id } from "../shared/ids.js";
 import {
@@ -88,6 +89,13 @@ export interface DebateCompletionRequest {
 
 export interface ValidatingDriverOptions {
   resolveWorker?: (ctx: PhaseContext) => FindingEvidenceWorker | Promise<FindingEvidenceWorker>;
+  /**
+   * Reviewers to put through the seeded-defect canary before a clean round is recorded. Omitted in
+   * tests that are not about R2; a production driver without it would record clean rounds no one
+   * has shown to be earned, so composition always supplies it.
+   */
+  resolveReviewers?: (ctx: PhaseContext) => ReviewProvider[] | Promise<ReviewProvider[]>;
+  protocols?: ProtocolRegistry;
   /** Three distinct cost-eligible models, or null to skip debate (no invented verdict). */
   resolveDebateRoles?: (ctx: PhaseContext) => DebateRoles | null | Promise<DebateRoles | null>;
   completeDebate?: (ctx: PhaseContext, request: DebateCompletionRequest) => Promise<string>;
@@ -300,6 +308,11 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
     }
 
     if (hasPendingFindingWork(ctx, hash)) return { status: "complete", nextPhase: "PLANNING" };
+    const unverified = await verifyReviewersOrExplain(ctx, hash, options);
+    if (unverified !== null) {
+      emitNeedsHumanReport(ctx, unverified);
+      return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: unverified };
+    }
     recordCleanRoundIfEligible(ctx, hash);
     return { status: "complete", nextPhase: "CONVERGENCE_CHECK" };
   };
@@ -725,6 +738,109 @@ function acceptanceLines(finding: Finding): string[] {
   if (finding.suggestedCheck !== undefined) return [finding.suggestedCheck];
   if (finding.reproduction.length > 0) return [`The reproduction no longer demonstrates the issue: ${finding.reproduction.join(" → ")}`];
   return [`Independent gates show that "${finding.claim}" is resolved`];
+}
+
+/**
+ * R2. A clean round is not clean until the reviewers that produced it have found a defect that was
+ * put there for them to find.
+ *
+ * Returns the terminal reason when they have not, and `null` when there is nothing to verify or
+ * every model is verified. Each model is canaried once per run: the question is whether this
+ * reviewer, on this transport, can report anything at all, and that does not change between rounds.
+ */
+async function verifyReviewersOrExplain(
+  ctx: PhaseContext,
+  checkpointHash: string,
+  options: ValidatingDriverOptions,
+): Promise<TerminalReason | null> {
+  if (options.resolveReviewers === undefined) return null;
+  const required = ctx.config.review.reviewersPerRound;
+  const reviewExecutions = ctx.store.repos.reviewExecutions.listByRun(ctx.run.id);
+  const reviewRoundIndex = nextUnconsumedCompletedReviewRound(
+    ctx.store.repos.cleanRounds.listByRun(ctx.run.id),
+    reviewExecutions,
+    checkpointHash,
+    required,
+  );
+  // Nothing would be recorded clean, so there is nothing to have earned.
+  if (reviewRoundIndex === null) return null;
+
+  // The models that actually produced the round, not the ones routing would pick now. A skip
+  // reached no provider, so its model produced nothing and has nothing to have earned.
+  const produced = new Map<string, ModelRef>();
+  for (const execution of reviewExecutions) {
+    if (execution.checkpointHash !== checkpointHash) continue;
+    if (execution.roundIndex !== reviewRoundIndex) continue;
+    if (!execution.completed || isSkippedExecution(execution)) continue;
+    produced.set(modelRefKey(execution.requestedModel), execution.requestedModel);
+  }
+  if (produced.size === 0) return null;
+
+  const verdicts = canaryVerdicts(ctx);
+  const pending = [...produced.values()].filter((model) => !verdicts.has(modelRefKey(model)));
+  if (pending.length > 0) {
+    const reviewers = await options.resolveReviewers(ctx);
+    const protocols = options.protocols ?? ProtocolRegistry.load(defaultProtocolsRoot());
+    for (const model of pending) {
+      const provider = reviewers.find((reviewer) => modelRefKey(reviewer.model) === modelRefKey(model));
+      if (provider === undefined) {
+        // The model that produced the round is not among today's reviewers, so it cannot be asked.
+        // Unverified: an unanswerable question is not a pass.
+        verdicts.set(modelRefKey(model), false);
+        recordCanary(ctx, { model, findings: 0, verified: false, promptDigest: "", error: "reviewer no longer selectable" });
+        continue;
+      }
+      const result = await runReviewerCanary({
+        provider,
+        protocols,
+        runId: ctx.run.id,
+        now: ctx.clock.now(),
+        maxOutputTokens: ctx.config.review.maxOutputTokens,
+      });
+      verdicts.set(modelRefKey(result.model), result.verified);
+      recordCanary(ctx, result);
+    }
+  }
+
+  const failed = [...produced.values()].filter((model) => verdicts.get(modelRefKey(model)) !== true);
+  if (failed.length === 0) return null;
+  const names = failed.map((model) => `${model.provider}:${model.model}`).join(", ");
+  return {
+    code: "review_unverifiable",
+    summary: `review unverifiable: ${names} reported nothing on a diff with a seeded off-by-one, so its clean verdict on this checkpoint is not evidence`,
+    question: "The reviewers that produced this clean round could not find a planted defect. How should the run proceed?",
+    options: ["Replace the reviewer models and review again", "Stop the run"],
+  };
+}
+
+function canaryVerdicts(ctx: PhaseContext): Map<string, boolean> {
+  const verdicts = new Map<string, boolean>();
+  for (const event of ctx.store.events.list(ctx.run.id, { types: ["review.canary_recorded"] })) {
+    const model = event.payload["model"];
+    if (typeof model !== "object" || model === null) continue;
+    const ref = model as ModelRef;
+    verdicts.set(modelRefKey(ref), event.payload["verified"] === true);
+  }
+  return verdicts;
+}
+
+function recordCanary(ctx: PhaseContext, result: ReviewerCanaryResult): void {
+  ctx.store.events.append([{
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: "review.canary_recorded",
+    payload: {
+      model: result.model,
+      findings: result.findings,
+      verified: result.verified,
+      promptDigest: result.promptDigest,
+      ...(result.error === undefined ? {} : { error: result.error }),
+    },
+    causedBy: [],
+    actor: SYSTEM_ACTOR,
+    artifacts: [],
+  }]);
 }
 
 function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): void {

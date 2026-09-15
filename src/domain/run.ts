@@ -140,6 +140,12 @@ export const TerminalReasonSchema = z.object({
     "pathology_detected",
     "budget_exhausted",
     "providers_unavailable",
+    /**
+     * Review ran and produced no findings, and the reviewers that produced it could not find a
+     * seeded defect either — so the clean verdict is not evidence of anything. `docs/RECOVERY.md`
+     * R2: without this, §1.1 repeats and goes unnoticed a second time.
+     */
+    "review_unverifiable",
     /** the project's checks cannot produce evidence here — e.g. its packages are not installed */
     "environment_not_ready",
     "internal_error",
