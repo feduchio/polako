@@ -700,8 +700,13 @@ function handleZeroSurvivors(
     nextPhase: "FAILED",
     // Counted, not generalised: "every candidate failed its gates" is false when one of them never
     // reached a gate, and a mixed attempt is the case where the operator most needs the breakdown.
+    //
+    // `repeated_failure` means the work was done and judged. When nothing reached a gate, nothing
+    // was judged, and calling that repeated failure is the same kind of false label as calling a
+    // timeout an exhausted allowance — which is what narrowing `providerRefusal` produced until
+    // this branch existed.
     terminalReason: {
-      code: "repeated_failure",
+      code: judged.length === 0 ? "providers_unavailable" : "repeated_failure",
       summary: `task ${task.id} produced no survivor on attempt ${String(attempts)} of ${String(candidates.length)} candidates: ` +
         `${String(judged.length)} reached a gate and failed, ${String(refused.length)} were refused by the provider, ` +
         `${String(other)} ended otherwise` +
@@ -738,22 +743,19 @@ function handleNoComparisonWinner(
   ctx: PhaseContext,
   task: Task,
   comparedEventId: string,
-): { status: "complete"; nextPhase: "PLANNING" | "NEEDS_HUMAN" | "FAILED" } {
+): { status: "complete"; nextPhase: "PLANNING" | "NEEDS_HUMAN" | "FAILED"; terminalReason?: RunTerminalReason } {
   const retry = task.attempts < ctx.config.retry.maxAttempts;
   const nextState: Task["state"] = retry ? "READY" : "BLOCKED";
   appendTaskEvent(ctx, { ...task, state: nextState, updatedAt: ctx.clock.now() });
   if (retry) return { status: "complete", nextPhase: "PLANNING" };
-  emitNeedsHumanReport(
-    ctx,
-    {
-      code: "repeated_failure",
-      summary: `comparison produced no winner for task ${task.id} after ${task.attempts} attempts`,
-      question: "Tournament comparison produced no winner. How should the run proceed?",
-      options: ["Retry planning", "Stop the run"],
-    },
-    [comparedEventId],
-  );
-  return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+  const reason: RunTerminalReason = {
+    code: "repeated_failure",
+    summary: `comparison produced no winner for task ${task.id} after ${task.attempts} attempts`,
+    question: "Tournament comparison produced no winner. How should the run proceed?",
+    options: ["Retry planning", "Stop the run"],
+  };
+  emitNeedsHumanReport(ctx, reason, [comparedEventId]);
+  return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
 }
 
 function toTournamentSource(

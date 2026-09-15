@@ -957,19 +957,25 @@ describe("B2 production candidate drivers", () => {
 
     // Waiting repairs an allowance and nothing else. Telling an operator to wait for a 404, a 400
     // or a local context-budget overflow is telling them to wait for something that never comes.
+    // Three outcomes, not two. `repeated_failure` means the work was done and judged; when nothing
+    // reached a gate, nothing was judged, and only an allowance is worth waiting for.
     it.each([
-      ["ProviderError: rate limited: 429", "provider_budget_exhausted"],
-      ["ProviderError: not found: 404", "repeated_failure"],
-      ["ProviderError: bad request (400): schema", "repeated_failure"],
-      ["ProviderError: auth failed (403)", "repeated_failure"],
-      ["ProviderError: request timed out after 120000ms", "repeated_failure"],
-      ["BUDGET_EXCEEDED", "repeated_failure"],
-      ["STOPPED", "repeated_failure"],
-    ] as const)("classifies %s as %s", async (error, code) => {
+      ["ProviderError: rate limited: 429", "provider_budget_exhausted", "refused all 1"],
+      ["ProviderError: not found: 404", "providers_unavailable", "0 reached a gate and failed"],
+      ["ProviderError: bad request (400): schema", "providers_unavailable", "1 ended otherwise"],
+      ["ProviderError: auth failed (403)", "providers_unavailable", "1 ended otherwise"],
+      ["ProviderError: request timed out after 120000ms", "providers_unavailable", "1 ended otherwise"],
+      ["BUDGET_EXCEEDED", "providers_unavailable", "1 ended otherwise"],
+      ["STOPPED", "providers_unavailable", "1 ended otherwise"],
+    ] as const)("classifies %s as %s", async (error, code, fragment) => {
       const { store: s3, engine, runId, taskId } = await seedGating();
       exhaust(s3, runId, taskId, [{ state: "DISCARDED", error, gated: false }]);
       await engine.tickRun(runId);
-      expect(s3.repos.runs.get(runId)?.terminalReason?.code).toBe(code);
+      const reason = s3.repos.runs.get(runId)?.terminalReason;
+      expect(reason?.code).toBe(code);
+      expect(reason?.summary).toContain(fragment);
+      // The raw error reaches the operator whichever branch was taken.
+      expect(reason?.summary).toContain(error.slice(0, 20));
       s3.close();
     });
 
@@ -1056,7 +1062,7 @@ describe("B2 production candidate drivers", () => {
 
       const run = s.repos.runs.get(runId)!;
       expect(run.phase).toBe("FAILED");
-      expect(run.terminalReason?.code).toBe("repeated_failure");
+      expect(run.terminalReason?.code).toBe("providers_unavailable");
       expect(run.terminalReason?.summary).toContain("npm ci failed");
       s.close();
     });

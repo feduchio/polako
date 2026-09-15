@@ -32,9 +32,9 @@ Three layers, outermost first, because the outermost is the one that makes the g
 6. A throwing driver leaves one `run.driver_failed` event carrying the phase and the message, and
    the run paused — with a cause an operator can read.
 
-Gate: Node 24.20.0, exit 0, 96 files, **1152 tests** (1149 before the fix round, 1146 before the
-item). `git diff --numstat f66d3af -- src`: 118 production, 204 test insertions — 322 total,
-22 over the plan's 300.
+Gate: Node 24.20.0, exit 0, 96 files, **1159 tests** (1146 before the item; 13 added across three
+rounds). `git diff --numstat f66d3af -- src`: **177 production, 228 test — 405 total**, against the
+plan's 300.
 
 ## Review round 1 — GPT lane, on commit `61b89e2`
 
@@ -67,11 +67,28 @@ Verdict FAIL, 4 blocking and 4 notes.
 
 | # | Finding | Ruling |
 |---|---|---|
-| 1 | The fallback closes the hole but replaces a *truer* reason with a generic one: four sites in `convergenceDrivers.ts` build a specific reason — "no proven rollback target", the pathology decision's own words — and pass it only to the report, so the run recorded "without a stated reason" | **actionable** — all four now put the reason on the run as well. The fallback is a floor, not a substitute, and it was being used as one |
-| 2 | `providerRefusal` matched every `ProviderError` and `BUDGET_EXCEEDED`, so a 404, a 400, an auth failure, a timeout and the **local** context-pack cap all became "wait for the allowance to reset" | **actionable** — the predicate decides whether an operator is told to wait, so it now matches only what waiting repairs: rate limits and quotas. Seven cases, one per real string in the store |
+| 1 | The fallback closes the hole but replaces a *truer* reason with a generic one: five returns in `convergenceDrivers.ts` build a specific reason — "no proven rollback target", the pathology decision's own words — and pass it only to the report, so the run recorded "without a stated reason" | **actionable** — all four now put the reason on the run as well. The fallback is a floor, not a substitute, and it was being used as one |
+| 2 | `providerRefusal` matched every `ProviderError` and `BUDGET_EXCEEDED`, so a 404, a 400, an auth failure, a timeout and the **local** `BUDGET_EXCEEDED` — which `agents/runner.ts` also raises for task token and turn exhaustion — all became "wait for the allowance to reset" | **actionable** — the predicate decides whether an operator is told to wait, so it now matches only what waiting repairs: rate limits and quotas. Seven cases, one per real string in the store |
 | 3 | The contract still said every candidate in all three runs was refused by the provider, which two of them contradict | **actionable on the text** — corrected: no candidate reached a gate, and what discarded them was not one thing |
 | 4 | `requireRun` still sat outside the guard, so a driver that closes the store replaces its own error with "database is not open" | **actionable** — the pre-driver phase is used when the re-read fails |
 | 5–8 | The attempt filter is correct in the production lifecycle; the withdrawn resume option is honest; the tests admit some mutants; the size figures are right | **notes** — the classification table added this round closes the largest of the test gaps |
+
+## Review round 3 — GPT lane, on commit `8a89cc5`. R3 stops.
+
+Verdict FAIL, 4 blocking and 1 note. Three of the four changed code.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | Narrowing `providerRefusal` fixed one false label by creating another: a timeout, a 404 or an auth failure now reported `repeated_failure`, whose documented meaning is that the work **was** done and judged | **actionable, and the real defect of round 2** — three outcomes, not two. Nothing judged and no allowance to wait for is `providers_unavailable`; `repeated_failure` is reserved for work that reached a gate. Each of the seven table rows now asserts the code, a fragment of the summary, and that the raw error still reaches the operator |
+| 2 | Five more sites return a terminal phase knowing a better reason than the fallback: `candidateDrivers.ts:464,470,519,756`, `convergenceDrivers.ts:67`, `councilDrivers.ts:265` | **partly actionable** — the two that already build the exact reason for the report now put it on the run as well (comparison-no-winner, and the anti-fake-`DONE` check). The other four are recorded below; the fallback still guarantees they are not silent |
+| 3 | `requireRun` at `engine.ts:252` and `control("pause")` were still unguarded, so a store that dies during the driver replaces the driver's error, and a failing pause leaves the run `RUNNING` with a recorded failure | **actionable** — both guarded. Pausing is a courtesy on the way out and a courtesy that throws replaces the error the caller needs |
+| 4 | The record's figures were stale — 1152 tests and 322 insertions against the actual 1159 and 405 — it said four convergence sites where five returns changed, attributed `BUDGET_EXCEEDED` only to the context-pack cap, and inferred "no work was ever done" from "no candidate reached a gate" when the store shows 4 and 26 worker calls in two of those runs | **actionable on the text** — all corrected. A figure measured one commit ago is not this commit's figure |
+| 5 | Several tests pass for the wrong reason, and all seven table rows asserted only the code | **note, partly actionable** — the rows now assert the summary too |
+
+**405 insertions against a ceiling of 300, after three rounds.** R3 stops here. What it delivered is
+the floor — no terminal phase without a reason, from any site — plus truthful classification at the
+one site three runs actually died in. What it did not deliver is a *good* reason at the four
+remaining sites, which is a successor's work and is named below.
 
 ## Not covered
 
@@ -81,5 +98,10 @@ Verdict FAIL, 4 blocking and 4 notes.
 - **The tests seed candidates directly.** Production reaches these states by updating an
   `IMPLEMENTED` candidate through `candidate.gated`; the fixtures assert the projection that
   results, not the lifecycle that produces it.
+- **Four sites still fall back to the generic reason** while knowing better: an exhausted
+  integration failure and an "integrated" result missing its commit (`candidateDrivers.ts:464,470`),
+  incomplete sibling tasks (`:519`), and exhausted coding tasks (`councilDrivers.ts:265`). Each
+  knows the ids, states and errors the fallback cannot. They are not silent — that is what the
+  fallback guarantees — but they are less informative than they could be.
 - **The daemon's stderr still goes nowhere** (`stdio: "ignore"`). The fix here is that the cause is
   in the run's own event log, where `polish log` already looks, not that the process logs.

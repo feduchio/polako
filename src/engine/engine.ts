@@ -251,7 +251,13 @@ export class RunEngine {
         councilPhase ||
         (err instanceof PolishError && (err.code === "PROVIDERS_UNAVAILABLE" || err.code === "OUTPUT_CONTRACT"))
       ) {
-        if (this.requireRun(runId).control === "RUNNING") this.control(runId, "pause");
+        // Same reason as the recorder above: pausing is a courtesy on the way out, and a courtesy
+        // that throws replaces the error the caller needs.
+        try {
+          if (this.requireRun(runId).control === "RUNNING") this.control(runId, "pause");
+        } catch {
+          // deliberately swallowed
+        }
       }
       if (err instanceof PolishError && (err.code === "PROVIDERS_UNAVAILABLE" || err.code === "OUTPUT_CONTRACT")) {
         return;

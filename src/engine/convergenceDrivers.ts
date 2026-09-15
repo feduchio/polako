@@ -61,10 +61,11 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
     const evidence = gatherCompletionEvidence(ctx);
     const antiFake = assertCodeChangeMissionMayComplete(evidence);
     if (!antiFake.ok) {
-      if (antiFake.terminal === "NEEDS_HUMAN") {
-        emitNeedsHumanReport(ctx, humanTerminalReason(antiFake.reason));
-      }
-      return { status: "complete", nextPhase: antiFake.terminal };
+      // On the run, not only in the report: this code knows the cause, and R3's fallback would
+      // otherwise record "without a stated reason" over it.
+      const reason = humanTerminalReason(antiFake.reason);
+      if (antiFake.terminal === "NEEDS_HUMAN") emitNeedsHumanReport(ctx, reason);
+      return { status: "complete", nextPhase: antiFake.terminal, terminalReason: reason };
     }
 
     if (acceptedB6Done(ctx, controller, hash)) {
