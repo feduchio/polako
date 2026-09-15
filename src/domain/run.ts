@@ -39,7 +39,10 @@ export const RUN_PHASE_TABLE: TransitionTable<RunPhase> = {
     DISCOVERING_MODELS: ["PLANNING", "NEEDS_HUMAN", "FAILED"],
     PLANNING: ["EXECUTING", "REVIEWING", "CONVERGENCE_CHECK", "NEEDS_HUMAN", "FAILED"],
     EXECUTING: ["GATING", "PLANNING", "NEEDS_HUMAN", "FAILED"],
-    GATING: ["COMPARING", "PLANNING", "FAILED"],
+    // NEEDS_HUMAN, because a provider that refused every candidate has not judged the work: an
+    // exhausted allowance lifts on its own, and terminating the run instead throws away a
+    // checkpoint the operator could have continued from. `docs/RECOVERY.md` R3.
+    GATING: ["COMPARING", "PLANNING", "NEEDS_HUMAN", "FAILED"],
     COMPARING: ["INTEGRATING", "PLANNING", "NEEDS_HUMAN", "FAILED"],
     INTEGRATING: ["REVIEWING", "PLANNING", "FAILED"],
     REVIEWING: ["VALIDATING", "FAILED"],
@@ -139,6 +142,13 @@ export const TerminalReasonSchema = z.object({
     "repeated_failure",
     "pathology_detected",
     "budget_exhausted",
+    /**
+     * Nothing ran: every candidate was refused by the provider before it could produce work, so
+     * there is no verdict on anything. Distinct from `repeated_failure`, which says the work was
+     * done and judged. Finding 55 is the case where these two were indistinguishable because
+     * neither was recorded.
+     */
+    "provider_budget_exhausted",
     "providers_unavailable",
     /**
      * Review ran and produced no findings, and the reviewers that produced it could not find a

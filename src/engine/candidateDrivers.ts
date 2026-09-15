@@ -654,12 +654,57 @@ function passedCandidates(ctx: PhaseContext, taskId: string): Candidate[] {
   return ctx.store.repos.candidates.listByTask(taskId).filter((candidate) => candidate.state === "PASSED_GATES");
 }
 
-function handleZeroSurvivors(ctx: PhaseContext, task: Task): { status: "complete"; nextPhase: "PLANNING" | "FAILED" } {
+/**
+ * R3, finding 55. This returned `FAILED` with no reason at all, so `polish status` showed
+ * `terminalReason: null` and the operator could not tell a run whose work failed its gates from a
+ * run where no work was ever done. Three runs in the store end this way.
+ */
+function handleZeroSurvivors(
+  ctx: PhaseContext,
+  task: Task,
+): { status: "complete"; nextPhase: "PLANNING" | "NEEDS_HUMAN" | "FAILED"; terminalReason?: RunTerminalReason } {
   const attempts = task.attempts;
   const retry = attempts < ctx.config.retry.maxAttempts;
   const nextState: Task["state"] = retry ? "READY" : "BLOCKED";
   appendTaskEvent(ctx, { ...task, state: nextState, updatedAt: ctx.clock.now() });
-  return { status: "complete", nextPhase: retry ? "PLANNING" : "FAILED" };
+  if (retry) return { status: "complete", nextPhase: "PLANNING" };
+
+  const candidates = ctx.store.repos.candidates.listByTask(task.id);
+  const judged = candidates.filter((candidate) => candidate.gateReport !== null);
+  const refused = candidates.filter((candidate) => candidate.gateReport === null && providerRefusal(candidate.error));
+  if (judged.length === 0 && refused.length > 0) {
+    // The provider refused every candidate, so nothing was built and nothing was judged. An
+    // allowance lifts on its own, which is why this asks rather than terminates.
+    const reason: RunTerminalReason = {
+      code: "provider_budget_exhausted",
+      summary: `no candidate for task ${task.id} reached a gate: the provider refused all ${String(refused.length)} of them (${firstLine(refused[0]?.error)})`,
+      question: "No work was produced, because the provider refused every candidate. How should the run proceed?",
+      options: ["Wait for the allowance to reset and resume", "Stop the run"],
+    };
+    emitNeedsHumanReport(ctx, reason);
+    return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
+  }
+  return {
+    status: "complete",
+    nextPhase: "FAILED",
+    terminalReason: {
+      code: "repeated_failure",
+      summary: judged.length === 0
+        ? `no candidate for task ${task.id} reached a gate after ${String(attempts)} attempts (${firstLine(candidates.at(-1)?.error) || "no reason recorded"})`
+        : `every candidate for task ${task.id} failed its gates after ${String(attempts)} attempts`,
+    },
+  };
+}
+
+/** A provider that would not answer, as opposed to work that was answered and found wanting. */
+function providerRefusal(error: string | null | undefined): boolean {
+  if (error === null || error === undefined) return false;
+  return /ProviderError|rate limit|\b429\b|budget/i.test(error);
+}
+
+function firstLine(error: string | null | undefined): string {
+  if (error === null || error === undefined) return "";
+  return error.split("\n")[0]?.slice(0, 200) ?? "";
 }
 
 function handleNoComparisonWinner(

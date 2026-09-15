@@ -223,6 +223,15 @@ export class RunEngine {
     } catch (err) {
       const phase = this.requireRun(runId).phase;
       const councilPhase = phase === "INTERPRETING_MISSION" || phase === "PLANNING";
+      // Recorded before anything else happens to the run. A driver error used to reach no event and
+      // no log — the daemon is spawned with `stdio: "ignore"` — so a run paused here looked like a
+      // run the operator had paused themselves, with the cause unavailable anywhere. Finding 55's
+      // second shape (`docs/ledger/R0-run.md`).
+      this.append(runId, "run.driver_failed", {
+        phase,
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        ...(err instanceof PolishError ? { code: err.code } : {}),
+      }, SYSTEM_ACTOR);
       if (
         councilPhase ||
         (err instanceof PolishError && (err.code === "PROVIDERS_UNAVAILABLE" || err.code === "OUTPUT_CONTRACT"))

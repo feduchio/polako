@@ -840,6 +840,133 @@ describe("B2 production candidate drivers", () => {
     emptyStore.close();
   });
 
+  /**
+   * R3, finding 55. Three runs in the store end `FAILED` with `terminalReason: null`, so the
+   * operator cannot tell work that failed its gates from work that was never done.
+   */
+  describe("zero survivors name their cause", () => {
+    const exhaust = (emptyStore: Store, runId: string, taskId: string, candidates: { state: "DISCARDED" | "FAILED_GATES"; error?: string; gated: boolean }[]): void => {
+      const task = emptyStore.repos.tasks.get(taskId)!;
+      emptyStore.events.append([
+        {
+          id: id("evt", clock.now() + 50),
+          runId,
+          ts: clock.now() + 50,
+          type: "task.state_changed",
+          payload: { task: { ...task, state: "GATED", attempts: defaultConfig().retry.maxAttempts, updatedAt: clock.now() + 50 } },
+          causedBy: [],
+          actor: { kind: "system" },
+          artifacts: [],
+        },
+        ...candidates.map((spec, index) => ({
+          id: id("evt", clock.now() + 60 + index),
+          runId,
+          ts: clock.now() + 60 + index,
+          type: "candidate.created",
+          payload: {
+            candidate: {
+              id: id("cand", clock.now() + 60 + index),
+              runId,
+              taskId,
+              attempt: defaultConfig().retry.maxAttempts,
+              model: { provider: "p", model: `m${index}` },
+              baseCheckpointHash: task.baseCheckpointHash,
+              branch: `polish/${runId}/candidates/c${index}`,
+              worktreePath: null,
+              headCommit: null,
+              state: spec.state,
+              gateReport: spec.gated
+                ? {
+                    gatedCommit: task.baseCheckpointHash,
+                    checks: [],
+                    injectedAcceptance: [],
+                    failures: [{ reason: "mandatory_check_failed" as const, detail: "test failed" }],
+                    passed: false,
+                    diffStat: { files: 1, insertions: 1, deletions: 0 },
+                    createdAt: clock.now(),
+                  }
+                : null,
+              diffRef: null,
+              transcriptRef: null,
+              error: spec.error ?? null,
+              createdAt: clock.now() + 60 + index,
+              updatedAt: clock.now() + 60 + index,
+            },
+          },
+          causedBy: [],
+          actor: { kind: "system" as const },
+          artifacts: [],
+        })),
+      ]);
+    };
+
+    const gatingEngineOn = (emptyStore: Store, emptyFixture: Awaited<ReturnType<typeof repositoryFixture>>): RunEngine => {
+      const engine = new RunEngine({ store: emptyStore, clock, scheduler: sched, config: defaultConfig(), assertProjectClean: () => undefined }, false);
+      engine.registerPhase("GATING", createGatingDriver(buildDriverOptions(emptyFixture, () => new ScriptedCandidateWorker(async () => ({ status: "completed" })))));
+      for (const phase of ["PLANNING", "COMPARING", "EXECUTING"] as const) engine.registerPhase(phase, stubDriverFor(phase));
+      return engine;
+    };
+
+    const seedGating = async (): Promise<{ store: Store; engine: RunEngine; runId: string; taskId: string }> => {
+      const emptyFixture = await repositoryFixture();
+      const emptyStore = openStore({ artifactsDir: join(emptyFixture.root, "artifacts") });
+      const { runId, taskId } = seedRun(emptyStore, clock, emptyFixture);
+      const run = emptyStore.repos.runs.get(runId)!;
+      emptyStore.events.append([{
+        id: id("evt", clock.now() + 40),
+        runId,
+        ts: clock.now() + 40,
+        type: "run.phase_changed",
+        payload: { run: { ...run, phase: "GATING", updatedAt: clock.now() + 40 } },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      }]);
+      return { store: emptyStore, engine: gatingEngineOn(emptyStore, emptyFixture), runId, taskId };
+    };
+
+    it("asks a human when the provider refused every candidate, because nothing was judged", async () => {
+      const { store: s, engine, runId, taskId } = await seedGating();
+      exhaust(s, runId, taskId, [
+        { state: "DISCARDED", error: 'ProviderError: rate limited: {"limit_source":"openrouter_free_tier_daily"}', gated: false },
+        { state: "DISCARDED", error: 'ProviderError: rate limited: {"limit_source":"openrouter_free_tier_daily"}', gated: false },
+      ]);
+      await engine.tickRun(runId);
+
+      const run = s.repos.runs.get(runId)!;
+      expect(run.phase).toBe("NEEDS_HUMAN");
+      expect(run.terminalReason?.code).toBe("provider_budget_exhausted");
+      expect(run.terminalReason?.summary).toContain("refused all 2");
+      expect(run.terminalReason?.summary).toContain("openrouter_free_tier_daily");
+      s.close();
+    });
+
+    it("fails with repeated_failure when the candidates were judged and lost", async () => {
+      const { store: s, engine, runId, taskId } = await seedGating();
+      exhaust(s, runId, taskId, [{ state: "FAILED_GATES", gated: true }, { state: "FAILED_GATES", gated: true }]);
+      await engine.tickRun(runId);
+
+      const run = s.repos.runs.get(runId)!;
+      expect(run.phase).toBe("FAILED");
+      expect(run.terminalReason?.code).toBe("repeated_failure");
+      expect(run.terminalReason?.summary).toContain("failed its gates");
+      s.close();
+    });
+
+    // Neither judged nor refused by a provider: still a reason, never `null`.
+    it("names a cause even when the discard has no provider error", async () => {
+      const { store: s, engine, runId, taskId } = await seedGating();
+      exhaust(s, runId, taskId, [{ state: "DISCARDED", error: "gate checkout produced no evidence: npm ci failed", gated: false }]);
+      await engine.tickRun(runId);
+
+      const run = s.repos.runs.get(runId)!;
+      expect(run.phase).toBe("FAILED");
+      expect(run.terminalReason?.code).toBe("repeated_failure");
+      expect(run.terminalReason?.summary).toContain("npm ci failed");
+      s.close();
+    });
+  });
+
   it("does not advance the run head when required runtime validation cannot run", async () => {
     const config = { ...defaultConfig(), runtimeValidation: { mode: "required" as const, level: "smoke" as const } };
     const requiredEngine = new RunEngine({
