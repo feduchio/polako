@@ -13,6 +13,10 @@ export const KNOWN_EVENT_TYPES = [
   "run.control_changed",
   /** A phase driver threw. Recorded before the engine does anything else with the run. R3. */
   "run.driver_failed",
+  /** Decomposition of one interpretation is claimed, and discarded when two claims raced. R4. */
+  "planning.decompose_claimed",
+  "planning.decompose_released",
+  "planning.decompose_discarded",
   /** A reviewer's verdict on the seeded defect. R2. */
   "review.canary_recorded",
   "run.terminated",

@@ -129,6 +129,40 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
   };
 }
 
+/**
+ * The decomposition already claimed for this interpretation, or `null`. Read from the log rather
+ * than held in memory, so a daemon restart cannot lose it and a second daemon cannot miss it.
+ */
+function decomposeIsClaimed(ctx: PhaseContext, interpretationId: string): boolean {
+  let held = 0;
+  for (const event of ctx.store.events.list(ctx.run.id, {
+    types: ["planning.decompose_claimed", "planning.decompose_released"],
+  })) {
+    if (event.payload["interpretationId"] !== interpretationId) continue;
+    held += event.type === "planning.decompose_claimed" ? 1 : -1;
+  }
+  return held > 0;
+}
+
+/**
+ * A claim that produced no tasks is released, or the run could never decompose again: an answered
+ * `NEEDS_HUMAN` re-enters PLANNING with the task list still empty, and a lock nobody can release
+ * is a run that waits forever. Released rather than deleted, because the log is append-only and
+ * the attempt is worth seeing.
+ */
+function releaseDecomposeClaim(ctx: PhaseContext, interpretationId: string, reason: string): void {
+  ctx.store.events.append([{
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: "planning.decompose_released",
+    payload: { interpretationId, reason },
+    causedBy: [],
+    actor: SYSTEM_ACTOR,
+    artifacts: [],
+  }]);
+}
+
 /** Production PLANNING driver: first-plan decompose only; re-entry restores and continues. */
 export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver {
   return async (ctx) => {
@@ -143,6 +177,26 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
       return nextPhaseForPlanningReentry(ctx);
     }
 
+    // R4. The check above is a read, and `council.decompose` below is an await: two drivers that
+    // both reach it while the task list is empty both decompose and both append. D1 did exactly
+    // that — `run_01m2gy5yg30631j247sn13` holds two `decompose APPROVED` decisions and ten tasks
+    // with five distinct titles, the second set landing after the run had already left for
+    // EXECUTING. Half the quota that run spent bought nothing.
+    //
+    // The claim is an event, not a field: it survives a restart, which an in-memory latch does not,
+    // and it is visible to anyone reading the log afterwards.
+    if (decomposeIsClaimed(ctx, interpretationId)) return { status: "waiting" };
+    ctx.store.events.append([{
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "planning.decompose_claimed",
+      payload: { interpretationId },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [],
+    }]);
+
     const council = createCouncil(ctx, options);
     let dag: TaskDag;
     try {
@@ -152,14 +206,34 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
         humanAnswer === undefined ? {} : { humanAnswer },
       );
     } catch (error) {
+      releaseDecomposeClaim(ctx, interpretationId, "decompose failed");
       recordCouncilUnavailable(ctx, error);
       throw error;
     }
     if (dag.decision.decision === "NEEDS_HUMAN") {
+      releaseDecomposeClaim(ctx, interpretationId, "decompose asked for a human");
       const reason = terminalReasonFromDecompose(dag);
       emitNeedsHumanReport(ctx, reason, dag.decision.events.map((event) => event.id));
       appendRunSnapshot(ctx, { terminalReason: reason });
       return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+    }
+    // Read again, in the same synchronous step as the append. The claim above stops a second
+    // driver starting; this stops one that started before the claim existed from finishing into a
+    // run that already has its tasks. Both are needed: the first is a lock, the second is the
+    // check that does not depend on the lock having been there first.
+    if (ctx.store.repos.tasks.listByRun(ctx.run.id).length >= 1) {
+      releaseDecomposeClaim(ctx, interpretationId, "another driver had already created the tasks");
+      ctx.store.events.append([{
+        id: id("evt", ctx.clock.now()),
+        runId: ctx.run.id,
+        ts: ctx.clock.now(),
+        type: "planning.decompose_discarded",
+        payload: { interpretationId, discardedTasks: dag.tasks.length },
+        causedBy: dag.decision.events.map((event) => event.id),
+        actor: SYSTEM_ACTOR,
+        artifacts: [],
+      }]);
+      return nextPhaseForPlanningReentry(ctx);
     }
     const causedBy = dag.decision.events.map((event) => event.id);
     const taskEvents: NewEvent[] = dag.tasks.map((task) => ({

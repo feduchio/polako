@@ -86,6 +86,69 @@ describe("council phase drivers", () => {
     expect(store.events.list(runId, { types: ["task.created"] }).length).toBe(tasks.length);
   });
 
+  /**
+   * R4. D1 decomposed twice — `run_01m2gy5yg30631j247sn13` holds two `decompose APPROVED`
+   * decisions and ten tasks with five distinct titles, the second set landing after the run had
+   * already left for EXECUTING. The guard was a read, and `council.decompose` is an await.
+   */
+  describe("decomposition happens once", () => {
+    const planningDriver = () => createPlanningDriver({ roles: councilRoles(provider) });
+
+    it("creates one set of tasks when two drivers race on the same run", async () => {
+      const { runId } = seedRun(store, clock);
+      await engine.tickRun(runId);
+      await engine.tickRun(runId);
+
+      // Both start while the task list is empty, which is the window the claim closes.
+      const run = store.repos.runs.get(runId)!;
+      const ctx = { run, store, scheduler: sched, clock, config: defaultConfig() };
+      const [first, second] = await Promise.all([planningDriver()(ctx), planningDriver()(ctx)]);
+
+      const created = store.events.list(runId, { types: ["task.created"] });
+      expect(created.length).toBeGreaterThanOrEqual(1);
+      expect(store.repos.tasks.listByRun(runId)).toHaveLength(created.length);
+      // One of the two produced the tasks; the other did not append a second set.
+      expect([first.status, second.status]).toContain("complete");
+      const decompositions = store.events
+        .list(runId, { types: ["supervisor.decision"] })
+        .filter((event) => event.payload["stage"] === "decompose" && event.payload["decision"] === "APPROVED");
+      expect(decompositions.length).toBeLessThanOrEqual(1);
+    });
+
+    it("discards a decomposition that finishes into a run that already has tasks", async () => {
+      const { runId } = seedRun(store, clock);
+      await engine.tickRun(runId);
+      await engine.tickRun(runId);
+      await engine.tickRun(runId);
+      const before = store.repos.tasks.listByRun(runId).length;
+      expect(before).toBeGreaterThanOrEqual(1);
+
+      // A driver that started before the claim existed: its own re-read is what stops it.
+      const run = { ...store.repos.runs.get(runId)!, phase: "PLANNING" as const };
+      await planningDriver()({ run, store, scheduler: sched, clock, config: defaultConfig() });
+      expect(store.repos.tasks.listByRun(runId)).toHaveLength(before);
+    });
+
+    // A lock nobody can release is a run that waits forever: an answered NEEDS_HUMAN re-enters
+    // PLANNING with the task list still empty.
+    it("releases the claim when the decomposition produced no tasks", async () => {
+      provider = scriptedCouncilProvider(false, { dropAll: true });
+      engine.registerPhase("INTERPRETING_MISSION", createInterpretingMissionDriver({ roles: councilRoles(provider), resolveProfile: () => PROFILE }));
+      engine.registerPhase("PLANNING", planningDriver());
+      const { runId } = seedRun(store, clock);
+      await engine.tickRun(runId);
+      await engine.tickRun(runId);
+      await engine.tickRun(runId);
+
+      expect(store.repos.runs.get(runId)?.phase).toBe("NEEDS_HUMAN");
+      const claims = store.events.list(runId, { types: ["planning.decompose_claimed"] });
+      const releases = store.events.list(runId, { types: ["planning.decompose_released"] });
+      expect(claims).toHaveLength(1);
+      expect(releases).toHaveLength(1);
+      expect(releases[0]?.payload["reason"]).toContain("human");
+    });
+  });
+
   it("blocking ambiguity routes to NEEDS_HUMAN with zero coding tasks", async () => {
     provider = scriptedCouncilProvider(true);
     engine.registerPhase(
