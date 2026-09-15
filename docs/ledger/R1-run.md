@@ -61,13 +61,37 @@ restart, because `restoreCatalog` replays `model.observation.recorded` and not `
 `exhaustedProviders` has the right lifetime; and the plan's historical breakdown reproduces exactly
 — 2,600 started, 2,465 rate-limited, 108 schema, 18 completed, 6 bad-request, 3 other.
 
-**Size.** `git diff --numstat f8b8c0d -- src` is **384 insertions**: 117 production, 267 tests. The
-plan's ceiling is 300 and this is the third item in a row to pass it. The production change is well
-inside it; what is not is the cost of stating each acceptance check as its own single-input case,
-which is the practice `docs/BVP.md` adopted after P1.9 found eight wrong classifiers behind one
-passing aggregate assertion. Recorded here once rather than argued again per item: **the ceiling as
-written counts something this codebase's own verification practice makes unbounded.** If it is to
-bind, it has to bind on production lines.
+**Size.** `git diff --numstat f8b8c0d -- src` is **384 insertions**: 117 production, 267 tests,
+against a ceiling of 300.
+
+*(This paragraph originally argued that the ceiling should be read as production lines only.
+Round 2 rejected that as changing the rule after the fact, and it was right: `docs/RECOVERY.md` §3
+says 300 lines and exempts nothing. Whether the ceiling should count tests is a question for the
+plan's author, not for the item that wants past it. Recorded as a breach.)*
+
+## Review round 2 — GPT lane, on commit `366d9f8`. R1 stops.
+
+Verdict FAIL, 3 blocking and 1 note. Round 1's three findings were confirmed closed by reproducing
+each failure at `fdc5611` and showing it gone at `366d9f8`.
+
+The three new ones are not repairs to make here. Two of them say the same thing: **the taxonomy in
+this item's contract is wrong in a specific, checkable way**, and the third is the ceiling.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | `openrouter_free_tier_daily` is a **free-tier** allowance, not an account-wide one. Calling it "account" makes the council skip a *paid* OpenRouter model after a free one 429s, and makes the broker cool the whole provider. Demonstrated: a chain of `openrouter:free`, `openrouter:paid`, `gemini:backup` called only the first and the third | **upheld; the contract's own definition is the defect** → **R1c** |
+| 2 | Broker-local retries are suppressed, but a worker's account-scoped 429 still comes back as a whole task attempt: `handleZeroSurvivors` returns the task to `READY` while `attempts < retry.maxAttempts`, five by default, times the candidate count | **upheld; a different layer than this item touched** → **R1c** |
+| 3 | 384 insertions against a ceiling of 300 | **upheld** → the item stops |
+| 4 | The stop-summary test would pass a wrong `some(...)` implementation, and the fallback test would pass `from = models[0]` | **note** — real, and the reason the successor's contract names the mixed-cause cases explicitly |
+
+What R1 got right is what it keeps: the scope now travels as a parsed fact rather than a guess, the
+review rotation no longer walks the whole list, the sticky exclusion no longer sticks, an exhausted
+allowance is not retried four times, and the stop that follows names the cause. What it got wrong
+is the word "account", and a rename is not a repair — the sites that skip have to learn which
+routes are free, which is plumbing the catalogue into two places that do not have it today.
+
+Successors, contracted so nothing is lost: **R1a** (`docs/ledger/R1a.md`), **R1b**
+(`docs/ledger/R1b.md`), **R1c** (`docs/ledger/R1c.md`).
 
 ## What this item does not do
 
