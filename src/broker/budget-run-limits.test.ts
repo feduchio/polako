@@ -59,6 +59,15 @@ describe("BudgetTracker admission reserves what a call may cost", () => {
     expect(budgetErrorOf(() => { tracker.admit("run_a", 0); }).message).toBe("run USD budget exhausted");
   });
 
+  it("fits holds that add up to the limit in decimal but not in binary", () => {
+    // 0.1 + 0.2 is 0.30000000000000004. A $0.10 and a $0.20 call fit a $0.30 budget, and an
+    // operator who is told otherwise has no way to see why.
+    const tracker = new BudgetTracker({ maxRunUsd: 0.3, maxRunTokens: null, maxTaskTokens: null });
+    tracker.admit("run_a", 0.1);
+    expect(() => tracker.admit("run_a", 0.2)).not.toThrow();
+    expect(budgetErrorOf(() => { tracker.admit("run_a", 0.000001); }).details["budget"]).toBe("run_usd");
+  });
+
   it("returns the whole reservation on release, with no floating-point residue", () => {
     const tracker = new BudgetTracker({ maxRunUsd: 1, maxRunTokens: null, maxTaskTokens: null });
     // 0.18 + 0.21 + 0.41 subtracted back one at a time leaves 1.665e-16 behind, and a run that

@@ -21,16 +21,25 @@ questions that were being conflated:
 Without the second, a $0.50 limit admits a $0.49 call while another $0.49 call is in flight. With
 it, the second is refused.
 
-The estimate is `ModelBroker.estimatedCostUsd`: everything the request puts on the wire — messages,
-tools and response schema — counted at **one token per character**, plus the output allowance
+The estimate is `ModelBroker.estimatedCostUsd`: the parts of the request whose size varies —
+messages, tools and response schema — counted at **one token per character**, plus the output
+allowance
 (`maxTokens`, else the catalogue's `maxOutputTokens`, else 8192), priced at the catalogue's
 advertised rates. When either price is unknown the estimate is 0 — such a call cannot raise
 `runUsd` either, and that gap is `unknownCostCalls`, which is R6's.
 
 One token per character over-counts ordinary prose about fourfold and is deliberately pessimistic,
-but it is **not a proven upper bound**: JSON-heavy messages have been measured at 1.15 characters
-per token. What this item guarantees is that N calls in flight are not all admitted against the
-same figure, not that any single estimate is never exceeded.
+but it is **not a proven upper bound**: dense non-Latin prose has been measured at 1.15 characters
+per token, and the fixed parts of the payload — model id, reasoning, response format, temperature —
+are not counted at all. What this item guarantees is that N calls in flight are not all admitted
+against the same figure, not that any single estimate is never exceeded.
+
+Size, measured rather than guessed: of the 992 `model_request` artifacts in the store the largest
+is 39,260 characters with `maxTokens` 25,457, which at the configured 0.30/1.20 ceiling estimates
+$0.0423 — against an actual recorded cost for that call of $0.0031. Eleven such holds fit inside
+`maxRunUsd = 0.50` and the twelfth is refused. Eight concurrent lanes plus accumulated retry holds
+can reach that, so the rule is not unreachable in practice; when it fires the operator is told
+"run USD budget cannot cover the next call" with the estimate that caused it.
 
 ## Acceptance
 
@@ -49,7 +58,7 @@ same figure, not that any single estimate is never exceeded.
    recorded yet and only the reservation can refuse; `releases the reservation when the provider
    call fails` covers the error path.
 4. Gate: Node 24.20.0, `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run
-   --maxWorkers=2` → exit 0, 95 files, **1105 tests** (1094 before this item).
+   --maxWorkers=2` → exit 0, 95 files, **1107 tests** (1094 before this item).
 
 ## Review round 1 — GPT lane, on commit `61fbf96`
 
@@ -64,10 +73,21 @@ Verdict FAIL, 4 blocking and 2 notes. All four changed code.
 | 5 | The committed tests assert concurrency by construction rather than by overlapping calls | **note** — the reviewer's own harness ran genuinely overlapping `complete` promises and observed the second refused, which is the evidence; the per-invocation test added for finding 2 observes admissibility from inside a live provider call |
 | 6 | Pre-existing behaviour and the ledger's numbers reproduce | confirmed, including that the `BudgetTracker per-run limits` block hashes identically before and after |
 
-Finding 4's second half is worth keeping in view: with `maxRunUsd = 0.50` and the ceiling's prices,
-a pessimistic estimate of a large worker call is about $0.07, so the rule has ample room. It would
-bite on a run whose budget is set near the cost of one call, and the operator then sees "run USD
-budget cannot cover the next call" with the estimate in the error — which is the true statement.
+## Review round 2 — GPT lane, on commit `a8075d4`
+
+Verdict FAIL, 2 blocking and 3 notes.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | A budget refusal from the retry admission arrives after `model.call_started` and threw without a terminal `model.call` — a regression, since admission used to happen before the call was started | **actionable** — the refusal now records the terminal event the way every other fatal error does, and a test asserts one `model.call_started` and one failed `model.call` |
+| 2 | "Exact by construction" is only true of subtraction: `0.1 + 0.2` is `0.30000000000000004`, so a $0.10 and a $0.20 hold did not fit a $0.30 limit, and the committed test used binary-exact `0.125`, which hides it | **actionable** — a relative slack of 1e-9 on the "one more call" comparison, with the decimal case as a test. The slack is far below any quoted price and far above the error of summing a handful of terms |
+| 3 | The "$0.07 for a large worker call" figure was never measured; the real maximum in the store is $0.0423, and "everything on the wire" overstates what is counted | **actionable on the text** — replaced with the measurement and its query, above |
+| 4 | Released hold sets were never removed from the map, so a long-lived daemon accumulates one empty set per run | **actionable** — the key is deleted when its last hold is released |
+| 5 | `reserves nothing when the estimate is unusable` passes while four zero-dollar holds are retained; several paths have no test | **note** — the assertion it makes is still the right one, and the retained holds are zero. The untested paths are named in the reviewer's output and are the reason this record says what it does not cover |
+
+Round 1's finding 1 is closed narrowly and the residual is now stated accurately: the reviewer's
+own measurement of 1.15 characters per token came from repeated Japanese prose, not from JSON, and
+the text said JSON.
 
 ## Not verified here
 

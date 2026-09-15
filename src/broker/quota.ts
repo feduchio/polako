@@ -92,6 +92,15 @@ export class QuotaTracker {
   }
 }
 
+/**
+ * Relative slack on the "one more call would exceed the limit" comparison. Sums of doubles land a
+ * few units in the last place away from the decimal answer — 0.1 + 0.2 is 0.30000000000000004 —
+ * and without this a $0.10 and a $0.20 hold do not fit a $0.30 limit. A billionth is orders of
+ * magnitude below any price a provider quotes and orders of magnitude above the error of summing a
+ * handful of terms.
+ */
+const BUDGET_SLACK = 1e-9;
+
 /** Token/USD budgets per run and per task. Exceeding a budget throws before the call is made. */
 export class BudgetTracker {
   private readonly runs = new Map<string, BudgetSnapshot>();
@@ -165,6 +174,8 @@ export class BudgetTracker {
     this.reserved.set(runId, holds);
     return () => {
       holds.delete(hold);
+      // A finished run must not leave a key behind: the daemon outlives thousands of them.
+      if (holds.size === 0) this.reserved.delete(runId);
     };
   }
 
@@ -188,7 +199,7 @@ export class BudgetTracker {
     if (limits.maxRunUsd !== null && committed >= limits.maxRunUsd) {
       throw new PolishError("CONFLICT", "run USD budget exhausted", { runId, spent: committed, limit: limits.maxRunUsd, budget: "run_usd" });
     }
-    if (limits.maxRunUsd !== null && committed + incomingUsd > limits.maxRunUsd) {
+    if (limits.maxRunUsd !== null && committed + incomingUsd > limits.maxRunUsd * (1 + BUDGET_SLACK)) {
       // Distinct from exhaustion, and said differently: the run has money and this call is too
       // large for what is left. Reporting it as "exhausted" at a spend of $0 is how an operator
       // ends up looking for spend that never happened.

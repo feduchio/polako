@@ -143,8 +143,18 @@ export class ModelBroker {
 
     while (attempt < retry.maxAttempts) {
       attempt++;
-      // The first invocation's hold was taken by the caller, before any work started.
-      if (attempt > 1) admitRetry();
+      // The first invocation's hold was taken by the caller, before any work started. A refusal
+      // here arrives after `model.call_started`, so it has to close the call the way every other
+      // terminal error does: a started call without a terminal `model.call` is a call that no
+      // report, no cost query and no operator can account for.
+      if (attempt > 1) {
+        try {
+          admitRetry();
+        } catch (err) {
+          this.recordEvent(tagged, null, Math.max(outcomes.length, 1), outcomes, errorToString(err), budget.snapshot(tagged.metadata.runId).runUsd, callId);
+          throw err;
+        }
+      }
       if (tagged.signal?.aborted) {
         failCancelled(new PolishError("CANCELLED", "model call cancelled"));
       }

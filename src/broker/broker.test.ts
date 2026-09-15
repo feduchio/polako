@@ -142,6 +142,29 @@ describe("ModelBroker", () => {
     expect(tryAdmit(budget, runId, 0.85)).toBe(true);
   });
 
+  it("closes the call with a terminal event when a retry cannot be admitted", async () => {
+    catalog.upsert({
+      ref: { provider: "p1", model: "mid" },
+      displayName: "mid",
+      capabilities: { ...FAKE_CAPABILITIES.strong, inputCostPerM: 0, outputCostPerM: 100, maxOutputTokens: 1000 },
+      source: "provider",
+    });
+    // Each attempt reserves $0.6 of a $1 limit, so the second cannot be admitted.
+    provider.script("mid", [
+      { kind: "error", error: new ProviderError("p1", "server", "1") },
+      { kind: "reply", content: "unreachable" },
+    ]);
+    const call = broker.complete({ ...req(runId, "mid"), maxTokens: 6000 });
+    const settled = call.then(() => null).catch((error: unknown) => error);
+    await clock.advance(100);
+    const error = await settled;
+    expect(isBudgetError(error)).toBe(true);
+    expect(store.events.list(runId, { types: ["model.call_started"] })).toHaveLength(1);
+    // A started call with no terminal event is one no report, cost query or operator can account for.
+    expect(store.events.list(runId, { types: ["model.call"] })).toHaveLength(1);
+    expect(store.events.list(runId, { types: ["model.call"] })[0]?.payload["ok"]).toBe(false);
+  });
+
   it("releases the reservation when the provider call fails", async () => {
     catalog.upsert({
       ref: { provider: "p1", model: "mid" },
