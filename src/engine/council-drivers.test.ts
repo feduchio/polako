@@ -115,18 +115,51 @@ describe("council phase drivers", () => {
       expect(decompositions.length).toBeLessThanOrEqual(1);
     });
 
-    it("discards a decomposition that finishes into a run that already has tasks", async () => {
+    // One set of tasks, whichever driver produced it, and at most one discard. The earlier version
+    // of this test seeded the tasks first, so the entry guard returned before either the decompose
+    // or the post-await re-read ran, and it passed against the unfixed code.
+    it("leaves one set of tasks behind, with distinct titles", async () => {
       const { runId } = seedRun(store, clock);
       await engine.tickRun(runId);
       await engine.tickRun(runId);
-      await engine.tickRun(runId);
-      const before = store.repos.tasks.listByRun(runId).length;
-      expect(before).toBeGreaterThanOrEqual(1);
-
-      // A driver that started before the claim existed: its own re-read is what stops it.
       const run = { ...store.repos.runs.get(runId)!, phase: "PLANNING" as const };
+
+
       await planningDriver()({ run, store, scheduler: sched, clock, config: defaultConfig() });
-      expect(store.repos.tasks.listByRun(runId)).toHaveLength(before);
+      const tasks = store.repos.tasks.listByRun(runId);
+      const discarded = store.events.list(runId, { types: ["planning.decompose_discarded"] });
+      // Exactly one set of tasks, whichever driver produced it.
+      expect(new Set(tasks.map((task) => task.title)).size).toBe(tasks.length);
+      expect(discarded.length).toBeLessThanOrEqual(1);
+    });
+
+    // A claim whose owner died is a claim nobody can release, and PLANNING would return `waiting`
+    // forever with no event ever changing. So it is a lease.
+    it("expires a claim whose owner never produced tasks", async () => {
+      const { runId } = seedRun(store, clock);
+      await engine.tickRun(runId);
+      await engine.tickRun(runId);
+      const interpretationId = store.repos.runs.get(runId)!.interpretationId!;
+      store.events.append([{
+        id: id("evt", clock.now()),
+        runId,
+        ts: clock.now(),
+        type: "planning.decompose_claimed",
+        payload: { interpretationId },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      }]);
+
+      const held = { ...store.repos.runs.get(runId)!, phase: "PLANNING" as const };
+      const waiting = await planningDriver()({ run: held, store, scheduler: sched, clock, config: defaultConfig() });
+      expect(waiting.status).toBe("waiting");
+
+      await clock.advance(11 * 60_000);
+      await planningDriver()({ run: held, store, scheduler: sched, clock, config: defaultConfig() });
+      expect(store.repos.tasks.listByRun(runId).length).toBeGreaterThanOrEqual(1);
+      const released = store.events.list(runId, { types: ["planning.decompose_released"] });
+      expect(released.some((event) => String(event.payload["reason"]).includes("expired"))).toBe(true);
     });
 
     // A lock nobody can release is a run that waits forever: an answered NEEDS_HUMAN re-enters

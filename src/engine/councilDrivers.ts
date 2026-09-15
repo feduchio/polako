@@ -133,15 +133,32 @@ export function createInterpretingMissionDriver(options: CouncilDriverOptions): 
  * The decomposition already claimed for this interpretation, or `null`. Read from the log rather
  * than held in memory, so a daemon restart cannot lose it and a second daemon cannot miss it.
  */
-function decomposeIsClaimed(ctx: PhaseContext, interpretationId: string): boolean {
-  let held = 0;
+/**
+ * How long a claim is honoured. A claim with no owner is a claim nobody can release: a process that
+ * dies between claiming and decomposing would otherwise leave PLANNING returning `waiting` forever,
+ * with no event ever changing and nothing to recover from. So it is a lease, not a lock.
+ *
+ * Ten minutes is far longer than a decomposition — three council calls — and far shorter than a
+ * person noticing a stuck run.
+ */
+const DECOMPOSE_CLAIM_LEASE_MS = 10 * 60_000;
+
+/**
+ * The live claim on decomposing this interpretation, or `null`. Counted from the log, so a restart
+ * cannot lose it; leased, so a crash cannot keep it.
+ */
+function liveDecomposeClaim(ctx: PhaseContext, interpretationId: string): { claimedAt: number } | null {
+  let claimedAt: number | null = null;
   for (const event of ctx.store.events.list(ctx.run.id, {
     types: ["planning.decompose_claimed", "planning.decompose_released"],
   })) {
     if (event.payload["interpretationId"] !== interpretationId) continue;
-    held += event.type === "planning.decompose_claimed" ? 1 : -1;
+    // Last write wins, rather than a counter: a counter lets an unmatched release cancel a later
+    // legitimate claim, and the log is append-only so an unmatched release cannot be removed.
+    claimedAt = event.type === "planning.decompose_claimed" ? event.ts : null;
   }
-  return held > 0;
+  if (claimedAt === null) return null;
+  return { claimedAt };
 }
 
 /**
@@ -185,7 +202,11 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
     //
     // The claim is an event, not a field: it survives a restart, which an in-memory latch does not,
     // and it is visible to anyone reading the log afterwards.
-    if (decomposeIsClaimed(ctx, interpretationId)) return { status: "waiting" };
+    const held = liveDecomposeClaim(ctx, interpretationId);
+    if (held !== null) {
+      if (ctx.clock.now() - held.claimedAt < DECOMPOSE_CLAIM_LEASE_MS) return { status: "waiting" };
+      releaseDecomposeClaim(ctx, interpretationId, "claim expired without producing tasks");
+    }
     ctx.store.events.append([{
       id: id("evt", ctx.clock.now()),
       runId: ctx.run.id,
