@@ -41,8 +41,18 @@ export const CANARY_DIFF = `--- a/src/cache.ts
 /** A valid 40-hex commit hash that no repository will hold. `GitHashSchema` accepts hex only. */
 export const CANARY_COMMIT = "ca4a24" + "0".repeat(32) + "ca";
 
-/** Where the planted defect is. A finding that does not point here has not found it. */
-export const CANARY_DEFECT = { path: "src/cache.ts", firstLine: 5, lastLine: 12 } as const;
+/**
+ * Where the planted defect is, in the post-image of `CANARY_DIFF`: line 8 is the loop header whose
+ * bound is wrong, line 9 is the dereference that goes out of bounds. Naming both is not slack — a
+ * correct reviewer may cite either — but the window stops there. Widened to the whole function it
+ * would accept a complaint about the comment, which is the defect round 1 found in this oracle.
+ */
+export const CANARY_DEFECT = { path: "src/cache.ts", firstLine: 8, lastLine: 9 } as const;
+
+/** `a/src/cache.ts`, `b/src/cache.ts` and `./src/cache.ts` are the same file as `src/cache.ts`. */
+function samePath(reported: string): boolean {
+  return reported.replace(/^\.?\/?/, "").replace(/^[ab]\//, "") === CANARY_DEFECT.path;
+}
 
 export const CANARY_EVENT_TYPE = "review.canary_recorded";
 
@@ -105,7 +115,7 @@ export async function runReviewerCanary(input: {
     // the planted defect.
     const located = result.findings.filter((finding) =>
       finding.evidence.some((entry) =>
-        entry.path === CANARY_DEFECT.path &&
+        samePath(entry.path) &&
         entry.line !== undefined &&
         entry.line >= CANARY_DEFECT.firstLine &&
         entry.line <= CANARY_DEFECT.lastLine)).length;

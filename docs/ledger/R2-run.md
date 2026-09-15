@@ -97,6 +97,19 @@ One further observation, recorded because it cost a rerun: `src/engine/candidate
 failed once under `--maxWorkers=2` and passed in isolation and on rerun. Flaky under load, not a
 regression from this item, and not investigated here.
 
+## Review round 2 — GPT lane, on commit `efd7574`
+
+Verdict FAIL, 1 blocking and 2 notes. Round 1's other findings were confirmed closed, including the
+`DONE`-path audit: recovery, restart, `polish answer`, rollback, `CHANGE_ENSEMBLE`, simplification
+and multi-task runs all reach `CONVERGENCE_CHECK`, whose gate filters clean rounds by the current
+checkpoint hash — which is the same hash `hasConverged` counts, so the two agree.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | The `located` window was lines 5–12 — the whole function, including the comment, the declaration, the return and the closing brace — so a reviewer passed by alleging something unrelated at line 11. And a correct report spelled `b/src/cache.ts` or `./src/cache.ts` failed | **actionable** — the window is lines 8 and 9: the loop header whose bound is wrong, and the dereference that goes out of bounds. Both, because a correct reviewer may cite either; nothing else, because round 1's finding was exactly that any complaint inside the function counted. Diff-flavoured and relative path spellings resolve to the same file |
+| 2 | Cancellation exceptions propagate, but the canary request carries no `AbortSignal`, so `polish stop` cannot interrupt the provider call | **note, upheld and not fixed** — `runAxisReview` takes no signal either, so this is the review path's property and not this item's; fixing it here would mean threading a signal through `RunAxisReviewInput` and every caller |
+| 3 | The record says "4 blocking and 5 notes" but tabulates six rows, omitting three notes; and the cost bound assumes three distinct reviewers when ensemble rotation can introduce more | **actionable on the text** — the omitted notes are now in "Not covered", and the cost claim carries its assumption |
+
 ## Not covered
 
 - The negative half of the pair: clean code must produce **no** finding. A reviewer that fabricates
@@ -108,6 +121,15 @@ regression from this item, and not investigated here.
   schema, the protocol text or `review.maxOutputTokens` changes mid-run, the model is not re-asked
   under the new conditions. Naming it here rather than keying the cache on a digest of all four,
   which is the shape of the successor if a run ever shows it.
-- **The cost.** Three distinct reviewers add three canary calls per run, each reserving about
-  $0.0028 at the configured ceiling — under $0.01 per run, and zero when no clean round is pending.
-  Measured by the reviewer against `~/.polish/polish.toml`, not estimated here.
+- **The cost**, for a run whose ensemble does not rotate: three distinct reviewers, three canary
+  calls, each reserving about $0.0028 at the configured ceiling — under $0.01, and zero when no
+  clean round is pending. The assumption is load-bearing: `selectReviewProviders` asks for at least
+  eight candidates and `CHANGE_ENSEMBLE` can introduce more distinct models, each of which is
+  canaried once. There is no run-wide bound on the number of canary calls, only a per-model one.
+- **Cancellation reaches the canary's caller but not its provider call.** `runAxisReview` accepts
+  no `AbortSignal`, so neither does the canary, so `polish stop` cannot interrupt one in flight. A
+  property of the review path rather than of this item, and untouched by it.
+- **The fixtures are not independent evidence.** The E2E reviewers were taught to answer the canary
+  by this item, so they demonstrate the gate's shape and not any reviewer's real capability. The
+  same is true of `docs/ledger/replay-set.md`, whose scripted corpus its own note already calls
+  inconclusive once model requests change.

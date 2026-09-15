@@ -32,11 +32,20 @@ function finding(path: string, line: number): string {
 describe("reviewer canary", () => {
   it("verifies only a finding that points at the planted defect", async () => {
     for (const [path, line, verified] of [
-      [CANARY_DEFECT.path, CANARY_DEFECT.firstLine, true],
-      [CANARY_DEFECT.path, CANARY_DEFECT.lastLine, true],
-      [CANARY_DEFECT.path, CANARY_DEFECT.firstLine - 1, false],
-      [CANARY_DEFECT.path, CANARY_DEFECT.lastLine + 1, false],
-      ["src/other.ts", CANARY_DEFECT.firstLine, false],
+      // The loop header whose bound is wrong, and the dereference that goes out of bounds: a
+      // correct reviewer may cite either.
+      [CANARY_DEFECT.path, 8, true],
+      [CANARY_DEFECT.path, 9, true],
+      // The declaration above and the closing brace below are not the defect. A reviewer that
+      // complains about them has not found it.
+      [CANARY_DEFECT.path, 7, false],
+      [CANARY_DEFECT.path, 10, false],
+      ["src/other.ts", 8, false],
+      // Diff-flavoured and relative spellings of the same file.
+      ["a/src/cache.ts", 8, true],
+      ["b/src/cache.ts", 9, true],
+      ["./src/cache.ts", 8, true],
+      ["src/cache.ts.bak", 8, false],
     ] as const) {
       const result = await runReviewerCanary({
         provider: reviewerReturning(finding(path, line)),
