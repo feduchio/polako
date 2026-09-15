@@ -68,12 +68,27 @@ describe("BudgetTracker admission reserves what a call may cost", () => {
     expect(budgetErrorOf(() => { tracker.admit("run_a", 0.000001); }).details["budget"]).toBe("run_usd");
   });
 
-  it("keeps the slack absolute, so a large limit does not buy a large overspend", () => {
-    // A slack proportional to the limit was the first attempt: at $1e9 it admitted $1 too much.
-    const tracker = new BudgetTracker({ maxRunUsd: 1_000_000_000, maxRunTokens: null, maxTaskTokens: null });
-    tracker.admit("run_a", 999_999_999);
-    expect(budgetErrorOf(() => { tracker.admit("run_a", 2); }).details["estimate"]).toBe(2);
-    expect(() => tracker.admit("run_a", 1)).not.toThrow();
+  // One case per boundary the two rules have to agree on. A slack, of either kind, failed at least
+  // one of these: relative slack admitted $1 at a limit of $1e9, absolute slack refused a
+  // decimal-exact total at $25.6M, and both let a call be admitted and then instantly called
+  // exhausted.
+  it.each([
+    ["decimal total equal to the limit", 0.3, [0.1], 0.2, true],
+    ["a hair over the limit", 0.5, [], 0.5000000005, false],
+    ["large limit, large overspend", 1_000_000_000, [999_999_999], 2, false],
+    ["large limit, exact remainder", 1_000_000_000, [999_999_999], 1, true],
+    ["limit of zero admits nothing", 0, [], 0, false],
+  ] as const)("budget boundary: %s", (_label, maxRunUsd, holds, incoming, admitted) => {
+    const tracker = new BudgetTracker({ maxRunUsd, maxRunTokens: null, maxTaskTokens: null });
+    for (const hold of holds) tracker.admit("run_a", hold);
+    if (admitted) {
+      // Reaching the limit exactly is allowed, and the next call is then correctly refused as
+      // exhausted. What the two rules must never do is admit a total above the limit and call the
+      // same total exhausted — which is what "a hair over the limit" covers.
+      expect(() => tracker.admit("run_a", incoming)).not.toThrow();
+    } else {
+      expect(isBudgetError(budgetErrorOf(() => { tracker.admit("run_a", incoming); }))).toBe(true);
+    }
   });
 
   it("does not let a stale release delete a live hold's accounting", () => {

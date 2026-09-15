@@ -93,18 +93,21 @@ export class QuotaTracker {
 }
 
 /**
- * Slack on the "one more call would exceed the limit" comparison. Sums of doubles land a few units
- * in the last place from the decimal answer — 0.1 + 0.2 is 0.30000000000000004 — and without it a
- * $0.10 and a $0.20 hold do not fit a $0.30 limit.
+ * Money is compared in whole nano-dollars, not in doubles. Sums of doubles land a few units in the
+ * last place from the decimal answer — 0.1 + 0.2 is 0.30000000000000004 — and a budget comparison
+ * that sees that is one that refuses a $0.10 and a $0.20 call under a $0.30 limit.
  *
- * A billionth of a dollar is three orders below the smallest cost this store has ever recorded
- * ($4.556e-06) and cannot be a real overspend. It is a floor rather than the whole answer because
- * at large limits the representation error is itself larger than a billionth: the second term
- * tracks it and stays proportional. A purely relative slack was the first attempt and let $1
- * through at a limit of $1e9.
+ * Rounding rather than a slack, because every slack is wrong somewhere: an absolute one is too
+ * small for large limits, a relative one admitted $1 of overspend at a limit of $1e9, and the two
+ * of them together still let the exhaustion rule and the insufficiency rule disagree at a
+ * boundary. Rounding makes both rules read the same integer.
+ *
+ * Exact while a limit's nano-dollars stay inside the safe integer range, which is limits up to
+ * about $9,007,199. The smallest cost this store has ever recorded is $4.556e-06, so a nano-dollar
+ * is three orders finer than anything a provider has charged.
  */
-function budgetSlack(limit: number): number {
-  return Math.max(1e-9, Math.abs(limit) * Number.EPSILON * 8);
+function nanoUsd(usd: number): number {
+  return Math.round(usd * 1e9);
 }
 
 /** Token/USD budgets per run and per task. Exceeding a budget throws before the call is made. */
@@ -208,10 +211,10 @@ export class BudgetTracker {
     const s = this.snapshot(runId);
     const limits = this.limitsFor(runId);
     const committed = s.runUsd + this.reservedFor(runId);
-    if (limits.maxRunUsd !== null && committed >= limits.maxRunUsd) {
+    if (limits.maxRunUsd !== null && nanoUsd(committed) >= nanoUsd(limits.maxRunUsd)) {
       throw new PolishError("CONFLICT", "run USD budget exhausted", { runId, spent: committed, limit: limits.maxRunUsd, budget: "run_usd" });
     }
-    if (limits.maxRunUsd !== null && committed + incomingUsd > limits.maxRunUsd + budgetSlack(limits.maxRunUsd)) {
+    if (limits.maxRunUsd !== null && nanoUsd(committed + incomingUsd) > nanoUsd(limits.maxRunUsd)) {
       // Distinct from exhaustion, and said differently: the run has money and this call is too
       // large for what is left. Reporting it as "exhausted" at a spend of $0 is how an operator
       // ends up looking for spend that never happened.

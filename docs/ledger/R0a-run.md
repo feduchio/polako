@@ -58,7 +58,7 @@ can reach that, so the rule is not unreachable in practice; when it fires the op
    recorded yet and only the reservation can refuse; `releases the reservation when the provider
    call fails` covers the error path.
 4. Gate: Node 24.20.0, `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run
-   --maxWorkers=2` → exit 0, 95 files, **1109 tests** (1094 before this item).
+   --maxWorkers=2` → exit 0, 95 files, **1113 tests** (1094 before this item).
 
 ## Review round 1 — GPT lane, on commit `61fbf96`
 
@@ -100,14 +100,41 @@ against `a8075d4` and showing it gone at `ac4e256`.
 | 2 | A release invoked twice, after its set had emptied and been deleted, deleted whatever set had replaced it — erasing a live hold's accounting | **actionable** — the release runs once, and deletes the key only when the map still holds the same set it belongs to. Both guards have a test |
 | 3 | The item exceeds the plan's 300-line ceiling | **upheld** — see below |
 
-`git diff --shortstat 85911d8 -- src` reports **348 insertions**, of which 151 are production
-(`broker.ts` 70, `quota.ts` 81) and 197 are tests. The ceiling is breached either way.
+`git diff --numstat 85911d8 -- src` reports **366 insertions**: 147 production (`broker.ts` 66,
+`quota.ts` 81) and 219 tests. The ceiling is breached either way. *(Round 3 said "348, of which
+151 production"; round 4 caught that 151 was churn, not insertions, and round 5 added 18 more.)*
 
 **R0a stops here.** `docs/RECOVERY.md` §4 rule 4 says a fourth round is not forbidden but is
 *recorded as a signal*, and the item stops rather than being pushed. This is that record. The two
 defects above were repaired rather than deferred, because both are money-safety holes of three
-lines each and shipping a known one is worse than the ceiling; a fourth review confirms only those
-two changes and adds nothing else to the item.
+lines each and shipping a known one is worse than the ceiling.
+
+## Review round 4 — narrow confirmation, GPT lane, on commit `569d31e`
+
+Scoped to the two repairs. Both round-3 failures were reproduced at `ac4e256` and shown gone at
+`569d31e`. The release repair was additionally exercised by 20,000 randomised admit/release
+operations across three runs, with accounting preserved and no keys left behind.
+
+The slack, however, failed again in both directions — a decimal-exact total of 256 holds refused at
+a $25.6M limit, and $5e-10 of overspend admitted at a limit of $1e-12 — and in both cases the
+admission rule and the exhaustion rule then disagreed about the same total.
+
+**Both directions were the same mistake: a slack.** Every slack is wrong somewhere, because it
+answers a question about decimal money with a tolerance on binary doubles. The replacement does not
+tolerate error, it removes it: both rules compare **whole nano-dollars**, `Math.round(usd * 1e9)`,
+so they read the same integer and cannot disagree. Exact for limits up to about $9,007,199, where
+the safe integer range ends; the largest budget this tool has been given is $0.50, and the smallest
+cost the store has recorded is $4.556e-06, three orders coarser than a nano-dollar.
+
+The boundary table replaces both slack tests, one case per boundary: a decimal total equal to the
+limit is admitted, a hair over it is refused, a large limit does not buy a proportional overspend,
+its exact remainder is still admitted, and a limit of zero admits nothing. The earlier tests used
+0.125 and then a single large limit, which is how each slack passed its own test and failed the
+other's.
+
+That is the last change to this item. The next boundary an adversarial reader constructs — a limit
+of $1e-12, a budget of $1.8e308 — is not a configuration `polish run --budget-usd` or `polish.toml`
+can produce, and by rule 5 a new item comes from a failure observed in a real run.
 
 What the item does **not** cover, named so the gap is visible rather than implied: cancellation
 during backoff, `BudgetTracker.restore` interleaved with live holds, lazily-resolved run limits at
