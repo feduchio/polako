@@ -221,7 +221,15 @@ export class RunEngine {
         signal,
       });
     } catch (err) {
-      const phase = this.requireRun(runId).phase;
+      // `run` was read before the driver ran, and re-reading it can itself throw — a driver that
+      // closes the store takes the lookup with it, and the replacement error is the one the caller
+      // would then see instead of the driver's.
+      let phase = run.phase;
+      try {
+        phase = this.requireRun(runId).phase;
+      } catch {
+        // deliberately swallowed: the pre-driver phase is the best answer still available
+      }
       const councilPhase = phase === "INTERPRETING_MISSION" || phase === "PLANNING";
       // Recorded before anything else happens to the run. A driver error used to reach no event and
       // no log — the daemon is spawned with `stdio: "ignore"` — so a run paused here looked like a

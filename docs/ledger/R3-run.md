@@ -61,6 +61,18 @@ Eight, not three. The three this item started from are the ones whose candidate 
 read in full; the other five were not examined, and the fix in `applyPhaseAdvance` is what covers
 the ones nobody looked at.
 
+## Review round 2 — GPT lane, on commit `eacc2d6`
+
+Verdict FAIL, 4 blocking and 4 notes.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | The fallback closes the hole but replaces a *truer* reason with a generic one: four sites in `convergenceDrivers.ts` build a specific reason — "no proven rollback target", the pathology decision's own words — and pass it only to the report, so the run recorded "without a stated reason" | **actionable** — all four now put the reason on the run as well. The fallback is a floor, not a substitute, and it was being used as one |
+| 2 | `providerRefusal` matched every `ProviderError` and `BUDGET_EXCEEDED`, so a 404, a 400, an auth failure, a timeout and the **local** context-pack cap all became "wait for the allowance to reset" | **actionable** — the predicate decides whether an operator is told to wait, so it now matches only what waiting repairs: rate limits and quotas. Seven cases, one per real string in the store |
+| 3 | The contract still said every candidate in all three runs was refused by the provider, which two of them contradict | **actionable on the text** — corrected: no candidate reached a gate, and what discarded them was not one thing |
+| 4 | `requireRun` still sat outside the guard, so a driver that closes the store replaces its own error with "database is not open" | **actionable** — the pre-driver phase is used when the re-read fails |
+| 5–8 | The attempt filter is correct in the production lifecycle; the withdrawn resume option is honest; the tests admit some mutants; the size figures are right | **notes** — the classification table added this round closes the largest of the test gaps |
+
 ## Not covered
 
 - **The `NEEDS_HUMAN` is not resumable.** Round 1 finding 4. An operator can only stop and start a

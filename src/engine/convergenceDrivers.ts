@@ -342,9 +342,12 @@ async function executePersistedDecision(
   }
 
   if (decision.action === "NEEDS_HUMAN") {
-    emitNeedsHumanReport(ctx, humanTerminalReason(decision.reason));
+    // The reason goes on the run, not only into the report: R3's fallback would otherwise replace
+    // a cause this code already knows with "without a stated reason".
+    const reason = humanTerminalReason(decision.reason);
+    emitNeedsHumanReport(ctx, reason);
     ctx.store.events.append([effectLifecycleEvent("pathology.effect_completed", decision, ctx.clock.now(), [decision.boundaryEventId])]);
-    return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+    return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
   }
 
   if (decision.action === "CHANGE_ENSEMBLE") {
@@ -361,9 +364,10 @@ async function executePersistedDecision(
         : checkpoints.find((checkpoint) => checkpoint.commitHash === decision.targetCheckpointHash) ?? null;
     const chosen = executablePersistedRollbackTarget(current, target);
     if (chosen?.runId !== ctx.run.id) {
-      emitNeedsHumanReport(ctx, humanTerminalReason("no proven rollback target"));
+      const reason = humanTerminalReason("no proven rollback target");
+      emitNeedsHumanReport(ctx, reason);
       ctx.store.events.append([effectLifecycleEvent("pathology.effect_completed", decision, ctx.clock.now(), [decision.boundaryEventId])]);
-      return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+      return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
     }
     const runHead = options.resolveRunHead?.(ctx) ?? new GitBranchRunHead(ctx.run.projectPath, ctx.run.runBranch);
     const result = await runOnIntegrationLane(() =>
@@ -376,14 +380,15 @@ async function executePersistedDecision(
       }),
     );
     if (!result.advanced) {
-      emitNeedsHumanReport(ctx, {
+      const reason: TerminalReason = {
         code: "internal_error",
         summary: "dominance rollback could not be applied on the run branch",
         question: "Rollback failed because the run branch head changed. How should the run proceed?",
         options: ["Retry rollback", "Stop the run"],
-      });
+      };
+      emitNeedsHumanReport(ctx, reason);
       ctx.store.events.append([effectLifecycleEvent("pathology.effect_completed", decision, ctx.clock.now(), [decision.boundaryEventId])]);
-      return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+      return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
     }
     ctx.store.events.append([
       ...result.events,
@@ -422,9 +427,11 @@ async function b6ContinueOrRecover(
     case "DONE":
       emitFinalReport(ctx);
       return { status: "complete", nextPhase: "DONE" };
-    case "NEEDS_HUMAN":
-      emitNeedsHumanReport(ctx, humanTerminalReason(decision.reason));
-      return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+    case "NEEDS_HUMAN": {
+      const reason = humanTerminalReason(decision.reason);
+      emitNeedsHumanReport(ctx, reason);
+      return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
+    }
     case "SIMPLIFY": {
       const rollbackTo = decision.rollbackTo;
       if (rollbackTo !== null) {
@@ -439,13 +446,14 @@ async function b6ContinueOrRecover(
           }),
         );
         if (!result.advanced) {
-          emitNeedsHumanReport(ctx, {
+          const reason: TerminalReason = {
             code: "internal_error",
             summary: "dominance rollback could not be applied on the run branch",
             question: "Rollback failed because the run branch head changed. How should the run proceed?",
             options: ["Retry simplification", "Stop the run"],
-          });
-          return { status: "complete", nextPhase: "NEEDS_HUMAN" };
+          };
+          emitNeedsHumanReport(ctx, reason);
+          return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: reason };
         }
         ctx.store.events.append(result.events);
       }

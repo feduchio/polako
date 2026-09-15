@@ -955,6 +955,24 @@ describe("B2 production candidate drivers", () => {
       s.close();
     });
 
+    // Waiting repairs an allowance and nothing else. Telling an operator to wait for a 404, a 400
+    // or a local context-budget overflow is telling them to wait for something that never comes.
+    it.each([
+      ["ProviderError: rate limited: 429", "provider_budget_exhausted"],
+      ["ProviderError: not found: 404", "repeated_failure"],
+      ["ProviderError: bad request (400): schema", "repeated_failure"],
+      ["ProviderError: auth failed (403)", "repeated_failure"],
+      ["ProviderError: request timed out after 120000ms", "repeated_failure"],
+      ["BUDGET_EXCEEDED", "repeated_failure"],
+      ["STOPPED", "repeated_failure"],
+    ] as const)("classifies %s as %s", async (error, code) => {
+      const { store: s3, engine, runId, taskId } = await seedGating();
+      exhaust(s3, runId, taskId, [{ state: "DISCARDED", error, gated: false }]);
+      await engine.tickRun(runId);
+      expect(s3.repos.runs.get(runId)?.terminalReason?.code).toBe(code);
+      s3.close();
+    });
+
     // A mixed attempt is where "every candidate failed its gates" becomes a false sentence, and
     // where the operator most needs the breakdown.
     // R3 at the one place every phase advance passes through: eight runs in the store are terminal

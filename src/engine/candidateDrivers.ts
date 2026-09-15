@@ -713,17 +713,20 @@ function handleZeroSurvivors(
 }
 
 /**
- * A provider that would not answer, as opposed to work that was answered and found wanting.
+ * An allowance that will lift on its own — and nothing else.
  *
- * Text, because that is all a discarded candidate keeps: `Candidate.error` is a string and the
- * shapes it actually holds are `ProviderError: …`, `BUDGET_EXCEEDED` and `STOPPED`, all of which
- * appear in the store. It is a heuristic and it is used only to choose between two true
- * statements — both branches name what they counted, so a misclassification changes which one is
- * emphasised, not whether the operator is told the truth.
+ * Narrow on purpose. This predicate decides whether the operator is told to wait, so anything that
+ * waiting cannot repair must not match. The store's discarded candidates carry, among others,
+ * `ProviderError: not found: 404` (14), `ProviderError: bad request (400)` (10), `auth failed`
+ * (2), `request timed out` (1) and `BUDGET_EXCEEDED` (42) — and `BUDGET_EXCEEDED` is the *local*
+ * `contextBudget.maxPackTokens`, which does not reset at midnight either. Matching `ProviderError`
+ * as a family told the operator to wait for five conditions that no amount of waiting changes.
+ *
+ * Text, because that is all a discarded candidate keeps: `Candidate.error` is a string.
  */
 function providerRefusal(error: string | null | undefined): boolean {
   if (error === null || error === undefined) return false;
-  return /^ProviderError\b|BUDGET_EXCEEDED|rate.?limit|\b429\b|quota/i.test(error.trim());
+  return /rate.?limit|\b429\b|too many requests|\bquota\b/i.test(error);
 }
 
 function firstLine(error: string | null | undefined): string {
