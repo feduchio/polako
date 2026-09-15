@@ -9,7 +9,7 @@ import { foldModelCallUsage, budgetSnapshotFromUsage } from "../convergence/path
 import type { BudgetSnapshot } from "./quota.js";
 import type { BudgetTracker, QuotaTracker } from "./quota.js";
 import type { SecretStore } from "./secrets.js";
-import { ProviderError, type CompletionRequest, type CompletionResponse } from "./types.js";
+import { ProviderError, type CompletionRequest, type CompletionResponse, type ProviderAdapter } from "./types.js";
 import { ModelObservationRepository } from "./observations.js";
 
 export interface RetryPolicy {
@@ -19,6 +19,15 @@ export interface RetryPolicy {
 }
 
 export const DEFAULT_RETRY_POLICY: RetryPolicy = { maxAttempts: 4, baseDelayMs: 1000, maxDelayMs: 30_000 };
+
+/** The same ratio `estimateTokens` uses for context packing; here it only has to not understate. */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Output allowance assumed when neither the request nor the catalogue states one. A reservation
+ * that understates is the defect; this is deliberately generous rather than typical.
+ */
+const UNSTATED_OUTPUT_ALLOWANCE = 8192;
 
 export interface BrokerDeps {
   store: Store;
@@ -64,11 +73,39 @@ export class ModelBroker {
   }
 
   async complete(request: CompletionRequest): Promise<ModelCallRecord> {
-    const { catalog, quota, budget, clock } = this.deps;
-    const adapter = catalog.provider(request.model.provider);
+    const adapter = this.deps.catalog.provider(request.model.provider);
     if (!adapter) throw new PolishError("CONFIG_ERROR", `unknown provider ${request.model.provider}`);
-    budget.assertWithin(request.metadata.runId, request.metadata.taskId);
+    // Released in `finally`, which runs after `attempt` has evaluated its return value and so
+    // after `budget.record`: releasing earlier leaves a window in which the call counts nowhere.
+    const release = this.deps.budget.admit(
+      request.metadata.runId,
+      this.estimatedCostUsd(request),
+      request.metadata.taskId,
+    );
+    try {
+      return await this.attempt(request, adapter);
+    } finally {
+      release();
+    }
+  }
 
+  /**
+   * The upper bound a call is admitted against: what the request already determines, priced at
+   * what the catalogue advertises. Unknown prices reserve nothing, because such a call cannot
+   * raise `runUsd` either — that gap is `unknownCostCalls`, not this bound's to close.
+   */
+  private estimatedCostUsd(request: CompletionRequest): number {
+    const capabilities = this.deps.catalog.get(request.model)?.info.capabilities;
+    if (capabilities === undefined) return 0;
+    const { inputCostPerM, outputCostPerM } = capabilities;
+    if (inputCostPerM === null || outputCostPerM === null) return 0;
+    const inputTokens = Math.ceil(JSON.stringify(request.messages).length / CHARS_PER_TOKEN);
+    const outputTokens = request.maxTokens ?? capabilities.maxOutputTokens ?? UNSTATED_OUTPUT_ALLOWANCE;
+    return (inputTokens * inputCostPerM + outputTokens * outputCostPerM) / 1_000_000;
+  }
+
+  private async attempt(request: CompletionRequest, adapter: ProviderAdapter): Promise<ModelCallRecord> {
+    const { catalog, quota, budget, clock } = this.deps;
     const retry = request.metadata.retryPolicy ?? this.retry;
     const callId = request.metadata.callId ?? id("call", clock.now());
     const tagged: CompletionRequest = {

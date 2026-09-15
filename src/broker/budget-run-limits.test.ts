@@ -24,6 +24,70 @@ function budgetErrorOf(fn: () => void): PolishError {
 }
 
 /**
+ * R0a. The reservation, which is what makes `maxRunUsd` a bound rather than an admission
+ * threshold. Before it, every call in flight was admitted against the same recorded spend.
+ */
+describe("BudgetTracker admission reserves what a call may cost", () => {
+  const usdOnly: BudgetLimits = { maxRunUsd: 0.5, maxRunTokens: null, maxTaskTokens: null };
+
+  it("refuses the second of two concurrent calls that cannot both fit", () => {
+    const tracker = new BudgetTracker(usdOnly);
+    const first = tracker.admit("run_a", 0.49);
+    // Nothing is recorded yet: this is the exact window in which ten $0.49 calls all passed.
+    expect(tracker.snapshot("run_a").runUsd).toBe(0);
+    expect(budgetErrorOf(() => { tracker.admit("run_a", 0.49); }).details["spent"]).toBe(0.49);
+    first();
+    expect(() => tracker.admit("run_a", 0.49)).not.toThrow();
+  });
+
+  it("admits four calls of a quarter of the limit and refuses the fifth", () => {
+    // 0.125 is exact in binary: the limit is reached, not approached, so the boundary is the
+    // boundary and not a rounding artefact.
+    const tracker = new BudgetTracker(usdOnly);
+    for (let i = 0; i < 4; i++) tracker.admit("run_a", 0.125);
+    expect(budgetErrorOf(() => { tracker.admit("run_a", 0.125); }).details["budget"]).toBe("run_usd");
+  });
+
+  it("refuses a single call that alone cannot fit the budget", () => {
+    const tracker = new BudgetTracker(usdOnly);
+    expect(budgetErrorOf(() => { tracker.admit("run_a", 0.51); }).details["spent"]).toBe(0);
+  });
+
+  it("releases a reservation once, whether the call succeeded or failed", () => {
+    const tracker = new BudgetTracker(usdOnly);
+    const release = tracker.admit("run_a", 0.4);
+    release();
+    release();
+    // A double release must not create room that was never there.
+    tracker.record("run_a", { inputTokens: 1, outputTokens: 1, costUsd: 0.4 });
+    expect(budgetErrorOf(() => { tracker.admit("run_a", 0.2); }).details["spent"]).toBe(0.4);
+  });
+
+  it("charges the recorded cost, not the reservation, once the call returns", () => {
+    const tracker = new BudgetTracker(usdOnly);
+    const release = tracker.admit("run_a", 0.49);
+    tracker.record("run_a", { inputTokens: 10, outputTokens: 2, costUsd: 0.01 });
+    release();
+    expect(tracker.snapshot("run_a").runUsd).toBe(0.01);
+    expect(() => tracker.admit("run_a", 0.4)).not.toThrow();
+  });
+
+  it("reserves nothing when the estimate is unusable, and still admits", () => {
+    const tracker = new BudgetTracker(usdOnly);
+    for (const estimate of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      tracker.admit("run_a", estimate);
+    }
+    expect(() => tracker.admit("run_a", 0.49)).not.toThrow();
+  });
+
+  it("keeps a run under a token-only limit unaffected", () => {
+    const tracker = new BudgetTracker(SHARED);
+    for (let i = 0; i < 20; i++) tracker.admit("run_a", 9_999);
+    expect(() => { tracker.assertWithin("run_a"); }).not.toThrow();
+  });
+});
+
+/**
  * B-selfhost-8: a run's own limits. The tracker already partitioned spend by run; these
  * cover the limits, which were shared by every run.
  */

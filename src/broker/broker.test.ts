@@ -23,6 +23,17 @@ function req(runId: string, model: string, provider = "p1", content = "hello"): 
   return { model: { provider, model }, messages: [{ role: "user", content }], metadata: { runId, purpose: "test", role: "worker" } };
 }
 
+/** Would one more call of this estimated cost be admitted right now? */
+function tryAdmit(budget: BudgetTracker, runId: string, estimatedUsd: number): boolean {
+  try {
+    budget.admit(runId, estimatedUsd)();
+    return true;
+  } catch (error) {
+    if (isBudgetError(error)) return false;
+    throw error;
+  }
+}
+
 describe("ModelBroker", () => {
   let dir: string;
   let store: Store;
@@ -79,6 +90,43 @@ describe("ModelBroker", () => {
     expect(store.events.list(runId, { types: ["model.call"] })[0]?.payload["callId"]).toBe(
       store.events.list(runId, { types: ["model.call_started"] })[0]?.payload["callId"],
     );
+  });
+
+  it("holds a reservation across the provider call and releases it after the cost is recorded", async () => {
+    // The catalogue prices this model, so the request determines an upper bound before the call.
+    catalog.upsert({
+      ref: { provider: "p1", model: "mid" },
+      displayName: "mid",
+      capabilities: { ...FAKE_CAPABILITIES.strong, inputCostPerM: 100, outputCostPerM: 100, maxOutputTokens: 1000 },
+      source: "provider",
+    });
+    let admittedDuringCall: boolean | null = null;
+    provider.script("mid", [{
+      kind: "fn",
+      fn: () => {
+        // Inside the provider call: nothing is recorded yet, so only the reservation can refuse.
+        // The estimate here is 1000 output tokens at $100/M = $0.1, against the run's $1 limit.
+        admittedDuringCall = tryAdmit(budget, runId, 0.95);
+        return reply("ok", 10, 5, 0.0001);
+      },
+    }]);
+    await broker.complete({ ...req(runId, "mid"), maxTokens: 1000 });
+    expect(admittedDuringCall).toBe(false);
+    expect(budget.snapshot(runId).runUsd).toBe(0.0001);
+    // Released: the run is charged what the call cost, not what it might have cost.
+    expect(tryAdmit(budget, runId, 0.95)).toBe(true);
+  });
+
+  it("releases the reservation when the provider call fails", async () => {
+    catalog.upsert({
+      ref: { provider: "p1", model: "mid" },
+      displayName: "mid",
+      capabilities: { ...FAKE_CAPABILITIES.strong, inputCostPerM: 100, outputCostPerM: 100, maxOutputTokens: 1000 },
+      source: "provider",
+    });
+    provider.script("mid", [{ kind: "error", error: new ProviderError("p1", "bad_request", "no") }]);
+    await expect(broker.complete({ ...req(runId, "mid"), maxTokens: 1000 })).rejects.toThrow(ProviderError);
+    expect(tryAdmit(budget, runId, 0.95)).toBe(true);
   });
 
   it("charges a probe to the budget and records its event, but not its routing statistics", async () => {

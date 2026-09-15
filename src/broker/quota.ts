@@ -96,6 +96,8 @@ export class QuotaTracker {
 export class BudgetTracker {
   private readonly runs = new Map<string, BudgetSnapshot>();
   private readonly runLimits = new Map<string, BudgetLimits>();
+  /** USD admitted but not yet charged: one entry per call in flight. */
+  private readonly reserved = new Map<string, number>();
 
   /**
    * `limits` are the daemon-wide defaults and are never written to: a run's own limits go
@@ -142,11 +144,41 @@ export class BudgetTracker {
     });
   }
 
-  assertWithin(runId: string, taskId?: string): void {
+  /**
+   * Admit one call and hold what it may cost until its actual cost is recorded. Indivisible by
+   * construction: asserting and then reserving in two steps is the defect it repairs, because two
+   * callers reach the assertion before either reserves. The returned function releases the hold
+   * and must run after `record`, or a window exists in which neither counts.
+   */
+  admit(runId: string, estimatedUsd: number, taskId?: string): () => void {
+    const held = Number.isFinite(estimatedUsd) && estimatedUsd > 0 ? estimatedUsd : 0;
+    this.assertWithin(runId, taskId, held);
+    this.reserved.set(runId, this.reservedFor(runId) + held);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.reserved.set(runId, Math.max(0, this.reservedFor(runId) - held));
+    };
+  }
+
+  private reservedFor(runId: string): number {
+    return this.reserved.get(runId) ?? 0;
+  }
+
+  /**
+   * `incomingUsd` is what the call being admitted may cost. Two rules, and they are not the same
+   * question: the budget is *exhausted* when what is already spent or promised has reached it, and
+   * it is *insufficient* when one more call would take it past. Recorded spend alone answered
+   * neither for a call in flight — ten $0.49 calls all passed a $0.50 limit and the run ended at
+   * $4.90.
+   */
+  assertWithin(runId: string, taskId?: string, incomingUsd = 0): void {
     const s = this.snapshot(runId);
     const limits = this.limitsFor(runId);
-    if (limits.maxRunUsd !== null && s.runUsd >= limits.maxRunUsd) {
-      throw new PolishError("CONFLICT", "run USD budget exhausted", { runId, spent: s.runUsd, limit: limits.maxRunUsd, budget: "run_usd" });
+    const committed = s.runUsd + this.reservedFor(runId);
+    if (limits.maxRunUsd !== null && (committed >= limits.maxRunUsd || committed + incomingUsd > limits.maxRunUsd)) {
+      throw new PolishError("CONFLICT", "run USD budget exhausted", { runId, spent: committed, limit: limits.maxRunUsd, budget: "run_usd" });
     }
     if (limits.maxRunTokens !== null && s.runTokens >= limits.maxRunTokens) {
       throw new PolishError("CONFLICT", "run token budget exhausted", { runId, spent: s.runTokens, limit: limits.maxRunTokens, budget: "run_tokens" });
