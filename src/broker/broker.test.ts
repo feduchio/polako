@@ -177,6 +177,23 @@ describe("ModelBroker", () => {
     expect(tryAdmit(budget, runId, 0.95)).toBe(true);
   });
 
+  // R1. Retrying an exhausted account allowance is more calls that cannot succeed: its backoff is
+  // milliseconds and the allowance observed in production resets at midnight UTC.
+  it.each([
+    ["account", 1],
+    ["model", 3],
+  ] as const)("makes %i provider call(s) for a %s-scoped 429", async (limitScope, calls) => {
+    provider.script("mid", Array.from({ length: 4 }, () => ({
+      kind: "error" as const,
+      error: new ProviderError("p1", "rate_limit", "429", { status: 429, limitScope }),
+    })));
+    const p = broker.complete(req(runId, "mid")).catch((error: unknown) => error);
+    await clock.advance(100);
+    await clock.advance(200);
+    expect(await p).toBeInstanceOf(ProviderError);
+    expect(provider.calls).toHaveLength(calls);
+  });
+
   // R1 AC5. Nine models probed under one exhausted account quota otherwise each carry a routing
   // penalty for a condition none of them caused.
   it.each([

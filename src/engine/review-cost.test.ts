@@ -447,6 +447,34 @@ describe("R1 account-scoped rate limits", () => {
     expect(excludedModels(store, clock, runId).sort()).toEqual(["m0", "m1", "m2", "m3", "m4"]);
   });
 
+  // The run must still stop rather than wait forever on an allowance that resets at midnight — but
+  // the reason it gives has to be the true one. "Non-retryable provider errors" describes a model
+  // that cannot answer; this is the opposite claim, and an operator acts differently on each.
+  it.each([
+    ["[account-scoped rate limit] rate limited: 429", "the provider account's rate limit allowance is exhausted"],
+    ["rate limited: 429", "non-retryable provider errors"],
+  ] as const)("names the cause when an axis is exhausted by %s", async (error, summaryFragment) => {
+    const { runId } = seedReviewingRun(store, clock, fixture);
+    const cap = defaultConfig().review.maxAxisAttemptsPerRound;
+    for (let attempt = 0; attempt < cap; attempt++) {
+      appendExecution(store, clock, runId, {
+        roundIndex: 1,
+        axis: "correctness",
+        requestedModel: { provider: "reviews", model: "m0" },
+        completed: false,
+        error,
+        hash: fixture.integrated,
+        at: clock.now() + attempt + 1,
+      });
+    }
+    const { engine } = engineWithFive("account");
+    await engine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("FAILED");
+    expect(run.terminalReason?.summary).toContain(summaryFragment);
+  });
+
   // AC3 at the level the next tick actually reads: a recorded execution error, not an exception.
   it("does not let a recorded account-scoped failure exclude the model on the next tick", () => {
     const { runId } = seedReviewingRun(store, clock, fixture);

@@ -124,7 +124,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
     const resolved = await resolveReviewers(ctx, options);
     const reviewers = override === null ? resolved : orderReviewersByEnsemble(resolved, override);
     const exhausted = exhaustedAxes(axes, roundExecutions, required, ctx.config.review.maxAxisAttemptsPerRound);
-    if (exhausted.length > 0) return stopForExhaustedAxes(ctx, hash, roundIndex, exhausted);
+        if (exhausted.length > 0) return stopForExhaustedAxes(ctx, hash, roundIndex, exhausted, roundExecutions);
     if (reviewers.length === 0) {
       // Only a *transient* exclusion justifies waiting. A rate limit lifts; a truncation or a schema
       // rejection is deterministic and recurs at the same cap, so waiting on it is the unbounded loop
@@ -1002,9 +1002,24 @@ function stopForExhaustedAxes(
   hash: string,
   roundIndex: number,
   exhausted: readonly ReviewAxis[],
+  roundExecutions: readonly ReviewExecution[],
 ): { status: "complete"; nextPhase: typeof EXHAUSTED_NEXT_PHASE; terminalReason: TerminalReason } {
   const cap = ctx.config.review.maxAxisAttemptsPerRound;
   recordAxisExhausted(ctx, hash, roundIndex, exhausted, cap);
+  // The bound still applies — a run that waits forever on an allowance that resets at midnight is
+  // a run nobody is told about — but the reason must be the true one. "Non-retryable provider
+  // errors" describes a model that cannot answer; an exhausted account allowance is the opposite
+  // claim, and an operator acts differently on each.
+  const accountLimited = exhausted.every((axis) =>
+    roundExecutions.some((execution) => execution.axis === axis && isAccountScopedLimitMessage(execution.error ?? "")) &&
+    !roundExecutions.some(
+      (execution) =>
+        execution.axis === axis &&
+        !execution.completed &&
+        execution.error !== undefined &&
+        isStickyReviewSkip(undefined, execution.error) &&
+        !isAccountScopedLimitMessage(execution.error),
+    ));
   // Terminal, not "proceed with the round marked unverified": VALIDATING would admit a checkpoint
   // that no reviewer ever saw, which is a worse failure than stopping.
   return {
@@ -1012,7 +1027,9 @@ function stopForExhaustedAxes(
     nextPhase: EXHAUSTED_NEXT_PHASE,
     terminalReason: {
       code: "providers_unavailable",
-      summary: `review axis ${exhausted.join(", ")} failed ${String(cap)} times in round ${String(roundIndex)} with non-retryable provider errors`,
+      summary: accountLimited
+        ? `review axis ${exhausted.join(", ")} failed ${String(cap)} times in round ${String(roundIndex)}: the provider account's rate limit allowance is exhausted, which no other model of that provider can escape`
+        : `review axis ${exhausted.join(", ")} failed ${String(cap)} times in round ${String(roundIndex)} with non-retryable provider errors`,
     },
   };
 }

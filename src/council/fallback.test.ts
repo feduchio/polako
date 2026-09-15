@@ -32,6 +32,13 @@ describe("council operational fallback", () => {
   // `run_01m2h3hpe2f6f4ra1ywcg7`, which 429'd on OpenRouter and answered on Gemini.
   it("skips the rest of a provider's chain on an account-scoped 429, but not another provider", async () => {
     const calls: string[] = [];
+    const events: NewEvent[] = [];
+    const sink: CouncilEventSink = {
+      append(batch) {
+        events.push(...batch);
+        return batch.map((event, index) => ({ ...event, seq: index, schemaVersion: 1 }));
+      },
+    };
     const inner: CouncilCompletionClient = {
       complete(request) {
         calls.push(`${request.model.provider}:${request.model.model}`);
@@ -51,10 +58,15 @@ describe("council operational fallback", () => {
       role: "judge",
       clock: systemClock,
       retry: { maxAttemptsPerModel: 1, baseBackoffMs: 0, maxBackoffMs: 0 },
+      eventSink: sink,
     });
 
     await client.complete(requestFor("first"));
     expect(calls).toEqual(["openrouter:first", "gemini:flash"]);
+    // The record must name the model that was actually tried, not the one the chain skipped.
+    const fallback = events.find((event) => event.type === "model.fallback_selected");
+    expect(fallback?.payload["from"]).toEqual({ provider: "openrouter", model: "first" });
+    expect(fallback?.payload["to"]).toEqual({ provider: "gemini", model: "flash" });
   });
 
   it("still walks the whole chain when the limit belongs to the model", async () => {

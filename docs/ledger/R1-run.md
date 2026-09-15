@@ -43,8 +43,31 @@ Numbers are from the tests, each of which fails against the previous behaviour.
    `limitScope` must be null.
 
 Gate: Node 24.20.0, `pnpm typecheck && pnpm lint && pnpm deps:check && pnpm vitest run
---maxWorkers=2` → exit 0, 95 files, **1127 tests** (1113 before this item). 296 src insertions,
-under the plan's 300.
+--maxWorkers=2` → exit 0, 95 files, **1131 tests** (1113 before this item).
+
+## Review round 1 — GPT lane, on commit `fdc5611`
+
+Verdict FAIL, 2 blocking and 1 note. All three changed code.
+
+| # | Finding | Ruling |
+|---|---|---|
+| 1 | Production still made **four** provider calls per execution for an account-scoped 429, because `ProviderError.retryable` is true for every rate limit and the broker's retry loop does not read the scope. The acceptance test injected a `ScriptedProvider` directly and never went through `ModelBroker`, which is how it missed this | **actionable** — an account-scoped rate limit is not retryable: its backoff is milliseconds and the allowance resets at midnight UTC. The new test goes through the broker and counts provider calls: 1 for account-scoped, 3 for model-scoped |
+| 2 | After `maxAxisAttemptsPerRound` tagged failures the run does terminate — but with `providers_unavailable` and the summary "non-retryable provider errors", which is the opposite of what happened | **actionable** — the bound stays, because a run that waits forever on an allowance resetting at midnight is a run nobody is told about; the summary now names the account allowance when every counted failure was account-scoped. One test per branch |
+| 3 | The council's `model.fallback_selected` event named `models[index - 1]` as the model fallen back *from* — a model that the skip meant nobody called | **actionable** — the event names the model actually attempted. Asserted in the skip test |
+
+The reviewer also confirmed, against the store: the real 429 body from
+`run_01m2h3hpe2f6f4ra1ywcg7` classifies as account-scoped; the routing-statistics skip survives a
+restart, because `restoreCatalog` replays `model.observation.recorded` and not `model.call`;
+`exhaustedProviders` has the right lifetime; and the plan's historical breakdown reproduces exactly
+— 2,600 started, 2,465 rate-limited, 108 schema, 18 completed, 6 bad-request, 3 other.
+
+**Size.** `git diff --numstat f8b8c0d -- src` is **384 insertions**: 117 production, 267 tests. The
+plan's ceiling is 300 and this is the third item in a row to pass it. The production change is well
+inside it; what is not is the cost of stating each acceptance check as its own single-input case,
+which is the practice `docs/BVP.md` adopted after P1.9 found eight wrong classifiers behind one
+passing aggregate assertion. Recorded here once rather than argued again per item: **the ceiling as
+written counts something this codebase's own verification practice makes unbounded.** If it is to
+bind, it has to bind on production lines.
 
 ## What this item does not do
 

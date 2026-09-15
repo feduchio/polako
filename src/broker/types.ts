@@ -130,10 +130,15 @@ export class ProviderError extends Error {
     this.name = "ProviderError";
     this.provider = provider;
     this.kind = kind;
-    this.retryable = kind === "rate_limit" || kind === "server" || kind === "timeout" || kind === "network";
+    this.limitScope = kind === "rate_limit" ? opts.limitScope ?? "unknown" : null;
+    // An account-wide allowance is not retryable in the sense the broker means: its backoff is
+    // milliseconds and the allowance observed in production resets at midnight UTC. Retrying it
+    // four times is four more calls that cannot succeed, on top of the rotation this item removed.
+    this.retryable =
+      (kind === "rate_limit" && this.limitScope !== "account") ||
+      kind === "server" || kind === "timeout" || kind === "network";
     this.retryAfterMs = opts.retryAfterMs ?? null;
     this.status = opts.status ?? null;
-    this.limitScope = kind === "rate_limit" ? opts.limitScope ?? "unknown" : null;
   }
 }
 

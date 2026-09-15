@@ -40,15 +40,13 @@ export function createResilientCouncilClient(options: ResilientCouncilClientOpti
       let lastError: unknown;
       /** Providers whose whole allowance is spent: another of their models cannot answer either. */
       const exhaustedProviders = new Set<string>();
-      for (let index = 0; index < models.length; index++) {
-        const model = models[index];
-        if (model === undefined) continue;
+      for (const model of models) {
         if (exhaustedProviders.has(model.provider)) continue;
-        if (index > 0) {
-          const previous = models[index - 1];
-          if (previous !== undefined) {
-            appendFallback(options, request, previous, model, attempted.at(-1));
-          }
+        // The model actually tried, not the one before this in the chain: with a provider's chain
+        // skipped, those are different, and the record must not name a model no one called.
+        const previous = attempted.at(-1);
+        if (previous !== undefined) {
+          appendFallback(options, request, previous.model, model, previous);
         }
         const tagged: CompletionRequest = {
           ...request,
