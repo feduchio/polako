@@ -117,6 +117,31 @@ describe("ModelBroker", () => {
     expect(tryAdmit(budget, runId, 0.95)).toBe(true);
   });
 
+  it("takes a reservation for every provider invocation, not one for the call", async () => {
+    catalog.upsert({
+      ref: { provider: "p1", model: "mid" },
+      displayName: "mid",
+      capabilities: { ...FAKE_CAPABILITIES.strong, inputCostPerM: 0, outputCostPerM: 100, maxOutputTokens: 1000 },
+      source: "provider",
+    });
+    const admissible: boolean[] = [];
+    provider.script("mid", [
+      { kind: "fn", fn: () => { admissible.push(tryAdmit(budget, runId, 0.85)); throw new ProviderError("p1", "server", "1"); } },
+      { kind: "fn", fn: () => { admissible.push(tryAdmit(budget, runId, 0.85)); throw new ProviderError("p1", "server", "2"); } },
+      { kind: "fn", fn: () => { admissible.push(tryAdmit(budget, runId, 0.85)); return reply("ok", 10, 5, 0.001); } },
+    ]);
+    // Each attempt reserves $0.1 against the run's $1 limit; a failed attempt records no usage, so
+    // one hold for the whole call would leave the second and third invocations unpriced.
+    const p = broker.complete({ ...req(runId, "mid"), maxTokens: 1000 });
+    await clock.advance(100);
+    await clock.advance(200);
+    await p;
+    // Holds accumulate 0.1, 0.2, 0.3, so a $0.85 call fits beside the first and not beside the
+    // later ones. One hold for the whole call would leave all three admissible.
+    expect(admissible).toEqual([true, false, false]);
+    expect(tryAdmit(budget, runId, 0.85)).toBe(true);
+  });
+
   it("releases the reservation when the provider call fails", async () => {
     catalog.upsert({
       ref: { provider: "p1", model: "mid" },

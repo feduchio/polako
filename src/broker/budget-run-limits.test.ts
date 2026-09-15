@@ -48,9 +48,24 @@ describe("BudgetTracker admission reserves what a call may cost", () => {
     expect(budgetErrorOf(() => { tracker.admit("run_a", 0.125); }).details["budget"]).toBe("run_usd");
   });
 
-  it("refuses a single call that alone cannot fit the budget", () => {
+  it("refuses a single call that alone cannot fit the budget, and says so differently", () => {
     const tracker = new BudgetTracker(usdOnly);
-    expect(budgetErrorOf(() => { tracker.admit("run_a", 0.51); }).details["spent"]).toBe(0);
+    const insufficient = budgetErrorOf(() => { tracker.admit("run_a", 0.51); });
+    expect(insufficient.details["spent"]).toBe(0);
+    expect(insufficient.details["estimate"]).toBe(0.51);
+    // "Exhausted" at a spend of $0 sends an operator looking for spend that never happened.
+    expect(insufficient.message).toBe("run USD budget cannot cover the next call");
+    tracker.record("run_a", { inputTokens: 1, outputTokens: 1, costUsd: 0.5 });
+    expect(budgetErrorOf(() => { tracker.admit("run_a", 0); }).message).toBe("run USD budget exhausted");
+  });
+
+  it("returns the whole reservation on release, with no floating-point residue", () => {
+    const tracker = new BudgetTracker({ maxRunUsd: 1, maxRunTokens: null, maxTaskTokens: null });
+    // 0.18 + 0.21 + 0.41 subtracted back one at a time leaves 1.665e-16 behind, and a run that
+    // has released everything is then refused forever.
+    const releases = [0.18, 0.21, 0.41].map((usd) => tracker.admit("run_a", usd));
+    for (const release of releases) release();
+    expect(() => tracker.admit("run_a", 1)).not.toThrow();
   });
 
   it("releases a reservation once, whether the call succeeded or failed", () => {

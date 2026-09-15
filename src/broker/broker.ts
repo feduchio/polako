@@ -20,9 +20,6 @@ export interface RetryPolicy {
 
 export const DEFAULT_RETRY_POLICY: RetryPolicy = { maxAttempts: 4, baseDelayMs: 1000, maxDelayMs: 30_000 };
 
-/** The same ratio `estimateTokens` uses for context packing; here it only has to not understate. */
-const CHARS_PER_TOKEN = 4;
-
 /**
  * Output allowance assumed when neither the request nor the catalogue states one. A reservation
  * that understates is the defect; this is deliberately generous rather than typical.
@@ -75,36 +72,52 @@ export class ModelBroker {
   async complete(request: CompletionRequest): Promise<ModelCallRecord> {
     const adapter = this.deps.catalog.provider(request.model.provider);
     if (!adapter) throw new PolishError("CONFIG_ERROR", `unknown provider ${request.model.provider}`);
-    // Released in `finally`, which runs after `attempt` has evaluated its return value and so
-    // after `budget.record`: releasing earlier leaves a window in which the call counts nowhere.
-    const release = this.deps.budget.admit(
-      request.metadata.runId,
-      this.estimatedCostUsd(request),
-      request.metadata.taskId,
-    );
+    // One hold per provider invocation, not per call: the retry loop makes up to `maxAttempts` of
+    // them, and a failed attempt records no usage, so a single hold would cover the first and let
+    // the rest through unpriced. Released in `finally`, which runs after `attempt` has evaluated
+    // its return value and so after `budget.record`: releasing earlier leaves a window in which
+    // the call counts nowhere.
+    const estimate = this.estimatedCostUsd(request);
+    const admit = (): (() => void) =>
+      this.deps.budget.admit(request.metadata.runId, estimate, request.metadata.taskId);
+    const releases = [admit()];
     try {
-      return await this.attempt(request, adapter);
+      return await this.attempt(request, adapter, () => {
+        releases.push(admit());
+      });
     } finally {
-      release();
+      for (const release of releases) release();
     }
   }
 
   /**
-   * The upper bound a call is admitted against: what the request already determines, priced at
-   * what the catalogue advertises. Unknown prices reserve nothing, because such a call cannot
-   * raise `runUsd` either — that gap is `unknownCostCalls`, not this bound's to close.
+   * What one attempt is admitted against: everything the request will put on the wire, priced at
+   * what the catalogue advertises.
+   *
+   * Deliberately pessimistic, and **not a proven upper bound**. A token is at least one character,
+   * so one token per character over-counts ordinary prose by about four; it still understates text
+   * that tokenizes badly, and JSON-heavy messages have been measured at 1.15 characters per token.
+   * The guarantee this item makes is about concurrency — that N calls in flight are not all
+   * admitted against the same figure — not about exactness. Unknown prices reserve nothing,
+   * because such a call cannot raise `runUsd` either; that gap is `unknownCostCalls`, R6's.
    */
   private estimatedCostUsd(request: CompletionRequest): number {
     const capabilities = this.deps.catalog.get(request.model)?.info.capabilities;
     if (capabilities === undefined) return 0;
     const { inputCostPerM, outputCostPerM } = capabilities;
     if (inputCostPerM === null || outputCostPerM === null) return 0;
-    const inputTokens = Math.ceil(JSON.stringify(request.messages).length / CHARS_PER_TOKEN);
+    // Tools and the response schema are sent too (`openaiCompat.ts` builds them into the payload)
+    // and a review request's schema is not small.
+    const sent = JSON.stringify([request.messages, request.tools ?? [], request.responseSchema ?? null]);
     const outputTokens = request.maxTokens ?? capabilities.maxOutputTokens ?? UNSTATED_OUTPUT_ALLOWANCE;
-    return (inputTokens * inputCostPerM + outputTokens * outputCostPerM) / 1_000_000;
+    return (sent.length * inputCostPerM + outputTokens * outputCostPerM) / 1_000_000;
   }
 
-  private async attempt(request: CompletionRequest, adapter: ProviderAdapter): Promise<ModelCallRecord> {
+  private async attempt(
+    request: CompletionRequest,
+    adapter: ProviderAdapter,
+    admitRetry: () => void,
+  ): Promise<ModelCallRecord> {
     const { catalog, quota, budget, clock } = this.deps;
     const retry = request.metadata.retryPolicy ?? this.retry;
     const callId = request.metadata.callId ?? id("call", clock.now());
@@ -130,6 +143,8 @@ export class ModelBroker {
 
     while (attempt < retry.maxAttempts) {
       attempt++;
+      // The first invocation's hold was taken by the caller, before any work started.
+      if (attempt > 1) admitRetry();
       if (tagged.signal?.aborted) {
         failCancelled(new PolishError("CANCELLED", "model call cancelled"));
       }

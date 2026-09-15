@@ -96,8 +96,14 @@ export class QuotaTracker {
 export class BudgetTracker {
   private readonly runs = new Map<string, BudgetSnapshot>();
   private readonly runLimits = new Map<string, BudgetLimits>();
-  /** USD admitted but not yet charged: one entry per call in flight. */
-  private readonly reserved = new Map<string, number>();
+  /**
+   * USD admitted but not yet charged, one entry per attempt in flight. A set of outstanding
+   * holds rather than a running sum: adding and subtracting the same doubles does not return to
+   * zero — 0.18 + 0.21 + 0.41 released in turn leaves 1.67e-16 behind, which refuses the run
+   * forever. Summing what is still held is exact by construction, and the set is never larger
+   * than the provider's concurrency.
+   */
+  private readonly reserved = new Map<string, Set<{ usd: number }>>();
 
   /**
    * `limits` are the daemon-wide defaults and are never written to: a run's own limits go
@@ -151,19 +157,21 @@ export class BudgetTracker {
    * and must run after `record`, or a window exists in which neither counts.
    */
   admit(runId: string, estimatedUsd: number, taskId?: string): () => void {
-    const held = Number.isFinite(estimatedUsd) && estimatedUsd > 0 ? estimatedUsd : 0;
-    this.assertWithin(runId, taskId, held);
-    this.reserved.set(runId, this.reservedFor(runId) + held);
-    let released = false;
+    const usd = Number.isFinite(estimatedUsd) && estimatedUsd > 0 ? estimatedUsd : 0;
+    this.assertWithin(runId, taskId, usd);
+    const holds = this.reserved.get(runId) ?? new Set<{ usd: number }>();
+    const hold = { usd };
+    holds.add(hold);
+    this.reserved.set(runId, holds);
     return () => {
-      if (released) return;
-      released = true;
-      this.reserved.set(runId, Math.max(0, this.reservedFor(runId) - held));
+      holds.delete(hold);
     };
   }
 
   private reservedFor(runId: string): number {
-    return this.reserved.get(runId) ?? 0;
+    let total = 0;
+    for (const hold of this.reserved.get(runId) ?? []) total += hold.usd;
+    return total;
   }
 
   /**
@@ -177,8 +185,20 @@ export class BudgetTracker {
     const s = this.snapshot(runId);
     const limits = this.limitsFor(runId);
     const committed = s.runUsd + this.reservedFor(runId);
-    if (limits.maxRunUsd !== null && (committed >= limits.maxRunUsd || committed + incomingUsd > limits.maxRunUsd)) {
+    if (limits.maxRunUsd !== null && committed >= limits.maxRunUsd) {
       throw new PolishError("CONFLICT", "run USD budget exhausted", { runId, spent: committed, limit: limits.maxRunUsd, budget: "run_usd" });
+    }
+    if (limits.maxRunUsd !== null && committed + incomingUsd > limits.maxRunUsd) {
+      // Distinct from exhaustion, and said differently: the run has money and this call is too
+      // large for what is left. Reporting it as "exhausted" at a spend of $0 is how an operator
+      // ends up looking for spend that never happened.
+      throw new PolishError("CONFLICT", "run USD budget cannot cover the next call", {
+        runId,
+        spent: committed,
+        estimate: incomingUsd,
+        limit: limits.maxRunUsd,
+        budget: "run_usd",
+      });
     }
     if (limits.maxRunTokens !== null && s.runTokens >= limits.maxRunTokens) {
       throw new PolishError("CONFLICT", "run token budget exhausted", { runId, spent: s.runTokens, limit: limits.maxRunTokens, budget: "run_tokens" });
