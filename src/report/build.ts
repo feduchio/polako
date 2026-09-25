@@ -97,6 +97,17 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
     const winner = compared.payload["winner"];
     if (typeof winner === "string") evidence.push(`Compared winner ${winner} (event ${compared.id})`);
   }
+  for (const recorded of events.filter((event) => event.type === "run.mechanisms")) {
+    const mechanisms = recorded.payload["mechanisms"];
+    if (!Array.isArray(mechanisms)) continue;
+    for (const item of mechanisms) {
+      if (typeof item !== "object" || item === null) continue;
+      const record = item as Record<string, unknown>;
+      if (typeof record["name"] !== "string" || typeof record["on"] !== "boolean") continue;
+      const reason = typeof record["reason"] === "string" ? ` (${record["reason"]})` : "";
+      evidence.push(`Mechanism ${record["name"]}: ${record["on"] ? "on" : "off"}${reason}`);
+    }
+  }
   for (const entry of corpus.entries) {
     const runtime = entry.runtimeEvidence;
     if (runtime?.runId === run.id) {

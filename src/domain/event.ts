@@ -9,6 +9,8 @@ export const CURRENT_EVENT_SCHEMA_VERSION = 1;
  */
 export const KNOWN_EVENT_TYPES = [
   "run.created",
+  /** Which safety mechanisms are on for this run, and why any of them is off. */
+  "run.mechanisms",
   "run.phase_changed",
   "run.control_changed",
   /** A phase driver threw. Recorded before the engine does anything else with the run. R3. */
@@ -19,6 +21,8 @@ export const KNOWN_EVENT_TYPES = [
   "planning.decompose_discarded",
   /** A reviewer's verdict on the seeded defect. R2. */
   "review.canary_recorded",
+  /** A review axis used up its attempts. Emitted by the reviewing driver; previously unregistered. */
+  "review.axis_exhausted",
   "run.terminated",
   "run.answer_recorded",
   "run.settings_fallback",

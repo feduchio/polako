@@ -19,8 +19,10 @@ import { CommandPolicy } from "../sandbox/allowlist.js";
 import { probeModelCapabilities } from "../broker/capabilityProbe.js";
 import {
   PRODUCTION_DRIVER_PHASES,
+  appendRunMechanisms,
   buildProductionDeps,
   createWorkerFactory,
+  describeRunMechanisms,
   installProductionDrivers,
   promoteEligibleTasksToReady,
   resolveDiscoveredProfile,
@@ -43,6 +45,8 @@ import {
   REVIEW_FINDINGS_RESPONSE_SCHEMA,
 } from "../broker/responseSchemas.js";
 import { hashJson } from "../shared/hash.js";
+import { buildFinalReportInput } from "../report/build.js";
+import { renderFinalReport } from "../report/reports.js";
 
 describe("production composition", () => {
   let dir: string;
@@ -640,6 +644,160 @@ describe("production composition", () => {
     expect(store.events.list(run.id, { types: ["model.call"] })
       .filter((event) => event.payload["purpose"] === "agent_progress_score")).toHaveLength(2);
     await normalHandle.destroy();
+  });
+
+  it("scores progress with a paid family when the routing ceiling allows it", async () => {
+    const config = defaultConfig();
+    config.routing.costEligibility = "ceiling";
+    config.routing.maxInputCostPerM = 5;
+    config.routing.maxOutputCostPerM = 5;
+    config.agent.maxTurns = 8;
+    const freeProgress = {
+      ...FAKE_CAPABILITIES.strong,
+      supportsTools: false,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const provider = new ScriptedProvider("models", [
+      { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, family: "worker", inputCostPerM: 0, outputCostPerM: 0 } },
+      { name: "progress-free", capabilities: { ...freeProgress, family: "free" } },
+      { name: "progress-paid", capabilities: { ...freeProgress, family: "paid", inputCostPerM: 1, outputCostPerM: 1 } },
+      { name: "progress-loose", capabilities: { ...freeProgress, family: "loose", inputCostPerM: 1, outputCostPerM: 1 } },
+    ]);
+    provider.script("progress-loose", [{ kind: "fn", fn: () => { throw new Error("unprobed progress model must not be called"); } }]);
+    provider.script("worker", Array.from({ length: 12 }, (_, index) => ({
+      kind: "reply" as const,
+      content: "",
+      toolCalls: [{ id: `read-${index}`, name: "read", arguments: JSON.stringify({ path: "package.json" }) }],
+    })));
+    provider.script("progress-free", [{ kind: "reply", content: '{"progress":0}' }]);
+    provider.script("progress-paid", [{ kind: "reply", content: '{"progress":0}' }]);
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-progress-ceiling-"));
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "progress" }));
+    const git = await Git.init(repoDir);
+    const head = await git.commitAll("base");
+    if (head === null) throw new Error("missing base");
+    const deps = buildProductionDeps({
+      store, clock, config, home: join(dir, "home"), providers: [provider],
+      resolveSandbox: (ctx) => new WorktreeSandbox(ctx.run.projectPath, join(dir, "wt", ctx.run.id), config.sandbox),
+    });
+    await deps.catalog.discover();
+    const observations = new ModelObservationRepository(store);
+    const schemaHash = hashJson(PROGRESS_SCORE_RESPONSE_SCHEMA);
+    for (const model of ["progress-free", "progress-paid"]) {
+      observations.recordStrictProbe({ provider: "models", model }, {
+        schema: "progress", schemaHash, supported: true, at: clock.now(),
+      });
+    }
+    observations.restoreCatalog(deps.catalog);
+    const run = new RunEngine({
+      store, clock,
+      scheduler: new Scheduler(store, clock, { workerId: "pw", laneLimits: config.lanes, leaseMs: 60_000 }),
+      config, assertProjectClean: () => undefined,
+    }, false).createRun({ projectPath: repoDir });
+    const task = createTaskFromRequirement(id("interp", clock.now()), "R1", {
+      id: id("task", clock.now()),
+      runId: run.id,
+      title: "Normal",
+      description: "Inspect",
+      kind: "bugfix",
+      acceptance: ["none"],
+      complexity: "normal",
+      baseCheckpointHash: head,
+      now: clock.now(),
+    });
+    const ctx = {
+      run, store,
+      scheduler: new Scheduler(store, clock, { workerId: "pw2", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock, config,
+    } satisfies PhaseContext;
+    appendRunMechanisms(deps, ctx);
+    const manifest = store.events.list(run.id, { types: ["run.mechanisms"] })[0];
+    const mechanisms = manifest?.payload["mechanisms"];
+    expect(mechanisms).toContainEqual({ name: "progress_tracker", on: true });
+    const sandbox = new WorktreeSandbox(repoDir, join(dir, "ceiling-candidates"), config.sandbox);
+    const handle = await sandbox.create({
+      id: id("cand", clock.now()),
+      baseCommit: head,
+      branch: "polish/progress/ceiling",
+      policy: CommandPolicy.forProject([], null, false, { search: true }),
+    });
+    const outcome = await createWorkerFactory(deps, ctx)(0).run(task, handle);
+    expect(outcome).toMatchObject({ status: "failed", error: "ABANDONED_PROGRESS" });
+    const scored = store.events.list(run.id, { types: ["worker.progress_scored"] });
+    expect(scored).toHaveLength(1);
+    expect(scored[0]!.seq).toBeGreaterThan(manifest!.seq);
+    expect(store.events.list(run.id, { types: ["run.mechanisms"] })).toHaveLength(1);
+    const called = new Set(provider.calls.map((call) => call.model.model));
+    expect(called.has("progress-paid")).toBe(true);
+    expect(called.has("progress-loose")).toBe(false);
+    const report = renderFinalReport(buildFinalReportInput({ run, store, clock, config }));
+    expect(report).toContain("Mechanism progress_tracker: on");
+    await handle.destroy();
+  });
+
+  it("says the progress tracker is off when the config disables it, even before any model is known", () => {
+    const config = defaultConfig();
+    config.agent.progressEnabled = false;
+    const deps = buildProductionDeps({
+      store, clock, config, home: join(dir, "home"),
+      providers: [new ScriptedProvider("models", [{ name: "worker", capabilities: FAKE_CAPABILITIES.frontier }])],
+    });
+    expect(describeRunMechanisms(deps)).toContainEqual({
+      name: "progress_tracker",
+      on: false,
+      reason: "progress_disabled",
+    });
+  });
+
+  it("records a single progress family as off before any worker call", async () => {
+    const config = defaultConfig();
+    config.routing.costEligibility = "ceiling";
+    config.routing.maxInputCostPerM = 5;
+    config.routing.maxOutputCostPerM = 5;
+    const freeProgress = {
+      ...FAKE_CAPABILITIES.strong,
+      supportsTools: false,
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+    };
+    const provider = new ScriptedProvider("models", [
+      { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, family: "worker", inputCostPerM: 0, outputCostPerM: 0 } },
+      { name: "progress-only", capabilities: { ...freeProgress, family: "only" } },
+    ]);
+    const deps = buildProductionDeps({
+      store, clock, config, home: join(dir, "home"), providers: [provider],
+    });
+    await deps.catalog.discover();
+    const observations = new ModelObservationRepository(store);
+    observations.recordStrictProbe({ provider: "models", model: "progress-only" }, {
+      schema: "progress",
+      schemaHash: hashJson(PROGRESS_SCORE_RESPONSE_SCHEMA),
+      supported: true,
+      at: clock.now(),
+    });
+    observations.restoreCatalog(deps.catalog);
+    const run = new RunEngine({
+      store, clock,
+      scheduler: new Scheduler(store, clock, { workerId: "pw", laneLimits: config.lanes, leaseMs: 60_000 }),
+      config, assertProjectClean: () => undefined,
+    }, false).createRun({ projectPath: dir });
+    const ctx = {
+      run, store,
+      scheduler: new Scheduler(store, clock, { workerId: "pw2", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock, config,
+    } satisfies PhaseContext;
+    appendRunMechanisms(deps, ctx);
+    expect(store.events.list(run.id, { types: ["worker.started"] })).toHaveLength(0);
+    expect(store.events.list(run.id, { types: ["worker.progress_scored"] })).toHaveLength(0);
+    const mechanisms = store.events.list(run.id, { types: ["run.mechanisms"] })[0]?.payload["mechanisms"];
+    expect(mechanisms).toContainEqual({
+      name: "progress_tracker",
+      on: false,
+      reason: "insufficient_families: 1",
+    });
+    const report = renderFinalReport(buildFinalReportInput({ run, store, clock, config }));
+    expect(report).toContain("Mechanism progress_tracker: off (insufficient_families: 1)");
   });
 
   it("buildProductionDeps discovers models with capability probes", async () => {

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { AgentRunner } from "../agents/runner.js";
+import { AgentRunner, toolResultTokenCap } from "../agents/runner.js";
 import { EmpiricalProgressTracker, type ProgressModel } from "../agents/progressTracker.js";
 import { AGENT_TOOL_NAMES } from "../agents/types.js";
 import { composeWorkerInstruction, workerPackCap } from "../context/workerInstruction.js";
@@ -541,6 +541,7 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
       }
     }
     observations.restoreCatalog(deps.catalog);
+    appendRunMechanisms(deps, ctx);
     const probeEvents: NewEvent[] = discovery.probes.map((probe) => ({
       id: id("evt", ctx.clock.now()),
       runId: ctx.run.id,
@@ -833,6 +834,7 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
   const maxPackTokens = workerPackCap(maxTokens, deps.config.contextBudget.maxPackTokens);
   const progressModels = selectProgressModels(deps);
   return (index: number) => {
+    appendRunMechanisms(deps, ctx);
     const model = ranked[index % Math.max(ranked.length, 1)]?.entry.info.ref ?? {
       provider: deps.providers[0]?.id ?? "scripted",
       model: "default",
@@ -919,12 +921,12 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
 }
 
 function selectProgressModels(deps: ProductionDeps): ProgressModel[] {
+  const policy = costEligibilityFromConfig(deps.config.routing);
   const eligible = deps.catalog.list()
     .filter((entry) =>
       entry.available &&
       entry.info.capabilities.supportsStrictProgressSchema === true &&
-      entry.info.capabilities.inputCostPerM === 0 &&
-      entry.info.capabilities.outputCostPerM === 0)
+      isCostEligible(entry.info.capabilities, policy))
     .sort((a, b) =>
       compareText(a.info.capabilities.family, b.info.capabilities.family) ||
       compareText(modelRefKey(a.info.ref), modelRefKey(b.info.ref)));
@@ -950,6 +952,56 @@ function selectProgressModels(deps: ProductionDeps): ProgressModel[] {
     if (selected.length === 2) break;
   }
   return selected;
+}
+
+export interface RunMechanism {
+  name: "repetition_breaker" | "tool_output_cap" | "progress_tracker" | "review_quorum" | "canary";
+  on: boolean;
+  reason?: string;
+}
+
+/**
+ * What is protecting this run. The progress tracker follows the same cost gate as routing: a paid
+ * ceiling that leaves the tracker requiring a free model is how it switched itself off in silence.
+ */
+export function describeRunMechanisms(deps: ProductionDeps): RunMechanism[] {
+  const families = selectProgressModels(deps).length;
+  const progressReason = !deps.config.agent.progressEnabled
+    ? "progress_disabled"
+    : families === 2
+      ? undefined
+      : `insufficient_families: ${String(families)}`;
+  const cap = toolResultTokenCap(deps.config.budget.maxTaskTokens ?? 32_000);
+  return [
+    { name: "repetition_breaker", on: true },
+    { name: "tool_output_cap", on: true, reason: `cap_tokens: ${String(cap)}` },
+    {
+      name: "progress_tracker",
+      on: progressReason === undefined,
+      ...(progressReason === undefined ? {} : { reason: progressReason }),
+    },
+    {
+      name: "review_quorum",
+      on: deps.config.review.reviewersPerRound >= 1,
+      reason: `reviewers_per_round: ${String(deps.config.review.reviewersPerRound)}`,
+    },
+    { name: "canary", on: true },
+  ];
+}
+
+/** Once per run. A later caller, including the worker factory, does not write a second copy. */
+export function appendRunMechanisms(deps: ProductionDeps, ctx: PhaseContext): void {
+  if (ctx.store.events.list(ctx.run.id, { types: ["run.mechanisms"] }).length > 0) return;
+  ctx.store.events.append([{
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: "run.mechanisms",
+    payload: { mechanisms: describeRunMechanisms(deps) },
+    causedBy: [],
+    actor: SYSTEM_ACTOR,
+    artifacts: [],
+  }]);
 }
 
 export function resolveCouncilRoles(deps: ProductionDeps, ctx?: PhaseContext): CouncilRoleConfigs {
