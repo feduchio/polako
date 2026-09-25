@@ -452,16 +452,23 @@ async function persistDebateThroughOutcome(
         return "debated";
       }
       if (step.role === "judge" && parseJudgeVerdict(text) === null) {
-        persistRoleArgument(ctx, finding, step.role, step.roundIndex, text, roles[step.role]);
-        persistDebateOutcome(ctx, finding, {
-          verdict: "UNCERTAIN",
-          rationale: "malformed or empty judge verdict",
-          hardFailure: true,
+        const judged = await rejudge(ctx, options.completeDebate, finding, roles, prompt, step.roundIndex, {
+          text,
+          failure: "unreadable verdict",
         });
-        return "debated";
+        if (judged === "failed") return "debated";
+        continue;
       }
       persistRoleArgument(ctx, finding, step.role, step.roundIndex, text, roles[step.role]);
     } catch (error) {
+      if (step.role === "judge") {
+        const judged = await rejudge(ctx, options.completeDebate, finding, roles, prompt, step.roundIndex, {
+          text: null,
+          failure: error instanceof Error ? error.message : String(error),
+        });
+        if (judged === "failed") return "debated";
+        continue;
+      }
       persistDebateOutcome(ctx, finding, {
         verdict: "UNCERTAIN",
         rationale: `debate role ${step.role} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -476,6 +483,59 @@ async function persistDebateThroughOutcome(
     hardFailure: true,
   });
   return "debated";
+}
+
+/**
+ * The judge's first answer could not be read, or never came. That is not a verdict, and treating
+ * it as UNCERTAIN turned formatting slips into investigation work nobody could do. Ask once more,
+ * then each judge of another family chosen at debate start; UNCERTAIN only when none answers.
+ */
+async function rejudge(
+  ctx: PhaseContext,
+  completeDebate: NonNullable<ValidatingDriverOptions["completeDebate"]>,
+  finding: Finding,
+  roles: DebateRoles,
+  prompt: string,
+  roundIndex: number,
+  first: { text: string | null; failure: string },
+): Promise<"ok" | "failed"> {
+  const failures = [`${modelLabel(roles.judge)}: ${first.failure}`];
+  let lastText = first.text;
+  let lastModel = roles.judge;
+  for (const model of [roles.judge, ...(roles.judgeAlternates ?? [])]) {
+    try {
+      const text = await completeDebate(ctx, { role: "judge", model, prompt, finding });
+      if (parseJudgeVerdict(text) !== null) {
+        persistRoleArgument(ctx, finding, "judge", roundIndex, text, model);
+        return "ok";
+      }
+      failures.push(`${modelLabel(model)}: unreadable verdict`);
+      lastText = text;
+      lastModel = model;
+    } catch (error) {
+      failures.push(`${modelLabel(model)}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (lastText !== null) persistRoleArgument(ctx, finding, "judge", roundIndex, lastText, lastModel);
+  persistDebateOutcome(ctx, finding, {
+    verdict: "UNCERTAIN",
+    rationale: `malformed or empty judge verdict from every judge asked (${failures.join("; ")})`,
+    hardFailure: true,
+  });
+  return "failed";
+}
+
+function modelLabel(model: ModelRef): string {
+  return `${model.provider}:${model.model}`;
+}
+
+/** The judge whose argument decided the debate, which after a retry is not always the one seated. */
+function decidingJudge(debate: { arguments: readonly Event[] }, seated: ModelRef): ModelRef {
+  for (const event of [...debate.arguments].reverse()) {
+    const actor = event.actor as { role?: unknown; model?: ModelRef };
+    if (actor.role === "judge" && actor.model !== undefined) return actor.model;
+  }
+  return seated;
 }
 
 function persistDebateStarted(ctx: PhaseContext, finding: Finding, roles: DebateRoles, causalValidationId: string) {
@@ -584,7 +644,7 @@ function applyDebateOutcome(
   if (debateState.started === null) {
     return handleResidualUncertain(ctx, before, requirementRef, null);
   }
-  const judgeModel = startedPayload(debateState.started).roles.judge;
+  const judgeModel = decidingJudge(debateState, startedPayload(debateState.started).roles.judge);
 
   const validating = FindingSchema.parse({ ...before, status: "VALIDATING", updatedAt: now });
   const terminalStatus = findingStatusFromVerdict(verdict);

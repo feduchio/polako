@@ -196,6 +196,70 @@ describe("C4 finding debate in createValidatingDriver", () => {
     expect(store.repos.tasks.listByRun(runId).some((task) => task.origin.kind === "valid_finding")).toBe(false);
   });
 
+  it("7d. an unreadable judge verdict is asked again before anything is called UNCERTAIN", async () => {
+    let judged = 0;
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(
+        () => uncertainWithEvidence(),
+        recorder((request) => {
+          if (request.role !== "judge") return `${request.role} argument`;
+          judged += 1;
+          return judged === 1 ? "not-json" : judgeScript("REJECTED")(request);
+        }),
+        ROLES,
+      ),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    await engine.tickRun(runId);
+    expect(judged).toBe(2);
+    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("REJECTED");
+    const outcome = store.events.list(runId, { types: ["finding.debate_outcome"] })[0];
+    expect(outcome?.payload).toMatchObject({ verdict: "REJECTED", hardFailure: false });
+  });
+
+  it("7e. a judge of another family decides when the seated judge cannot, and is the one recorded", async () => {
+    const alternate = { provider: "scripted", model: "alternate-judge" };
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(
+        () => uncertainWithEvidence(),
+        recorder((request) => {
+          if (request.role !== "judge") return `${request.role} argument`;
+          if (request.model.model === "judge") throw new Error("judge timed out");
+          return judgeScript("REJECTED")(request);
+        }),
+        { ...ROLES, judgeAlternates: [alternate] },
+      ),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    await engine.tickRun(runId);
+    const judgeCalls = calls.filter((call) => call.role === "judge").map((call) => call.model.model);
+    expect(judgeCalls).toEqual(["judge", "judge", "alternate-judge"]);
+    const finding = store.repos.findings.listByRun(runId)[0];
+    expect(finding?.status).toBe("REJECTED");
+    const validation = store.repos.validations.listByFinding(finding!.id).at(-1);
+    expect(JSON.stringify(validation)).toContain("alternate-judge");
+  });
+
+  it("7f. UNCERTAIN names every judge that failed when none could answer", async () => {
+    const alternate = { provider: "scripted", model: "alternate-judge" };
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(
+        () => uncertainWithEvidence(),
+        recorder((request) => (request.role === "judge" ? "not-json" : `${request.role} argument`)),
+        { ...ROLES, judgeAlternates: [alternate] },
+      ),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    await engine.tickRun(runId);
+    expect(calls.filter((call) => call.role === "judge")).toHaveLength(3);
+    const outcome = store.events.list(runId, { types: ["finding.debate_outcome"] })[0];
+    expect(outcome?.payload["verdict"]).toBe("UNCERTAIN");
+    expect(String(outcome?.payload["rationale"])).toContain("scripted:alternate-judge: unreadable verdict");
+  });
+
   it("7c. thrown advocate does not upgrade to VALID", async () => {
     engine.registerPhase(
       "VALIDATING",
