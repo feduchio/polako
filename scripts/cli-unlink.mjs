@@ -16,7 +16,7 @@ if (binDir.length > 0) {
 
 const localBin = join(homedir(), ".local", "bin");
 let removedLocal = false;
-for (const name of ["polish", "polishd"]) {
+for (const name of ["polish", "polishd", "polish-mcp"]) {
   const dest = join(localBin, name);
   if (!existsSync(dest)) continue;
   try {

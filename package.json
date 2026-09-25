@@ -11,7 +11,8 @@
   "packageManager": "pnpm@11.25.0",
   "bin": {
     "polish": "dist/cli/index.js",
-    "polishd": "dist/daemon/main.js"
+    "polishd": "dist/daemon/main.js",
+    "polish-mcp": "dist/mcp/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

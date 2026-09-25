@@ -28,12 +28,14 @@ run("pnpm", ["build"]);
 
 const polishBin = join(root, "dist/cli/index.js");
 const polishdBin = join(root, "dist/daemon/main.js");
-if (!existsSync(polishBin) || !existsSync(polishdBin)) {
-  console.error("build did not produce dist/cli/index.js and dist/daemon/main.js");
+const mcpBin = join(root, "dist/mcp/index.js");
+if (!existsSync(polishBin) || !existsSync(polishdBin) || !existsSync(mcpBin)) {
+  console.error("build did not produce dist/cli/index.js, dist/daemon/main.js, and dist/mcp/index.js");
   process.exit(1);
 }
 chmodSync(polishBin, 0o755);
 chmodSync(polishdBin, 0o755);
+chmodSync(mcpBin, 0o755);
 
 const pnpmBinDir = capture("pnpm", ["bin", "-g"]).stdout.trim();
 const pathDirs = [];
@@ -54,6 +56,7 @@ pathDirs.unshift(localBin);
 for (const [name, target] of [
   ["polish", polishBin],
   ["polishd", polishdBin],
+  ["polish-mcp", mcpBin],
 ]) {
   const dest = join(localBin, name);
   try {
@@ -67,6 +70,7 @@ for (const [name, target] of [
 const env = { ...process.env, PATH: `${pathDirs.join(":")}:${process.env["PATH"] ?? ""}` };
 const expectedPolish = realpathSync(polishBin);
 const expectedDaemon = realpathSync(polishdBin);
+const expectedMcp = realpathSync(mcpBin);
 
 function resolved(command) {
   const which = capture("which", [command], env);
@@ -101,7 +105,14 @@ if (daemon.real !== expectedDaemon) {
   process.exit(1);
 }
 
-console.log(`linked polish  → ${polish.path}`);
-console.log(`linked polishd → ${daemon.path}`);
+const mcp = resolved("polish-mcp");
+if (mcp === null || mcp.real !== expectedMcp) {
+  console.error("polish-mcp on PATH is not this repository's current build.");
+  console.error(`  expected → ${expectedMcp}`);
+  process.exit(1);
+}
+console.log(`linked polish     → ${polish.path}`);
+console.log(`linked polishd    → ${daemon.path}`);
+console.log(`linked polish-mcp → ${mcp.path}`);
 console.log("Everyday use from any directory: polish run ...");
 console.log("pnpm cli:link is an install/update step, not part of ordinary product usage.");

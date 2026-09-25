@@ -19,9 +19,10 @@ export class McpFacade {
         serverInfo: { name: "polish", version: "0.1.0" },
       };
     }
+    if (request.method === "ping") return {};
     if (request.method === "tools/list") {
       return {
-        tools: RPC_METHODS.filter((method) => method !== "daemon.ping").map((method) => ({
+        tools: RPC_METHODS.map((method) => ({
           name: method,
           description: `Call the polish daemon's ${method} RPC method`,
           inputSchema: { type: "object", additionalProperties: true },
@@ -34,11 +35,16 @@ export class McpFacade {
       if (typeof name !== "string") throw new Error("tools/call requires a tool name");
       if (!RPC_METHODS.some((method) => method === name)) throw new Error(`unknown polish tool ${name}`);
       const params = typeof args === "object" && args !== null ? args as Record<string, unknown> : {};
-      const result = await callDaemon(name, params);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-        structuredContent: result,
-      };
+      try {
+        const result = await callDaemon(name, params);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          structuredContent: result,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { isError: true, content: [{ type: "text", text: message }] };
+      }
     }
     throw new Error(`unsupported MCP method ${request.method}`);
   }
@@ -57,7 +63,8 @@ async function respond(facade: McpFacade, line: string): Promise<void> {
   let id: string | number | null = null;
   try {
     const request = JSON.parse(line) as McpRequest;
-    id = request.id ?? null;
+    if (request.id === undefined) return;
+    id = request.id;
     const result = await facade.handle(request);
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
   } catch (error) {

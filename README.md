@@ -33,6 +33,19 @@ protocol and the threat model. The implementation plan lives in the Cursor plan 
 - git 2.40+.
 - Repository intelligence is the built-in index. There is no external code graph or verifier process.
 
+## Cursor MCP
+
+`polish-mcp` speaks MCP over stdio and forwards each tool call to the local daemon.
+A project can register it with:
+
+```json
+{
+  "mcpServers": {
+    "polish": { "command": "polish-mcp" }
+  }
+}
+```
+
 ## Development
 
 ```bash

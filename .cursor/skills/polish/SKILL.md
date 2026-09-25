@@ -6,6 +6,7 @@ description: Operate the local Polish verification daemon from Cursor.
 # Polish
 
 Use the `polish` CLI for all orchestration. Do not construct a second run engine in chat tools.
+`polish-mcp` is the same daemon over MCP stdio, for a Cursor `mcp.json` entry.
 
 Everyday usage is `polish run ...`. `pnpm cli:link`, rebuilds, and daemon restarts are
 development install/update operations after pulling CLI/daemon changes — not part of
