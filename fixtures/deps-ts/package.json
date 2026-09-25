@@ -1,0 +1,12 @@
+{
+  "name": "deps-ts",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pad": "file:vendor/pad"
+  },
+  "scripts": {
+    "test": "node --test tests/add.test.mjs"
+  }
+}

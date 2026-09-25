@@ -1,0 +1,9 @@
+{
+  "run": "run_01m2jc020mfwk8qfp2gkdy",
+  "note": "Three recursive listings of a checkout that contained node_modules took 81% of the worker tokens.",
+  "calls": [
+    { "name": "list", "arguments": { "path": ".", "recursive": true } },
+    { "name": "list", "arguments": { "path": ".", "recursive": true } },
+    { "name": "list", "arguments": { "path": ".", "recursive": true } }
+  ]
+}

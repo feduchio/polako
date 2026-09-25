@@ -1,0 +1,10 @@
+{
+  "run": "run_01m2hfb2mnmvd10384k320",
+  "note": "The worker repeated one empty search. The digest in that run did not say the search had found nothing.",
+  "calls": [
+    { "name": "search", "arguments": { "query": "commit duration", "path": "src" } },
+    { "name": "search", "arguments": { "query": "commit duration", "path": "src" } },
+    { "name": "search", "arguments": { "query": "commit duration", "path": "src" } },
+    { "name": "search", "arguments": { "query": "commit duration", "path": "src" } }
+  ]
+}
