@@ -11,6 +11,8 @@ export type WorkerOutcome =
       status: "completed";
       evidenceRefs?: readonly ArtifactRef[];
       transcriptRef?: ArtifactRef | null;
+      /** An investigation's claim of how to reproduce; the engine runs it, never trusts it. */
+      reproduction?: WorkerReproduction;
     }
   | {
       status: "failed" | "interrupted";
@@ -141,9 +143,14 @@ export interface AgentRunnerDeps {
   signal?: AbortSignal;
 }
 
+export interface WorkerReproduction {
+  argv: string[];
+}
+
 export interface AgentLoopResult {
   status: AgentRunStatus;
   output: string | null;
+  reproduction: WorkerReproduction | null;
   loopEvidence: LoopEvidence | null;
   turns: number;
   totalTokens: number;

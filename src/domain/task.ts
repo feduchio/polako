@@ -58,17 +58,23 @@ export const TaskStateSchema = z.enum([
   "REJECTED",
   "BLOCKED",
   "CANCELLED",
+  /**
+   * Done without an integrated change, on evidence the engine produced itself: an investigation
+   * whose reproduction the engine re-ran to a verdict, or a coding task whose acceptance already
+   * holds on its base.
+   */
+  "SATISFIED",
 ]);
 export type TaskState = z.infer<typeof TaskStateSchema>;
 
 export const TASK_TABLE: TransitionTable<TaskState> = {
   initial: "PENDING",
   states: TaskStateSchema.options,
-  terminal: ["INTEGRATED", "REJECTED", "CANCELLED"],
+  terminal: ["INTEGRATED", "REJECTED", "CANCELLED", "SATISFIED"],
   edges: {
     PENDING: ["READY", "CANCELLED"],
     READY: ["RUNNING", "CANCELLED"],
-    RUNNING: ["GATED", "READY", "BLOCKED", "CANCELLED"],
+    RUNNING: ["GATED", "READY", "BLOCKED", "CANCELLED", "SATISFIED"],
     GATED: ["SELECTED", "READY", "BLOCKED", "CANCELLED"],
     SELECTED: ["INTEGRATING", "CANCELLED"],
     INTEGRATING: ["INTEGRATED", "INTEGRATION_FAILED"],
@@ -77,8 +83,13 @@ export const TASK_TABLE: TransitionTable<TaskState> = {
     INTEGRATED: [],
     REJECTED: [],
     CANCELLED: [],
+    SATISFIED: [],
   },
 };
+
+export function isTerminalTaskState(state: TaskState): boolean {
+  return TASK_TABLE.terminal.includes(state);
+}
 
 export const ComplexitySchema = z.enum(["trivial", "normal", "complex"]);
 

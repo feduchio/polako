@@ -23,6 +23,8 @@ export const KNOWN_EVENT_TYPES = [
   "review.canary_recorded",
   /** A review axis used up its attempts. Emitted by the reviewing driver; previously unregistered. */
   "review.axis_exhausted",
+  /** The engine re-ran an investigation's reproduction; its exit code, not the worker, decides. */
+  "investigation.completed",
   "run.terminated",
   "run.answer_recorded",
   "run.settings_fallback",

@@ -7,7 +7,7 @@ import { cleanRoundsHaveReviewProof } from "./record.js";
 
 const DEFAULT_MAX_ATTEMPTS = 5;
 
-const ACCEPTABLE_TERMINALS_FOR_DONE = new Set<Task["state"]>(["INTEGRATED", "REJECTED", "CANCELLED"]);
+const ACCEPTABLE_TERMINALS_FOR_DONE = new Set<Task["state"]>(["INTEGRATED", "REJECTED", "CANCELLED", "SATISFIED"]);
 
 export interface MissionCompletionEvidence {
   tasks: readonly Task[];

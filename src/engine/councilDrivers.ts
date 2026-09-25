@@ -7,7 +7,7 @@ import { id } from "../shared/ids.js";
 import { SupervisorCouncil, type CouncilEventSink, type CouncilRoleConfigs } from "../council/index.js";
 import { emitNeedsHumanReport } from "../report/emit.js";
 import type { TerminalReason } from "../domain/run.js";
-import type { Task } from "../domain/task.js";
+import { TASK_TABLE, type Task } from "../domain/task.js";
 import type { TaskDag } from "../council/types.js";
 import type { IntakeResult } from "../council/types.js";
 import type { PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
@@ -276,7 +276,7 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
   };
 }
 
-const TERMINAL_TASK_STATES = new Set<Task["state"]>(["INTEGRATED", "REJECTED", "CANCELLED"]);
+const TERMINAL_TASK_STATES = new Set<Task["state"]>(TASK_TABLE.terminal);
 
 function latestHumanAnswer(ctx: PhaseContext): string | undefined {
   return ctx.store.events
@@ -328,12 +328,15 @@ function nextPhaseForPlanningReentry(ctx: PhaseContext): PhaseDriverResult {
     return { status: "complete", nextPhase: "EXECUTING" };
   }
 
-  const pendingInvestigation = tasks.some((task) => task.kind === "investigation" && !isTerminalTask(task));
-  if (pendingInvestigation) {
+  const openInvestigations = tasks.filter((task) => task.kind === "investigation" && !isTerminalTask(task));
+  if (openInvestigations.some((task) => task.state !== "BLOCKED")) {
+    return { status: "complete", nextPhase: "EXECUTING" };
+  }
+  if (openInvestigations.length > 0) {
     const reason: TerminalReason = {
       code: "product_decision_required",
-      summary: "Investigation work is pending and is not EXECUTING-schedulable at this base.",
-      question: "Investigation tasks remain open. How should the run proceed?",
+      summary: `No reproduction the engine could run settled ${String(openInvestigations.length)} uncertain finding(s) within ${String(maxAttempts)} attempts.`,
+      question: "Investigation attempts are exhausted. How should the run proceed?",
       options: ["Provide investigation evidence", "Stop the run"],
     };
     emitNeedsHumanReport(ctx, reason, []);

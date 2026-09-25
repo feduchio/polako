@@ -52,7 +52,16 @@ export const AGENT_TOOL_DEFINITIONS: ToolSpec[] = [
   { name: "apply_patch", description: "Replace one exact text fragment in a worktree file.", parameters: objectSchema({ path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } }, ["path", "oldText", "newText"]) },
   { name: "run_command", description: "Run an argv command allowed by the command policy.", parameters: objectSchema({ argv: { type: "array", items: { type: "string" }, minItems: 1 }, cwd: { type: "string" }, timeoutMs: { type: "integer", minimum: 1 } }, ["argv"]) },
   { name: "request_context", description: "Request additional task or repository context.", parameters: objectSchema({ query: { type: "string" } }, ["query"]) },
-  { name: "finish", description: "Finish with a summary after producing fresh loop evidence.", parameters: objectSchema({ summary: { type: "string" } }, ["summary"]) },
+  {
+    name: "finish",
+    description:
+      "Finish with a summary after producing fresh loop evidence. An investigation finishes with reproduction.argv: " +
+      "the command that fails on this checkout if the finding is real and passes if it is not; the engine re-runs it itself.",
+    parameters: objectSchema({
+      summary: { type: "string" },
+      reproduction: objectSchema({ argv: { type: "array", items: { type: "string" }, minItems: 1 } }, ["argv"]),
+    }, ["summary"]),
+  },
 ];
 
 export function createLoopEvidence(): LoopEvidence {

@@ -27,7 +27,13 @@ import type {
   CandidateWorker,
   LoopEvidence,
   WorkerOutcome,
+  WorkerReproduction,
 } from "./types.js";
+
+interface FinishArgs {
+  summary: string;
+  reproduction?: WorkerReproduction;
+}
 import { progressStateFingerprint, shouldAbandonProgress } from "./progressTracker.js";
 import { sha256Hex } from "../shared/hash.js";
 
@@ -77,6 +83,7 @@ export class AgentRunner implements CandidateWorker {
     let totalTokens = 0;
     let status: AgentRunStatus = "STOPPED";
     let output: string | null = null;
+    let reproduction: WorkerReproduction | null = null;
     let acceptedEvidence: LoopEvidence | null = null;
     const repeats = new Map<string, { count: number; diffHash: string }>();
     const progressTracker = this.deps.createProgressTracker?.(task) ?? null;
@@ -144,6 +151,7 @@ export class AgentRunner implements CandidateWorker {
         if (result.finish !== null) {
           acceptedEvidence = loopEvidence;
           output = result.finish.summary;
+          reproduction = result.finish.reproduction ?? null;
           status = "FINISHED";
           break;
         }
@@ -213,6 +221,7 @@ export class AgentRunner implements CandidateWorker {
       status,
       loopEvidence: acceptedEvidence,
       output,
+      reproduction,
       startedAt,
       progress,
       protocolHash: composed?.protocolHash ?? null,
@@ -231,7 +240,7 @@ export class AgentRunner implements CandidateWorker {
   ): Promise<{
     event: AgentToolResult;
     message: string;
-    finish: { summary: string } | null;
+    finish: FinishArgs | null;
   }> {
     try {
       const args: unknown = JSON.parse(encodedArgs);
@@ -273,7 +282,7 @@ export class AgentRunner implements CandidateWorker {
     task: Task,
     worktree: SandboxHandle,
     loopEvidence: LoopEvidence,
-  ): Promise<{ summary: string }> {
+  ): Promise<FinishArgs> {
     const args = record(value, "finish arguments");
     const summary = args["summary"];
     if (typeof summary !== "string" || summary.trim() === "") {
@@ -284,6 +293,9 @@ export class AgentRunner implements CandidateWorker {
         "INVALID_ARGUMENT",
         "finish rejected: produce fresh evidence in this loop (write, apply_patch, or run_command) before finishing",
       );
+    }
+    if (task.kind === "investigation") {
+      return { summary, reproduction: await this.validateReproduction(args["reproduction"], worktree) };
     }
     if (task.touchesProductCode) {
       const diff = await worktree.git.diffAgainst(worktree.baseCommit);
@@ -297,6 +309,34 @@ export class AgentRunner implements CandidateWorker {
     return { summary };
   }
 
+  /**
+   * An investigation ends in a command, not an opinion. It may add files for that command to run —
+   * a test, a script — but not edit the project's own: a reproduction that works by changing the
+   * code under suspicion proves only that the code was changed.
+   */
+  private async validateReproduction(value: unknown, worktree: SandboxHandle): Promise<WorkerReproduction> {
+    if (value === undefined) {
+      throw new PolishError(
+        "INVALID_ARGUMENT",
+        "finish rejected: an investigation must finish with reproduction.argv, the command that fails if the finding is real",
+      );
+    }
+    const argv = record(value, "finish reproduction")["argv"];
+    if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part): part is string => typeof part === "string" && part !== "")) {
+      throw new PolishError("INVALID_ARGUMENT", "finish rejected: reproduction.argv must be a non-empty array of strings");
+    }
+    const denial = this.deps.commandPolicy.check(argv);
+    if (denial !== null) throw new PolishError("INVALID_ARGUMENT", `finish rejected: reproduction command is not allowed: ${denial}`);
+    const edited = await worktree.git.trackedDiffAgainst(worktree.baseCommit);
+    if (edited.trim() !== "") {
+      throw new PolishError(
+        "INVALID_ARGUMENT",
+        "finish rejected: an investigation may add files but must not modify tracked ones; restore them and put the reproduction in a new file",
+      );
+    }
+    return { argv: [...argv] };
+  }
+
   private persistResult(input: {
     task: Task;
     messages: ChatMessage[];
@@ -305,6 +345,7 @@ export class AgentRunner implements CandidateWorker {
     status: AgentRunStatus;
     loopEvidence: LoopEvidence | null;
     output: string | null;
+    reproduction: WorkerReproduction | null;
     startedAt: number;
     protocolHash: string | null;
     progress: AgentProgressRecord[];
@@ -333,6 +374,7 @@ export class AgentRunner implements CandidateWorker {
     return {
       status: input.status,
       output: input.output,
+      reproduction: input.reproduction,
       loopEvidence: input.loopEvidence,
       turns: input.turns.length,
       totalTokens: input.totalTokens,
@@ -405,6 +447,7 @@ function toWorkerOutcome(result: AgentLoopResult): WorkerOutcome {
       status: "completed",
       evidenceRefs: result.evidenceRefs,
       transcriptRef: result.transcriptRef,
+      ...(result.reproduction === null ? {} : { reproduction: result.reproduction }),
     };
   }
   return {

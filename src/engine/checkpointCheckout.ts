@@ -16,7 +16,7 @@ export function detachedCheckoutPolicy(): CommandPolicy {
   return CommandPolicy.forProject([], null, true);
 }
 
-export function uniqueCheckoutId(kind: "rev" | "val", key: string, seq: number): string {
+export function uniqueCheckoutId(kind: "rev" | "val" | "inv", key: string, seq: number): string {
   const compact = key.replace(/[^a-zA-Z0-9._-]/g, "").slice(-24);
   return `${kind}-${compact}-${seq}`;
 }

@@ -487,6 +487,44 @@ describe("AgentRunner", () => {
     store.close();
   });
 
+  it("an investigation finishes with a reproduction command and may only add files", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 10_000 });
+    const argv = ["node", "-e", "console.log('ok')"];
+    provider.script("worker", [
+      replyWith(tool("write", { path: "src/math.ts", content: "export const add = () => 0;\n" }, "edit-tracked")),
+      replyWith(tool("finish", { summary: "reproduced", reproduction: { argv } }, "finish-edited")),
+      replyWith(tool("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b;\n" }, "restore")),
+      replyWith(tool("write", { path: "repro.test.ts", content: "// reproduction\n" }, "add-file")),
+      replyWith(tool("finish", { summary: "reproduced" }, "finish-no-command")),
+      replyWith(tool("finish", { summary: "reproduced", reproduction: { argv: ["rm", "-rf", "src"] } }, "finish-denied")),
+      replyWith(tool("finish", { summary: "reproduced", reproduction: { argv } }, "finish-ok")),
+    ]);
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      branch: "polish/test/investigation-finish",
+      policy: fixture.policy,
+    });
+    const task: Task = {
+      ...codingTask(fixture.runId, fixture.base),
+      kind: "investigation",
+      origin: { kind: "investigation", findingId: id("find", NOW), round: 1 },
+      touchesProductCode: false,
+    };
+    const outcome = await new AgentRunner(deps).run(task, handle);
+
+    expect(outcome).toMatchObject({ status: "completed", reproduction: { argv } });
+    const rejections = provider.calls.map((call) => call.messages.at(-1)?.content ?? "");
+    expect(rejections[2]).toContain("must not modify tracked ones");
+    expect(rejections[5]).toContain("must finish with reproduction.argv");
+    expect(rejections[6]).toContain("reproduction command is not allowed");
+    await handle.destroy();
+    store.close();
+  });
+
   it("does not let a rejected finish disable a later unanimous abandon", async () => {
     const fixture = await repositoryFixture();
     cleanup.push(fixture.root);

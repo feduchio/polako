@@ -274,7 +274,7 @@ export { EnvironmentNotReadyError } from "../project/checkRunner.js";
  * a gate checkout, because it is the same kind of fresh worktree; it differs only in that nothing
  * downstream refuses when it is not ready, so the result is reported instead of thrown.
  */
-async function prepareWorkerCheckout(
+export async function prepareWorkerCheckout(
   checkout: SandboxHandle,
   gates: CandidateGates,
   signal: AbortSignal | undefined,

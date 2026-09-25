@@ -199,15 +199,25 @@ describe("planning re-entry", () => {
     expect(store.repos.tasks.get(taskId)?.id).toBe(taskId);
   });
 
-  it("investigation-only re-entry escalates to NEEDS_HUMAN", async () => {
+  it("a live investigation re-enters EXECUTING, where the engine runs it", async () => {
     const { runId } = seedInvestigationOnly(store, clock);
     const createdBefore = store.events.list(runId, { types: ["task.created"] }).length;
     await engine.tickRun(runId);
     expect(decomposeCalls(provider)).toBe(0);
     expect(store.events.list(runId, { types: ["task.created"] })).toHaveLength(createdBefore);
     const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("EXECUTING");
+    expect(run.terminalReason).toBeNull();
+  });
+
+  it("an investigation that used up its attempts escalates to NEEDS_HUMAN", async () => {
+    const { runId } = seedInvestigationOnly(store, clock);
+    const task = store.repos.tasks.listByRun(runId)[0]!;
+    forceTaskState(store, clock, task.id, "BLOCKED", defaultConfig().retry.maxAttempts);
+    await engine.tickRun(runId);
+    const run = store.repos.runs.get(runId)!;
     expect(run.phase).toBe("NEEDS_HUMAN");
-    expect(run.terminalReason?.summary).toMatch(/Investigation work is pending/i);
+    expect(run.terminalReason?.summary).toMatch(/No reproduction the engine could run settled 1 uncertain finding/);
     expect(store.events.list(runId, { types: ["report.generated"] }).length).toBeGreaterThanOrEqual(1);
   });
 

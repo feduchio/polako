@@ -26,6 +26,7 @@ import {
 } from "../verify/tournament.js";
 import type { VerifierStrategy } from "../verify/strategy.js";
 import type { ProjectProfile } from "../project/profile.js";
+import { activeInvestigationTask, runInvestigationTask } from "./investigation.js";
 import { transitionTask } from "./taskTransition.js";
 import { discoverRuntimeValidator } from "../runtime/discovery.js";
 import { discoverProjectRuntime } from "../runtime/projectDiscovery.js";
@@ -48,7 +49,7 @@ import {
   runnableTestPathPriority,
 } from "../convergence/pathology/changeClassification.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
-import type { Task } from "../domain/task.js";
+import { isTerminalTaskState, type Task } from "../domain/task.js";
 import { incompleteCodingWorkTerminal } from "../convergence/antiFakeDone.js";
 import {
   runCandidatesParallel,
@@ -105,7 +106,16 @@ export function seedWinnerForTests(ctx: PhaseContext, taskId: string, candidateI
 export function createExecutingDriver(options: CandidateDriverOptions): PhaseDriver {
   return async (ctx) => {
     const task = activeCodingTask(ctx);
-    if (task === null) return { status: "waiting" };
+    if (task === null) {
+      const investigation = activeInvestigationTask(ctx);
+      if (investigation === null) return { status: "waiting" };
+      return runInvestigationTask(ctx, investigation, {
+        sandbox: await resolveValue(options.sandbox, ctx),
+        policy: await resolveValue(options.policy, ctx),
+        workerFactory: options.workerFactory(ctx),
+        gates: await resolveGates(ctx, options, investigation),
+      });
+    }
     const existing = ctx.store.repos.candidates.listByTask(task.id);
     if (existing.some((candidate) => candidate.state === "IMPLEMENTED")) {
       return { status: "complete", nextPhase: "GATING" };
@@ -633,7 +643,7 @@ function integrationTask(ctx: PhaseContext): Task | null {
 }
 
 function terminalTask(task: Task): boolean {
-  return task.state === "INTEGRATED" || task.state === "REJECTED" || task.state === "CANCELLED";
+  return isTerminalTaskState(task.state);
 }
 
 function dependenciesMet(ctx: PhaseContext, task: Task): boolean {
