@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, realpathSync, statSync, type Dirent } from "node:fs";
-import { dirname, join, normalize, relative, resolve, sep } from "node:path";
+import { existsSync, readFileSync, statSync, type Dirent } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PolishError } from "../shared/errors.js";
 import { parseSkillMarkdown } from "./frontmatter.js";
@@ -62,39 +62,6 @@ export class ProtocolRegistry {
 
   has(name: string): boolean {
     return this.byName.has(name);
-  }
-
-  /**
-   * Read a progressive-disclosure resource listed in the protocol frontmatter.
-   * Rejects path escape outside the protocol directory and unlisted paths.
-   */
-  readResource(protocolName: string, relativePath: string): string {
-    const protocol = this.get(protocolName);
-    const normalized = normalize(relativePath).replaceAll("\\", "/");
-    if (
-      normalized === ".." ||
-      normalized.startsWith("../") ||
-      normalized.startsWith("/") ||
-      normalized.includes("\0")
-    ) {
-      throw new PolishError("INVALID_ARGUMENT", `illegal resource path: ${relativePath}`);
-    }
-    const listed =
-      protocol.meta.resources.includes(normalized) || protocol.meta.resources.includes(relativePath);
-    if (!listed) {
-      throw new PolishError("NOT_FOUND", `resource not listed for ${protocolName}: ${relativePath}`);
-    }
-    const abs = resolve(protocol.dir, normalized);
-    const rootReal = realpathSync(protocol.dir);
-    if (!existsSync(abs) || !statSync(abs).isFile()) {
-      throw new PolishError("NOT_FOUND", `resource file missing: ${protocolName}/${normalized}`);
-    }
-    const fileReal = realpathSync(abs);
-    const rel = relative(rootReal, fileReal);
-    if (rel.startsWith("..") || rel.startsWith(`..${sep}`) || rel === "") {
-      throw new PolishError("INVALID_ARGUMENT", `resource escapes protocol directory: ${relativePath}`);
-    }
-    return readFileSync(fileReal, "utf8");
   }
 }
 

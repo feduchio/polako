@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { emptyFindingCounts, type Checkpoint, type EvidenceVector } from "../domain/checkpoint.js";
-import type { CleanRound } from "../domain/convergence.js";
+import { CleanRoundSchema, type CleanRound } from "../domain/convergence.js";
 import type { ReviewExecution } from "../domain/review.js";
 import { createTaskFromRequirement } from "../domain/task.js";
-import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import {
   assertCodeChangeMissionMayComplete,
@@ -19,25 +18,10 @@ import {
   recordCleanRoundEvent,
 } from "./record.js";
 import { createRollbackCheckpoint } from "./rollback.js";
-import { CleanRoundTracker, preferRotatedEnsemble } from "./tracker.js";
-
 const NOW = 1_700_000_000_000;
 const HASH_A = "a".repeat(40);
 const HASH_B = "b".repeat(40);
 const RUN_ID = id("run", NOW);
-
-function tracker(hash = HASH_A): CleanRoundTracker {
-  return new CleanRoundTracker(RUN_ID, hash, new FakeClock(NOW));
-}
-
-function record(subject: CleanRoundTracker, hash: string, model = "m1"): CleanRound {
-  return subject.record({
-    checkpointHash: hash,
-    axes: ["correctness"],
-    ensemble: [{ provider: "p", model }],
-    rawFindings: 0,
-  });
-}
 
 function evidence(overrides: Partial<EvidenceVector> = {}): EvidenceVector {
   return {
@@ -153,60 +137,6 @@ function baseEvidence(overrides: Partial<MissionCompletionEvidence> = {}): Missi
     ...overrides,
   };
 }
-
-describe("CleanRoundTracker", () => {
-  it("accumulates clean rounds and enforces required_clean_rounds", () => {
-    const subject = tracker();
-    record(subject, HASH_A);
-    record(subject, HASH_A, "m2");
-    expect(subject.currentRounds().map((round) => round.roundIndex)).toEqual([1, 2]);
-    expect(subject.hasRequired(2)).toBe(true);
-    expect(subject.hasRequired(3)).toBe(false);
-  });
-
-  it("invalidates prior counts on checkpoint change while retaining history", () => {
-    const subject = tracker();
-    record(subject, HASH_A);
-    record(subject, HASH_A, "m2");
-    subject.setCheckpoint(HASH_B);
-    expect(subject.currentRounds()).toHaveLength(0);
-    expect(subject.hasRequired(1)).toBe(false);
-    const next = record(subject, HASH_B);
-    expect(next.roundIndex).toBe(1);
-    expect(subject.allRounds()).toHaveLength(3);
-    expect(() => record(subject, HASH_A)).toThrow(/stale checkpoint/);
-  });
-
-  it("uses rotation only to break quality ties", () => {
-    const subject = tracker();
-    record(subject, HASH_A, "m1");
-    const previous = subject.currentRounds();
-    expect(
-      preferRotatedEnsemble(
-        [
-          { ensemble: [{ provider: "p", model: "m1" }], quality: 0.9 },
-          { ensemble: [{ provider: "p", model: "m2" }], quality: 0.8 },
-        ],
-        previous,
-        HASH_A,
-        ["correctness"],
-        0.6,
-      ),
-    ).toEqual([{ provider: "p", model: "m1" }]);
-    expect(
-      preferRotatedEnsemble(
-        [
-          { ensemble: [{ provider: "p", model: "m1" }], quality: 0.9 },
-          { ensemble: [{ provider: "p", model: "m2" }], quality: 0.9 },
-        ],
-        previous,
-        HASH_A,
-        ["correctness"],
-        0.6,
-      ),
-    ).toEqual([{ provider: "p", model: "m2" }]);
-  });
-});
 
 describe("clean round proof-of-review", () => {
   it("rejects recording without review executions", () => {
@@ -618,6 +548,21 @@ describe("anti-fake-DONE", () => {
   });
 });
 
+function cleanRound(roundIndex: number, model: string): CleanRound {
+  return CleanRoundSchema.parse({
+    id: id("cr", NOW + roundIndex),
+    runId: RUN_ID,
+    checkpointHash: HASH_A,
+    axes: ["correctness"],
+    ensemble: [{ provider: "p", model }],
+    rawFindings: 0,
+    roundIndex,
+    validatedBlocking: 0,
+    novel: true,
+    createdAt: NOW,
+  });
+}
+
 function resultReasons(result: { ok: false; reason: string }): string {
   return result.reason;
 }
@@ -640,12 +585,12 @@ describe("dominance and ConvergenceController", () => {
   it("returns DONE only at required_clean_rounds for the current hash", () => {
     const current = checkpoint(1, HASH_A);
     const subject = new ConvergenceController();
-    const rounds = tracker();
-    record(rounds, HASH_A);
+    const first = cleanRound(1, "m1");
+    const second = cleanRound(2, "m2");
     const state = {
       current,
       priorCheckpoints: [],
-      cleanRounds: rounds.allRounds(),
+      cleanRounds: [first],
       requiredCleanRounds: 2,
       openBlockingFindings: 0,
       investigationExhausted: false,
@@ -653,9 +598,8 @@ describe("dominance and ConvergenceController", () => {
       simplifyAfterNoProgress: 3,
     };
     expect(subject.decide(state).action).toBe("CONTINUE_REVIEW");
-    record(rounds, HASH_A, "m2");
-    expect(subject.decide({ ...state, cleanRounds: rounds.allRounds() }).action).toBe("DONE");
-    expect(subject.decide({ ...state, cleanRounds: rounds.allRounds(), openBlockingFindings: 1 }).action).toBe(
+    expect(subject.decide({ ...state, cleanRounds: [first, second] }).action).toBe("DONE");
+    expect(subject.decide({ ...state, cleanRounds: [first, second], openBlockingFindings: 1 }).action).toBe(
       "CONTINUE_REVIEW",
     );
   });

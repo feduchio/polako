@@ -6,7 +6,7 @@ import type { ModelRef } from "../domain/common.js";
 import { compose } from "../protocols/composer.js";
 import type { ProtocolRegistry } from "../protocols/loader.js";
 import { PairwiseJudge } from "./pairwise.js";
-import { decomposeCriteria } from "./sidecar.js";
+import { decomposeCriteria } from "./criteria.js";
 import type {
   FrontierSelectOptions,
   FrontierSelection,

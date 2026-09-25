@@ -1078,10 +1078,10 @@ describe("production composition", () => {
     // The pack is resent every turn, so its size displaces worker turns. The cap is derived from
     // the task budget; here the ceiling is lowered so it binds on a small fixture.
     const { request } = await firstWorkerRequest("bugfix", (config) => {
-      config.contextBudget.maxPackTokens = 530;
+      config.contextBudget.maxPackTokens = 620;
     });
     const text = contentOf(request);
-    expect(estimateTokens(text)).toBeLessThanOrEqual(530);
+    expect(estimateTokens(text)).toBeLessThanOrEqual(620);
     // Protected sections survive: an instruction with no hierarchy and no method is not a
     // cheaper instruction, it is a different one.
     expect(text).toContain("Controlling instruction hierarchy");
@@ -1147,7 +1147,7 @@ describe("production composition", () => {
     // protected basePolicy section. The task protocol is a separate protected section, and a cap
     // that drops evidence must still leave it.
     const { request } = await firstWorkerRequest("bugfix", (config) => {
-      config.contextBudget.maxPackTokens = 530;
+      config.contextBudget.maxPackTokens = 800;
     });
     const text = contentOf(request);
     expect(text).toContain("## taskProtocol");

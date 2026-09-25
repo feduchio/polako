@@ -97,7 +97,17 @@ function evenWindowSize(min: number) {
 }
 
 export const VerifierStrategySchema = z.object({
-  backend: z.enum(["ts", "sidecar", "empirical"]).default("empirical"),
+  backend: z.string().transform((value, ctx): "ts" | "empirical" => {
+    if (value === "sidecar") {
+      ctx.addIssue({ code: "custom", message: 'verifier.backend "sidecar" was removed; use "empirical" or "ts"' });
+      return z.NEVER;
+    }
+    if (value !== "ts" && value !== "empirical") {
+      ctx.addIssue({ code: "custom", message: 'verifier.backend must be "empirical" or "ts"' });
+      return z.NEVER;
+    }
+    return value;
+  }).default("empirical"),
   /** score granularity (letter tokens); default follows LLM-as-a-Verifier findings */
   granularity: z.number().int().min(2).max(26).default(20),
   /** repeated evaluations per pair */

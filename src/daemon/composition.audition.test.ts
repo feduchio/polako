@@ -11,7 +11,6 @@ import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { PairwiseJudge } from "../verify/pairwise.js";
-import { VerifierAdapter } from "../verify/sidecar.js";
 import * as debate from "../findings/debate.js";
 import {
   buildProductionDeps,
@@ -265,7 +264,6 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
   });
 
   it("production micro-task discovery does not invoke sidecar, pairwise judge, or debate", async () => {
-    const compareAdapter = vi.spyOn(VerifierAdapter.prototype, "comparePair");
     const compareJudge = vi.spyOn(PairwiseJudge.prototype, "comparePair");
     const debateStarted = vi.spyOn(debate, "assertDebateMayStart");
     const config = PolishConfigSchema.parse({
@@ -285,7 +283,6 @@ describe("production DISCOVERING_MODELS audition wiring", () => {
     });
     await createDiscoveringModelsDriverFromCatalog(deps)(phaseContext(store, clock, config));
     expect(auditionCalls(provider).length).toBeGreaterThan(0);
-    expect(compareAdapter).not.toHaveBeenCalled();
     expect(compareJudge).not.toHaveBeenCalled();
     expect(debateStarted).not.toHaveBeenCalled();
   });

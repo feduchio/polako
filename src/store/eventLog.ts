@@ -101,26 +101,6 @@ export class EventLog {
     return row?.s ?? -1;
   }
 
-  /** Walk `causedBy` links backwards (BFS, bounded) — the "why chain". */
-  causalChain(eventId: string, maxDepth = 50): Event[] {
-    const seen = new Set<string>();
-    const out: Event[] = [];
-    let frontier = [eventId];
-    for (let depth = 0; depth < maxDepth && frontier.length > 0; depth++) {
-      const next: string[] = [];
-      for (const id of frontier) {
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const e = this.get(id);
-        if (!e) continue;
-        out.push(e);
-        next.push(...e.causedBy);
-      }
-      frontier = next;
-    }
-    return out;
-  }
-
   /** Events directly caused by `eventId`. */
   effects(eventId: string): Event[] {
     const rows = this.db

@@ -19,7 +19,7 @@ import { compareToBaseline } from "../domain/checks.js";
 import type { GateResult } from "../project/checkRunner.js";
 import { createCheckOutputPersister } from "../project/checkRunner.js";
 import { safeTarget } from "../store/acceptance.js";
-import { createVerifierStrategy, VerifierAdapter } from "../verify/sidecar.js";
+import { createVerifierStrategy } from "../verify/createStrategy.js";
 import {
   selectTournamentWinner,
   type TournamentSourceCandidate,
@@ -293,10 +293,9 @@ async function finishComparing(
     repeats: ctx.config.verifier.repeats,
     granularity: ctx.config.verifier.granularity,
   });
-  const backend = selection.backend ?? (strategy instanceof VerifierAdapter ? "sidecar" : ctx.config.verifier.backend);
-  const fallback = selection.fallback ?? (strategy instanceof VerifierAdapter && strategy.usedFallback);
-  const client = selection.client
-    ?? (strategy instanceof VerifierAdapter ? strategy.lastProvenance.client : "none");
+  const backend = selection.backend ?? ctx.config.verifier.backend;
+  const fallback = selection.fallback ?? false;
+  const client = selection.client ?? "none";
 
   const rationaleRef = ctx.store.artifacts.put(
     JSON.stringify({

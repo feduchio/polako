@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { ProjectProfile } from "../project/profile.js";
-import { executionEvidenceIsSufficient, intakeCouncilPayload } from "./profileHints.js";
+import { intakeCouncilPayload } from "./profileHints.js";
 import { createMission } from "../domain/mission.js";
 import { buildBaselineEvidenceView } from "../project/baselineEvidence.js";
 
@@ -43,10 +43,6 @@ const BASELINE: BaselineSnapshot = {
 };
 
 describe("intake payload evidence boundary", () => {
-  it("treats a ran baseline as sufficient execution evidence", () => {
-    expect(executionEvidenceIsSufficient(PROFILE, BASELINE)).toBe(true);
-  });
-
   it("puts compact baseline diagnostics in the payload instead of a hash-only snapshot", () => {
     const stdout = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/resume-dup-fetch/baseline-test.stdout.txt"),

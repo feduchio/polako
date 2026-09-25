@@ -40,8 +40,9 @@ describe("PolishConfig", () => {
     }).convergence.testOnlyCheckpointWindow).toBe(4);
   });
 
-  it("keeps sidecar repeats independent from four-way empirical repeats", () => {
-    expect(PolishConfigSchema.parse({ verifier: { backend: "sidecar", repeats: 1 } }).verifier.repeats).toBe(1);
+  it("rejects the removed sidecar backend and keeps ts repeats independent of empirical repeats", () => {
+    expect(() => PolishConfigSchema.parse({ verifier: { backend: "sidecar" } })).toThrow(/sidecar/);
+    expect(PolishConfigSchema.parse({ verifier: { backend: "ts", repeats: 1 } }).verifier.repeats).toBe(1);
     expect(() => PolishConfigSchema.parse({ verifier: { empiricalRepeats: 6 } })).toThrow();
   });
 

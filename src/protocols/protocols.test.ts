@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -60,8 +60,6 @@ describe("ProtocolRegistry", () => {
       "refactor",
       "simplify",
       "investigate",
-      "typescript",
-      "react-native",
       "reviewer-correctness",
       "reviewer-regression",
       "reviewer-adversarial",
@@ -121,48 +119,25 @@ resources: []
 
   it("composes deterministically and hashes stably", () => {
     const registry = ProtocolRegistry.load(defaultProtocolsRoot());
-    const a = compose(registry, { task: "bugfix", domains: ["react-native", "typescript"], role: "planner" });
-    const b = compose(registry, { task: "bugfix", domains: ["typescript", "react-native"], role: "planner" });
+    const a = compose(registry, { task: "bugfix", role: "planner" });
+    const b = compose(registry, { task: "bugfix", role: "planner" });
     expect(a.members.map((m) => m.name)).toEqual([
       "base-engineering-policy",
       "bugfix",
-      "react-native",
-      "typescript",
       "planner",
     ]);
     expect(a.hash).toBe(b.hash);
     expect(a.promptText).toContain("## Protocol: base-engineering-policy");
-    expect(a.promptText).not.toContain("Anti-rationalization");
+    expect(a.promptText).toContain("Anti-rationalization");
     expect(a.totalBudgetTokens).toBeGreaterThan(a.members[0]!.budgetTokens);
   });
 
   it("fitToBudget drops trailing members but never base", () => {
     const registry = ProtocolRegistry.load(defaultProtocolsRoot());
-    const full = compose(registry, { task: "feature", domains: ["typescript"], role: "judge" });
+    const full = compose(registry, { task: "feature", role: "judge" });
     const baseOnly = fitToBudget(full, full.members[0]!.budgetTokens);
     expect(baseOnly.members.map((m) => m.name)).toEqual(["base-engineering-policy"]);
     expect(() => fitToBudget(full, full.members[0]!.budgetTokens - 1)).toThrow(PolishError);
   });
 
-  it("readResource allows listed files and blocks escape / unlisted", () => {
-    const registry = ProtocolRegistry.load(defaultProtocolsRoot());
-    const text = registry.readResource("base-engineering-policy", "references/anti-rationalization.md");
-    expect(text).toContain("Forbidden excuses");
-    expect(() => registry.readResource("base-engineering-policy", "SKILL.md")).toThrow(PolishError);
-    expect(() => registry.readResource("base-engineering-policy", "../bugfix/SKILL.md")).toThrow(PolishError);
-
-    dir = mkdtempSync(join(tmpdir(), "polish-proto-"));
-    writeSkill(dir, "base-engineering-policy", {
-      kind: "base",
-      applies_to: ["worker"],
-      budget_tokens: 10,
-      resources: ["notes.md", "evil.md"],
-    });
-    writeSkill(dir, "bugfix", { kind: "task", applies_to: ["worker"], budget_tokens: 10 });
-    writeFileSync(join(dir, "base-engineering-policy", "notes.md"), "ok\n");
-    symlinkSync(join(dir, "bugfix", "SKILL.md"), join(dir, "base-engineering-policy", "evil.md"));
-    const reg = ProtocolRegistry.load(dir);
-    expect(reg.readResource("base-engineering-policy", "notes.md")).toBe("ok\n");
-    expect(() => reg.readResource("base-engineering-policy", "evil.md")).toThrow(PolishError);
-  });
 });

@@ -3,16 +3,6 @@ import type { Mission } from "../domain/mission.js";
 import type { BaselineCheckEvidence } from "../project/baselineEvidence.js";
 import type { ProjectProfile } from "../project/profile.js";
 
-export function executionEvidenceIsSufficient(
-  discovery: ProjectProfile,
-  baseline: BaselineSnapshot,
-): boolean {
-  const mandatory = discovery.checks.filter((check) => check.mandatory && check.command.length > 0);
-  if (mandatory.length === 0) return false;
-  const names = new Set(mandatory.map((check) => check.name));
-  return baseline.checks.some((check) => names.has(check.name));
-}
-
 /**
  * Payload for council intake: profile labels are informational; checks + bounded
  * baselineEvidence are authoritative. Full stdout/stderr stay in CAS.

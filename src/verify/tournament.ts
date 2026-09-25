@@ -54,7 +54,7 @@ export interface TournamentSelection {
   evidence: MatchEvidence[];
   method: TournamentSelectionMethod;
   frontier: string[];
-  backend?: "sidecar" | "ts" | "empirical";
+  backend?: "ts" | "empirical";
   fallback?: boolean;
   logprobScheme?: "direct" | "two_stage";
   claimedLogprobScheme?: "direct" | "two_stage";
@@ -166,7 +166,7 @@ export async function selectTournamentWinner(
       evidence,
       method: selection.method === "ppt" ? "ppt" : "pairwise",
       frontier: frontierIds,
-      backend: selection.backend ?? "sidecar",
+      backend: selection.backend ?? "empirical",
       fallback: selection.fallback,
       criteria: selection.criteria,
       nComparisons: selection.nComparisons,

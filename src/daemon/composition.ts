@@ -59,7 +59,6 @@ import {
   type EnsureDependenciesResult,
   type ProjectProfile,
 } from "../project/index.js";
-import type { FinalReportInput } from "../report/reports.js";
 import {
   discoverProjectRuntime,
   FixtureRuntimeValidator,
@@ -72,7 +71,6 @@ import { PolishError, type PolishErrorCode } from "../shared/errors.js";
 import { canonicalJson, hashJson } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import type { Store } from "../store/index.js";
-import type { FacadeRunMetadata } from "./types.js";
 import {
   EMPIRICAL_SCORE_RESPONSE_SCHEMA,
   PROGRESS_SCORE_RESPONSE_SCHEMA,
@@ -80,7 +78,7 @@ import {
   withConfiguredReasoning,
 } from "../broker/responseSchemas.js";
 import { EmpiricalVerifier, type EmpiricalModel } from "../verify/empirical.js";
-import { createVerifierStrategy } from "../verify/sidecar.js";
+import { createVerifierStrategy } from "../verify/createStrategy.js";
 import type { VerifierStrategy } from "../verify/strategy.js";
 import { estimateTokens } from "../context/types.js";
 import { transitionTask } from "../engine/taskTransition.js";
@@ -1263,75 +1261,6 @@ export function loadConfiguredProviders(config: PolishConfig, secrets: SecretSto
     if (adapter !== null) providers.push(adapter);
   }
   return providers;
-}
-
-/** Build a DONE/NEEDS_HUMAN/FAILED report from run projections and facade metadata. */
-export function buildFacadeReportInput(
-  run: {
-    id: string;
-    phase: string;
-    control: string;
-    currentCheckpointHash: string | null;
-    missionId: string;
-  },
-  store: Store,
-  metadata: FacadeRunMetadata,
-): FinalReportInput {
-  const events = store.events.list(run.id);
-  const cleanRounds = store.repos.cleanRounds.listByRun(run.id);
-  const findings = store.repos.findings.listByRun(run.id);
-  const corpus = store.repos.acceptanceCorpus.forMission(run.missionId);
-
-  const runtimeEntries = corpus.entries.filter((entry) => entry.kind === "runtime_evidence");
-  const summary =
-    run.phase === "DONE"
-      ? `mission completed for ${metadata.projectPath}`
-      : run.phase === "NEEDS_HUMAN"
-        ? `mission paused for human input (${metadata.projectPath})`
-        : `run ended in ${run.phase} (${run.control})`;
-
-  return {
-    summary,
-    changes: [
-      `run branch ${metadata.runBranch}`,
-      `baseline ${metadata.baselineCommit}`,
-      ...(metadata.appliedAt === null ? ["target branch not yet updated (use polish apply)"] : [`applied at ${new Date(metadata.appliedAt).toISOString()}`]),
-    ],
-    reasons: [
-      metadata.mission.trim() === "" ? "mission text was not supplied at start" : `mission: ${metadata.mission}`,
-      `runtime mode: ${metadata.runtime ?? "auto"}`,
-      ...(metadata.budgetTokens === undefined ? [] : [`token budget: ${metadata.budgetTokens}`]),
-      ...(metadata.budgetUsd === undefined ? [] : [`usd budget: ${metadata.budgetUsd}`]),
-    ],
-    rejected: events
-      .filter((event) => event.type === "finding.status_changed")
-      .map((event) => {
-        const finding = (event.payload as { finding?: { status?: string; claim?: string } }).finding;
-        if (finding?.status !== "REJECTED") return "";
-        return finding.claim ?? "rejected finding";
-      })
-      .filter((line) => line.length > 0),
-    checks: [
-      ...cleanRounds.map((round) => `clean round ${round.roundIndex} on ${round.checkpointHash.slice(0, 8)}`),
-      ...(runtimeEntries.length === 0 ? ["no runtime evidence recorded"] : runtimeEntries.map((entry) => entry.summary)),
-    ],
-    findings: findings.map((finding) => `${finding.status} ${finding.severity}: ${finding.claim}`),
-    validation: [
-      ...findings
-        .filter((finding) => finding.status === "VALID" || finding.status === "REJECTED" || finding.status === "UNCERTAIN")
-        .map((finding) => `${finding.id} → ${finding.status}`),
-      ...(findings.length === 0 ? ["no findings required validation"] : []),
-    ],
-    convergence: [
-      `phase ${run.phase}`,
-      `checkpoint ${run.currentCheckpointHash ?? "none"}`,
-      `${cleanRounds.length} clean round(s) recorded`,
-    ],
-    evidence: [
-      ...events.slice(-8).map((event) => `${event.type}#${event.seq}`),
-      ...corpus.entries.map((entry) => `corpus:${entry.kind}:${entry.id}`),
-    ],
-  };
 }
 
 function syntheticCheckpoint(ctx: PhaseContext, hash: string): Checkpoint {

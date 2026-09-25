@@ -3,24 +3,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { emptyFindingCounts } from "../domain/checkpoint.js";
 import { createMission } from "../domain/mission.js";
-import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { PolishError } from "../shared/errors.js";
 import {
   buildMissionContext,
-  buildSupervisorView,
   buildWorkerContextPack,
   discloseFailedAttempts,
-  FactsService,
   formatFactForPrompt,
 } from "./index.js";
 import type { Task } from "../domain/task.js";
 import type { Finding } from "../domain/finding.js";
 import type { Fact } from "../domain/fact.js";
-import type { Checkpoint } from "../domain/checkpoint.js";
 import type { MissionInterpretation } from "../domain/mission.js";
 import type { ProtocolBundle } from "../protocols/types.js";
 
@@ -48,18 +43,14 @@ function sampleTask(runId: string): Task {
   };
 }
 
-describe("context builders + FactsService", () => {
+describe("context builders", () => {
   let dir: string;
   let store: Store;
-  let clock: FakeClock;
-  let facts: FactsService;
   const runId = id("run", NOW);
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "polish-ctx-"));
     store = openStore({ artifactsDir: join(dir, "artifacts") });
-    clock = new FakeClock(NOW);
-    facts = new FactsService(store, clock);
   });
   afterEach(() => {
     store.close();
@@ -107,225 +98,6 @@ describe("context builders + FactsService", () => {
     const det = { ...inferred, provenanceKind: "deterministic" as const, confidence: null };
     expect(formatFactForPrompt(det)).toContain("[deterministic]");
     expect(formatFactForPrompt(det)).not.toContain("hypothesis");
-  });
-
-  it("FactsService promote only from llm_inferred via evidence event", () => {
-    const f = facts.record({
-      runId,
-      kind: "behavior",
-      statement: "add is broken",
-      provenanceKind: "llm_inferred",
-      provenanceRefs: [id("evt", NOW)],
-      evidenceRefs: [],
-      confidence: 0.7,
-      tags: [],
-      files: ["src/math.ts"],
-    });
-    const evidenceId = id("evt", NOW + 1);
-    store.events.append([{
-      id: evidenceId,
-      runId,
-      ts: NOW,
-      type: "shell.command",
-      payload: {},
-      causedBy: [],
-      actor: { kind: "system" },
-      artifacts: [],
-    }]);
-    expect(() => facts.promote(f.id, evidenceId)).not.toThrow();
-    expect(store.repos.facts.get(f.id)?.provenanceKind).toBe("verified");
-    expect(store.repos.facts.get(f.id)?.evidenceRefs).toContain(evidenceId);
-    expect(store.repos.facts.get(f.id)?.provenanceRefs).toContain(evidenceId);
-
-    const det = facts.record({
-      runId,
-      kind: "project_check",
-      statement: "vitest present",
-      provenanceKind: "deterministic",
-      provenanceRefs: [id("evt", NOW + 2)],
-      evidenceRefs: [],
-      confidence: null,
-      tags: [],
-      files: [],
-    });
-    expect(() => facts.promote(det.id, id("evt", NOW + 3))).toThrow(PolishError);
-  });
-
-  it("rejects missing, cross-run, and non-deterministic promotion evidence", () => {
-    const inferred = facts.record({
-      runId,
-      kind: "behavior",
-      statement: "evidence must be valid",
-      provenanceKind: "llm_inferred",
-      provenanceRefs: [id("evt", NOW)],
-      evidenceRefs: [],
-      confidence: 0.5,
-      tags: [],
-      files: [],
-    });
-    expect(() => facts.promote(inferred.id, id("evt", NOW + 1))).toThrow(PolishError);
-
-    const otherRunEvidence = id("evt", NOW + 2);
-    store.events.append([{
-      id: otherRunEvidence,
-      runId: id("run", NOW + 1),
-      ts: NOW,
-      type: "candidate.gated",
-      payload: {},
-      causedBy: [],
-      actor: { kind: "system" },
-      artifacts: [],
-    }]);
-    expect(() => facts.promote(inferred.id, otherRunEvidence)).toThrow(PolishError);
-
-    const inferredEvidence = id("evt", NOW + 3);
-    store.events.append([{
-      id: inferredEvidence,
-      runId,
-      ts: NOW,
-      type: "model.call",
-      payload: {},
-      causedBy: [],
-      actor: { kind: "system" },
-      artifacts: [],
-    }]);
-    expect(() => facts.promote(inferred.id, inferredEvidence)).toThrow(PolishError);
-  });
-
-  it("consolidate supersedes duplicate statements", async () => {
-    facts.record({
-      runId,
-      kind: "convention",
-      statement: "Use ESM",
-      provenanceKind: "user_stated",
-      provenanceRefs: [id("evt", NOW)],
-      evidenceRefs: [],
-      confidence: null,
-      tags: [],
-      files: [],
-    });
-    await clock.advance(1);
-    facts.record({
-      runId,
-      kind: "invariant",
-      statement: "use  esm",
-      provenanceKind: "user_stated",
-      provenanceRefs: [id("evt", NOW + 1)],
-      evidenceRefs: [],
-      confidence: null,
-      tags: [],
-      files: [],
-    });
-    const r = facts.consolidate(runId);
-    expect(r.kept).toBe(1);
-    expect(r.superseded).toBe(1);
-    expect(facts.listCurrent(runId)).toHaveLength(1);
-  });
-
-  it("consolidate keeps the strongest duplicate and its evidence", async () => {
-    const strongEvidence = id("evt", NOW + 10);
-    store.events.append([{
-      id: strongEvidence,
-      runId,
-      ts: NOW,
-      type: "finding.validated",
-      payload: {},
-      causedBy: [],
-      actor: { kind: "system" },
-      artifacts: [],
-    }]);
-    facts.record({
-      runId,
-      kind: "invariant",
-      statement: "Checks are baseline relative",
-      provenanceKind: "verified",
-      provenanceRefs: [strongEvidence],
-      evidenceRefs: [strongEvidence],
-      confidence: null,
-      tags: [],
-      files: [],
-    });
-    await clock.advance(1);
-    facts.record({
-      runId,
-      kind: "invariant",
-      statement: " checks  are baseline relative ",
-      provenanceKind: "llm_inferred",
-      provenanceRefs: [id("evt", NOW + 11)],
-      evidenceRefs: [],
-      confidence: 0.9,
-      tags: [],
-      files: [],
-    });
-    facts.consolidate(runId);
-    const [winner] = facts.listCurrent(runId);
-    expect(winner?.provenanceKind).toBe("verified");
-    expect(winner?.evidenceRefs).toContain(strongEvidence);
-  });
-
-  it("supervisor view ranks facts and lists unresolved findings", () => {
-    const task = sampleTask(runId);
-    const factA = facts.record({
-      runId,
-      kind: "decision",
-      statement: "ship fix",
-      provenanceKind: "user_stated",
-      provenanceRefs: [id("evt", NOW)],
-      evidenceRefs: [],
-      confidence: null,
-      tags: ["mission"],
-      files: ["src/math.ts"],
-    });
-    const finding: Finding = {
-      id: id("find", NOW),
-      runId,
-      checkpointHash: HASH,
-      axis: "correctness",
-      criterion: "spec",
-      severity: "high",
-      blocking: true,
-      claim: "add wrong",
-      evidence: [{ path: "src/math.ts", line: 1, endLine: 2 }],
-      reproduction: ["pnpm test"],
-      reportedBy: { kind: "system" },
-      status: "VALID",
-      duplicateOf: null,
-      fingerprint: "abc",
-      investigationRounds: 0,
-      createdAt: NOW,
-      updatedAt: NOW,
-    };
-    const cp: Checkpoint = {
-      id: id("cp", NOW),
-      runId,
-      seq: 1,
-      commitHash: HASH,
-      parentId: null,
-      source: "baseline",
-      taskId: null,
-      evidence: {
-        gates: { test: "pass" },
-        testsPassed: 1,
-        testsFailed: 0,
-        testsTotal: 1,
-        openValidatedFindings: emptyFindingCounts(),
-        diffLinesFromBaseline: 0,
-      },
-      createdAt: NOW,
-    };
-    const view = buildSupervisorView({
-      runId,
-      tasks: [task],
-      facts: [factA],
-      findings: [finding],
-      checkpoints: [cp],
-      focusFiles: ["src/math.ts"],
-    });
-    expect(view.tasks[0]?.blockedBy).toEqual([]);
-    expect(view.facts.some((s) => s.includes("ship fix"))).toBe(true);
-    expect(view.decisions.length).toBe(1);
-    expect(view.unresolvedFindings).toHaveLength(1);
-    expect(view.checkpoints[0]?.evidenceDigest).toContain("tests=1/1");
   });
 
   it("worker pack retains hierarchy, mission, task, and base policy while dropping supplementary protocol", () => {

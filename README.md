@@ -31,8 +31,7 @@ protocol and the threat model. The implementation plan lives in the Cursor plan 
 
 - Node 24 LTS (`.node-version` / `.nvmrc`), pnpm 11 (`corepack enable`).
 - git 2.40+.
-- Optional: `codegraph` CLI for repository intelligence, Python 3.11+ for the
-  `llm-verifier` sidecar.
+- Repository intelligence is the built-in index. There is no external code graph or verifier process.
 
 ## Development
 

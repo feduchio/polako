@@ -30,7 +30,7 @@ export interface PairwiseVerdict {
 
 export type LogprobScheme = "direct" | "two_stage";
 export type ScoreScheme = "empirical_repeats";
-export type VerifierBackend = "sidecar" | "ts" | "empirical";
+export type VerifierBackend = "ts" | "empirical";
 export type VerifierClientKind = "scripted" | "live" | "none";
 
 export interface FrontierSelectOptions {

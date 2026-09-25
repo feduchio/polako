@@ -54,3 +54,8 @@ invariants.
 - Every substantive decision is reconstructible from the event log.
 - Adding providers, sandboxes, verifier strategies or supervisor roles does not touch the
   engine.
+- **2026-09-25.** `FactsService`, the supervisor view, `CleanRoundTracker`, the CodeGraph
+  backends, and the Python verifier sidecar were removed. `RepositoryIntelligence` and
+  `BasicIntel` stay: CodeGraph was a backend behind that seam, not the seam. The
+  anti-rationalization rules are inlined in `base-engineering-policy` because nothing ever
+  loaded protocol resources. `REJECTED` and `CANCELLED` remain legal task endings.

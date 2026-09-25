@@ -236,9 +236,8 @@ describe("Store", () => {
     const [a] = store.events.append([ev(runId, "finding.raised", {})]);
     const [b] = store.events.append([ev(runId, "finding.validated", {}, [a!.id])]);
     const [c] = store.events.append([ev(runId, "task.created", {}, [b!.id])]);
-    const chain = store.events.causalChain(c!.id).map((e) => e.type);
-    expect(chain).toEqual(["task.created", "finding.validated", "finding.raised"]);
     expect(store.events.effects(a!.id).map((e) => e.id)).toEqual([b!.id]);
+    expect(store.events.effects(b!.id).map((e) => e.id)).toEqual([c!.id]);
   });
 
   it("unknown event types are stored and replayed without projection", () => {

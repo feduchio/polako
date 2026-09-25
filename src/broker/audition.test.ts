@@ -10,7 +10,6 @@ import { FakeClock } from "../shared/clock.js";
 import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
-import { VerifierAdapter } from "../verify/sidecar.js";
 import { PairwiseJudge } from "../verify/pairwise.js";
 import * as debate from "../findings/debate.js";
 import {
@@ -252,7 +251,6 @@ describe("C8 audition strategy and observations", () => {
   it("does not import or invoke C3/C4 scorers from a micro-task run", async () => {
     const src = readFileSync(fileURLToPath(new URL("./audition.ts", import.meta.url)), "utf8");
     expect(src).not.toMatch(/VerifierAdapter|PairwiseJudge|findings\/debate|verify\/sidecar|verify\/pairwise/);
-    const compareAdapter = vi.spyOn(VerifierAdapter.prototype, "comparePair");
     const compareJudge = vi.spyOn(PairwiseJudge.prototype, "comparePair");
     const debateStarted = vi.spyOn(debate, "assertDebateMayStart");
     const provider = new ScriptedProvider("scripted", [{
@@ -265,7 +263,6 @@ describe("C8 audition strategy and observations", () => {
       [{ id: "echo", prompt: "ok", expected: "ok" }],
       new MicroTaskAuditionStrategy(provider, "run_no_c3"),
     );
-    expect(compareAdapter).not.toHaveBeenCalled();
     expect(compareJudge).not.toHaveBeenCalled();
     expect(debateStarted).not.toHaveBeenCalled();
   });
