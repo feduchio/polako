@@ -118,6 +118,31 @@ describe("finding fingerprint and triage", () => {
     expect(result.finding.status).toBe("NOTED");
     expect(result.validation).toBeNull();
   });
+
+  it("notes a finding whose quote is not in the checkpoint without spawning evidence work", async () => {
+    let calls = 0;
+    const subject = new FindingValidator({
+      clock: new FakeClock(NOW),
+      worker: new ScriptedFindingEvidenceWorker(() => {
+        calls++;
+        return attempt("VALID");
+      }),
+      corpus: new MemoryCorpus(),
+      maxInvestigationRounds: 2,
+    });
+    const mismatched = rawFinding({ evidenceMismatch: "evidence_mismatch: src/auth/store.ts:81 does not contain the quoted text" });
+    const result = await subject.validate({ finding: mismatched, existingFindings: [], missionId: id("msn", NOW), requirementRef: "R1" });
+    expect(result.finding.status).toBe("NOTED");
+    expect(result.triage).toMatchObject({ disposition: "noise", reason: mismatched.evidenceMismatch });
+    expect(calls).toBe(0);
+
+    // The void citation must not absorb a later finding that cites the same code correctly.
+    const noted = { ...result.finding, id: id("find", NOW + 2) };
+    const honest = rawFinding({ id: id("find", NOW + 3), runId: mismatched.runId });
+    const second = await subject.validate({ finding: honest, existingFindings: [noted], missionId: id("msn", NOW), requirementRef: "R1" });
+    expect(second.finding.status).not.toBe("DUPLICATE");
+    expect(calls).toBe(1);
+  });
 });
 
 describe("FindingValidator verdicts", () => {

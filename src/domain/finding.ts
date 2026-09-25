@@ -49,6 +49,15 @@ export function commitFindingStatus(from: FindingStatus, to: FindingStatus, find
   assertTransition(FINDING_TABLE, `finding ${findingId}`, from, to);
 }
 
+/**
+ * A location a reviewer cites, with the text it says is there. The quote is what makes a citation
+ * checkable: a line number alone is satisfied by any line of a long enough file.
+ */
+export const FindingEvidenceSchema = FileRefSchema.extend({
+  quote: z.string().min(1).optional(),
+});
+export type FindingEvidence = z.infer<typeof FindingEvidenceSchema>;
+
 /** Structured claim produced by a reviewer. Opinions without evidence become NOTED, not work. */
 export const RawFindingSchema = z.object({
   criterion: z.string().min(1),
@@ -56,7 +65,7 @@ export const RawFindingSchema = z.object({
   /** does this block convergence if valid? */
   blocking: z.boolean(),
   claim: z.string().min(1),
-  evidence: z.array(FileRefSchema),
+  evidence: z.array(FindingEvidenceSchema),
   reproduction: z.array(z.string().min(1)),
   suggestedCheck: z.string().optional(),
 });
@@ -73,6 +82,11 @@ export const FindingSchema = RawFindingSchema.extend({
   duplicateOf: IdSchema.nullable(),
   fingerprint: z.string().min(1),
   investigationRounds: z.number().int().nonnegative(),
+  /**
+   * Set when a quoted citation is not the text at that place in the checkpoint. Such a finding is
+   * about code that is not there, so it is noted and never validated or debated.
+   */
+  evidenceMismatch: z.string().min(1).optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });

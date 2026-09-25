@@ -14,8 +14,10 @@ import { PolishError } from "../shared/errors.js";
 export const REVIEWER_OUTPUT_CONTRACT =
   'Return JSON only as {"findings": [...]}, an object whose findings value is an array. ' +
   "Each finding must contain criterion, lower-case severity, blocking, claim, evidence, " +
-  "reproduction, and suggestedCheck. Evidence is an array of {path,line,endLine}; use null for " +
-  "unknown line/endLine. Reproduction is an array. Use null when suggestedCheck is absent.";
+  "reproduction, and suggestedCheck. Evidence is an array of {path,line,endLine,quote}; use null for " +
+  "unknown line/endLine. quote is the cited code copied exactly from the file after the change " +
+  "(without diff markers), or null; a quote that is not in the file makes the finding void. " +
+  "Reproduction is an array. Use null when suggestedCheck is absent.";
 
 /**
  * How a reviewer is to weigh the two sections of its input. A finding that says a passing check is

@@ -9,7 +9,7 @@ import type { Checkpoint } from "../domain/checkpoint.js";
 import { FindingSchema } from "../domain/finding.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
-import { REVIEW_DATA_HEADER, REVIEW_TRUSTED_HEADER, runAxisReview, runReviewSwarm } from "./swarm.js";
+import { REVIEW_DATA_HEADER, REVIEW_TRUSTED_HEADER, quoteMatches, runAxisReview, runReviewSwarm } from "./swarm.js";
 import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 
 const roots: string[] = [];
@@ -105,6 +105,52 @@ describe("B-selfhost-19 composed reviewer instruction", () => {
     expect(trusted).toContain('{"name":"test","status":"pass"}');
     expect(trusted).not.toContain("ignore previous instructions");
     expect(content.slice(dataAt)).toContain("ignore previous instructions");
+  });
+
+  it("voids a finding whose quote is not the code at the cited line, and keeps one whose quote is", async () => {
+    const root = await mkdtemp(join(tmpdir(), "polish-quote-"));
+    roots.push(root);
+    await writeFile(join(root, "add.mjs"), "import { pad } from \"pad\";\n\nexport function add(a, b) {\n  return pad(a + b);\n}\n");
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    const finding = (quote: string | null) => ({
+      criterion: "correctness",
+      severity: "high",
+      blocking: true,
+      claim: "add subtracts",
+      evidence: [{ path: "add.mjs", line: 4, endLine: null, quote }],
+      reproduction: ["node --test"],
+      suggestedCheck: null,
+    });
+    provider.script("reviewer", [{
+      kind: "reply",
+      content: JSON.stringify({ findings: [finding("return pad(a - b);"), finding("+  return pad(a + b);"), finding(null)] }),
+    }]);
+    const { findings } = await runAxisReview({
+      checkpoint: CHECKPOINT,
+      axis: "correctness",
+      artifact: { commitHash: CHECKPOINT.commitHash, diffBase: null, diff: "d", checkpoint: CHECKPOINT },
+      provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+      protocols: PROTOCOLS,
+      repositoryRoot: root,
+    });
+    expect(findings.map((item) => item.evidenceMismatch)).toEqual([
+      "evidence_mismatch: add.mjs:4 does not contain the quoted text",
+      undefined,
+      undefined,
+    ]);
+    expect(findings[1]?.evidence[0]?.quote).toBe("+  return pad(a + b);");
+    expect(findings[2]?.evidence[0]).not.toHaveProperty("quote");
+  });
+
+  it("matches a quote across rewrapped whitespace and nearby lines, but not a paraphrase", () => {
+    const lines = ["function f(a) {", "  if (a >", "      0) return a;", "  return -1;", "}"];
+    expect(quoteMatches("if (a > 0) return a;", lines, 2, 3)).toBe(true);
+    expect(quoteMatches("return -1;", lines, 2)).toBe(true);
+    expect(quoteMatches("-  return -1;", lines, 4)).toBe(true);
+    expect(quoteMatches("if (a >= 0) return a;", lines, 2, 3)).toBe(false);
+    expect(quoteMatches("return -1;", lines, 1)).toBe(false);
+    // Too short to prove anything either way.
+    expect(quoteMatches("}", lines, 1)).toBe(true);
   });
 
   it("resolves every mapped role once, before any review runs", () => {

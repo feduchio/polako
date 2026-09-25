@@ -12,12 +12,19 @@ export type FindingTriage =
  */
 export function triageFinding(finding: Finding, existing: readonly Finding[]): FindingTriage {
   const fingerprint = fingerprintFinding(finding);
+  // Before duplicates: a citation of code that is not there says nothing about the finding it
+  // resembles, and must be recorded as what it is.
+  if (finding.evidenceMismatch !== undefined) {
+    return { disposition: "noise", fingerprint, reason: finding.evidenceMismatch };
+  }
   const duplicate = existing.find(
     (candidate) =>
       candidate.id !== finding.id &&
       candidate.runId === finding.runId &&
       candidate.status !== "RAW" &&
       candidate.status !== "DUPLICATE" &&
+      // A void citation must not absorb a later finding that cites the code correctly.
+      candidate.evidenceMismatch === undefined &&
       (candidate.fingerprint === fingerprint || fingerprintFinding(candidate) === fingerprint),
   );
   if (duplicate !== undefined) {

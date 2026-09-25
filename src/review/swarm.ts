@@ -129,8 +129,10 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
   const findings = await Promise.all(
     raws.map(async (raw) => {
       const evidenceIssues = await checkEvidence(raw.evidence, input.repositoryRoot);
+      const mismatches = evidenceIssues.filter((issue) => issue.startsWith(EVIDENCE_MISMATCH));
       const finding = FindingSchema.parse({
         ...raw,
+        ...(mismatches.length === 0 ? {} : { evidenceMismatch: mismatches.join("; ") }),
         id: id("find", now),
         runId: input.checkpoint.runId,
         checkpointHash: input.checkpoint.commitHash,
@@ -260,6 +262,7 @@ function normalizeFinding(value: unknown): unknown {
       const ref = { ...item };
       if (ref["line"] === null) delete ref["line"];
       if (ref["endLine"] === null) delete ref["endLine"];
+      if (ref["quote"] === null || (typeof ref["quote"] === "string" && ref["quote"].trim() === "")) delete ref["quote"];
       return ref;
     });
   }
@@ -295,12 +298,16 @@ async function checkEvidence(
           return `${ref.path}: evidence target escapes repository`;
         }
         if (!(await stat(actual)).isFile()) return `${ref.path}: evidence target is not a file`;
-        if (ref.line !== undefined || ref.endLine !== undefined) {
-          const lineCount = (await readFile(actual, "utf8")).split(/\r?\n/).length;
+        if (ref.line !== undefined || ref.endLine !== undefined || ref.quote !== undefined) {
+          const lines = (await readFile(actual, "utf8")).split(/\r?\n/);
+          const lineCount = lines.length;
           if (ref.line !== undefined && ref.line > lineCount) return `${ref.path}:${ref.line}: line does not exist`;
           if (ref.endLine !== undefined && ref.endLine > lineCount) return `${ref.path}:${ref.endLine}: end line does not exist`;
           if (ref.line !== undefined && ref.endLine !== undefined && ref.endLine < ref.line) {
             return `${ref.path}: end line precedes start line`;
+          }
+          if (ref.quote !== undefined && !quoteMatches(ref.quote, lines, ref.line, ref.endLine)) {
+            return `${EVIDENCE_MISMATCH}: ${ref.path}${ref.line === undefined ? "" : `:${String(ref.line)}`} does not contain the quoted text`;
           }
         }
         return null;
@@ -310,6 +317,34 @@ async function checkEvidence(
     }),
   );
   return issues.filter((issue): issue is string => issue !== null);
+}
+
+export const EVIDENCE_MISMATCH = "evidence_mismatch";
+
+/** Lines either side of the cited range that a quote may come from: line numbers drift by one or two. */
+const QUOTE_SLACK_LINES = 2;
+/** A quote shorter than this, once whitespace is dropped, matches almost anywhere and proves nothing. */
+const MIN_QUOTE_CHARS = 8;
+
+/**
+ * True when the quote is the text at the cited place. Compared after dropping diff markers and
+ * collapsing whitespace, since a reviewer copies from a diff and a formatter may rewrap; nothing
+ * looser than that, because a paraphrase is exactly what a fabricated citation looks like.
+ */
+export function quoteMatches(quote: string, lines: readonly string[], line?: number, endLine?: number): boolean {
+  const verbatim = normalizeQuoted(quote);
+  if (verbatim.replace(/\s/g, "").length < MIN_QUOTE_CHARS) return true;
+  const window = line === undefined
+    ? lines
+    : lines.slice(Math.max(0, line - 1 - QUOTE_SLACK_LINES), (endLine ?? line) + QUOTE_SLACK_LINES);
+  const text = normalizeQuoted(window.join("\n"));
+  // Both readings: `-1` may be code or a removed line, and only the file can say which.
+  const unmarked = normalizeQuoted(quote.split(/\r?\n/).map((row) => row.replace(/^[+-]/, "")).join("\n"));
+  return text.includes(verbatim) || text.includes(unmarked);
+}
+
+function normalizeQuoted(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function stripFence(value: string): string {

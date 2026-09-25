@@ -32,11 +32,12 @@ export const REVIEW_FINDINGS_RESPONSE_SCHEMA = {
               items: {
                 type: "object",
                 additionalProperties: false,
-                required: ["path", "line", "endLine"],
+                required: ["path", "line", "endLine", "quote"],
                 properties: {
                   path: { type: "string" },
                   line: { type: ["integer", "null"], minimum: 1 },
                   endLine: { type: ["integer", "null"], minimum: 1 },
+                  quote: { type: ["string", "null"] },
                 },
               },
             },
