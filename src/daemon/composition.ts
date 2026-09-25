@@ -83,6 +83,7 @@ import { EmpiricalVerifier, type EmpiricalModel } from "../verify/empirical.js";
 import { createVerifierStrategy } from "../verify/sidecar.js";
 import type { VerifierStrategy } from "../verify/strategy.js";
 import { estimateTokens } from "../context/types.js";
+import { transitionTask } from "../engine/taskTransition.js";
 import { parseModelRefString } from "./configLoad.js";
 
 export interface RunBudgetLimits {
@@ -354,22 +355,10 @@ export function createSimplifyingDriver(): PhaseDriver {
 /** Promote eligible PENDING tasks to READY so EXECUTING can schedule them (B2). */
 export function promoteEligibleTasksToReady(ctx: PhaseContext): void {
   const tasks = ctx.store.repos.tasks.listByRun(ctx.run.id);
-  const events: NewEvent[] = [];
   for (const task of tasks) {
     if (task.state !== "PENDING" || !dependenciesMet(tasks, task)) continue;
-    const ready: Task = { ...task, state: "READY", updatedAt: ctx.clock.now() };
-    events.push({
-      id: id("evt", ctx.clock.now()),
-      runId: ctx.run.id,
-      ts: ctx.clock.now(),
-      type: "task.state_changed",
-      payload: { task: ready, from: "PENDING", to: "READY" },
-      causedBy: [],
-      actor: SYSTEM_ACTOR,
-      artifacts: [],
-    });
+    transitionTask(ctx.store, ctx.clock, ctx.run.id, { ...task, state: "READY", updatedAt: ctx.clock.now() });
   }
-  if (events.length > 0) ctx.store.events.append(events);
 }
 
 function withReadyPromotion(driver: PhaseDriver): PhaseDriver {

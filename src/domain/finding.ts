@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { TransitionTable } from "./fsm.js";
+import { assertTransition, type TransitionTable } from "./fsm.js";
 import { ActorSchema, ArtifactRefSchema, FileRefSchema, GitHashSchema, IdSchema, SeveritySchema, TimestampSchema } from "./common.js";
 import { sha256Hex } from "../shared/hash.js";
 
@@ -42,6 +42,12 @@ export const FINDING_TABLE: TransitionTable<FindingStatus> = {
     RESOLVED: [],
   },
 };
+
+/** The check the debate path, the validator, and validation persistence all go through. */
+export function commitFindingStatus(from: FindingStatus, to: FindingStatus, findingId: string): void {
+  if (from === to) return;
+  assertTransition(FINDING_TABLE, `finding ${findingId}`, from, to);
+}
 
 /** Structured claim produced by a reviewer. Opinions without evidence become NOTED, not work. */
 export const RawFindingSchema = z.object({

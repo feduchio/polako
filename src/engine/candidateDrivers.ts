@@ -26,6 +26,7 @@ import {
 } from "../verify/tournament.js";
 import type { VerifierStrategy } from "../verify/strategy.js";
 import type { ProjectProfile } from "../project/profile.js";
+import { transitionTask } from "./taskTransition.js";
 import { discoverRuntimeValidator } from "../runtime/discovery.js";
 import { discoverProjectRuntime } from "../runtime/projectDiscovery.js";
 import {
@@ -92,7 +93,7 @@ export function seedWinnerForTests(ctx: PhaseContext, taskId: string, candidateI
   const winner: Candidate = { ...candidate, state: "WINNER", updatedAt: now };
   const selected: Task = {
     ...task,
-    state: "QUEUED_FOR_INTEGRATION",
+    state: "SELECTED",
     selectedCandidateId: candidateId,
     updatedAt: now,
   };
@@ -109,12 +110,7 @@ export function createExecutingDriver(options: CandidateDriverOptions): PhaseDri
     if (existing.some((candidate) => candidate.state === "IMPLEMENTED")) {
       return { status: "complete", nextPhase: "GATING" };
     }
-    const inflight = existing.filter((candidate) =>
-      candidate.state === "CREATED" ||
-      candidate.state === "IMPLEMENTING" ||
-      candidate.state === "GATING" ||
-      candidate.state === "INTERRUPTED",
-    );
+    const inflight = existing.filter((candidate) => candidate.state === "INTERRUPTED");
     if (inflight.length > 0) return { status: "waiting" };
 
     const running = task.state === "READY"
@@ -634,7 +630,7 @@ function comparingTask(ctx: PhaseContext): Task | null {
 function integrationTask(ctx: PhaseContext): Task | null {
   return ctx.store.repos.tasks
     .listByRun(ctx.run.id)
-    .find((task) => task.state === "QUEUED_FOR_INTEGRATION" || task.state === "SELECTED") ?? null;
+    .find((task) => task.state === "SELECTED") ?? null;
 }
 
 function terminalTask(task: Task): boolean {
@@ -1255,16 +1251,7 @@ function appendCandidateEvents(ctx: PhaseContext, candidates: Candidate[], type:
 }
 
 function appendTaskEvent(ctx: PhaseContext, task: Task, causedBy: string[] = []): void {
-  ctx.store.events.append([{
-    id: id("evt", ctx.clock.now()),
-    runId: ctx.run.id,
-    ts: ctx.clock.now(),
-    type: "task.state_changed",
-    payload: { task },
-    causedBy,
-    actor: SYSTEM_ACTOR,
-    artifacts: [],
-  }]);
+  transitionTask(ctx.store, ctx.clock, ctx.run.id, task, causedBy);
 }
 
 function appendComparedEvent(ctx: PhaseContext, payload: Record<string, unknown>): string {

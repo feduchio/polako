@@ -72,9 +72,7 @@ export function incompleteCodingWorkTerminal(
 }
 
 const CANDIDATE_WORKER_STATES = new Set<Candidate["state"]>([
-  "IMPLEMENTING",
   "IMPLEMENTED",
-  "GATING",
   "PASSED_GATES",
   "FAILED_GATES",
   "WINNER",

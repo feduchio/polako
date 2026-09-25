@@ -1,6 +1,7 @@
 import { CORPUS_EXECUTABLE_STATUS, type CorpusEntry } from "../domain/acceptance.js";
 import type { Actor, ArtifactRef } from "../domain/common.js";
 import {
+  commitFindingStatus,
   FindingSchema,
   FindingValidationStrictSchema,
   findingStatusFromVerdict,
@@ -85,10 +86,12 @@ export class FindingValidator {
     }
     const now = this.options.clock.now();
     const triage = triageFinding(input.finding, input.existingFindings);
+    const triagedStatus = triage.disposition === "duplicate" ? "DUPLICATE" : triage.disposition === "noise" ? "NOTED" : "VALIDATING";
+    commitFindingStatus(input.finding.status, triagedStatus, input.finding.id);
     const triagedFinding = FindingSchema.parse({
       ...input.finding,
       fingerprint: triage.fingerprint,
-      status: triage.disposition === "duplicate" ? "DUPLICATE" : triage.disposition === "noise" ? "NOTED" : "VALIDATING",
+      status: triagedStatus,
       duplicateOf: triage.disposition === "duplicate" ? triage.duplicateOf : null,
       updatedAt: now,
     });
@@ -108,9 +111,11 @@ export class FindingValidator {
       performedBy: attempt.performedBy ?? { kind: "evidence_agent" },
       createdAt: now,
     });
+    const validatedStatus = findingStatusFromVerdict(validation.verdict);
+    commitFindingStatus(triagedFinding.status, validatedStatus, triagedFinding.id);
     const finding = FindingSchema.parse({
       ...triagedFinding,
-      status: findingStatusFromVerdict(validation.verdict),
+      status: validatedStatus,
       updatedAt: now,
     });
 

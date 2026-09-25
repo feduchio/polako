@@ -3,9 +3,8 @@ import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { SYSTEM_ACTOR, modelRefKey, type ModelRef } from "../domain/common.js";
 import { CORPUS_EXECUTABLE_STATUS, type CorpusEntry } from "../domain/acceptance.js";
 import type { Event, NewEvent } from "../domain/event.js";
-import { FINDING_TABLE, FindingSchema, FindingValidationStrictSchema, findingStatusFromVerdict, type Finding, type FindingValidation, type ValidationVerdict } from "../domain/finding.js";
+import { commitFindingStatus, FINDING_TABLE, FindingSchema, FindingValidationStrictSchema, findingStatusFromVerdict, type Finding, type FindingStatus, type FindingValidation, type ValidationVerdict } from "../domain/finding.js";
 import type { ReviewAxis } from "../domain/finding.js";
-import { assertTransition } from "../domain/fsm.js";
 import { createInvestigationTask, createTaskFromValidFinding, type Task } from "../domain/task.js";
 import { ProviderError, isAccountScopedLimit } from "../broker/types.js";
 import {
@@ -45,6 +44,7 @@ import {
   type ReviewExecution,
 } from "../domain/review.js";
 import type { TerminalReason } from "../domain/run.js";
+import { canTransition } from "../domain/fsm.js";
 import { PolishError } from "../shared/errors.js";
 import { buildCheckpointReviewArtifact, type CheckpointReviewArtifact } from "../review/artifact.js";
 import { REVIEW_TRUNCATED_MESSAGE, runAxisReview, type ReviewProvider, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
@@ -581,8 +581,8 @@ function applyDebateOutcome(
     createdAt: now,
   });
 
-  assertTransition(FINDING_TABLE, `finding ${before.id}`, before.status, "VALIDATING");
-  assertTransition(FINDING_TABLE, `finding ${before.id}`, "VALIDATING", terminalStatus);
+  commitFindingStatus(before.status, "VALIDATING", before.id);
+  commitFindingStatus("VALIDATING", terminalStatus, before.id);
 
   let task: Task | null = null;
   if (verdict === "VALID" && terminalFinding.blocking) {
@@ -1178,6 +1178,20 @@ function findRaisedEventId(ctx: PhaseContext, findingId: string): string | null 
   return null;
 }
 
+/**
+ * Validation collapses RAW → VALIDATING → verdict into the finding the caller sees. The table has
+ * no RAW → VALID edge, so the stored history has to name the step the validator actually took.
+ */
+function findingStatusSteps(from: FindingStatus, to: FindingStatus, findingId: string): FindingStatus[] {
+  if (from === to) return [];
+  if (canTransition(FINDING_TABLE, from, to)) return [to];
+  if (canTransition(FINDING_TABLE, from, "VALIDATING") && canTransition(FINDING_TABLE, "VALIDATING", to)) {
+    return ["VALIDATING", to];
+  }
+  commitFindingStatus(from, to, findingId);
+  return [];
+}
+
 function persistValidationResult(
   ctx: PhaseContext,
   before: Finding,
@@ -1186,16 +1200,34 @@ function persistValidationResult(
 ): string | null {
   const events: NewEvent[] = [];
   if (result.finding.status !== before.status || result.finding.fingerprint !== before.fingerprint) {
-    events.push({
-      id: id("evt", ctx.clock.now()),
-      runId: ctx.run.id,
-      ts: ctx.clock.now(),
-      type: "finding.status_changed",
-      payload: { finding: result.finding, from: before.status, to: result.finding.status },
-      causedBy,
-      actor: { kind: "evidence_agent" },
-      artifacts: [],
-    });
+    let cursor = before.status;
+    for (const step of findingStatusSteps(before.status, result.finding.status, before.id)) {
+      commitFindingStatus(cursor, step, before.id);
+      const finding = step === result.finding.status ? result.finding : { ...before, status: step, updatedAt: result.finding.updatedAt };
+      events.push({
+        id: id("evt", ctx.clock.now()),
+        runId: ctx.run.id,
+        ts: ctx.clock.now(),
+        type: "finding.status_changed",
+        payload: { finding, from: cursor, to: step },
+        causedBy,
+        actor: { kind: "evidence_agent" },
+        artifacts: [],
+      });
+      cursor = step;
+    }
+    if (cursor === before.status) {
+      events.push({
+        id: id("evt", ctx.clock.now()),
+        runId: ctx.run.id,
+        ts: ctx.clock.now(),
+        type: "finding.status_changed",
+        payload: { finding: result.finding, from: before.status, to: result.finding.status },
+        causedBy,
+        actor: { kind: "evidence_agent" },
+        artifacts: [],
+      });
+    }
   }
   let validationEventId: string | null = null;
   if (result.validation !== null) {

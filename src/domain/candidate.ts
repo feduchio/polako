@@ -1,13 +1,14 @@
 import { z } from "zod";
-import type { TransitionTable } from "./fsm.js";
 import { CheckResultSchema } from "./checks.js";
 import { ArtifactRefSchema, GitHashSchema, IdSchema, ModelRefSchema, TimestampSchema } from "./common.js";
 
+/**
+ * A candidate is stored already carrying the outcome of the work that produced it.
+ * CREATED, IMPLEMENTING and GATING were never written: the store's candidate events are
+ * IMPLEMENTED, PASSED_GATES, FAILED_GATES, WINNER, LOSER, DISCARDED and INTERRUPTED.
+ */
 export const CandidateStateSchema = z.enum([
-  "CREATED",
-  "IMPLEMENTING",
   "IMPLEMENTED",
-  "GATING",
   "PASSED_GATES",
   "FAILED_GATES",
   "WINNER",
@@ -16,24 +17,6 @@ export const CandidateStateSchema = z.enum([
   "INTERRUPTED",
 ]);
 export type CandidateState = z.infer<typeof CandidateStateSchema>;
-
-export const CANDIDATE_TABLE: TransitionTable<CandidateState> = {
-  initial: "CREATED",
-  states: CandidateStateSchema.options,
-  terminal: ["FAILED_GATES", "WINNER", "LOSER", "DISCARDED"],
-  edges: {
-    CREATED: ["IMPLEMENTING", "DISCARDED"],
-    IMPLEMENTING: ["IMPLEMENTED", "INTERRUPTED", "DISCARDED"],
-    INTERRUPTED: ["CREATED", "DISCARDED"],
-    IMPLEMENTED: ["GATING", "DISCARDED"],
-    GATING: ["PASSED_GATES", "FAILED_GATES", "INTERRUPTED"],
-    PASSED_GATES: ["WINNER", "LOSER", "DISCARDED"],
-    FAILED_GATES: [],
-    WINNER: [],
-    LOSER: [],
-    DISCARDED: [],
-  },
-};
 
 export const GateFailureReasonSchema = z.enum([
   "mandatory_check_failed",

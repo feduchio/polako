@@ -1314,7 +1314,7 @@ function seedIntegratingRun(
   };
   const task = {
     ...store.repos.tasks.get(seeded.taskId)!,
-    state: "QUEUED_FOR_INTEGRATION" as const,
+    state: "SELECTED" as const,
     selectedCandidateId: candidateId,
     updatedAt: now,
   };

@@ -767,7 +767,7 @@ function seedIntegratingWithInterpretation(
     }),
     event(runId, clock, "baseline.snapshotted", { baseline }),
     event(runId, clock, "mission.interpreted", { interpretation: interpretationFor(missionId, interpretationId, baseline.id) }),
-    event(runId, clock, "task.created", { task: { ...task, state: "QUEUED_FOR_INTEGRATION", selectedCandidateId: candidateId } }),
+    event(runId, clock, "task.created", { task: { ...task, state: "SELECTED", selectedCandidateId: candidateId } }),
     event(runId, clock, "candidate.created", {
       candidate: {
         id: candidateId,

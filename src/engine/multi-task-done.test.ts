@@ -546,7 +546,7 @@ function seedIntegrating(
     }),
     event(runId, clock, "baseline.snapshotted", { baseline }),
     event(runId, clock, "task.created", {
-      task: { ...winner, state: "QUEUED_FOR_INTEGRATION", selectedCandidateId: candidateId },
+      task: { ...winner, state: "SELECTED", selectedCandidateId: candidateId },
     }),
     event(runId, clock, "candidate.created", {
       candidate: {

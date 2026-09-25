@@ -11,6 +11,7 @@ import type { Task } from "../domain/task.js";
 import type { TaskDag } from "../council/types.js";
 import type { IntakeResult } from "../council/types.js";
 import type { PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
+import { transitionTask } from "./taskTransition.js";
 
 export interface CouncilDriverOptions {
   roles: CouncilRoleConfigs | ((ctx: PhaseContext) => CouncilRoleConfigs);
@@ -309,16 +310,7 @@ function restoreIntegrationFailedForRetry(ctx: PhaseContext, tasks: readonly Tas
   const maxAttempts = ctx.config.retry.maxAttempts;
   for (const task of tasks) {
     if (!isCodingTask(task) || task.state !== "INTEGRATION_FAILED" || task.attempts >= maxAttempts) continue;
-    ctx.store.events.append([{
-      id: id("evt", ctx.clock.now()),
-      runId: ctx.run.id,
-      ts: ctx.clock.now(),
-      type: "task.state_changed",
-      payload: { task: { ...task, state: "READY", updatedAt: ctx.clock.now() } },
-      causedBy: [],
-      actor: SYSTEM_ACTOR,
-      artifacts: [],
-    }]);
+    transitionTask(ctx.store, ctx.clock, ctx.run.id, { ...task, state: "READY", updatedAt: ctx.clock.now() });
   }
 }
 

@@ -40,22 +40,3 @@ export function reachableStates<S extends string>(table: TransitionTable<S>): Se
   return seen;
 }
 
-/** Structural validation used by tests: every state listed, terminal states have no outgoing edges, all reachable. */
-export function validateTable<S extends string>(table: TransitionTable<S>): string[] {
-  const problems: string[] = [];
-  const stateSet = new Set(table.states);
-  if (!stateSet.has(table.initial)) problems.push(`initial ${table.initial} not in states`);
-  for (const s of table.states) {
-    const edges = table.edges[s] as readonly S[] | undefined;
-    if (!edges) {
-      problems.push(`state ${s} has no edge entry`);
-      continue;
-    }
-    for (const t of edges) if (!stateSet.has(t)) problems.push(`edge ${s} -> ${t} targets unknown state`);
-    if (table.terminal.includes(s) && edges.length > 0) problems.push(`terminal ${s} has outgoing edges`);
-    if (!table.terminal.includes(s) && edges.length === 0) problems.push(`non-terminal ${s} is a dead end`);
-  }
-  const reachable = reachableStates(table);
-  for (const s of table.states) if (!reachable.has(s)) problems.push(`state ${s} unreachable from ${table.initial}`);
-  return problems;
-}

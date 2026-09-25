@@ -1,8 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { CANDIDATE_TABLE } from "./candidate.js";
 import { FINDING_TABLE } from "./finding.js";
-import { canTransition, validateTable, type TransitionTable } from "./fsm.js";
+import { canTransition, reachableStates, type TransitionTable } from "./fsm.js";
 import { JOB_TABLE } from "./job.js";
 import {
   CODE_CHANGING_PHASES,
@@ -18,11 +17,30 @@ import {
 } from "./run.js";
 import { TASK_TABLE } from "./task.js";
 
+/** Structural check. It lives with the tests because production never calls it. */
+function validateTable<S extends string>(table: TransitionTable<S>): string[] {
+  const problems: string[] = [];
+  const stateSet = new Set(table.states);
+  if (!stateSet.has(table.initial)) problems.push(`initial ${table.initial} not in states`);
+  for (const s of table.states) {
+    const edges = table.edges[s] as readonly S[] | undefined;
+    if (!edges) {
+      problems.push(`state ${s} has no edge entry`);
+      continue;
+    }
+    for (const t of edges) if (!stateSet.has(t)) problems.push(`edge ${s} -> ${t} targets unknown state`);
+    if (table.terminal.includes(s) && edges.length > 0) problems.push(`terminal ${s} has outgoing edges`);
+    if (!table.terminal.includes(s) && edges.length === 0) problems.push(`non-terminal ${s} is a dead end`);
+  }
+  const reachable = reachableStates(table);
+  for (const s of table.states) if (!reachable.has(s)) problems.push(`state ${s} unreachable from ${table.initial}`);
+  return problems;
+}
+
 const TABLES: [string, TransitionTable<string>][] = [
   ["RUN_PHASE_TABLE", RUN_PHASE_TABLE],
   ["RUN_CONTROL_TABLE", RUN_CONTROL_TABLE],
   ["TASK_TABLE", TASK_TABLE],
-  ["CANDIDATE_TABLE", CANDIDATE_TABLE],
   ["FINDING_TABLE", FINDING_TABLE],
   ["JOB_TABLE", JOB_TABLE],
 ];
@@ -139,17 +157,10 @@ describe("run control axis", () => {
 describe("task FSM", () => {
   it("integration is the only path to INTEGRATED and is serial-queue gated", () => {
     expect(canTransition(TASK_TABLE, "SELECTED", "INTEGRATED")).toBe(false);
-    expect(canTransition(TASK_TABLE, "SELECTED", "QUEUED_FOR_INTEGRATION")).toBe(true);
+    expect(canTransition(TASK_TABLE, "SELECTED", "INTEGRATING")).toBe(true);
+    expect(canTransition(TASK_TABLE, "GATED", "INTEGRATING")).toBe(false);
     expect(canTransition(TASK_TABLE, "INTEGRATING", "INTEGRATED")).toBe(true);
     expect(canTransition(TASK_TABLE, "INTEGRATION_FAILED", "READY")).toBe(true);
   });
 });
 
-describe("candidate FSM", () => {
-  it("a candidate cannot win without passing gates", () => {
-    for (const s of CANDIDATE_TABLE.states) {
-      if (s === "PASSED_GATES") continue;
-      expect(canTransition(CANDIDATE_TABLE, s, "WINNER")).toBe(false);
-    }
-  });
-});
