@@ -3,6 +3,8 @@ import { basename, join, resolve } from "node:path";
 import { withRuntimeValidationMode, type PolishConfig } from "../domain/config.js";
 import { createMission } from "../domain/mission.js";
 import type { NewEvent } from "../domain/event.js";
+import { GLOBAL_MODEL_OBSERVATIONS_RUN_ID } from "../domain/event.js";
+import { SYSTEM_ACTOR } from "../domain/common.js";
 import { RunPhaseSchema, type Run } from "../domain/run.js";
 import { RunEngine } from "../engine/index.js";
 import type { ProviderAdapter } from "../broker/types.js";
@@ -88,10 +90,26 @@ export class DaemonService implements RpcHandler {
   private readonly reportSignatures = new Map<string, string>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
+  private tickStartedAt: number | null = null;
+  private lastTickCompletedAt: number | null = null;
+  private reportRenders = 0;
+  private watchdog!: TickWatchdog;
 
   constructor(options: DaemonServiceOptions) {
     this.home = options.home;
     this.tickMs = options.tickMs ?? 50;
+    this.watchdog = new TickWatchdog(this.tickMs, (durationMs) => {
+      this.store.events.append([{
+        id: id("evt", this.clock.now()),
+        runId: GLOBAL_MODEL_OBSERVATIONS_RUN_ID,
+        ts: this.clock.now(),
+        type: "daemon.watchdog",
+        payload: { durationMs, tickMs: this.tickMs },
+        causedBy: [],
+        actor: SYSTEM_ACTOR,
+        artifacts: [],
+      }]);
+    });
     this.clock = options.clock ?? systemClock;
     mkdirSync(this.home, { recursive: true });
     this.store = openStore({ home: this.home });
@@ -160,7 +178,13 @@ export class DaemonService implements RpcHandler {
   async handle(method: string, params: Record<string, unknown>): Promise<unknown> {
     switch (method) {
       case "daemon.ping":
-        return { pid: process.pid, home: this.home };
+        return {
+          pid: process.pid,
+          home: this.home,
+          tickInFlightMs: this.tickStartedAt === null ? 0 : Math.max(0, this.clock.now() - this.tickStartedAt),
+          lastTickCompletedAt: this.lastTickCompletedAt,
+          reportRenders: this.reportRenders,
+        };
       case "project.add":
         return this.addProject(requiredString(params, "path"), optionalString(params, "name"));
       case "run":
@@ -464,9 +488,15 @@ export class DaemonService implements RpcHandler {
     return result;
   }
 
+  /** One engine pass. Tests use it to measure a tick without waiting for the interval. */
+  async step(): Promise<void> {
+    await this.tick();
+  }
+
   private async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
+    this.tickStartedAt = this.clock.now();
     try {
       await this.engine.tick();
       for (const run of this.store.repos.runs.listAll()) {
@@ -484,7 +514,11 @@ export class DaemonService implements RpcHandler {
       // Phase drivers pause on unexpected failure. Do not let an unhandled rejection
       // clear the tick lock and silently re-enter INTERPRETING_MISSION.
     } finally {
+      const started = this.tickStartedAt;
+      this.tickStartedAt = null;
+      this.lastTickCompletedAt = this.clock.now();
       this.ticking = false;
+      this.watchdog.observe(this.lastTickCompletedAt - started);
     }
   }
 
@@ -499,6 +533,7 @@ export class DaemonService implements RpcHandler {
     const metadata = this.readMetadata(run.id);
     const body = this.renderReportBody(run, metadata, generated?.artifacts[0]);
     writeFileSync(metadata.reportPath, body);
+    this.reportRenders += 1;
     this.reportSignatures.set(run.id, signature);
   }
 
@@ -696,6 +731,27 @@ function optionalString(params: Record<string, unknown>, key: string): string | 
   if (value === undefined) return undefined;
   if (typeof value !== "string") throw new PolishError("CONFIG_ERROR", `${key} must be a string`);
   return value;
+}
+
+/** Three over-budget ticks, then one signal. A fast tick clears the run so a single slow pass is not an alarm. */
+export class TickWatchdog {
+  private slowTicks = 0;
+  private emitted = false;
+
+  constructor(
+    private readonly tickMs: number,
+    private readonly emit: (durationMs: number) => void,
+  ) {}
+
+  observe(durationMs: number): void {
+    const limit = Math.max(1_000, 10 * this.tickMs);
+    if (durationMs > limit) this.slowTicks += 1;
+    else this.slowTicks = 0;
+    if (this.slowTicks >= 3 && !this.emitted) {
+      this.emitted = true;
+      this.emit(durationMs);
+    }
+  }
 }
 
 function optionalNumber(params: Record<string, unknown>, key: string): number | undefined {

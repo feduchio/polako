@@ -87,6 +87,8 @@ export const KNOWN_EVENT_TYPES = [
   "pathology.effect_started",
   "pathology.effect_completed",
   "report.generated",
+  /** A daemon tick stayed over its budget three times. Emitted once, not on every tick. */
+  "daemon.watchdog",
 ] as const;
 export type KnownEventType = (typeof KNOWN_EVENT_TYPES)[number];
 

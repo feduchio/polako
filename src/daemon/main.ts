@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { PolishError } from "../shared/errors.js";
 import { isMainModule } from "../shared/cliEntry.js";
 import { RpcServer } from "./rpc.js";
 import { DaemonService } from "./service.js";
@@ -22,16 +23,55 @@ export function polishPidPath(home = polishHome()): string {
   return join(home, "polish.pid");
 }
 
+export function polishLockPath(home = polishHome()): string {
+  return join(home, "polish.lock");
+}
+
+/**
+ * Exclusive claim, taken before the socket is unlinked. A second process must not delete a live
+ * daemon's socket: that is how a ticking process became unreachable for 28 hours.
+ */
+export function claimDaemonLock(home: string, pid = process.pid): void {
+  const lockPath = polishLockPath(home);
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, "wx", 0o600);
+      writeSync(fd, `${pid}\n`);
+      closeSync(fd);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const holder = Number(readFileSync(lockPath, "utf8"));
+      if (Number.isInteger(holder) && holder > 0 && pidAlive(holder)) {
+        throw new PolishError("CONFLICT", `polishd is already running as pid ${String(holder)}`);
+      }
+      rmSync(lockPath, { force: true });
+    }
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Listen first, then publish the pid. A pid written earlier can name a process that never listened. */
+export async function bindDaemon(home: string, listen: () => Promise<void>): Promise<void> {
+  claimDaemonLock(home);
+  await listen();
+  writeFileSync(polishPidPath(home), `${process.pid}\n`, { mode: 0o600 });
+}
+
 export async function runDaemon(): Promise<void> {
   const home = polishHome();
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const service = new DaemonService({ home });
   const server = new RpcServer(polishSocketPath(home), service);
-  // The pid file is claimed only once this process owns the socket. Claiming it first meant a
-  // second daemon that then failed to listen had already overwritten a live daemon's pid, leaving
-  // the file pointing at a corpse and the live process unstoppable through `polish`.
-  await server.listen();
-  writeFileSync(polishPidPath(home), `${process.pid}\n`, { mode: 0o600 });
+  await bindDaemon(home, () => server.listen());
   service.start();
 
   let stopping = false;
@@ -42,6 +82,7 @@ export async function runDaemon(): Promise<void> {
       .then(() => service.close())
       .then(() => {
         rmSync(polishPidPath(home), { force: true });
+        rmSync(polishLockPath(home), { force: true });
         process.exitCode = 0;
       });
   };
