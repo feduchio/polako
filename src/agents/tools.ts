@@ -31,6 +31,11 @@ export interface AgentTools {
   execute(name: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
 }
 
+/** Directories a recursive listing must not walk. A checkout with dependencies is mostly these. */
+const SKIP_LIST_DIRS = new Set(["node_modules", ".git", "dist", ".polish"]);
+/** How much of a file `read` returns when the caller names no range. */
+const DEFAULT_READ_LINES = 400;
+
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({
   type: "object",
   properties,
@@ -67,20 +72,35 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
         case "read": {
           const path = safePath(root, stringArg(args, "path"));
           const lines = readFileSync(path, "utf8").split(/\r?\n/);
-          const start = optionalInteger(args, "startLine") ?? 1;
-          const end = optionalInteger(args, "endLine") ?? lines.length;
-          return { path: relative(root, path), startLine: start, endLine: Math.min(end, lines.length), content: lines.slice(start - 1, end).join("\n") };
+          const startGiven = optionalInteger(args, "startLine");
+          const endGiven = optionalInteger(args, "endLine");
+          const start = startGiven ?? 1;
+          const end = endGiven ?? (startGiven === undefined ? start + DEFAULT_READ_LINES - 1 : lines.length);
+          const endLine = Math.min(end, lines.length);
+          return {
+            path: relative(root, path),
+            startLine: start,
+            endLine,
+            totalLines: lines.length,
+            truncated: start > 1 || endLine < lines.length,
+            content: lines.slice(start - 1, endLine).join("\n"),
+          };
         }
         case "list": {
           const path = safePath(root, optionalString(args, "path") ?? ".");
-          return { path: relative(root, path) || ".", entries: listEntries(root, path, args["recursive"] === true) };
+          const rel = relative(root, path) || ".";
+          if (pathHitsSkippedDir(rel)) return { path: rel, entries: [], skipped: true };
+          return { path: rel, entries: listEntries(root, path, args["recursive"] === true) };
         }
         case "search": {
           const query = stringArg(args, "query");
           const requested = optionalString(args, "path") ?? ".";
           safePath(root, requested);
           try {
-            const result = await deps.sandbox.run(["rg", "-n", query, requested], signal === undefined ? {} : { signal });
+            const result = await deps.sandbox.run(
+              ["rg", "-n", "--glob", "!node_modules", "--glob", "!.git", query, requested],
+              signal === undefined ? {} : { signal },
+            );
             return { exitCode: result.exitCode, matches: redact(result.stdout), stderr: redact(result.stderr), truncated: result.truncated };
           } catch (error) {
             if (!isSpawnError(error, "rg")) throw error;
@@ -181,11 +201,16 @@ function isSpawnError(error: unknown, binary: string): boolean {
   return error instanceof Error && error.message.includes(`spawn ${binary}`);
 }
 
+function pathHitsSkippedDir(rel: string): boolean {
+  return rel.split(sep).some((part) => SKIP_LIST_DIRS.has(part));
+}
+
 function listEntries(root: string, path: string, recursive: boolean): string[] {
   const out: string[] = [];
   const visit = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isSymbolicLink()) continue;
+      if (SKIP_LIST_DIRS.has(entry.name)) continue;
       const full = resolve(dir, entry.name);
       out.push(relative(root, full) + (entry.isDirectory() ? "/" : ""));
       if (recursive && entry.isDirectory() && out.length < 2_000) visit(full);

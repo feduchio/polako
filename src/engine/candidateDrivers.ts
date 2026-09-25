@@ -706,7 +706,11 @@ function handleZeroSurvivors(
     // timeout an exhausted allowance — which is what narrowing `providerRefusal` produced until
     // this branch existed.
     terminalReason: {
-      code: judged.length === 0 ? "providers_unavailable" : "repeated_failure",
+      code: judged.length > 0
+        ? "repeated_failure"
+        : refused.length > 0
+          ? "providers_unavailable"
+          : "no_candidate_finished",
       summary: `task ${task.id} produced no survivor on attempt ${String(attempts)} of ${String(candidates.length)} candidates: ` +
         `${String(judged.length)} reached a gate and failed, ${String(refused.length)} were refused by the provider, ` +
         `${String(other)} ended otherwise` +

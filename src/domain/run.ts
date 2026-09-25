@@ -151,6 +151,12 @@ export const TerminalReasonSchema = z.object({
     "provider_budget_exhausted",
     "providers_unavailable",
     /**
+     * Candidates ran and none of them reached a gate, and the provider did not refuse them.
+     * `BUDGET_EXCEEDED` and a worker that never called `finish` land here. Calling that
+     * `providers_unavailable` told the operator the models were down.
+     */
+    "no_candidate_finished",
+    /**
      * Review ran and produced no findings, and the reviewers that produced it could not find a
      * seeded defect either — so the clean verdict is not evidence of anything. `docs/RECOVERY.md`
      * R2: without this, §1.1 repeats and goes unnoticed a second time.

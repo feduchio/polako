@@ -901,6 +901,18 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
         }
         ctx.store.events.append(events);
       },
+      onLoopStalled: (task, info) => {
+        ctx.store.events.append([{
+          id: id("evt", ctx.clock.now()),
+          runId: ctx.run.id,
+          ts: ctx.clock.now(),
+          type: "worker.loop_stalled",
+          payload: { taskId: task.id, workerModel: model, tool: info.tool, repeats: info.repeats },
+          causedBy: [],
+          actor: SYSTEM_ACTOR,
+          artifacts: [],
+        }]);
+      },
       now: () => deps.clock.now(),
     });
   };

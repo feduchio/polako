@@ -278,7 +278,7 @@ function checkEscapingOperands(argv: readonly string[], start: number): string |
 const RG_OPTIONS = new Set([
   "-n", "--line-number", "-i", "--ignore-case", "-S", "--smart-case", "-F", "--fixed-strings",
   "-l", "--files-with-matches", "-L", "--files-without-match", "-c", "--count", "--count-matches",
-  "--hidden", "--no-ignore", "--no-messages",
+  "--hidden", "--no-ignore", "--no-messages", "--glob",
 ]);
 const LS_OPTIONS = new Set(["-a", "-A", "-l", "-la", "-al", "-1", "--all"]);
 const CAT_OPTIONS = new Set(["-n", "--number", "-b", "--number-nonblank"]);

@@ -961,12 +961,12 @@ describe("B2 production candidate drivers", () => {
     // reached a gate, nothing was judged, and only an allowance is worth waiting for.
     it.each([
       ["ProviderError: rate limited: 429", "provider_budget_exhausted", "refused all 1"],
-      ["ProviderError: not found: 404", "providers_unavailable", "0 reached a gate and failed"],
-      ["ProviderError: bad request (400): schema", "providers_unavailable", "1 ended otherwise"],
-      ["ProviderError: auth failed (403)", "providers_unavailable", "1 ended otherwise"],
-      ["ProviderError: request timed out after 120000ms", "providers_unavailable", "1 ended otherwise"],
-      ["BUDGET_EXCEEDED", "providers_unavailable", "1 ended otherwise"],
-      ["STOPPED", "providers_unavailable", "1 ended otherwise"],
+      ["ProviderError: not found: 404", "no_candidate_finished", "0 reached a gate and failed"],
+      ["ProviderError: bad request (400): schema", "no_candidate_finished", "1 ended otherwise"],
+      ["ProviderError: auth failed (403)", "no_candidate_finished", "1 ended otherwise"],
+      ["ProviderError: request timed out after 120000ms", "no_candidate_finished", "1 ended otherwise"],
+      ["BUDGET_EXCEEDED", "no_candidate_finished", "1 ended otherwise"],
+      ["STOPPED", "no_candidate_finished", "1 ended otherwise"],
     ] as const)("classifies %s as %s", async (error, code, fragment) => {
       const { store: s3, engine, runId, taskId } = await seedGating();
       exhaust(s3, runId, taskId, [{ state: "DISCARDED", error, gated: false }]);
@@ -1062,8 +1062,23 @@ describe("B2 production candidate drivers", () => {
 
       const run = s.repos.runs.get(runId)!;
       expect(run.phase).toBe("FAILED");
-      expect(run.terminalReason?.code).toBe("providers_unavailable");
+      expect(run.terminalReason?.code).toBe("no_candidate_finished");
       expect(run.terminalReason?.summary).toContain("npm ci failed");
+      s.close();
+    });
+
+    it("keeps providers_unavailable only when a refusal is mixed with work that never reached a gate", async () => {
+      const { store: s, engine, runId, taskId } = await seedGating();
+      exhaust(s, runId, taskId, [
+        { state: "DISCARDED", error: "ProviderError: rate limited: 429", gated: false },
+        { state: "DISCARDED", error: "BUDGET_EXCEEDED", gated: false },
+      ]);
+      await engine.tickRun(runId);
+      const run = s.repos.runs.get(runId)!;
+      expect(run.phase).toBe("FAILED");
+      expect(run.terminalReason?.code).toBe("providers_unavailable");
+      expect(run.terminalReason?.summary).toContain("1 were refused by the provider");
+      expect(run.terminalReason?.summary).toContain("1 ended otherwise");
       s.close();
     });
   });

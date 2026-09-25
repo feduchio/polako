@@ -15,7 +15,8 @@ import type { SandboxHandle } from "../sandbox/worktree.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
-import { AgentRunner } from "./runner.js";
+import { estimateTokens } from "../context/types.js";
+import { AgentRunner, toolResultTokenCap } from "./runner.js";
 import type { AgentRunnerDeps } from "./types.js";
 import { EmpiricalProgressTracker } from "./progressTracker.js";
 import { defaultProtocolsRoot, ProtocolRegistry } from "../protocols/loader.js";
@@ -64,6 +65,182 @@ describe("AgentRunner", () => {
     expect(transcript.length).toBeGreaterThan(0);
     expect(transcript).not.toContain(SECRET);
     expect(JSON.parse(transcript)).toMatchObject({ status: "FINISHED", turns: expect.any(Array) });
+    store.close();
+    await handle.destroy();
+  });
+
+  it("stops a repeated empty search before the fourth model call", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 3, maxTokens: 32_000 });
+    const stalled: { tool: string; repeats: number }[] = [];
+    deps.onLoopStalled = (_task, info) => { stalled.push(info); };
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      policy: fixture.policy,
+    });
+    provider.script("worker", Array.from({ length: 6 }, (_, index) =>
+      replyWith(tool("search", { query: "commit duration", path: "src" }, `search-${index}`))));
+
+    const result = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+
+    expect(result.status).toBe("failed");
+    if (result.status !== "failed") throw new Error("expected a failed run");
+    expect(result.error).toBe("STALLED");
+    expect(provider.calls).toHaveLength(3);
+    expect(stalled).toEqual([{ tool: "search", repeats: 3 }]);
+    const digest = provider.calls[2]?.messages.find((message) => message.content.includes("Earlier in this loop"))?.content ?? "";
+    expect(digest).toContain('search "commit duration" (0 matches)');
+    const firstResult = provider.calls[1]?.messages.find((message) => message.role === "tool")?.content ?? "";
+    expect(firstResult).not.toContain('"truncated":true');
+    store.close();
+    await handle.destroy();
+  });
+
+  it("omits node_modules from a listing small enough to return whole", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 2, maxTokens: 8_000 });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      policy: fixture.policy,
+    });
+    mkdirSync(join(handle.path, "node_modules", "left-pad"), { recursive: true });
+    writeFileSync(join(handle.path, "node_modules", "left-pad", "index.js"), "module.exports = 1;\n");
+    provider.script("worker", [
+      replyWith(tool("list", { path: ".", recursive: true }, "list")),
+      replyWith(tool("finish", { summary: "listed" }, "finish")),
+    ]);
+    await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    const listed = provider.calls[1]?.messages.find((message) => message.role === "tool")?.content ?? "";
+    expect(listed).toContain("src/math.ts");
+    expect(listed).not.toContain("left-pad");
+    expect(listed).not.toContain('"truncated":true');
+    store.close();
+    await handle.destroy();
+  });
+
+  it("does not list node_modules and keeps a huge listing under the token cap", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 4, maxTokens: 8_000 });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      policy: fixture.policy,
+    });
+    mkdirSync(join(handle.path, "node_modules", "left-pad"), { recursive: true });
+    writeFileSync(join(handle.path, "node_modules", "left-pad", "index.js"), "module.exports = 1;\n");
+    mkdirSync(join(handle.path, "bulk"));
+    for (let i = 0; i < 1_500; i += 1) {
+      writeFileSync(join(handle.path, "bulk", `file-${String(i).padStart(4, "0")}.txt`), "x\n");
+    }
+    provider.script("worker", [
+      replyWith(tool("list", { path: "node_modules", recursive: true }, "list-deps")),
+      replyWith(tool("list", { path: ".", recursive: true }, "list")),
+      replyWith(tool("finish", { summary: "listed" }, "finish")),
+    ]);
+
+    await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+
+    const skipped = provider.calls[1]?.messages.find((message) => message.role === "tool")?.content ?? "";
+    expect(skipped).toContain('"skipped":true');
+    expect(skipped).not.toContain("left-pad");
+    const toolMessage = provider.calls[2]?.messages.find((message) => message.role === "tool")?.content ?? "";
+    expect(toolMessage).not.toContain("left-pad");
+    expect(toolMessage).not.toContain("node_modules");
+    expect(estimateTokens(toolMessage)).toBeLessThanOrEqual(toolResultTokenCap(8_000));
+    expect(toolMessage).toContain("truncated");
+    expect(toolMessage).toContain("entryCount");
+    store.close();
+    await handle.destroy();
+  });
+
+  it("does not stall a search whose third repeat lands on a different diff", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 6, maxTokens: 32_000 });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      policy: fixture.policy,
+    });
+    provider.script("worker", [
+      replyWith(tool("search", { query: "commit duration", path: "src" }, "s1")),
+      replyWith(tool("search", { query: "commit duration", path: "src" }, "s2")),
+      replyWith(tool("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" }, "w")),
+      replyWith(tool("search", { query: "commit duration", path: "src" }, "s3")),
+      replyWith(tool("finish", { summary: "edited" }, "finish")),
+    ]);
+
+    const result = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("completed");
+    expect(provider.calls.length).toBeGreaterThanOrEqual(5);
+    store.close();
+    await handle.destroy();
+  });
+
+  it("asks ripgrep to skip node_modules and .git", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 2, maxTokens: 8_000 });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      policy: fixture.policy,
+    });
+    const argvSeen: string[][] = [];
+    const sandbox = {
+      ...handle,
+      run: (argv: readonly string[]) => {
+        argvSeen.push([...argv]);
+        return Promise.reject(new Error("spawn rg ENOENT"));
+      },
+    };
+    provider.script("worker", [
+      replyWith(tool("search", { query: "add", path: "src" }, "search")),
+      replyWith(tool("finish", { summary: "searched" }, "finish")),
+    ]);
+    await new AgentRunner(deps).run({ ...codingTask(fixture.runId, fixture.base), touchesProductCode: false }, sandbox);
+    expect(argvSeen[0]).toEqual(["rg", "-n", "--glob", "!node_modules", "--glob", "!.git", "add", "src"]);
+    store.close();
+    await handle.destroy();
+  });
+
+  it("windows a read that names no range, and compresses a long command transcript", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 4, maxTokens: 32_000 });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      policy: fixture.policy,
+    });
+    writeFileSync(join(handle.path, "src/long.ts"), `${Array.from({ length: 500 }, (_, i) => `export const line${String(i)} = ${String(i)};`).join("\n")}\n`);
+    const noise = `${"noise line\n".repeat(180)}UNIQUE-MIDDLE-LINE\n${"tail line\n".repeat(40)}`;
+    const sandbox = trackingSandbox(handle, () => processResult(noise));
+    provider.script("worker", [
+      replyWith(tool("read", { path: "src/long.ts" }, "read")),
+      replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "cmd")),
+      replyWith(tool("finish", { summary: "read" }, "finish")),
+    ]);
+
+    await new AgentRunner(deps).run({ ...codingTask(fixture.runId, fixture.base), touchesProductCode: false }, sandbox);
+    const readMessage = provider.calls[1]?.messages.find((message) => message.role === "tool")?.content ?? "";
+    expect(readMessage).toContain('"endLine":400');
+    expect(readMessage).toContain('"truncated":true');
+    expect(readMessage).not.toContain("line499");
+    const commandMessage = provider.calls[2]?.messages.find((message) => message.role === "tool")?.content ?? "";
+    expect(commandMessage).toContain("compressed");
+    expect(commandMessage).not.toContain("UNIQUE-MIDDLE-LINE");
     store.close();
     await handle.destroy();
   });

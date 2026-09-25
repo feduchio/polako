@@ -96,7 +96,8 @@ export type AgentRunStatus =
   | "BUDGET_EXCEEDED"
   | "STOPPED"
   | "FAILED"
-  | "ABANDONED_PROGRESS";
+  | "ABANDONED_PROGRESS"
+  | "STALLED";
 
 export interface AgentTranscript {
   runId: string;
@@ -131,6 +132,8 @@ export interface AgentRunnerDeps {
   prompt?: (task: Task) => { text: string; protocolHash: string | null };
   createProgressTracker?: (task: Task) => AgentProgressTracker | null;
   onProgress?: (task: Task, record: AgentProgressRecord) => void;
+  /** Fired when the loop stops itself on a repeated tool result. The runner does not ask a model. */
+  onLoopStalled?: (task: Task, info: { tool: string; repeats: number }) => void;
   createIntelligence?: (worktreePath: string) => RepositoryIntelligence;
   requestContext?: RequestContext;
   redact?: (text: string) => string;

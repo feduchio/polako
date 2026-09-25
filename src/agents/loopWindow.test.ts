@@ -62,6 +62,16 @@ describe("buildLoopDigest", () => {
     expect(digest).toContain('request_context "why is it slow"');
   });
 
+  it("says an empty search found nothing, and counts the repeat", () => {
+    const digest = buildLoopDigest(
+      [1, 2, 3, 4].map((n) => turn(n, [
+        ok("search", { query: "commit duration" }, { exitCode: 0, matches: "" }),
+      ])),
+      400,
+    );
+    expect(digest).toContain('search "commit duration" (0 matches) (x4)');
+  });
+
   it("evicts the oldest low-priority entry and keeps the newest command whole", () => {
     const turns = [
       turn(1, [ok("read", { path: "src/very-old-file.ts" }, { path: "src/very-old-file.ts" })]),

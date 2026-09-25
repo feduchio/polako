@@ -70,6 +70,8 @@ export const KNOWN_EVENT_TYPES = [
   "worker.started",
   "worker.progress_scored",
   "worker.progress_abandoned",
+  /** The worker repeated one tool result with an unchanged diff. No model call decides this. */
+  "worker.loop_stalled",
   "supervisor.decision",
   "council.role_resolved",
   "council.unavailable",

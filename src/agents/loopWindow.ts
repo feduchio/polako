@@ -107,6 +107,7 @@ function render(entries: readonly DigestEntry[], turns: number): string {
 function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
   const entries: DigestEntry[] = [];
   const errorCounts = new Map<string, { seq: number; count: number }>();
+  const repeatedResults = new Map<string, { seq: number; count: number; text: string }>();
   const seenChanged = new Set<string>();
   const seenToolCall = new Set<string>();
   let failedCommandSeq = -1;
@@ -138,6 +139,16 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
           seenChanged.add(key);
           entries.push({ section: "changed", priority: PRIORITY.changed, seq, text: key, tail: null });
         }
+        continue;
+      }
+      if (result.name === "search" || result.name === "list" || result.name === "read") {
+        const identity = identifyingArgument(result.name, result.output, parsed);
+        const summary = boundedResult(result.name, result.output);
+        const text = summary === ""
+          ? `${result.name} ${identity}`.trim()
+          : `${result.name} ${identity} ${summary}`.trim();
+        const prior = repeatedResults.get(text);
+        repeatedResults.set(text, { seq, count: (prior?.count ?? 0) + 1, text });
         continue;
       }
       if (result.name === "run_command") {
@@ -173,6 +184,16 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
       : entry,
   );
 
+  for (const { seq: at, count, text } of repeatedResults.values()) {
+    demoted.push({
+      section: "toolCall",
+      priority: PRIORITY.toolCall,
+      seq: at,
+      text: count > 1 ? `${text} (x${String(count)})` : text,
+      tail: null,
+    });
+  }
+
   for (const [key, { seq: at, count }] of errorCounts) {
     demoted.push({
       section: "error",
@@ -190,6 +211,45 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
  * query, `repo_intel` its action: without these a worker cannot tell that it already searched for
  * a symbol and found nothing, and searches again.
  */
+/**
+ * What the call returned, in a form that fits one digest line. A search that found nothing has to
+ * say so: the previous digest recorded the query and dropped the empty result, and the worker
+ * searched again.
+ */
+function boundedResult(name: string, output: unknown): string {
+  if (name === "search") {
+    const declared = numberField(output, "matchCount");
+    const matches = stringField(output, "matches");
+    const count = declared ?? countMatchLines(matches);
+    return `(${String(count)} matches)`;
+  }
+  if (name === "list") {
+    const declared = numberField(output, "entryCount");
+    const entries = field(output, "entries");
+    const count = declared ?? (Array.isArray(entries) ? entries.length : 0);
+    return `(${String(count)} entries)`;
+  }
+  if (name === "read") {
+    const start = numberField(output, "startLine");
+    const end = numberField(output, "endLine");
+    if (start === null || end === null) return "";
+    return `(lines ${String(start)}-${String(end)})`;
+  }
+  return "";
+}
+
+function countMatchLines(matches: string | null): number {
+  if (matches === null) return 0;
+  const trimmed = matches.trim();
+  if (trimmed === "" || trimmed === "[]") return 0;
+  return trimmed.split("\n").filter((line) => line.trim() !== "").length;
+}
+
+function field(source: unknown, key: string): unknown {
+  if (typeof source !== "object" || source === null) return undefined;
+  return (source as Record<string, unknown>)[key];
+}
+
 function identifyingArgument(name: string, output: unknown, args: Record<string, unknown>): string {
   switch (name) {
     case "read":
