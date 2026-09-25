@@ -78,6 +78,46 @@ describe("B5 production VALIDATING driver", () => {
     expect(store.events.list(runId, { types: ["finding.validated"] })).toHaveLength(1);
   });
 
+  it("does not treat a missing reviewer as a canary pass", async () => {
+    const config = defaultConfig();
+    config.review.reviewersPerRound = 1;
+    const local = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    local.registerPhase("VALIDATING", createValidatingDriver({
+      resolveWorker: () => new ScriptedFindingEvidenceWorker(() => validAttempt()),
+      resolveReviewers: () => [],
+    }));
+    const { runId, checkpointHash } = seedValidatingRun(store, clock, fixture, []);
+    const execution = {
+      id: id("evt", clock.now() + 40),
+      runId,
+      checkpointHash,
+      roundIndex: 1,
+      axis: "correctness" as const,
+      requestedModel: { provider: "models", model: "m0" },
+      completed: true,
+      findings: [],
+      promptDigest: "digest",
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+    };
+    store.events.append([{
+      id: id("evt", clock.now() + 50),
+      runId,
+      ts: clock.now() + 50,
+      type: "review.finished",
+      payload: { execution },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
+    await local.tickRun(runId);
+    const run = store.repos.runs.get(runId);
+    expect(run?.phase).toBe("NEEDS_HUMAN");
+    expect(run?.terminalReason?.code).toBe("review_unverifiable");
+    const canary = store.events.list(runId, { types: ["review.canary_recorded"] })[0];
+    expect(canary?.payload).toMatchObject({ verified: false, error: "reviewer no longer selectable" });
+  });
+
   it("dedupes duplicate fingerprints without evidence work", async () => {
     const finding = blockingFinding(fixture.integrated);
     const existing = { ...finding, id: id("find", NOW + 1), status: "VALID" as const };

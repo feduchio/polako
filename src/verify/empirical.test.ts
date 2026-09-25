@@ -10,7 +10,7 @@ import {
   ringPairs,
   sigmoidMass,
 } from "./empirical.js";
-import type { TournamentCandidate } from "./strategy.js";
+import type { TournamentCandidate, VerifierStrategy } from "./strategy.js";
 
 const PROTOCOLS = ProtocolRegistry.load(defaultProtocolsRoot());
 
@@ -203,6 +203,40 @@ describe("EmpiricalVerifier", () => {
       { runId: "run_test", taskKind: "bugfix", task: "one" },
     );
     expect(order).toEqual(["p0", "p0", "p1", "p1", "p0", "p0", "p1", "p1"]);
+  });
+
+  it("falls back when a pair completed fewer than half its evaluations", async () => {
+    const down = {
+      id: "down",
+      kind: "scripted",
+      concurrency: 1,
+      listModels: () => Promise.resolve([]),
+      health: () => Promise.resolve({ ok: true, checkedAt: 1 }),
+      complete: () => Promise.reject(new ProviderError("down", "server", "down")),
+    };
+    let fallbackCalls = 0;
+    const fallback: VerifierStrategy = {
+      comparePair: () => {
+        fallbackCalls += 1;
+        return Promise.resolve({ winner: "fallback", rationale: "quorum", scores: {} });
+      },
+      selectFrontier: () => Promise.reject(new Error("unused")),
+    };
+    const strategy = new EmpiricalVerifier({
+      models: [
+        { provider: down, model: { provider: "down", model: "a" }, family: "family-a" },
+        { provider: down, model: { provider: "down", model: "b" }, family: "family-b" },
+      ],
+      protocols: PROTOCOLS,
+      fallback,
+    });
+    const verdict = await strategy.comparePair(
+      candidate("a"),
+      candidate("b"),
+      { runId: "run_test", taskKind: "bugfix", task: "one" },
+    );
+    expect(fallbackCalls).toBe(1);
+    expect(verdict.winner).toBe("fallback");
   });
 
   it("pins sigmoid mass to independent literals", () => {

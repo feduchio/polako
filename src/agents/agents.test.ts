@@ -245,6 +245,29 @@ describe("AgentRunner", () => {
     await handle.destroy();
   });
 
+  it("rejects a no-evidence finish on a task that does not change code", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy);
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      policy: fixture.policy,
+    });
+    provider.script("worker", [
+      replyWith(tool("finish", { summary: "claim only" }, "bad")),
+      replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "cmd")),
+      replyWith(tool("finish", { summary: "checked" }, "good")),
+    ]);
+    const task = { ...codingTask(fixture.runId, fixture.base), touchesProductCode: false };
+    const result = await new AgentRunner(deps).run(task, handle);
+    expect(result.status).toBe("completed");
+    expect(provider.calls[1]?.messages.at(-1)?.content).toContain("fresh evidence in this loop");
+    store.close();
+    await handle.destroy();
+  });
+
   it("rejects finish without fresh loop evidence and lets the model recover", async () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
@@ -264,7 +287,7 @@ describe("AgentRunner", () => {
 
     const result = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
     expect(result.status).toBe("completed");
-    expect(provider.calls[1]?.messages.at(-1)?.content).toContain("finish rejected");
+    expect(provider.calls[1]?.messages.at(-1)?.content).toContain("fresh evidence in this loop");
     store.close();
     await handle.destroy();
   });
