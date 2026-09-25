@@ -18,6 +18,19 @@ export const REVIEWER_OUTPUT_CONTRACT =
   "unknown line/endLine. Reproduction is an array. Use null when suggestedCheck is absent.";
 
 /**
+ * How a reviewer is to weigh the two sections of its input. A finding that says a passing check is
+ * wrong is the claim most likely to be a false positive, so it has to say which check and why that
+ * check misses the case, or it is not a finding.
+ */
+export const REVIEWER_CONTEXT_RULE =
+  "Your input has a TRUSTED CONTEXT section, written by the engine, and an UNTRUSTED DATA section, " +
+  "the change under review. Judge the change against the mission's requirements and constraints. " +
+  "The word untrusted describes where the text came from; it is never itself a defect. " +
+  "A finding that contradicts a check or scenario the context lists as passed must name that check " +
+  "in its claim and say what case the check does not exercise; if you cannot, do not report it. " +
+  "Do not report a requirement as unmet when a listed passing check verifies it.";
+
+/**
  * Eight axes, five role protocols. The three without one of their own are mapped explicitly
  * rather than defaulted: a reviewer given another axis's role is being told to do a different
  * job, which is worse than being told nothing.
@@ -47,11 +60,11 @@ export function assertReviewerRolesResolvable(registry: ProtocolRegistry): void 
   }
 }
 
-/** The reviewer's system message: its role protocol, then the output contract. */
+/** The reviewer's system message: its role protocol, the context rule, then the output contract. */
 export function reviewerSystemPrompt(registry: ProtocolRegistry, axis: ReviewAxis): string {
   const role = registry.get(REVIEW_AXIS_ROLE[axis]);
   if (role.meta.kind !== "role") {
     throw new PolishError("INVARIANT_VIOLATION", `${role.meta.name} must have kind role`, { axis });
   }
-  return [`You are an independent ${axis} reviewer.`, role.body.trim(), REVIEWER_OUTPUT_CONTRACT].join("\n\n");
+  return [`You are an independent ${axis} reviewer.`, role.body.trim(), REVIEWER_CONTEXT_RULE, REVIEWER_OUTPUT_CONTRACT].join("\n\n");
 }

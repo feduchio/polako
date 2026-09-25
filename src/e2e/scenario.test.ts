@@ -44,6 +44,10 @@ describe("run scenarios", () => {
     const reviewed = env.service.store.repos.reviewExecutions.listByRun(runId).filter((execution) => execution.completed);
     expect(reviewed.length).toBeGreaterThan(0);
     expect(reviewed.every((execution) => execution.requestedModel.model === "xrev")).toBe(true);
+    const review = env.provider.calls.find((call) => call.metadata.purpose.startsWith("review_") && call.metadata.runId === runId);
+    const user = review?.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(user.startsWith("TRUSTED CONTEXT")).toBe(true);
+    expect(user).toContain("The exported add function agrees with its test");
   });
 
   it("does not call a no-change finish DONE", async () => {

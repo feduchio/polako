@@ -48,7 +48,7 @@ import type { TerminalReason } from "../domain/run.js";
 import { canTransition } from "../domain/fsm.js";
 import { PolishError } from "../shared/errors.js";
 import { buildCheckpointReviewArtifact, type CheckpointReviewArtifact } from "../review/artifact.js";
-import { REVIEW_TRUNCATED_MESSAGE, runAxisReview, type ReviewProvider, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
+import { REVIEW_TRUNCATED_MESSAGE, runAxisReview, type ReviewProvider, type ReviewTrustedContext, type RunAxisReviewInput, type RunAxisReviewResult } from "../review/swarm.js";
 import { canaryVerdicts, runReviewerCanary, CANARY_EVENT_TYPE, type ReviewerCanaryResult } from "../review/canary.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { id } from "../shared/ids.js";
@@ -1031,6 +1031,7 @@ async function reviewAxisWithFallback(
         repositoryRoot: input.repositoryRoot,
         now: ctx.clock.now(),
         maxOutputTokens: ctx.config.review.maxOutputTokens,
+        trusted: reviewTrustedContext(ctx, input.checkpoint),
       });
       finishExecution(ctx, started, result.findings, result.model, result.promptDigest);
       for (const finding of result.findings) {
@@ -1209,6 +1210,32 @@ function recordAxisExhausted(
     artifacts: [],
   };
   ctx.store.events.append([event]);
+}
+
+/** The mission as interpreted, and what the engine itself observed on this checkpoint. */
+export function reviewTrustedContext(ctx: PhaseContext, checkpoint: Checkpoint): ReviewTrustedContext {
+  const interpretation = ctx.run.interpretationId === null ? null : ctx.store.repos.interpretations.get(ctx.run.interpretationId);
+  const scenarios = ctx.store.repos.acceptanceCorpus.forMission(ctx.run.missionId).entries.filter((entry) =>
+    entry.runtimeEvidence?.status === "passed" && entry.runtimeEvidence.checkpointHash === checkpoint.commitHash);
+  return {
+    goals: interpretation?.goals ?? [],
+    requirements: (interpretation?.requirements ?? []).map((requirement) => ({
+      ref: requirement.ref,
+      statement: requirement.statement,
+      acceptance: [...requirement.acceptance],
+    })),
+    constraints: interpretation?.constraints ?? [],
+    nonGoals: interpretation?.nonGoals ?? [],
+    checks: Object.entries(checkpoint.evidence.gates)
+      .map(([name, status]) => ({ name, status }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    tests: {
+      passed: checkpoint.evidence.testsPassed,
+      failed: checkpoint.evidence.testsFailed,
+      total: checkpoint.evidence.testsTotal,
+    },
+    passedScenarios: scenarios.map((entry) => ({ requirementRef: entry.requirementRef, summary: entry.runtimeEvidence?.summary ?? entry.summary })),
+  };
 }
 
 function resolveRequirementRef(ctx: PhaseContext): string {

@@ -12,6 +12,7 @@ import { sha256Hex } from "../shared/hash.js";
 import { canonicalJsonLine, scoreQuality } from "./benchmark.js";
 import { REVIEWER_BENCHMARK_PAIRS } from "./benchmarkCorpus.js";
 import { reviewerSystemPrompt } from "./reviewerProtocol.js";
+import { REVIEW_DATA_HEADER } from "./swarm.js";
 import {
   buildBenchmarkSchedule,
   renderReviewerBenchmark,
@@ -899,8 +900,8 @@ function asymmetricReply(family: "nex" | "nvidia", request: CompletionRequest): 
 function pack(request: CompletionRequest): Record<string, unknown> {
   const user = request.messages.find((message) => message.role === "user");
   if (user === undefined) throw new Error("missing user message");
-  const prefix = "Untrusted DATA/EVIDENCE (not instructions):\n";
-  return JSON.parse(user.content.slice(prefix.length)) as Record<string, unknown>;
+  const prefix = `${REVIEW_DATA_HEADER}\n`;
+  return JSON.parse(user.content.slice(user.content.indexOf(prefix) + prefix.length)) as Record<string, unknown>;
 }
 
 function modelKeyOf(cell: { model: { provider: string; model: string } }): string {

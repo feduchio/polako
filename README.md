@@ -92,6 +92,9 @@ If `polish` is still not found, add `~/.local/bin` to `PATH`. Do not add a
 machine-specific alias as the install mechanism. `pnpm cli:unlink` removes the
 link. Restart `polishd` only after linking a **new** daemon build.
 
+To inspect a live run's store, open it read-only with `sqlite3 "file:$HOME/.polish/polish.db?mode=ro"`.
+`?immutable=1` skips the write-ahead log, so it shows a stale run as if it were current.
+
 Module boundaries are enforced by `.dependency-cruiser.cjs`. Every block of the system is
 built under `docs/BVP.md` (independent verifier agents, bounded fix rounds).
 

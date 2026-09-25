@@ -4,7 +4,7 @@ import { modelRefKey, type ModelRef } from "../domain/common.js";
 import type { ProtocolRegistry } from "../protocols/loader.js";
 import { PolishError, isAbortError } from "../shared/errors.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
-import { runAxisReview, type ReviewProvider } from "./swarm.js";
+import { runAxisReview, type ReviewProvider, type ReviewTrustedContext } from "./swarm.js";
 
 function isCancellation(error: unknown): boolean {
   return isAbortError(error) || (error instanceof PolishError && error.code === "CANCELLED");
@@ -37,6 +37,25 @@ export const CANARY_DIFF = `--- a/src/cache.ts
 +  return kept;
 +}
 `;
+
+/**
+ * The canary's mission, in the same shape a real review receives. Without it the canary prompt had
+ * one section and a real one two, and a canary a model can tell apart is not the same call path.
+ * No check is listed: the planted defect contradicts nothing the engine ran.
+ */
+export const CANARY_TRUSTED_CONTEXT: ReviewTrustedContext = {
+  goals: ["Evict cache entries older than the TTL"],
+  requirements: [{
+    ref: "R1",
+    statement: "evictStale keeps exactly the entries touched within TTL_MS",
+    acceptance: ["evictStale returns the fresh entries of any input array"],
+  }],
+  constraints: [],
+  nonGoals: [],
+  checks: [],
+  tests: { passed: 0, failed: 0, total: 0 },
+  passedScenarios: [],
+};
 
 /** A valid 40-hex commit hash that no repository will hold. `GitHashSchema` accepts hex only. */
 export const CANARY_COMMIT = "ca4a24" + "0".repeat(32) + "ca";
@@ -108,6 +127,7 @@ export async function runReviewerCanary(input: {
       provider: input.provider,
       protocols: input.protocols,
       now: input.now,
+      trusted: CANARY_TRUSTED_CONTEXT,
       ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
     });
     // Counting findings is not enough: a reviewer that answers "something is wrong" to anything
