@@ -118,6 +118,61 @@ describe("B5 production VALIDATING driver", () => {
     expect(canary?.payload).toMatchObject({ verified: false, error: "reviewer no longer selectable" });
   });
 
+  it("does not record a round clean when one family answered two of its axes", async () => {
+    const config = defaultConfig();
+    config.review.reviewersPerRound = 2;
+    const local = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    const reviewer = (model: string, family: string) => ({
+      provider: {
+        id: "models",
+        kind: "scripted",
+        concurrency: null,
+        listModels: () => Promise.resolve([]),
+        health: () => Promise.resolve({ ok: true, checkedAt: NOW }),
+        complete: () => Promise.reject(new Error("must not be called")),
+      },
+      model: { provider: "models", model },
+      family,
+    });
+    local.registerPhase("VALIDATING", createValidatingDriver({
+      resolveWorker: () => new ScriptedFindingEvidenceWorker(() => validAttempt()),
+      resolveReviewers: () => [reviewer("a-large", "a"), reviewer("a-small", "a"), reviewer("b-1", "b")],
+    }));
+    const { runId, checkpointHash } = seedValidatingRun(store, clock, fixture, []);
+    const axes = [["correctness", "a-large"], ["security", "a-small"]] as const;
+    store.events.append(axes.map(([axis, model], index) => ({
+      id: id("evt", clock.now() + 40 + index),
+      runId,
+      ts: clock.now() + 40 + index,
+      type: "review.finished" as const,
+      payload: {
+        execution: {
+          id: id("evt", clock.now() + 60 + index),
+          runId,
+          checkpointHash,
+          roundIndex: 1,
+          axis,
+          requestedModel: { provider: "models", model },
+          completed: true,
+          findings: [],
+          promptDigest: "digest",
+          startedAt: clock.now(),
+          finishedAt: clock.now(),
+        },
+      },
+      causedBy: [],
+      actor: { kind: "system" as const },
+      artifacts: [],
+    })));
+    await local.tickRun(runId);
+    const run = store.repos.runs.get(runId);
+    expect(run?.phase).toBe("NEEDS_HUMAN");
+    expect(run?.terminalReason?.code).toBe("review_unverifiable");
+    expect(run?.terminalReason?.summary).toContain("insufficient_families: 1 of 2 (a)");
+    expect(store.repos.cleanRounds.listByRun(runId)).toHaveLength(0);
+    expect(store.events.list(runId, { types: ["review.canary_recorded"] })).toHaveLength(0);
+  });
+
   it("dedupes duplicate fingerprints without evidence work", async () => {
     const finding = blockingFinding(fixture.integrated);
     const existing = { ...finding, id: id("find", NOW + 1), status: "VALID" as const };

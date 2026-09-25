@@ -2,6 +2,7 @@ import { modelRefKey, type ModelRef } from "../domain/common.js";
 import {
   UNRESTRICTED_COST_ELIGIBILITY,
   isCostEligible,
+  isExplicitlyFree,
   type CostEligibilityPolicy,
 } from "./costEligibility.js";
 import type { ModelInfo } from "./types.js";
@@ -22,9 +23,15 @@ function estimatedCostPerM(cap: ModelInfo["capabilities"]): number {
 }
 
 /**
- * Build the bounded probe shortlist for one provider: pinned supervisor models first
- * (never dropped, even if paid), then cheapest declared-tool models that pass cost
- * eligibility, up to maxProbesPerProvider. Cataloging of paid models happens elsewhere.
+ * Build the bounded probe shortlist for one provider: pinned supervisor models first (never
+ * dropped, even if paid), then declared-tool models that pass cost eligibility, up to
+ * maxProbesPerProvider.
+ *
+ * The order is by family, not by price alone. Cheapest-first filled every slot with `:free`
+ * routes, which share one account allowance and mostly lack strict schemas, so one family passed
+ * and every cross-model check ran on one model (`docs/ledger/R11-I9.md`). Each family gets a slot
+ * before any family gets a second, and explicitly free and priced routes alternate, so a ceiling
+ * that admits paid models actually probes some.
  */
 export function buildDiscoveryShortlist(
   models: readonly ModelInfo[],
@@ -57,5 +64,41 @@ export function buildDiscoveryShortlist(
       return left.ref.model.localeCompare(right.ref.model);
     });
 
-  return [...pinned, ...ranked.slice(0, maxProbesPerProvider)];
+  return [...pinned, ...diverseOrder(ranked, maxProbesPerProvider, pinned)];
+}
+
+function diverseOrder(ranked: readonly ModelInfo[], limit: number, pinned: readonly ModelInfo[]): ModelInfo[] {
+  const free = ranked.filter((model) => isExplicitlyFree(model.capabilities));
+  const priced = ranked.filter((model) => !isExplicitlyFree(model.capabilities));
+  const queues = [free, priced];
+  const picked: ModelInfo[] = [];
+  const pickedKeys = new Set<string>();
+  const families = new Set<string>(pinned.map((model) => model.capabilities.family));
+  const take = (model: ModelInfo): void => {
+    picked.push(model);
+    pickedKeys.add(modelRefKey(model.ref));
+    families.add(model.capabilities.family);
+  };
+  // First pass: one model per family, alternating free and priced.
+  const cursors = [0, 0];
+  let progressed = true;
+  while (picked.length < limit && progressed) {
+    progressed = false;
+    for (const [index, queue] of queues.entries()) {
+      if (picked.length >= limit) break;
+      let cursor = cursors[index] ?? 0;
+      while (cursor < queue.length && families.has(queue[cursor]?.capabilities.family ?? "")) cursor += 1;
+      cursors[index] = cursor + 1;
+      const model = queue[cursor];
+      if (model === undefined) continue;
+      take(model);
+      progressed = true;
+    }
+  }
+  // Second pass: the rest in rank order, once every family has had its slot.
+  for (const model of ranked) {
+    if (picked.length >= limit) break;
+    if (!pickedKeys.has(modelRefKey(model.ref))) take(model);
+  }
+  return picked;
 }

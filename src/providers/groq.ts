@@ -8,6 +8,7 @@ export interface GroqProviderOptions {
   fetch?: FetchLike;
   concurrency?: number | null;
   timeoutMs?: number;
+  capabilityHints?: Record<string, Partial<ModelInfo["capabilities"]>>;
 }
 
 /** Groq via the OpenAI-compatible chat completions API. */
@@ -28,6 +29,7 @@ export class GroqProvider implements ProviderAdapter {
       ...(opts.fetch !== undefined ? { fetch: opts.fetch } : {}),
       ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...(opts.capabilityHints !== undefined ? { capabilityHints: opts.capabilityHints } : {}),
     });
   }
 

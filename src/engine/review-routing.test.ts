@@ -38,23 +38,55 @@ describe("production REVIEWING cost-eligible routing", () => {
     store.close();
   });
 
-  it("selects the free reviewer via ModelRouter and never calls paid or unknown-price models", async () => {
+  it("selects free reviewers via ModelRouter, one family per axis, and never calls paid or unknown-price models", async () => {
+    const { provider, config, engine } = await productionReviewing(["free-a", "free-b", "free-c"]);
+
+    const listed = (await provider.listModels()).map((model) => model.ref.model);
+    expect(listed[0]).toBe("paid-frontier");
+
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+
+    expect(provider.calls.length).toBeGreaterThan(0);
+    expect(provider.calls.every((call) => call.model.model.startsWith("free-") && call.model.model !== "free-unprobed")).toBe(true);
+
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    expect(executions.length).toBe(config.review.reviewersPerRound);
+    expect(executions.every((execution) => execution.requestedModel.provider === "openrouter")).toBe(true);
+    expect(new Set(executions.map((execution) => execution.requestedModel.model)).size).toBe(config.review.reviewersPerRound);
+  });
+
+  it("stops before calling anyone when fewer strict reviewer families exist than axes", async () => {
+    const { provider, config, engine } = await productionReviewing(["free-a", "free-b"]);
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+
+    expect(config.review.reviewersPerRound).toBe(3);
+    const run = store.repos.runs.get(runId);
+    expect(run?.phase).toBe("NEEDS_HUMAN");
+    expect(run?.terminalReason?.code).toBe("review_unverifiable");
+    expect(run?.terminalReason?.summary).toContain("insufficient_families: 2 of 3 (free-a, free-b)");
+    expect(provider.calls).toHaveLength(0);
+    expect(store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash)).toHaveLength(0);
+  });
+
+  async function productionReviewing(freeFamilies: readonly string[]) {
     const provider = new ScriptedProvider("openrouter", [
       {
         name: "paid-frontier",
         capabilities: { ...FAKE_CAPABILITIES.frontier, family: "paid", supportsJson: true, inputCostPerM: 3, outputCostPerM: 15 },
       },
-      {
-        name: "free-reviewer",
+      ...freeFamilies.map((family) => ({
+        name: family,
         capabilities: {
           ...FAKE_CAPABILITIES.fast,
-          family: "free",
+          family,
           supportsJson: true,
           supportsStrictReviewSchema: true,
           inputCostPerM: 0,
           outputCostPerM: 0,
         },
-      },
+      })),
       {
         name: "unknown-price",
         capabilities: { ...FAKE_CAPABILITIES.strong, family: "unknown", supportsJson: true, inputCostPerM: null, outputCostPerM: null },
@@ -79,10 +111,7 @@ describe("production REVIEWING cost-eligible routing", () => {
     provider.script("paid-frontier", [banned("paid-frontier")]);
     provider.script("unknown-price", [banned("unknown-price")]);
     provider.script("free-unprobed", [banned("free-unprobed")]);
-    provider
-      .script("free-reviewer", [{ kind: "reply", content: "[]" }])
-      .script("free-reviewer", [{ kind: "reply", content: "[]" }])
-      .script("free-reviewer", [{ kind: "reply", content: "[]" }]);
+    for (const family of freeFamilies) provider.script(family, [{ kind: "reply", content: "[]" }]);
 
     const config = defaultConfig();
     expect(config.routing.costEligibility).toBe("free_only");
@@ -90,45 +119,21 @@ describe("production REVIEWING cost-eligible routing", () => {
     mkdirSync(home, { recursive: true });
     const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
     const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
-    const deps = buildProductionDeps({
-      store,
-      clock,
-      config,
-      home,
-      providers: [provider],
-    });
+    const deps = buildProductionDeps({ store, clock, config, home, providers: [provider] });
     await deps.catalog.discover();
     const observations = new ModelObservationRepository(store);
-    observations.recordStrictProbe({ provider: "openrouter", model: "free-reviewer" }, {
-      schema: "review",
-      schemaHash: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
-      supported: true,
-      at: clock.now(),
-    });
+    for (const family of freeFamilies) {
+      observations.recordStrictProbe({ provider: "openrouter", model: family }, {
+        schema: "review",
+        schemaHash: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
+        supported: true,
+        at: clock.now(),
+      });
+    }
     observations.restoreCatalog(deps.catalog);
     installProductionDrivers(engine, deps);
-
-    const listed = (await provider.listModels()).map((model) => model.ref.model);
-    expect(listed[0]).toBe("paid-frontier");
-    expect(listed[1]).toBe("free-reviewer");
-
-    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
-    await engine.tickRun(runId);
-
-    expect(provider.calls.length).toBeGreaterThan(0);
-    expect(provider.calls.every((call) => call.model.model === "free-reviewer")).toBe(true);
-    expect(provider.calls.some((call) => call.model.model === "paid-frontier")).toBe(false);
-    expect(provider.calls.some((call) => call.model.model === "unknown-price")).toBe(false);
-    expect(provider.calls.some((call) => call.model.model === "free-unprobed")).toBe(false);
-
-    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
-    expect(executions.length).toBe(config.review.reviewersPerRound);
-    expect(
-      executions.every(
-        (execution) => execution.requestedModel.provider === "openrouter" && execution.requestedModel.model === "free-reviewer",
-      ),
-    ).toBe(true);
-  });
+    return { provider, config, engine };
+  }
 });
 
 async function repositoryFixture(): Promise<{ root: string; repoDir: string; base: string; integrated: string }> {

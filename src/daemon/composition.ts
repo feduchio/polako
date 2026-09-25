@@ -16,6 +16,7 @@ import { ModelCatalog } from "../broker/catalog.js";
 import { costEligibilityFromConfig, isCostEligible } from "../broker/costEligibility.js";
 import { ModelObservationRepository } from "../broker/observations.js";
 import { DEFAULT_ROUTER_POLICY, ModelRouter, type Ranked } from "../broker/router.js";
+import { distinctFamilies } from "../broker/diversity.js";
 import type { EnsembleOption } from "../convergence/tracker.js";
 import { BudgetTracker, QuotaTracker, type BudgetLimits } from "../broker/quota.js";
 import { SecretStore } from "../broker/secrets.js";
@@ -49,6 +50,7 @@ import {
 import { threeDistinctDebateRoles, type DebateRoles } from "../findings/index.js";
 import type { PhaseContext, PhaseDriver } from "../engine/types.js";
 import { createProviderFromConfig } from "../providers/factory.js";
+import { inferFamily } from "../providers/openaiCompat.js";
 import type { ReviewProvider } from "../review/swarm.js";
 import {
   buildBaselineSnapshot,
@@ -403,6 +405,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
     "REVIEWING",
     createReviewingDriver({
       resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
+      authorFamilies: (ctx) => authorFamilies(deps, ctx),
       strictProbeEpochComplete: (ctx) => strictProbeEpochComplete(deps, ctx),
       sandbox: sandboxFor,
       protocols: deps.protocols,
@@ -418,6 +421,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
         // R2: the same reviewers REVIEWING used, so the canary asks the models that produced the
         // round rather than whichever ones routing would pick at this moment.
         resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
+        authorFamilies: (ctx) => authorFamilies(deps, ctx),
         protocols: deps.protocols,
       }),
     ),
@@ -605,23 +609,52 @@ async function runConfiguredAudition(deps: ProductionDeps, ctx: PhaseContext): P
   observations.restoreCatalog(deps.catalog);
 }
 
-/** Three distinct cost-eligible debate models, or null to skip without inventing a verdict. */
+/**
+ * Three cost-eligible debate models of three different families, none the family that wrote the
+ * code under debate, or null to skip without inventing a verdict. Further families are kept as
+ * judges to ask when a judge's verdict cannot be read.
+ */
 export function selectDebateRoles(deps: ProductionDeps, ctx?: PhaseContext): DebateRoles | null {
   if (deps.catalog.list().length === 0) return null;
   const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
   const ranked = deps.router.select({
     role: "reviewer",
-    count: 3,
+    count: 16,
     requireJson: true,
     ...(exclude.length > 0 ? { exclude } : {}),
   });
-  if (ranked.length < 3) return null;
-  const prosecutor = ranked[0]?.entry.info.ref;
-  const defender = ranked[1]?.entry.info.ref;
-  const judge = ranked[2]?.entry.info.ref;
+  const avoid = ctx === undefined ? new Set<string>() : authorFamilies(deps, ctx);
+  const diverse = distinctFamilies(ranked, (row) => row.entry.info.capabilities.family, avoid);
+  if (diverse.length < 3) return null;
+  const prosecutor = diverse[0]?.entry.info.ref;
+  const defender = diverse[1]?.entry.info.ref;
+  const judge = diverse[2]?.entry.info.ref;
   if (prosecutor === undefined || defender === undefined || judge === undefined) return null;
-  const roles = { prosecutor, defender, judge };
-  return threeDistinctDebateRoles(roles) ? roles : null;
+  const roles: DebateRoles = {
+    prosecutor,
+    defender,
+    judge,
+    judgeAlternates: diverse.slice(3, 5).map((row) => row.entry.info.ref),
+  };
+  return threeDistinctDebateRoles(roles, (ref) => familyOfModel(deps, ref)) ? roles : null;
+}
+
+/** Canonical family of a model: the catalog's word, or the id's vendor prefix when it is not listed. */
+export function familyOfModel(deps: Pick<ProductionDeps, "catalog">, ref: ModelRef): string {
+  return deps.catalog.get(ref)?.info.capabilities.family ?? inferFamily(ref.model);
+}
+
+/**
+ * Families of the models whose candidates this run integrated. A reviewer of the same family as the
+ * author is checking its own family's work, which is the single-model trust the founding rule forbids.
+ */
+export function authorFamilies(deps: Pick<ProductionDeps, "catalog">, ctx: PhaseContext): Set<string> {
+  const families = new Set<string>();
+  for (const candidate of ctx.store.repos.candidates.listByRun(ctx.run.id)) {
+    if (candidate.state !== "WINNER") continue;
+    families.add(familyOfModel(deps, candidate.model));
+  }
+  return families;
 }
 
 /**
@@ -676,13 +709,17 @@ export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseCon
   if (ranked.length === 0) {
     return [];
   }
-  return ranked.map((row) => {
+  // One reviewer per family: the fallback walk in REVIEWING then reaches a different family, not a
+  // second model of one it already asked. REVIEWING itself passes over the author's families.
+  const diverse = distinctFamilies(ranked, (row) => row.entry.info.capabilities.family);
+  return diverse.map((row) => {
     const ref = row.entry.info.ref;
     const adapter = deps.catalog.provider(ref.provider) ?? deps.providers.find((provider) => provider.id === ref.provider);
     if (adapter === undefined) {
       throw new PolishError("CONFIG_ERROR", `no provider adapter for review model ${ref.provider}:${ref.model}`);
     }
     return {
+      family: row.entry.info.capabilities.family,
       provider: {
         id: adapter.id,
         kind: adapter.kind,
@@ -942,7 +979,7 @@ function selectProgressModels(deps: ProductionDeps): ProgressModel[] {
 }
 
 export interface RunMechanism {
-  name: "repetition_breaker" | "tool_output_cap" | "progress_tracker" | "review_quorum" | "canary";
+  name: "repetition_breaker" | "tool_output_cap" | "progress_tracker" | "review_quorum" | "debate_diversity" | "canary";
   on: boolean;
   reason?: string;
 }
@@ -967,13 +1004,34 @@ export function describeRunMechanisms(deps: ProductionDeps): RunMechanism[] {
       on: progressReason === undefined,
       ...(progressReason === undefined ? {} : { reason: progressReason }),
     },
-    {
-      name: "review_quorum",
-      on: deps.config.review.reviewersPerRound >= 1,
-      reason: `reviewers_per_round: ${String(deps.config.review.reviewersPerRound)}`,
-    },
+    familyMechanism("review_quorum", reviewerFamilies(deps, true), deps.config.review.reviewersPerRound),
+    familyMechanism("debate_diversity", reviewerFamilies(deps, false), 3),
     { name: "canary", on: true },
   ];
+}
+
+/**
+ * On only when enough families exist to fill the role with one model each. A count of reviewers is
+ * not a quorum: three calls to one model are one opinion (`docs/ledger/R11-I9.md`). The author's
+ * family is excluded again when the round is chosen, so this is the ceiling, not a promise.
+ */
+function familyMechanism(name: "review_quorum" | "debate_diversity", families: readonly string[], required: number): RunMechanism {
+  const listed = families.length === 0 ? "none" : families.join(",");
+  return families.length >= required
+    ? { name, on: true, reason: `families: ${listed}` }
+    : { name, on: false, reason: `insufficient_families: ${String(families.length)} of ${String(required)} (${listed})` };
+}
+
+function reviewerFamilies(deps: ProductionDeps, strict: boolean): string[] {
+  const ranked = deps.router.select({
+    role: "reviewer",
+    count: 16,
+    requireJson: true,
+    ...(strict ? { requireStrictReviewSchema: true } : {}),
+  });
+  return distinctFamilies(ranked, (row) => row.entry.info.capabilities.family)
+    .map((row) => row.entry.info.capabilities.family)
+    .sort();
 }
 
 /** Once per run. A later caller, including the worker factory, does not write a second copy. */

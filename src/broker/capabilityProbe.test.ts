@@ -556,4 +556,36 @@ describe("buildDiscoveryShortlist", () => {
       }).map((entry) => entry.ref.model),
     ).toEqual(order);
   });
+
+  it("gives every family a slot before any family a second, alternating free and priced routes", () => {
+    const routed = (name: string, family: string, price: number): ModelInfo => ({
+      ref: { provider: "p", model: name },
+      displayName: name,
+      capabilities: { ...FAKE_CAPABILITIES.fast, family, inputCostPerM: price, outputCostPerM: price },
+      source: "provider",
+    });
+    const models = [
+      routed("nvidia-free-a", "nvidia", 0),
+      routed("nvidia-free-b", "nvidia", 0),
+      routed("google-free", "google", 0),
+      routed("liquid-free", "liquid", 0),
+      routed("deepseek-paid", "deepseek", 0.1),
+      routed("openai-paid", "openai", 0.05),
+      routed("nvidia-paid", "nvidia", 0.02),
+    ];
+    const shortlist = buildDiscoveryShortlist(models, "p", [], 5, {
+      mode: "ceiling",
+      maxInputCostPerM: 0.3,
+      maxOutputCostPerM: 1.2,
+    });
+    // Cheapest-first would have taken the four free routes and one priced one, with nvidia twice.
+    expect(shortlist.map((entry) => entry.ref.model)).toEqual([
+      "google-free",
+      "nvidia-paid",
+      "liquid-free",
+      "openai-paid",
+      "deepseek-paid",
+    ]);
+    expect(new Set(shortlist.map((entry) => entry.capabilities.family)).size).toBe(5);
+  });
 });

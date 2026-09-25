@@ -64,6 +64,12 @@ describe("review attempt cap", () => {
     expect(exhaustedAxes(axes, transient, 3, 6)).toEqual([]);
     const sticky = Array.from({ length: 6 }, () => execution("correctness", false));
     expect(exhaustedAxes(axes, sticky, 3, 6)).toEqual(["correctness"]);
+    // A reviewer answering prose fails the same way every time; without this it retried forever.
+    const prose = Array.from({ length: 6 }, () => ({
+      ...execution("correctness", false),
+      error: "Unexpected token 'U', \"Untrusted \"... is not valid JSON",
+    }));
+    expect(exhaustedAxes(axes, prose, 3, 6)).toEqual(["correctness"]);
   });
 
   it("rejects a cap of zero at the schema", () => {
@@ -71,13 +77,12 @@ describe("review attempt cap", () => {
     expect(ReviewStrategySchema.parse({ maxAxisAttemptsPerRound: 1 }).maxAxisAttemptsPerRound).toBe(1);
   });
 
-  it("stops through a phase REVIEWING is allowed to reach", () => {
-    // The first version of this returned NEEDS_HUMAN, which RUN_PHASE_TABLE forbids out of
-    // REVIEWING: the engine would have thrown INVALID_TRANSITION on every tick, trading an
-    // unbounded retry loop for an unbounded crash loop. Nothing observed it.
-    // Asserted through the gate the engine itself uses, not a copy of the table.
+  it("stops through phases REVIEWING is allowed to reach", () => {
+    // A stop the table forbids makes the engine throw INVALID_TRANSITION on every tick: an
+    // unbounded crash loop. Asserted through the gate the engine itself uses, not a copy of the
+    // table. NEEDS_HUMAN is the insufficient-families stop, which a human ends by adding a family.
     expect(canTransitionPhase("REVIEWING", EXHAUSTED_NEXT_PHASE)).toBe(true);
-    expect(canTransitionPhase("REVIEWING", "NEEDS_HUMAN")).toBe(false);
+    expect(canTransitionPhase("REVIEWING", "NEEDS_HUMAN")).toBe(true);
     expect(RUN_PHASE_TABLE.terminal).toContain(EXHAUSTED_NEXT_PHASE);
   });
 });

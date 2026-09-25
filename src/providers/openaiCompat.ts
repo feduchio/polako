@@ -1,5 +1,8 @@
 import type { ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ModelInfo, ModelTier, ProviderAdapter, ProviderHealth, RateLimitScope, ToolCall } from "../broker/types.js";
 import { ProviderError } from "../broker/types.js";
+import { canonicalFamily, inferFamily } from "../broker/diversity.js";
+
+export { canonicalFamily, inferFamily };
 
 export type FetchLike = (input: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<{
   status: number;
@@ -167,7 +170,8 @@ export class OpenAICompatProvider implements ProviderAdapter {
   }
 
   private toModelInfo(row: OpenAIModelRow): ModelInfo {
-    const hint = this.opts.capabilityHints?.[row.id] ?? {};
+    const hints = this.opts.capabilityHints;
+    const hint = hints?.[row.id] ?? hints?.[row.id.replace(/^models\//, "")] ?? {};
     const input = advertisedPricePerM(row.pricing?.prompt);
     const output = advertisedPricePerM(row.pricing?.completion);
     const supported = new Set(row.supported_parameters ?? []);
@@ -267,26 +271,6 @@ function mapFinish(reason: string | undefined, hasToolCalls: boolean): FinishRea
     default:
       return "error";
   }
-}
-
-/** Vendor family from the model id prefix (`vendor/model` on OpenRouter) or well-known name stems. */
-export function inferFamily(modelId: string): string {
-  const slash = modelId.indexOf("/");
-  if (slash > 0) return modelId.slice(0, slash).toLowerCase();
-  const lower = modelId.toLowerCase();
-  const stems: [RegExp, string][] = [
-    [/^(gpt|o\d|chatgpt)/, "openai"],
-    [/^claude/, "anthropic"],
-    [/^gemini|^gemma/, "google"],
-    [/^llama/, "meta"],
-    [/^mixtral|^mistral|^magistral|^codestral/, "mistralai"],
-    [/^deepseek/, "deepseek"],
-    [/^qwen|^qwq/, "qwen"],
-    [/^grok/, "x-ai"],
-    [/^kimi|^moonshot/, "moonshotai"],
-  ];
-  for (const [re, fam] of stems) if (re.test(lower)) return fam;
-  return lower.split(/[-_:.]/)[0] ?? lower;
 }
 
 /**

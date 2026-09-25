@@ -152,7 +152,7 @@ async function makeEnv(): Promise<TestEnv> {
 
   const home = join(dir, "home");
   mkdirSync(home, { recursive: true });
-  // Single scripted model for pinned council + worker/reviewer (router has no alternative).
+  // wkr plans and writes; xrev reviews, since a clean round needs a family other than the author's.
   writeFileSync(
     join(home, "polish.toml"),
     `
@@ -160,7 +160,10 @@ async function makeEnv(): Promise<TestEnv> {
 id = "scripted"
 kind = "scripted"
 enabled = true
-models = ["wkr"]
+models = ["wkr", "xrev"]
+
+[agent]
+progressEnabled = false
 
 [[supervisors]]
 role = "planner"
@@ -306,7 +309,13 @@ function scriptProvider(provider: ScriptedProvider): void {
   ]);
 
   // Review — 1 reviewer, clean round.
-  provider.script("wkr", [
+  scriptReviewer(provider);
+}
+
+function scriptReviewer(provider: ScriptedProvider): void {
+  provider.script("xrev", [
+    { kind: "reply", content: "", toolCalls: [{ id: "pxrev", name: "probe_ping", arguments: "{}" }] },
+    { kind: "reply", content: '{"probe":"ok"}' },
     ...reviewSteps(),
   ]);
 }
@@ -347,8 +356,8 @@ function scriptHumanThenDone(provider: ScriptedProvider): void {
       content: "",
       toolCalls: [{ id: "t2", name: "finish", arguments: JSON.stringify({ summary: "Fixed #pending" }) }],
     },
-    ...reviewSteps(),
   ]);
+  scriptReviewer(provider);
 }
 
 function scriptUntilBlockingWorker(provider: ScriptedProvider): void {
@@ -697,7 +706,7 @@ describe("B10 daemon path – production RPC E2E", () => {
 
     service.store.events.rebuildProjections(runId);
     const provider = service.productionComposition().providers[0] as ScriptedProvider;
-    provider.script("wkr", [{ kind: "reply", content: JSON.stringify({ findings: [] }) }]);
+    provider.script("xrev", [{ kind: "reply", content: JSON.stringify({ findings: [] }) }]);
     await driveToTerminal(service, runId);
     expect(service.store.repos.runs.get(runId)?.phase).toBe("DONE");
     assertCausality(service, runId);

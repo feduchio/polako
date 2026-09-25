@@ -21,6 +21,8 @@ export interface DebateRoles {
   prosecutor: ModelRef;
   defender: ModelRef;
   judge: ModelRef;
+  /** Judges of further families, asked in order when the judge's verdict cannot be read. */
+  judgeAlternates?: ModelRef[];
 }
 
 export interface DebateArgumentRecord {
@@ -75,10 +77,15 @@ export function sameDebateKey(
   return payload.findingId === findingId && payload.checkpointHash === checkpointHash;
 }
 
-/** Three distinct cost-eligible ModelRefs; same-model Judge is forbidden. */
-export function threeDistinctDebateRoles(roles: DebateRoles): boolean {
-  const keys = [modelRefKey(roles.prosecutor), modelRefKey(roles.defender), modelRefKey(roles.judge)];
-  return keys.every((key) => key.length > 0) && new Set(keys).size === 3;
+/**
+ * Three distinct ModelRefs, and three distinct families when `familyOf` is given: a judge from
+ * the prosecutor's family is that family agreeing with itself.
+ */
+export function threeDistinctDebateRoles(roles: DebateRoles, familyOf?: (ref: ModelRef) => string): boolean {
+  const refs = [roles.prosecutor, roles.defender, roles.judge];
+  const keys = refs.map(modelRefKey);
+  if (!keys.every((key) => key.length > 0) || new Set(keys).size !== 3) return false;
+  return familyOf === undefined || new Set(refs.map(familyOf)).size === 3;
 }
 
 export function debateActor(role: DebateRole, model: ModelRef): Actor {

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FAKE_CAPABILITIES, ScriptedProvider, reply } from "../providers/scripted.js";
 import { RecordReplayProvider } from "../providers/recordReplay.js";
 import { OpenAICompatProvider, inferFamily, inferTier, type FetchLike } from "../providers/openaiCompat.js";
+import { createProviderFromConfig } from "../providers/factory.js";
 import { GroqProvider } from "../providers/groq.js";
 import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
@@ -625,6 +626,34 @@ describe("OpenAICompatProvider", () => {
     };
   }
 
+  it("applies configured capability hints to a Gemini listing that states no price or context", async () => {
+    const provider = createProviderFromConfig(
+      {
+        id: "gemini",
+        kind: "gemini",
+        enabled: true,
+        capabilityHints: {
+          "gemini-2.5-flash": { inputCostPerM: 0, outputCostPerM: 0, contextWindow: 1_048_576 },
+        },
+      },
+      "key",
+      {
+        fetch: fakeFetch(() => ({
+          status: 200,
+          body: { data: [{ id: "models/gemini-2.5-flash" }, { id: "models/gemini-2.5-pro" }] },
+        })),
+      },
+    );
+    const models = await provider!.listModels();
+    expect(models[0]?.capabilities).toMatchObject({
+      family: "google",
+      inputCostPerM: 0,
+      outputCostPerM: 0,
+      contextWindow: 1_048_576,
+    });
+    expect(models[1]?.capabilities).toMatchObject({ family: "google", inputCostPerM: null, contextWindow: 8192 });
+  });
+
   it("maps requests, responses, tool calls and model listings", async () => {
     const seen: { url: string; body: unknown; auth: string }[] = [];
     const p = new OpenAICompatProvider({
@@ -657,7 +686,7 @@ describe("OpenAICompatProvider", () => {
     });
     const models = await p.listModels();
     expect(models[0]).toMatchObject({ ref: { provider: "or", model: "anthropic/claude-x" }, capabilities: { family: "anthropic", tier: "frontier", supportsTools: true, supportsJson: true, inputCostPerM: 3, outputCostPerM: 15 } });
-    expect(models[1]?.capabilities).toMatchObject({ family: "meta-llama", tier: "fast", supportsTools: false, supportsJson: false });
+    expect(models[1]?.capabilities).toMatchObject({ family: "meta", tier: "fast", supportsTools: false, supportsJson: false });
     expect(seen[0]?.url).toBe("https://example.test/api/v1/models");
     expect(seen[0]?.auth).toBe("Bearer sk-test");
 
@@ -734,6 +763,12 @@ describe("OpenAICompatProvider", () => {
     expect(inferFamily("gemini-3-flash")).toBe("google");
     expect(inferFamily("llama-4-maverick")).toBe("meta");
     expect(inferFamily("qwen-coder")).toBe("qwen");
+    // One vendor, several spellings: a diversity rule must not count it twice.
+    expect(inferFamily("models/gemini-2.5-flash")).toBe("google");
+    expect(inferFamily("google/gemma-4-31b-it:free")).toBe("google");
+    expect(inferFamily("~openai/gpt-latest")).toBe("openai");
+    expect(inferFamily("~anthropic/claude-latest")).toBe("anthropic");
+    expect(inferFamily("meta-llama/llama-4")).toBe("meta");
     expect(inferTier("x", 5, 100)).toBe("frontier");
     expect(inferTier("x", 0.5, 100)).toBe("strong");
     expect(inferTier("x", null, 200_000)).toBe("strong");

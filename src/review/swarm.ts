@@ -23,6 +23,11 @@ export interface ReviewProvider {
   provider: ProviderAdapter;
   /** Exact model; production REVIEWING must never fall back to listModels()[0]. */
   model: ModelRef;
+  /**
+   * Canonical vendor family. Production composition always sets it, and REVIEWING then refuses a
+   * round two axes of which one family answered. Absent only where a test builds reviewers by hand.
+   */
+  family?: string;
 }
 
 export interface ReviewedFinding extends Finding {

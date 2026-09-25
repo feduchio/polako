@@ -30,7 +30,16 @@ export function destroyScenario(env: ScenarioEnv | undefined): Promise<void> {
   });
 }
 
-export async function startScenario(fixture: string): Promise<ScenarioEnv> {
+export interface ScenarioOptions {
+  /**
+   * Scripted model names; each is its own family. The default gives the reviewer a family other
+   * than the worker's, which a clean round requires.
+   */
+  models?: string[];
+  progressEnabled?: boolean;
+}
+
+export async function startScenario(fixture: string, options: ScenarioOptions = {}): Promise<ScenarioEnv> {
   const dir = mkdtempSync(join(tmpdir(), "polish-scenario-"));
   const repoDir = join(dir, "repo");
   mkdirSync(repoDir, { recursive: true });
@@ -40,7 +49,7 @@ export async function startScenario(fixture: string): Promise<ScenarioEnv> {
   const home = join(dir, "home");
   mkdirSync(home, { recursive: true });
   const { writeFileSync } = await import("node:fs");
-  writeFileSync(join(home, "polish.toml"), TOML);
+  writeFileSync(join(home, "polish.toml"), scenarioToml(options.models ?? ["wkr", "xrev"], options.progressEnabled ?? false));
   const clock = new FakeClock(1_700_000_000_000);
   const service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
   const provider = service.productionComposition().providers[0] as ScriptedProvider;
@@ -99,19 +108,30 @@ export function toolSteps(calls: readonly { name: string; arguments: Record<stri
   }));
 }
 
-export function scriptPipeline(provider: ScriptedProvider, worker: ScriptStep[], review: ScriptStep[]): void {
+/**
+ * `wkr` plans and writes the code. `reviewer` answers the review and the canary: `xrev` by default,
+ * `wkr` for a one-model scenario, where REVIEWING has no other family to ask.
+ */
+export function scriptPipeline(provider: ScriptedProvider, worker: ScriptStep[], review: ScriptStep[], reviewer = "xrev"): void {
   provider.script("wkr", [
     opinion(plannerIntake()),
     opinion(supervisorApprove()),
     opinion(judgeApprove()),
-    { kind: "reply", content: "", toolCalls: [{ id: "pwkr", name: "probe_ping", arguments: "{}" }] },
-    { kind: "reply", content: '{"probe":"ok"}' },
+    ...probeSteps("wkr"),
     opinion(plannerDecompose()),
     opinion(supervisorApprove({ dropRefs: [] })),
     opinion(judgeApprove({ restoreRefs: [] })),
     ...worker,
-    ...review,
+    ...(reviewer === "wkr" ? review : []),
   ]);
+  if (reviewer !== "wkr") provider.script(reviewer, [...probeSteps(reviewer), ...review]);
+}
+
+function probeSteps(model: string): ScriptStep[] {
+  return [
+    { kind: "reply", content: "", toolCalls: [{ id: `p${model}`, name: "probe_ping", arguments: "{}" }] },
+    { kind: "reply", content: '{"probe":"ok"}' },
+  ];
 }
 
 export function emptyReview(count = 8): ScriptStep[] {
@@ -147,12 +167,16 @@ export function add(a, b) {
 }
 `;
 
-const TOML = `
+function scenarioToml(models: readonly string[], progressEnabled: boolean): string {
+  return `
 [[providers]]
 id = "scripted"
 kind = "scripted"
 enabled = true
-models = ["wkr"]
+models = ${JSON.stringify(models)}
+
+[agent]
+progressEnabled = ${String(progressEnabled)}
 
 [[supervisors]]
 role = "planner"
@@ -190,6 +214,7 @@ maxTaskTokens = 96000
 [runtimeValidation]
 mode = "auto"
 `;
+}
 
 function opinion(content: string): ScriptStep {
   return { kind: "reply", content };

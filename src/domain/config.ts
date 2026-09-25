@@ -284,6 +284,14 @@ export const CouncilRetryConfigSchema = z.object({
 });
 export type CouncilRetryConfig = z.infer<typeof CouncilRetryConfigSchema>;
 
+const CapabilityHintSchema = z.object({
+  contextWindow: z.number().int().min(1).optional(),
+  maxOutputTokens: z.number().int().min(1).optional(),
+  inputCostPerM: z.number().min(0).optional(),
+  outputCostPerM: z.number().min(0).optional(),
+  family: z.string().min(1).optional(),
+}).strict();
+
 export const ProviderConfigSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["openrouter", "gemini", "groq", "scripted", "record-replay", "cursor-agent"]),
@@ -295,6 +303,12 @@ export const ProviderConfigSchema = z.object({
   /** Scripted provider model names (relative to polish home for record-replay cassettes) */
   models: z.array(z.string().min(1)).optional(),
   cassette: z.string().optional(),
+  /**
+   * What the provider's listing does not state, declared per model id. Gemini's OpenAI-compatible
+   * listing carries no price and no context length, so under a cost ceiling every Gemini model is
+   * ineligible until its price is declared here.
+   */
+  capabilityHints: z.record(z.string().min(1), CapabilityHintSchema).optional(),
 });
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 

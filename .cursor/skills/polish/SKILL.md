@@ -32,6 +32,10 @@ observer does not stop it. Its socket and PID file remain under `${POLISH_HOME:-
 until the daemon exits; verify this with `polish status` or inspect `polish.pid` /
 `polish.sock`, not by starting a second daemon.
 
+To inspect the store while the daemon is alive, open it read-only with
+`sqlite3 "file:$HOME/.polish/polish.db?mode=ro" ...`. Do not use `?immutable=1` on a live
+store: it skips the WAL, so the newest events are silently missing (`docs/ledger/R11-I9.md`).
+
 `DONE` never applies changes automatically — the user must run `polish apply` explicitly.
 
 From the polish repo under Node 24, `pnpm cli:link` puts the current `dist/` `polish` and

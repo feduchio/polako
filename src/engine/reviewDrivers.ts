@@ -7,6 +7,7 @@ import { commitFindingStatus, FINDING_TABLE, FindingSchema, FindingValidationStr
 import type { ReviewAxis } from "../domain/finding.js";
 import { createInvestigationTask, createTaskFromValidFinding, type Task } from "../domain/task.js";
 import { ProviderError, isAccountScopedLimit } from "../broker/types.js";
+import { inferFamily } from "../broker/diversity.js";
 import {
   DEBATE_ARGUMENT,
   DEBATE_METHOD,
@@ -76,6 +77,11 @@ export interface ReviewDriverOptions {
   sandbox?: Sandbox | ((ctx: PhaseContext) => Sandbox | Promise<Sandbox>);
   policy?: CommandPolicy | ((ctx: PhaseContext) => CommandPolicy | Promise<CommandPolicy>);
   runAxisReview?: (input: RunAxisReviewInput) => Promise<RunAxisReviewResult>;
+  /**
+   * Families of the models that wrote the checkpoint. A reviewer of one of them is that family
+   * checking its own work, so it neither answers an axis nor counts toward a clean round.
+   */
+  authorFamilies?: (ctx: PhaseContext) => ReadonlySet<string>;
   /** Injected once; `ProtocolRegistry.load` is synchronous IO over every protocol directory. */
   protocols?: ProtocolRegistry;
 }
@@ -95,6 +101,11 @@ export interface ValidatingDriverOptions {
    * has shown to be earned, so composition always supplies it.
    */
   resolveReviewers?: (ctx: PhaseContext) => ReviewProvider[] | Promise<ReviewProvider[]>;
+  /**
+   * Families of the models that wrote the checkpoint. A reviewer of one of them is that family
+   * checking its own work, so it neither answers an axis nor counts toward a clean round.
+   */
+  authorFamilies?: (ctx: PhaseContext) => ReadonlySet<string>;
   protocols?: ProtocolRegistry;
   /** Three distinct cost-eligible models, or null to skip debate (no invented verdict). */
   resolveDebateRoles?: (ctx: PhaseContext) => DebateRoles | null | Promise<DebateRoles | null>;
@@ -167,6 +178,21 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
             },
       };
     }
+    const familyOf = reviewerFamilyLookup(reviewers);
+    const authors = options.authorFamilies?.(ctx) ?? new Set<string>();
+    // Author families start covered: the walk passes over them exactly as over a family that answered.
+    const coveredFamilies = new Set([...authors, ...familiesThatAnswered(roundExecutions, familyOf)]);
+    if (familyOf !== null) {
+      const missing = missingAxes(axes, roundExecutions, required).length;
+      const fresh = new Set(reviewers.map((reviewer) => familyOf(reviewer.model)).filter((family) => !coveredFamilies.has(family)));
+      if (fresh.size < missing) {
+        if (transientlyExcludedReviewModels(ctx).length > 0) return { status: "waiting" };
+        const answered = [...coveredFamilies].filter((family) => !authors.has(family));
+        const terminalReason = insufficientFamiliesReason(answered.length + fresh.size, required, [...answered, ...fresh], authors);
+        emitNeedsHumanReport(ctx, terminalReason);
+        return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason };
+      }
+    }
     if (options.sandbox === undefined) {
       throw new PolishError("CONFIG_ERROR", "production REVIEWING requires a sandbox");
     }
@@ -201,7 +227,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
         if (adversarialSkipApplies(ctx, hash, roundIndex, axis)) {
           // The row must name the model that would actually have been called, which is the first
           // reviewer `reviewAxisWithFallback` would not have passed over.
-          const skipReviewer = nextUsableReviewer(reviewers, preferredIndex, rateLimited);
+          const skipReviewer = nextUsableReviewer(reviewers, preferredIndex, rateLimited, familyOf, coveredFamilies);
           if (skipReviewer !== undefined) {
             skipExecution(ctx, hash, roundIndex, axis, skipReviewer, SKIP_REASON);
             continue;
@@ -217,6 +243,8 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
           artifact,
           repositoryRoot: handle.path,
           rateLimited,
+          familyOf,
+          coveredFamilies,
           protocols,
           review: options.runAxisReview ?? runAxisReview,
         });
@@ -768,18 +796,31 @@ async function verifyReviewersOrExplain(
   // The models that actually produced the round, not the ones routing would pick now. A skip
   // reached no provider, so its model produced nothing and has nothing to have earned.
   const produced = new Map<string, ModelRef>();
+  const producing: ReviewExecution[] = [];
   for (const execution of reviewExecutions) {
     if (execution.checkpointHash !== checkpointHash) continue;
     if (execution.roundIndex !== reviewRoundIndex) continue;
     if (!execution.completed || isSkippedExecution(execution)) continue;
     produced.set(modelRefKey(execution.requestedModel), execution.requestedModel);
+    producing.push(execution);
   }
   if (produced.size === 0) return null;
+
+  const reviewers = await options.resolveReviewers(ctx);
+  // REVIEWING already refuses a second axis to a family; this is the check at the one place a round
+  // becomes clean, so a round recorded before that rule, or assembled by any other path, cannot pass.
+  const familyOf = reviewerFamilyLookup(reviewers);
+  if (familyOf !== null) {
+    const authors = options.authorFamilies?.(ctx) ?? new Set<string>();
+    const families = [...familiesThatAnswered(producing, familyOf)].filter((family) => !authors.has(family));
+    if (families.length < producing.length) {
+      return insufficientFamiliesReason(families.length, producing.length, families, authors);
+    }
+  }
 
   const verdicts = canaryVerdicts(ctx.store.events.list(ctx.run.id, { types: [CANARY_EVENT_TYPE] }));
   const pending = [...produced.values()].filter((model) => !verdicts.has(modelRefKey(model)));
   if (pending.length > 0) {
-    const reviewers = await options.resolveReviewers(ctx);
     const protocols = options.protocols ?? ProtocolRegistry.load(defaultProtocolsRoot());
     for (const model of pending) {
       const provider = reviewers.find((reviewer) => modelRefKey(reviewer.model) === modelRefKey(model));
@@ -939,12 +980,15 @@ function isStickyReviewSkip(err: unknown, message: string): boolean {
   if (err instanceof ProviderError && (err.kind === "bad_request" || err.kind === "auth" || err.kind === "not_found" || err.kind === "context_length")) {
     return true;
   }
-  if (err instanceof Error && (err.name === "ZodError" || err instanceof TypeError)) return true;
+  if (err instanceof Error && (err.name === "ZodError" || err instanceof TypeError || err instanceof SyntaxError)) return true;
+  // Unparseable JSON at temperature 0 recurs. Not counting it toward the axis cap is how a
+  // reviewer answering prose kept REVIEWING busy for every tick it was given.
   return (
     isRateLimitMessage(message) ||
     /\bbad request\b|\b400\b|JSON mode is not enabled/i.test(message) ||
     message === REVIEW_TRUNCATED_MESSAGE ||
-    /invalid_type|expected array|findings array/i.test(message)
+    /invalid_type|expected array|findings array/i.test(message) ||
+    /is not valid JSON|Unexpected end of JSON input/i.test(message)
   );
 }
 
@@ -960,6 +1004,8 @@ async function reviewAxisWithFallback(
         artifact: CheckpointReviewArtifact;
         repositoryRoot: string;
         rateLimited: Set<string>;
+        familyOf: ReviewerFamilyLookup | null;
+        coveredFamilies: Set<string>;
         protocols: ProtocolRegistry;
         review: (input: RunAxisReviewInput) => Promise<RunAxisReviewResult>;
       },
@@ -970,6 +1016,10 @@ async function reviewAxisWithFallback(
     if (reviewer === undefined) continue;
     const key = modelRefKey(reviewer.model);
     if (input.rateLimited.has(key)) continue;
+    // A family that already answered an axis of this round would make the round two opinions
+    // dressed as three.
+    const family = input.familyOf?.(reviewer.model);
+    if (family !== undefined && input.coveredFamilies.has(family)) continue;
     const started = startExecution(ctx, input.hash, input.roundIndex, input.axis, reviewer);
     try {
       const result = await input.review({
@@ -986,6 +1036,7 @@ async function reviewAxisWithFallback(
       for (const finding of result.findings) {
         raiseFinding(ctx, finding, started.id);
       }
+      if (family !== undefined) input.coveredFamilies.add(family);
       return "ok";
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1330,14 +1381,54 @@ function nextUsableReviewer(
   reviewers: readonly ReviewProvider[],
   preferredIndex: number,
   rateLimited: ReadonlySet<string>,
+  familyOf: ReviewerFamilyLookup | null,
+  coveredFamilies: ReadonlySet<string>,
 ): ReviewProvider | undefined {
   for (let offset = 0; offset < reviewers.length; offset++) {
     const reviewer = reviewers[(preferredIndex + offset) % reviewers.length];
     if (reviewer === undefined) continue;
     if (rateLimited.has(modelRefKey(reviewer.model))) continue;
+    if (familyOf !== null && coveredFamilies.has(familyOf(reviewer.model))) continue;
     return reviewer;
   }
   return undefined;
+}
+
+type ReviewerFamilyLookup = (model: ModelRef) => string;
+
+/**
+ * Family of a review model, or null when the reviewers carry no families (hand-built test
+ * reviewers). A model that answered earlier but is no longer selectable is named by its id prefix.
+ */
+function reviewerFamilyLookup(reviewers: readonly ReviewProvider[]): ReviewerFamilyLookup | null {
+  if (reviewers.length === 0 || reviewers.some((reviewer) => reviewer.family === undefined)) return null;
+  const byKey = new Map(reviewers.map((reviewer) => [modelRefKey(reviewer.model), reviewer.family ?? ""]));
+  return (model) => byKey.get(modelRefKey(model)) ?? inferFamily(model.model);
+}
+
+/** Families that produced a completed, non-skipped execution in the given executions. */
+function familiesThatAnswered(executions: readonly ReviewExecution[], familyOf: ReviewerFamilyLookup | null): Set<string> {
+  const families = new Set<string>();
+  if (familyOf === null) return families;
+  for (const execution of executions) {
+    if (!execution.completed || isSkippedExecution(execution)) continue;
+    families.add(familyOf(execution.requestedModel));
+  }
+  return families;
+}
+
+function insufficientFamiliesReason(
+  available: number,
+  required: number,
+  families: readonly string[],
+  authors: ReadonlySet<string>,
+): TerminalReason {
+  const listed = families.length === 0 ? "none" : [...families].sort().join(", ");
+  const author = authors.size === 0 ? "" : `; author families excluded: ${[...authors].sort().join(", ")}`;
+  return {
+    code: "review_unverifiable",
+    summary: `insufficient_families: ${String(available)} of ${String(required)} (${listed})${author}; a clean round needs one reviewer family per axis, none of them the author's`,
+  };
 }
 
 /**

@@ -39,7 +39,11 @@ describe("run scenarios", () => {
     expect(run.phase).toBe("DONE");
     expect(run.terminalReason === null || run.terminalReason.code === "converged").toBe(true);
     expect(workerTokens(env, runId)).toBeLessThan(96_000);
-    expect(env.service.store.events.list(runId, { types: ["run.mechanisms"] }).length).toBeGreaterThan(0);
+    const mechanisms = env.service.store.events.list(runId, { types: ["run.mechanisms"] })[0]?.payload["mechanisms"];
+    expect(mechanisms).toContainEqual({ name: "review_quorum", on: true, reason: "families: wkr,xrev" });
+    const reviewed = env.service.store.repos.reviewExecutions.listByRun(runId).filter((execution) => execution.completed);
+    expect(reviewed.length).toBeGreaterThan(0);
+    expect(reviewed.every((execution) => execution.requestedModel.model === "xrev")).toBe(true);
   });
 
   it("does not call a no-change finish DONE", async () => {
@@ -132,7 +136,7 @@ describe("run scenarios", () => {
   });
 
   it("records that the progress tracker is off when only one family exists", async () => {
-    env = await startScenario("nothing-to-do");
+    env = await startScenario("nothing-to-do", { models: ["wkr"], progressEnabled: true });
     scriptPipeline(env.provider, [], []);
     const runId = await begin(env, "Leave the code unchanged.");
     let seen = false;
@@ -146,7 +150,24 @@ describe("run scenarios", () => {
     expect(seen).toBe(true);
     const mechanisms = env.service.store.events.list(runId, { types: ["run.mechanisms"] })[0]?.payload["mechanisms"];
     expect(mechanisms).toContainEqual({ name: "progress_tracker", on: false, reason: "insufficient_families: 1" });
+    expect(mechanisms).toContainEqual({ name: "debate_diversity", on: false, reason: "insufficient_families: 1 of 3 (wkr)" });
     expect(env.service.store.events.list(runId, { types: ["worker.started"] })).toHaveLength(0);
+  });
+
+  it("does not let the author's family review its own fix", async () => {
+    env = await startScenario("deps-ts", { models: ["wkr"] });
+    scriptPipeline(env.provider, toolSteps([
+      { name: "write", arguments: { path: "src/add.mjs", content: FIXED_ADD } },
+      { name: "finish", arguments: { summary: "add sums through pad" } },
+    ]), emptyReview(), "wkr");
+    const runId = await begin(env, "Make add return the sum of its arguments.");
+    const { run, ticks } = await drive(env, runId, 80);
+    expect(ticks).toBeLessThan(80);
+    expect(run.phase).toBe("NEEDS_HUMAN");
+    expect(run.terminalReason?.code).toBe("review_unverifiable");
+    expect(run.terminalReason?.summary).toContain("insufficient_families: 0 of 1");
+    expect(run.terminalReason?.summary).toContain("author families excluded: wkr");
+    expect(env.service.store.repos.reviewExecutions.listByRun(runId).filter((execution) => execution.completed)).toHaveLength(0);
   });
 });
 
