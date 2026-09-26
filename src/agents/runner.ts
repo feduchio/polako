@@ -534,14 +534,10 @@ export class AgentRunner implements CandidateWorker {
  */
 function stableResult(name: string, message: string): string {
   try {
-    const parsed = JSON.parse(message) as { ok?: unknown; error?: unknown; output?: unknown };
+    const parsed = JSON.parse(message) as { ok?: unknown; output?: unknown };
     if (name === "run_command" && typeof parsed.output === "object" && parsed.output !== null) {
       const { exitCode, signal, timedOut } = parsed.output as Record<string, unknown>;
       return JSON.stringify({ ok: parsed.ok, exitCode, signal, timedOut });
-    }
-    if (typeof parsed.output === "object" && parsed.output !== null && "durationMs" in parsed.output) {
-      const { durationMs: _durationMs, ...rest } = parsed.output as Record<string, unknown>;
-      return JSON.stringify({ ...parsed, output: rest });
     }
   } catch {
     // not JSON; compared as it is

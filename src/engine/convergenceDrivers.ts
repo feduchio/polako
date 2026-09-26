@@ -29,6 +29,7 @@ import {
   executablePersistedRollbackTarget,
   resolveObservationBoundary,
   runDetectors,
+  runExhaustedDimensions,
   sampleEvent,
   selectEligibleEnsemble,
   selectStrategy,
@@ -86,7 +87,7 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
           nextPhase: "DONE",
           terminalReason: {
             code: "no_change_required",
-            summary: "No code was changed: the engine's gates on the unchanged base passed for every coding task, and review found nothing.",
+            summary: "No code was changed: the engine's gates on the unchanged base passed for every coding task, and the required review rounds closed clean with no finding left standing.",
           },
         };
       }
@@ -142,7 +143,7 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
     if (budgetIsExhausted(sample.budget)) {
       const decision = buildDecision(ctx, sample, {
         action: "BUDGET_STOP",
-        reason: `budget exhausted: ${sample.budget.exhaustedDimensions.join(",")}`,
+        reason: `budget exhausted: ${runExhaustedDimensions(sample.budget).join(",")}`,
         findings: [],
         targetCheckpointHash: null,
         targetEnsemble: null,

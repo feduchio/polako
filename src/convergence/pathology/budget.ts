@@ -169,6 +169,16 @@ export function buildPathologyBudgetSnapshot(input: {
   };
 }
 
+/**
+ * The dimensions that stop the run. A task budget is per attempt and the broker enforces it on the
+ * call, so running out ends that attempt and the next attempt has its own:
+ * run_01m3dry8frymxpnfwkep12 failed at CONVERGENCE_CHECK on the budget of an investigation attempt
+ * whose retry had already rejected the finding.
+ */
+export function runExhaustedDimensions(snapshot: Pick<PathologyBudgetSnapshot, "exhaustedDimensions">): string[] {
+  return snapshot.exhaustedDimensions.filter((dimension) => !dimension.startsWith("task_tokens:"));
+}
+
 export function budgetIsExhausted(snapshot: Pick<PathologyBudgetSnapshot, "exhaustedDimensions" | "usageConflict">): boolean {
-  return snapshot.exhaustedDimensions.length > 0;
+  return runExhaustedDimensions(snapshot).length > 0;
 }

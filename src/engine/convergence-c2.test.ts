@@ -114,6 +114,42 @@ describe("C2 production CONVERGENCE_CHECK order", () => {
     expect(store.repos.checkpoints.listByRun(runId).some((checkpoint) => checkpoint.source === "rollback")).toBe(false);
   });
 
+  it("does not stop the run on the task budget of an attempt that has already ended", async () => {
+    const { runId } = seed(store, clock, fixture, { cleanRounds: 1 });
+    store.events.append([
+      {
+        id: id("evt", clock.now() + 500),
+        runId,
+        ts: clock.now() + 500,
+        type: "model.call",
+        payload: { callId: "attempt-1", taskId: "task_x", taskAttempt: 1, role: "worker", usage: { inputTokens: 100, outputTokens: 0, costUsd: 0 } },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
+      {
+        id: id("evt", clock.now() + 501),
+        runId,
+        ts: clock.now() + 501,
+        type: "budget.evaluated",
+        payload: { kind: "usage", observedAt: clock.now() + 501 },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
+    ]);
+    const config = defaultConfig();
+    config.budget.maxTaskTokens = 50;
+    engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    engine.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver());
+    await engine.tickRun(runId);
+    const samples = store.events.list(runId, { types: ["pathology.sample"] });
+    expect(samples.at(-1)?.payload["sample"]).toMatchObject({ budget: { exhaustedDimensions: ["task_tokens:task_x#1"] } });
+    expect(store.events.list(runId, { types: ["pathology.decision"] }).map((event) => (event.payload["decision"] as { action: string }).action))
+      .not.toContain("BUDGET_STOP");
+    expect(store.repos.runs.get(runId)?.phase).not.toBe("FAILED");
+  });
+
   it("duplicate boundary delivery persists one sample and one decision", async () => {
     const { runId } = seed(store, clock, fixture, { cleanRounds: 1, tokens: 10 });
     const config = defaultConfig();

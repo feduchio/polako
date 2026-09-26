@@ -1,4 +1,4 @@
-export { foldModelCallUsage, budgetSnapshotFromUsage, buildPathologyBudgetSnapshot, budgetIsExhausted, liveBudgetLimits } from "./budget.js";
+export { foldModelCallUsage, budgetSnapshotFromUsage, buildPathologyBudgetSnapshot, budgetIsExhausted, liveBudgetLimits, runExhaustedDimensions } from "./budget.js";
 export {
   buildPathologySample,
   disagreementRoundsOf,
