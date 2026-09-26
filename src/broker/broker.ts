@@ -9,7 +9,7 @@ import { foldModelCallUsage, budgetSnapshotFromUsage } from "../convergence/path
 import type { BudgetSnapshot } from "./quota.js";
 import type { BudgetTracker, QuotaTracker } from "./quota.js";
 import type { SecretStore } from "./secrets.js";
-import { ProviderError, isAccountScopedLimit, type CompletionRequest, type CompletionResponse, type ProviderAdapter } from "./types.js";
+import { ProviderError, isAccountScopedLimit, taskBudgetKey, type CompletionRequest, type CompletionResponse, type ProviderAdapter } from "./types.js";
 import { ModelObservationRepository } from "./observations.js";
 
 export interface RetryPolicy {
@@ -79,7 +79,7 @@ export class ModelBroker {
     // the call counts nowhere.
     const estimate = this.estimatedCostUsd(request);
     const admit = (): (() => void) =>
-      this.deps.budget.admit(request.metadata.runId, estimate, request.metadata.taskId);
+      this.deps.budget.admit(request.metadata.runId, estimate, taskBudgetKey(request.metadata.taskId, request.metadata.taskAttempt));
     const releases = [admit()];
     try {
       return await this.attempt(request, adapter, () => {
@@ -177,7 +177,7 @@ export class ModelBroker {
         const outcome: AttemptOutcome = { ok: true, latencyMs: latency, at: clock.now() };
         outcomes.push(outcome);
         this.recordRoutingStats(tagged, outcome);
-        const snapshot = budget.record(tagged.metadata.runId, response.usage, tagged.metadata.taskId, callId);
+        const snapshot = budget.record(tagged.metadata.runId, response.usage, taskBudgetKey(tagged.metadata.taskId, tagged.metadata.taskAttempt), callId);
         const eventId = this.recordEvent(tagged, response, attempt, outcomes, null, snapshot.runUsd, callId);
         return { eventId, response, attempts: attempt, callId };
       } catch (err) {
@@ -333,6 +333,7 @@ export class ModelBroker {
         role: request.metadata.role,
         purpose: request.metadata.purpose,
         taskId: request.metadata.taskId ?? null,
+        ...(request.metadata.taskAttempt === undefined ? {} : { taskAttempt: request.metadata.taskAttempt }),
         attempts,
         retryPolicy: request.metadata.retryPolicy ?? null,
         attemptOutcomes,

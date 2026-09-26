@@ -164,6 +164,7 @@ export class AgentRunner implements CandidateWorker {
             purpose: "agent_run",
             role: "worker",
             taskId: task.id,
+            taskAttempt: task.attempts,
           },
           ...(this.deps.signal === undefined ? {} : { signal: this.deps.signal }),
         });

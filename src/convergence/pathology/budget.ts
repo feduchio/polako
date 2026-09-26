@@ -1,6 +1,7 @@
 import type { Event } from "../../domain/event.js";
 import type { PolishConfig } from "../../domain/config.js";
 import type { BudgetSnapshot } from "../../broker/quota.js";
+import { taskBudgetKey } from "../../broker/types.js";
 import type {
   CanonicalBudgetUsage,
   PathologyBudgetLimits,
@@ -37,10 +38,11 @@ function callIdOf(event: Event): string {
   return typeof callId === "string" && callId.length > 0 ? callId : event.id;
 }
 
+/** The task budget key: per attempt when the call names one, as the broker charges it. */
 function taskIdOf(event: Event): string | null {
   const payload = asRecord(event.payload);
   const taskId = payload?.["taskId"];
-  return typeof taskId === "string" && taskId.length > 0 ? taskId : null;
+  return typeof taskId === "string" && taskId.length > 0 ? taskBudgetKey(taskId, payload?.["taskAttempt"]) ?? null : null;
 }
 
 /** Untasked spend is attributed by role; a call whose role is absent is bucketed, never dropped. */

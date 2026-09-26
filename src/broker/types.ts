@@ -72,6 +72,8 @@ export interface CompletionRequest {
     purpose: string;
     role: string;
     taskId?: string;
+    /** The task's attempt this call belongs to; `budget.maxTaskTokens` is spent per attempt. */
+    taskAttempt?: number;
     /** event ids that caused this call (why-chain) */
     causedBy?: string[];
     /** Correlate start/retry/completion events for one logical call. */
@@ -79,6 +81,16 @@ export interface CompletionRequest {
     /** Override constructor retry policy for this request (council uses a tighter bound). */
     retryPolicy?: { maxAttempts: number; baseDelayMs: number; maxDelayMs: number };
   };
+}
+
+/**
+ * The key `budget.maxTaskTokens` is charged to. Per attempt, not per task: a task's retry would
+ * otherwise start with the failed attempt's tokens already spent and stop on its first call, as
+ * both retries in run_01m3dna9fh612q9042sn9c did.
+ */
+export function taskBudgetKey(taskId: string | null | undefined, taskAttempt: unknown): string | undefined {
+  if (taskId === null || taskId === undefined) return undefined;
+  return typeof taskAttempt === "number" ? `${taskId}#${String(taskAttempt)}` : taskId;
 }
 
 export interface Usage {

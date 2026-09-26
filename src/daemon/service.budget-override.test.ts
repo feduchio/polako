@@ -234,6 +234,21 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(error.details).toMatchObject({ budget: "task_tokens", limit: 30 });
   });
 
+  it("charges the per-task cap to each attempt, so a retry does not start exhausted, across a restart too", async () => {
+    const fixture = await daemonFixture({ maxRunTokens: null, maxTaskTokens: 30 });
+    const runId = await fixture.createRun({ budgetTokens: 1_000_000 });
+    for (let i = 0; i < 3; i += 1) await expect(fixture.call(runId, "task_1", 1)).resolves.toBeDefined();
+
+    expect((await budgetErrorOf(fixture.call(runId, "task_1", 1))).details).toMatchObject({ budget: "task_tokens", limit: 30 });
+    await expect(fixture.call(runId, "task_1", 2)).resolves.toBeDefined();
+
+    await fixture.service.close();
+    services.splice(services.indexOf(fixture.service), 1);
+    const restarted = fixture.restart();
+    expect((await budgetErrorOf(restarted.call(runId, "task_1", 1))).details).toMatchObject({ budget: "task_tokens" });
+    await expect(restarted.call(runId, "task_1", 2)).resolves.toBeDefined();
+  });
+
   it("rejects invalid budgets before a run exists and leaves no residue", async () => {
     const fixture = await daemonFixture({ maxRunTokens: 50, maxRunUsd: 4, maxTaskTokens: 25, maxRunWallClockMinutes: 90 });
 
@@ -922,7 +937,7 @@ interface Fixture {
   repoDir: string;
   gate: Gate;
   createRun: (budget: { budgetTokens?: number; budgetUsd?: number; runtime?: string }) => Promise<string>;
-  call: (runId: string, taskId?: string) => Promise<ModelCallRecord>;
+  call: (runId: string, taskId?: string, taskAttempt?: number) => Promise<ModelCallRecord>;
   restart: () => Fixture;
 }
 
@@ -1111,11 +1126,17 @@ function buildFixture(dir: string, home: string, repoDir: string, costUsd: numbe
       const run = (await service.handle("run", { project: repoDir, mission: "noop", runtime: "off", ...budget })) as { id: string };
       return run.id;
     },
-    call: (runId, taskId) =>
+    call: (runId, taskId, taskAttempt) =>
       service.productionComposition().broker.complete({
         model: { provider: "scripted", model: "worker" },
         messages: [{ role: "user", content: "hello" }],
-        metadata: { runId, purpose: "test", role: "worker", ...(taskId === undefined ? {} : { taskId }) },
+        metadata: {
+          runId,
+          purpose: "test",
+          role: "worker",
+          ...(taskId === undefined ? {} : { taskId }),
+          ...(taskAttempt === undefined ? {} : { taskAttempt }),
+        },
       }),
     restart: () => buildFixture(dir, home, repoDir, costUsd),
   };
