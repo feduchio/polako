@@ -73,6 +73,12 @@ export function buildWorkerContextPack(input: BuildWorkerInput): WorkerContextPa
     input.task.description,
     "Acceptance:",
     ...input.task.acceptance.map((a) => `- ${a}`),
+    ...(input.profile && input.profile.checks.length > 0
+      ? [`Check commands (run_command argv, exactly as written): ${input.profile.checks.map((c) => c.command.join(" ")).join("; ")}`]
+      : []),
+    ...(input.task.kind === "investigation"
+      ? ["Put the reproduction in a new file: an investigation that modifies a tracked file is rejected."]
+      : []),
   ].join("\n");
 
   if (input.protocol) {

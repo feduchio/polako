@@ -1078,10 +1078,10 @@ describe("production composition", () => {
     // The pack is resent every turn, so its size displaces worker turns. The cap is derived from
     // the task budget; here the ceiling is lowered so it binds on a small fixture.
     const { request } = await firstWorkerRequest("bugfix", (config) => {
-      config.contextBudget.maxPackTokens = 620;
+      config.contextBudget.maxPackTokens = 640;
     });
     const text = contentOf(request);
-    expect(estimateTokens(text)).toBeLessThanOrEqual(620);
+    expect(estimateTokens(text)).toBeLessThanOrEqual(640);
     // Protected sections survive: an instruction with no hierarchy and no method is not a
     // cheaper instruction, it is a different one.
     expect(text).toContain("Controlling instruction hierarchy");
@@ -1092,9 +1092,9 @@ describe("production composition", () => {
   });
 
   it("throws rather than dropping the task protocol when only it does not fit", async () => {
-    // Measured on this fixture: the protected sections are ~517 estimated tokens with the task
-    // protocol and ~386 without it. A cap between the two separates "protected" from "last in
-    // DROP_ORDER" -- if the protocol were droppable the pack would quietly fit at ~395 instead.
+    // Measured on this fixture: the protected sections are ~531 estimated tokens with the task
+    // protocol and ~400 without it. A cap between the two separates "protected" from "last in
+    // DROP_ORDER" -- if the protocol were droppable the pack would quietly fit at ~409 instead.
     await expect(
       firstWorkerRequest("bugfix", (config) => {
         config.contextBudget.maxPackTokens = 450;

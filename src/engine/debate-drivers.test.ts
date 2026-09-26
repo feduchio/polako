@@ -146,6 +146,32 @@ describe("C4 finding debate in createValidatingDriver", () => {
     expect(store.repos.runs.get(runId)?.phase).toBe("PLANNING");
   });
 
+  it.each([0, 2])("5b. an UNCERTAIN non-blocking finding stays advisory (investigationRounds %i)", async (investigationRounds) => {
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(() => uncertainAttempt(), recorder(judgeScript("UNCERTAIN")), ROLES),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [
+      blockingFinding(fixture.integrated, { blocking: false, severity: "medium", investigationRounds }),
+    ]);
+    await engine.tickRun(runId);
+    const finding = store.repos.findings.listByRun(runId)[0]!;
+    expect(finding.status).toBe("UNCERTAIN");
+    expect(finding.investigationRounds).toBe(investigationRounds);
+    expect(store.repos.tasks.listByRun(runId)).toHaveLength(0);
+    expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
+  });
+
+  it("5c. without debate roles an UNCERTAIN non-blocking finding still stays advisory", async () => {
+    engine.registerPhase("VALIDATING", debateDriver(() => uncertainAttempt(), recorder(judgeScript("UNCERTAIN")), null));
+    const { runId } = seedValidatingRun(store, clock, fixture, [
+      blockingFinding(fixture.integrated, { blocking: false, severity: "medium", investigationRounds: 2 }),
+    ]);
+    await engine.tickRun(runId);
+    expect(store.repos.tasks.listByRun(runId)).toHaveLength(0);
+    expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
+  });
+
   it("6. exhausted residual UNCERTAIN becomes NEEDS_HUMAN with no coding task or DONE", async () => {
     engine.registerPhase(
       "VALIDATING",

@@ -6,6 +6,7 @@ import type { BaselineSnapshot } from "../domain/checks.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { defaultConfig } from "../domain/config.js";
 import type { CleanRound } from "../domain/convergence.js";
+import type { Finding } from "../domain/finding.js";
 import type { ReviewExecution } from "../domain/review.js";
 import { createTaskFromRequirement } from "../domain/task.js";
 import { FakeClock } from "../shared/clock.js";
@@ -61,6 +62,39 @@ describe("C2 production CONVERGENCE_CHECK order", () => {
     await engine.tickRun(runId);
     expect(store.repos.runs.get(runId)?.phase).toBe("DONE");
     expect(store.events.list(runId, { types: ["pathology.decision"] })).toHaveLength(0);
+  });
+
+  it("an exhausted UNCERTAIN finding that is not blocking does not stop a DONE-eligible run", async () => {
+    const { runId } = seed(store, clock, fixture, { cleanRounds: 3, runtime: true, tokens: 100 });
+    const finding: Finding = {
+      id: id("find", clock.now() + 300),
+      runId,
+      checkpointHash: fixture.integrated,
+      axis: "correctness",
+      reportedBy: { kind: "reviewer", model: { provider: "p", model: "m" } },
+      status: "UNCERTAIN",
+      duplicateOf: null,
+      fingerprint: "advisory-fp",
+      investigationRounds: 2,
+      criterion: "c",
+      severity: "medium",
+      blocking: false,
+      claim: "add does not handle non-numeric arguments",
+      evidence: [],
+      reproduction: ["x"],
+      createdAt: clock.now(),
+      updatedAt: clock.now(),
+    };
+    store.events.append([
+      { id: id("evt", clock.now() + 300), runId, ts: clock.now() + 300, type: "finding.raised", payload: { finding }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
+    ]);
+    const config = defaultConfig();
+    config.budget.maxRunTokens = 100;
+    engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    engine.registerPhase("CONVERGENCE_CHECK", createConvergenceDriver());
+    await engine.tickRun(runId);
+    expect(store.repos.findings.openForCheckpoint(runId, fixture.integrated).map((open) => open.status)).toEqual(["UNCERTAIN"]);
+    expect(store.repos.runs.get(runId)?.phase).toBe("DONE");
   });
 
   it("exhausted + not DONE + pathology produces only BUDGET_STOP FAILED", async () => {

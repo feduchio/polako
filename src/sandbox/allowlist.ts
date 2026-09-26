@@ -231,11 +231,16 @@ export class CommandPolicy {
         : r.prefix.length === argv.length;
       return lengthMatches && r.prefix.every((p, i) => argv[i] === p);
     });
-    return matched ? null : `command not in allowlist: ${argv.join(" ")}`;
+    if (matched) return null;
+    // A worker told only "no" guesses the next spelling: one live investigation tried `npm test`
+    // four times against a policy that admits exactly `npm run test`.
+    return `command not in allowlist: ${argv.join(" ")}. Allowed: ${this.allowedCommands().join("; ")}`;
   }
 
-  describe(): string[] {
-    return this.rules.map((r) => r.description);
+  /** Each admitted command as argv, with `…` where trailing arguments are accepted. */
+  allowedCommands(): string[] {
+    const listed = this.rules.map((rule) => (rule.match === "prefix" ? `${rule.prefix.join(" ")} …` : rule.prefix.join(" ")));
+    return [...new Set(listed)];
   }
 }
 

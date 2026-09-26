@@ -657,8 +657,11 @@ function applyDebateOutcome(
 
   const validating = FindingSchema.parse({ ...before, status: "VALIDATING", updatedAt: now });
   const terminalStatus = findingStatusFromVerdict(verdict);
+  // A non-blocking finding is advisory even when VALID, so doubt about one is no reason to spend an
+  // investigation on it or to stop the run.
   const residualInvestigate =
     terminalStatus === "UNCERTAIN" &&
+    before.blocking &&
     before.investigationRounds < ctx.config.convergence.maxInvestigationRoundsPerFinding;
   const terminalFinding = FindingSchema.parse({
     ...validating,
@@ -777,7 +780,7 @@ function applyDebateOutcome(
     });
   }
 
-  if (terminalStatus === "UNCERTAIN" && !residualInvestigate) return "needs_human";
+  if (terminalStatus === "UNCERTAIN" && terminalFinding.blocking && !residualInvestigate) return "needs_human";
   return "ok";
 }
 
@@ -787,6 +790,7 @@ function handleResidualUncertain(
   _requirementRef: string,
   _validation: FindingValidation | null,
 ): "ok" | "needs_human" {
+  if (!finding.blocking) return "ok";
   const max = ctx.config.convergence.maxInvestigationRoundsPerFinding;
   if (finding.investigationRounds >= max) return "needs_human";
   if (hasInvestigationForFinding(ctx, finding.id)) return "ok";

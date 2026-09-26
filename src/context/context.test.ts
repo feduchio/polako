@@ -18,6 +18,7 @@ import type { Finding } from "../domain/finding.js";
 import type { Fact } from "../domain/fact.js";
 import type { MissionInterpretation } from "../domain/mission.js";
 import type { ProtocolBundle } from "../protocols/types.js";
+import type { ProjectProfile } from "../project/profile.js";
 
 const NOW = 1_700_000_000_000;
 const HASH = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -172,6 +173,26 @@ describe("context builders", () => {
         maxPackTokens: 1,
       }),
     ).toThrow(PolishError);
+  });
+
+  it("names the exact check commands in the protected task section, and the new-file rule for an investigation", () => {
+    const profile = { checks: [{ name: "test", kind: "test", command: ["npm", "run", "test"], mandatory: true, timeoutMs: 1 }] } as unknown as ProjectProfile;
+    const build = (task: Task) => buildWorkerContextPack({
+      task,
+      profile,
+      facts: [],
+      findings: [],
+      fileFragments: [],
+      failedAttempts: [],
+      attemptNumber: 1,
+      tools: [],
+      maxPackTokens: 10_000,
+    });
+    const coding = build(sampleTask(runId)).sections["task"] ?? "";
+    expect(coding).toContain("Check commands (run_command argv, exactly as written): npm run test");
+    expect(coding).not.toContain("new file");
+    const investigation = build({ ...sampleTask(runId), kind: "investigation" }).sections["task"] ?? "";
+    expect(investigation).toContain("Put the reproduction in a new file");
   });
 
   it("throws when protected base protocol policy exceeds the worker budget", () => {

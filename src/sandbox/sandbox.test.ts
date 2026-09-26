@@ -126,6 +126,13 @@ describe("CommandPolicy", () => {
     expect(CommandPolicy.forProject([], "cargo").check(["cargo", "build"])).toMatch(/not in allowlist/);
   });
 
+  it("names the commands it admits when it refuses one", () => {
+    const npm = CommandPolicy.forProject([["npm", "run", "test"]], "npm", false, { search: true });
+    expect(npm.check(["npm", "test"])).toBe(
+      "command not in allowlist: npm test. Allowed: npm run test; npm ci; rg …; ls …; cat …; wc …; head …; tail …",
+    );
+  });
+
   it("allows project checks and read-only git; denies raw search and the rest", () => {
     expect(policy.check(["pnpm", "test"])).toBeNull();
     expect(policy.check(["pnpm", "test", "--", "src/x.test.ts"])).toMatch(/not in allowlist/);

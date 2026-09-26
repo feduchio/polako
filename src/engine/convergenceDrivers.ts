@@ -211,6 +211,7 @@ function acceptedB6Decision(ctx: PhaseContext, controller: ConvergenceController
   const openBlocking = findings.filter((finding) => finding.blocking && finding.status === "VALID").length;
   const investigationExhausted = findings.some(
     (finding) =>
+      finding.blocking &&
       finding.status === "UNCERTAIN" &&
       finding.investigationRounds >= ctx.config.convergence.maxInvestigationRoundsPerFinding,
   );
