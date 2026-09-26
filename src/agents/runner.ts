@@ -156,7 +156,7 @@ export class AgentRunner implements CandidateWorker {
       try {
         call = await this.deps.complete({
           model: this.deps.model,
-          messages: buildWireWindow({ archive: messages, turns, digestCap }),
+          messages: buildWireWindow({ archive: messages, turns, digestCap, verbatimTokens: historyTokenBudget(this.deps.contextWindow) }),
           tools: tools.definitions,
           maxTokens: remainingTokens,
           metadata: {
@@ -557,6 +557,14 @@ const DEFAULT_CONTEXT_WINDOW = 32_000;
 /** How many tokens one tool result may occupy in the message the model actually sees. */
 export function toolResultTokenBudget(contextWindow: number | undefined): number {
   return Math.max(Math.floor((contextWindow ?? DEFAULT_CONTEXT_WINDOW) * TOOL_RESULT_CONTEXT_SHARE), 1_000);
+}
+
+/** Share of the worker model's context its recent turns may fill verbatim; older turns are digested. */
+const HISTORY_CONTEXT_SHARE = 1 / 4;
+
+/** How many tokens of the loop's most recent turns each request carries word for word. */
+export function historyTokenBudget(contextWindow: number | undefined): number {
+  return Math.floor((contextWindow ?? DEFAULT_CONTEXT_WINDOW) * HISTORY_CONTEXT_SHARE);
 }
 
 /**

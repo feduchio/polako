@@ -328,8 +328,14 @@ function quote(text: string): string {
 }
 
 /**
- * The messages one request carries: the fixed prompt, a bounded digest of everything before the
- * most recent turn, and that turn verbatim.
+ * The messages one request carries: the fixed prompt, the most recent turns verbatim while they fit
+ * in `verbatimTokens`, and a bounded digest of the turns before them. The newest turn is sent
+ * whole whatever its size.
+ *
+ * Only the newest turn used to be verbatim. A worker then saw what it had read one turn ago and
+ * nothing before, so reading two files became reading them in turn forever:
+ * run_01m3dpv223r4cdbcx7ydr4 alternated `read src/add.mjs` and `read tests/add.test.mjs` from
+ * turn 27 until its budget ran out, on requests of about 2,400 tokens to a 128k-context model.
  *
  * The verbatim tail is sliced out of the archive rather than rebuilt, which is what keeps the
  * assistant message and its tool results paired: `toOpenAIMessage` maps a tool message to
@@ -339,24 +345,40 @@ export function buildWireWindow(input: {
   readonly archive: readonly ChatMessage[];
   readonly turns: readonly AgentTurn[];
   readonly digestCap: number;
+  readonly verbatimTokens: number;
 }): ChatMessage[] {
   const prefixEnd = input.archive.findIndex((message) => message.role === "user");
   const prefix = prefixEnd === -1 ? [...input.archive] : input.archive.slice(0, prefixEnd + 1);
   if (input.turns.length === 0) return prefix;
 
-  let lastAssistant = -1;
-  for (let i = input.archive.length - 1; i >= 0; i -= 1) {
-    if (input.archive[i]?.role === "assistant") {
-      lastAssistant = i;
-      break;
-    }
-  }
-  if (lastAssistant === -1) return prefix;
+  const turnStarts: number[] = [];
+  input.archive.forEach((message, index) => {
+    if (index > prefixEnd && message.role === "assistant") turnStarts.push(index);
+  });
+  const newest = turnStarts.at(-1);
+  if (newest === undefined) return prefix;
 
-  const digest = buildLoopDigest(input.turns.slice(0, -1), input.digestCap);
+  let start = newest;
+  let kept = 1;
+  let spent = tokensOf(input.archive.slice(newest));
+  for (let k = turnStarts.length - 2; k >= 0 && kept < input.turns.length; k -= 1) {
+    const from = turnStarts[k] ?? start;
+    const cost = tokensOf(input.archive.slice(from, start));
+    if (spent + cost > input.verbatimTokens) break;
+    spent += cost;
+    start = from;
+    kept += 1;
+  }
+
+  const digest = buildLoopDigest(input.turns.slice(0, input.turns.length - kept), input.digestCap);
   return [
     ...prefix,
     ...(digest === "" ? [] : [{ role: "user" as const, content: digest }]),
-    ...input.archive.slice(lastAssistant),
+    ...input.archive.slice(start),
   ];
+}
+
+function tokensOf(messages: readonly ChatMessage[]): number {
+  return messages.reduce((sum, message) =>
+    sum + estimateTokens(message.content) + (message.role === "assistant" ? estimateTokens(JSON.stringify(message.toolCalls ?? [])) : 0), 0);
 }

@@ -74,7 +74,8 @@ describe("AgentRunner", () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
     cleanup.push(fixture.root);
-    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 3, maxTokens: 32_000 });
+    // No room for verbatim history, so the earlier searches reach the model through the digest.
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 3, maxTokens: 32_000, contextWindow: 3 });
     const stalled: { tool: string; repeats: number }[] = [];
     deps.onLoopStalled = (_task, info) => { stalled.push(info); };
     const handle = await fixture.sandbox.create({

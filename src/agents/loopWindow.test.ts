@@ -374,13 +374,14 @@ describe("buildWireWindow", () => {
       archive: [{ role: "system", content: "sys" }, pack],
       turns: [],
       digestCap: 400,
+      verbatimTokens: 0,
     });
     expect(window.map((message) => message.role)).toEqual(["system", "user"]);
     expect(window.at(-1)?.content).toBe(pack.content);
 
     // The contract says "the system message, if any, plus the pack", so the no-system branch is
     // a named case and not an implicit one.
-    expect(buildWireWindow({ archive: [pack], turns: [], digestCap: 400 })).toEqual([pack]);
+    expect(buildWireWindow({ archive: [pack], turns: [], digestCap: 400, verbatimTokens: 0 })).toEqual([pack]);
   });
 
   it("summarises only what precedes the turn it sends verbatim", () => {
@@ -398,6 +399,7 @@ describe("buildWireWindow", () => {
         turn(2, [ok("read", { path: "src/newest.ts" }, { path: "src/newest.ts" })]),
       ],
       digestCap: 400,
+      verbatimTokens: 0,
     });
     const body = window.map((message) => message.content).join("\n");
     expect(body).toContain("src/older.ts");
@@ -422,6 +424,7 @@ describe("buildWireWindow", () => {
         turn(2, [ok("read", { path: "src/b.ts" }, { path: "src/b.ts" })]),
       ],
       digestCap: 400,
+      verbatimTokens: 0,
     });
     // Turn 1 is not the interesting case: a prompt dropped only once the digest appears is the
     // plausible mistake.
@@ -446,6 +449,7 @@ describe("buildWireWindow", () => {
       archive,
       turns: [turn(1, [ok("read", { path: "src/z.ts" }, { path: "src/z.ts" })]), turn(2, [])],
       digestCap: 400,
+      verbatimTokens: 0,
     });
 
     expect(window.map((message) => message.role)).toEqual(["user", "user", "assistant", "tool", "tool"]);
@@ -455,6 +459,60 @@ describe("buildWireWindow", () => {
     expect(window[1]?.content).toContain("## Earlier in this loop");
     // The older turn's output is in the archive, not on the wire.
     expect(window.map((m) => m.content).join("\n")).not.toContain("first turn output");
+  });
+
+  /**
+   * run_01m3dpv223r4cdbcx7ydr4: with only the newest turn verbatim the worker read one file, then
+   * the other, then the first again, because each read pushed the previous file off the wire.
+   */
+  it("sends the recent turns word for word while they fit, and digests only the ones before", () => {
+    const archive: ChatMessage[] = [
+      pack,
+      { role: "assistant", content: "", toolCalls: [{ id: "a", name: "read", arguments: '{"path":"src/add.mjs"}' }] },
+      { role: "tool", toolCallId: "a", content: "A".repeat(400) },
+      { role: "assistant", content: "", toolCalls: [{ id: "b", name: "read", arguments: '{"path":"tests/add.test.mjs"}' }] },
+      { role: "tool", toolCallId: "b", content: "B".repeat(400) },
+      { role: "assistant", content: "", toolCalls: [{ id: "c", name: "read", arguments: '{"path":"src/label.mjs"}' }] },
+      { role: "tool", toolCallId: "c", content: "C".repeat(400) },
+    ];
+    const turns = [
+      turn(1, [ok("read", { path: "src/add.mjs" }, { path: "src/add.mjs" })]),
+      turn(2, [ok("read", { path: "tests/add.test.mjs" }, { path: "tests/add.test.mjs" })]),
+      turn(3, [ok("read", { path: "src/label.mjs" }, { path: "src/label.mjs" })]),
+    ];
+    const newestTwo = archive.slice(3).reduce((sum, m) =>
+      sum + estimateTokens(m.content) + (m.role === "assistant" ? estimateTokens(JSON.stringify(m.toolCalls ?? [])) : 0), 0);
+
+    const everything = buildWireWindow({ archive, turns, digestCap: 400, verbatimTokens: 100_000 });
+    expect(everything).toEqual(archive);
+
+    const two = buildWireWindow({ archive, turns, digestCap: 400, verbatimTokens: newestTwo });
+    expect(two.slice(2)).toEqual(archive.slice(3));
+    expect(two[1]?.content).toContain("## Earlier in this loop (turns 1-1)");
+    expect(two[1]?.content).toContain("src/add.mjs");
+    expect(two[1]?.content).not.toContain("tests/add.test.mjs");
+
+    const oneTokenShort = buildWireWindow({ archive, turns, digestCap: 400, verbatimTokens: newestTwo - 1 });
+    expect(oneTokenShort.slice(2)).toEqual(archive.slice(5));
+    expect(oneTokenShort[1]?.content).toContain("## Earlier in this loop (turns 1-2)");
+  });
+
+  it("sends the newest turn whole even when it alone is larger than the verbatim budget", () => {
+    const archive: ChatMessage[] = [
+      pack,
+      { role: "assistant", content: "", toolCalls: [{ id: "a", name: "read", arguments: "{}" }] },
+      { role: "tool", toolCallId: "a", content: "small" },
+      { role: "assistant", content: "", toolCalls: [{ id: "b", name: "run_command", arguments: "{}" }] },
+      { role: "tool", toolCallId: "b", content: "X".repeat(20_000) },
+    ];
+    const window = buildWireWindow({
+      archive,
+      turns: [turn(1, [ok("read", { path: "src/a.ts" }, { path: "src/a.ts" })]), turn(2, [])],
+      digestCap: 400,
+      verbatimTokens: 10,
+    });
+    expect(window.at(-1)?.content).toBe("X".repeat(20_000));
+    expect(window.map((m) => m.content).join("\n")).not.toContain("small");
   });
 });
 

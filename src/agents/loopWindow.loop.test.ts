@@ -25,6 +25,12 @@ const EARLIER_MARKER = "alpha-setup-exploded";
 /** Sits at the start of an output longer than the bound, so only a tail rendering drops it. */
 const LATE_HEAD_MARKER = "omega-head-of-the-failure";
 const cleanup: string[] = [];
+/**
+ * A context with no room for verbatim history, so every turn but the newest reaches the model
+ * through the digest: most checks here are about the digest, and a realistic window would send the
+ * turns they inspect word for word instead.
+ */
+const DIGEST_ONLY_CONTEXT = 3;
 const LONG_DIR = "deeply/nested/directory/of/the/project";
 /** Long enough that twenty of them want more than a 200-token digest and less than a 400 one. */
 const LONG_PATHS = Array.from(
@@ -134,7 +140,8 @@ describe("the worker's context window", () => {
     const fixture = await repositoryFixture();
     cleanup.push(fixture.root);
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
-    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 6, maxTokens: 32_000 });
+    // A realistic context, so the read is one page and not paged: the check is about the window.
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 6, maxTokens: 32_000, contextWindow: 32_000 });
     const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
 
     provider.script("worker", [
@@ -295,6 +302,32 @@ describe("the worker's context window", () => {
     await handle.destroy();
   });
 
+  it("keeps both files on the wire when a worker reads one and then the other", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 6, maxTokens: 64_000, contextWindow: 128_000 });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+
+    provider.script("worker", [
+      reply([call("read", { path: "big-0.txt" })]),
+      reply([call("read", { path: "big-1.txt" })]),
+      reply([call("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" })]),
+      reply([call("finish", { summary: "done" })]),
+    ]);
+
+    const result = await new AgentRunner(deps).runLoop(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("FINISHED");
+    const third = bodyOf(provider.calls[2]!);
+    expect(third).toContain("marker-big-0");
+    expect(third).toContain("marker-big-1");
+    expect(digestOf(provider.calls[2]!)).toBeUndefined();
+    for (const request of provider.calls) expectPairing(request.messages);
+
+    store.close();
+    await handle.destroy();
+  });
+
   it("keeps the budget and turn stopping conditions it had before", async () => {
     const fixture = await repositoryFixture();
     cleanup.push(fixture.root);
@@ -409,6 +442,7 @@ function harness(
       commandPolicy: policy,
       maxTurns: 8,
       maxTokens: 32_000,
+      contextWindow: DIGEST_ONLY_CONTEXT,
       createIntelligence: (path) => new BasicIntel(path),
       ...overrides,
     },
