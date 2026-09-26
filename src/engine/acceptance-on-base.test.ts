@@ -50,4 +50,14 @@ describe("acceptanceOnBase", () => {
     expect(await acceptanceOnBase({ acceptance: ["it works"], acceptanceChecks: [{ kind: "command", argv: ["rm", "-rf", "."] }] }, handle, policy, undefined))
       .toMatch(/refused by the command policy/);
   });
+
+  it("checks a file_exists without running anything, and names a missing single-file command", async () => {
+    const { handle, ran } = checkout({});
+    expect(await acceptanceOnBase({ acceptance: ["it works"], acceptanceChecks: [{ kind: "file_exists", path: "tests/add.test.mjs" }] }, handle, policy, undefined))
+      .toBeNull();
+    expect(ran).toEqual([]);
+    const noRunner = CommandPolicy.forProject([["npm", "run", "test"]], "npm");
+    expect(await acceptanceOnBase({ acceptance: ["it works"], acceptanceChecks: [{ kind: "test_file", path: "tests/add.test.mjs" }] }, handle, noRunner, undefined))
+      .toMatch(/no command that runs one test file/);
+  });
 });

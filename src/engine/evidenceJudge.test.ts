@@ -116,3 +116,45 @@ describe("judgeReproduction, one added file run alone", () => {
     expect(judgeReproduction({ framework: "node-test", treatment: empty, control: null, added: ADDED, scoped: true }).reason).toBe("reproduction_not_executed");
   });
 });
+
+describe("judgeReproduction, how the processes ended", () => {
+  const scopedRun = (overrides: Partial<ProcessResult>) =>
+    judgeReproduction({ framework: "node-test", treatment: result({ argv: ["node", "--test", "tests/claim.test.mjs"], ...overrides }), control: null, added: ADDED, scoped: true });
+
+  it("names a killed and an aborted reproduction for what they were", () => {
+    expect(scopedRun({ exitCode: null, signal: "SIGKILL" })).toMatchObject({ reason: "killed", rationale: expect.stringMatching(/killed \(SIGKILL\)/) });
+    expect(scopedRun({ exitCode: null, aborted: true })).toMatchObject({ reason: "aborted" });
+  });
+
+  it("says the control run itself was killed rather than that it failed", () => {
+    const treatment = result({ exitCode: 1, stdout: specRun(1, [{ at: "tests/claim.test.mjs:4:1", title: "claim", error: "AssertionError: x" }]) });
+    const control = result({ exitCode: null, signal: "SIGTERM", timedOut: true });
+    expect(judgeReproduction({ framework: "node-test", treatment, control, added: ADDED, scoped: false })).toMatchObject({
+      reason: "control_failed",
+      rationale: expect.stringMatching(/control run timed out/),
+    });
+  });
+
+  it("does not refute when a passing command printed no test report", () => {
+    expect(scopedRun({ exitCode: 0, stdout: "done\n" })).toMatchObject({ reason: "unrecognised_runner" });
+  });
+
+  it("with the whole suite run, a load error in the reproduction is broken and an error raised in product code is shown", () => {
+    const loadFailure = result({
+      exitCode: 1,
+      stdout: `${specRun(1, [])}\n\n✖ failing tests:\n\ntest at tests/claim.test.mjs:1:1\n✖ tests/claim.test.mjs (1ms)\n  'test failed'\n`,
+      stderr: "file:///tmp/checkout/tests/claim.test.mjs:2\n\nReferenceError: test is not defined\n",
+    });
+    expect(judgeReproduction({ framework: "node-test", treatment: loadFailure, control: passingControl, added: ADDED, scoped: false }).reason).toBe("reproduction_broken");
+    const productError = result({
+      exitCode: 1,
+      stdout: `✖ claim (1ms)\nℹ tests 2\nℹ pass 1\nℹ fail 1\n\n✖ failing tests:\n\ntest at tests/claim.test.mjs:4:1\n✖ claim (1ms)\n  ReferenceError: total is not defined\n      at sum (file:///tmp/checkout/src/sum.mjs:2:3)\n`,
+    });
+    expect(judgeReproduction({ framework: "node-test", treatment: productError, control: passingControl, added: ADDED, scoped: false }).outcome).toBe("demonstrated");
+  });
+
+  it("without a control run, a whole-suite pass does not show the reproduction ran", () => {
+    expect(judgeReproduction({ framework: "node-test", treatment: result({ stdout: specRun(3, []) }), control: null, added: ADDED, scoped: false }).reason)
+      .toBe("reproduction_not_executed");
+  });
+});

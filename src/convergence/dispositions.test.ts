@@ -30,4 +30,9 @@ describe("tallyDispositions", () => {
       "8 findings: 1 demonstrated, 1 refuted, 1 dismissed, 2 not examined (citation_unverifiable 1, killed 1), 1 duplicate, 1 noted, 1 open",
     );
   });
+
+  it("counts a rejection nothing executed as not examined, not as refuted or dismissed", () => {
+    const tally = tallyDispositions({ findings: [finding("a", "REJECTED")], latestValidation: new Map(), investigationReason: new Map() });
+    expect(tally).toMatchObject({ refuted: 0, dismissed: 0, notExamined: { rejected_without_execution: 1 } });
+  });
 });
