@@ -30,6 +30,7 @@ import {
   startedPayload,
   threeDistinctDebateRoles,
   type CorpusAppender,
+  type DebateMission,
   type DebateRole,
   type DebateRoles,
   type FindingEvidenceWorker,
@@ -445,7 +446,7 @@ async function persistDebateThroughOutcome(
       return "debated";
     }
 
-    const prompt = rolePrompt(step.role, finding, validations, preDebateRefs, records, step.roundIndex);
+    const prompt = rolePrompt(step.role, finding, validations, preDebateRefs, records, step.roundIndex, debateMission(ctx));
     try {
       const text = await options.completeDebate(ctx, {
         role: step.role,
@@ -1355,6 +1356,21 @@ export function reviewTrustedContext(ctx: PhaseContext, checkpoint: Checkpoint):
       total: checkpoint.evidence.testsTotal,
     },
     passedScenarios: scenarios.map((entry) => ({ requirementRef: entry.requirementRef, summary: entry.runtimeEvidence?.summary ?? entry.summary })),
+  };
+}
+
+function debateMission(ctx: PhaseContext): DebateMission | null {
+  const interpretation = ctx.run.interpretationId === null ? null : ctx.store.repos.interpretations.get(ctx.run.interpretationId);
+  if (interpretation === null) return null;
+  return {
+    goals: interpretation.goals,
+    requirements: interpretation.requirements.map((requirement) => ({
+      ref: requirement.ref,
+      statement: requirement.statement,
+      acceptance: [...requirement.acceptance],
+    })),
+    constraints: interpretation.constraints,
+    nonGoals: interpretation.nonGoals,
   };
 }
 

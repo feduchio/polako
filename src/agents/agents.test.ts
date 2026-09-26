@@ -1175,6 +1175,24 @@ describe("agent tools", () => {
     store.close();
     await handle.destroy();
   });
+
+  it("keeps the final newline a rewritten file already had, and only then", async () => {
+    const { store, handle, tools } = await toolsFixture();
+    writeFileSync(join(handle.path, "src/lf.mjs"), "export const a = 1;\n");
+    writeFileSync(join(handle.path, "src/crlf.mjs"), "export const a = 1;\r\n");
+    writeFileSync(join(handle.path, "src/bare.mjs"), "export const a = 1;");
+    expect(await tools.execute("write", { path: "src/lf.mjs", content: "export const a = 1;" }))
+      .toMatchObject({ bytes: 20, finalNewlineKept: true });
+    await tools.execute("write", { path: "src/crlf.mjs", content: "export const a = 1;" });
+    await tools.execute("write", { path: "src/bare.mjs", content: "export const a = 2;" });
+    await tools.execute("write", { path: "src/new.mjs", content: "export const b = 1;" });
+    expect(readFileSync(join(handle.path, "src/lf.mjs"), "utf8")).toBe("export const a = 1;\n");
+    expect(readFileSync(join(handle.path, "src/crlf.mjs"), "utf8")).toBe("export const a = 1;\r\n");
+    expect(readFileSync(join(handle.path, "src/bare.mjs"), "utf8")).toBe("export const a = 2;");
+    expect(readFileSync(join(handle.path, "src/new.mjs"), "utf8")).toBe("export const b = 1;");
+    store.close();
+    await handle.destroy();
+  });
 });
 
 describe("pageLines", () => {

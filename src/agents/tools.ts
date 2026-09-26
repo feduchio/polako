@@ -183,9 +183,10 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
           const rel = stringArg(args, "path");
           const path = safePath(root, rel, true);
           mkdirSync(dirname(path), { recursive: true });
-          writeFileSync(path, stringArg(args, "content"), "utf8");
+          const { content, finalNewlineKept } = keepFinalNewline(path, stringArg(args, "content"));
+          writeFileSync(path, content, "utf8");
           deps.loopEvidence.writes.push(rel);
-          return { path: relative(root, path), bytes: Buffer.byteLength(stringArg(args, "content")) };
+          return { path: relative(root, path), bytes: Buffer.byteLength(content), ...(finalNewlineKept ? { finalNewlineKept } : {}) };
         }
         case "apply_patch": {
           const rel = stringArg(args, "path");
@@ -344,6 +345,19 @@ async function scanText(sandbox: SandboxHandle, root: string, rel: string, query
     });
   }
   return { lines, error: null };
+}
+
+/**
+ * A whole-file write keeps the final newline the file already ends with. Workers write files back
+ * without it, and that one byte became the whole change of a mission that needed none
+ * (run_01m3drb07720355x3z1s63, run_01m3dvhgf6yapa3cvhvcnx).
+ */
+function keepFinalNewline(path: string, content: string): { content: string; finalNewlineKept: boolean } {
+  if (content === "" || content.endsWith("\n") || !existsSync(path)) return { content, finalNewlineKept: false };
+  const existing = readFileSync(path, "utf8");
+  if (existing.endsWith("\r\n")) return { content: `${content}\r\n`, finalNewlineKept: true };
+  if (existing.endsWith("\n")) return { content: `${content}\n`, finalNewlineKept: true };
+  return { content, finalNewlineKept: false };
 }
 
 function splitLines(text: string): string[] {

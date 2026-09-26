@@ -231,7 +231,20 @@ export function nextDebateStep(
 export const DEBATE_VERDICT_MEANING =
   "VALID means the change has the defect the claim describes: the cited code fails a mission requirement the way the claim says. " +
   "A claim that the code is correct, or that a check passes, names no defect and is REJECTED however true it is. " +
+  "A claim about behavior that no mission requirement asks for, and that the change did not break, is REJECTED. " +
   "UNCERTAIN means the supplied evidence cannot decide whether that defect exists.";
+
+/**
+ * The mission as the engine interpreted it. VALID is defined against its requirements, and without
+ * them a judge could only answer UNCERTAIN: in run_01m3dvhgf6yapa3cvhvcnx the judge of "add does not
+ * handle non-number input" wrote that the evidence "contains no mission requirement" about input types.
+ */
+export interface DebateMission {
+  goals: readonly string[];
+  requirements: readonly { ref: string; statement: string; acceptance: readonly string[] }[];
+  constraints: readonly string[];
+  nonGoals: readonly string[];
+}
 
 export function rolePrompt(
   role: DebateRole,
@@ -240,8 +253,10 @@ export function rolePrompt(
   preDebateRefs: readonly ArtifactRef[],
   records: readonly DebateArgumentRecord[],
   roundIndex: number,
+  mission: DebateMission | null = null,
 ): string {
   const evidenceBound = {
+    ...(mission === null ? {} : { mission }),
     finding: evidenceBoundFinding(finding),
     priorValidations: validations
       .filter((item) => item.findingId === finding.id && item.method !== DEBATE_METHOD)

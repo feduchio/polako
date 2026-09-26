@@ -34,6 +34,7 @@ export {
   startedPayload,
   threeDistinctDebateRoles,
   type DebateArgumentRecord,
+  type DebateMission,
   type DebateOutcomePayload,
   type DebateRole,
   type DebateRoles,

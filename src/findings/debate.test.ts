@@ -72,6 +72,22 @@ describe("finding debate helpers", () => {
     }
   });
 
+  it("gives every role the mission its verdict is defined against", () => {
+    const claim = finding({ claim: "The add function does not handle the case where the input is not a number." });
+    const mission = {
+      goals: ["add sums its arguments"],
+      requirements: [{ ref: "R1", statement: "add returns the sum of its arguments", acceptance: ["tests/add.test.mjs passes"] }],
+      constraints: [],
+      nonGoals: ["input validation"],
+    };
+    for (const role of ["prosecutor", "defender", "judge"] as const) {
+      const prompt = rolePrompt(role, claim, [], [], [], 1, mission);
+      expect(prompt, role).toContain("no mission requirement asks for, and that the change did not break, is REJECTED");
+      expect(prompt, role).toContain('"statement":"add returns the sum of its arguments"');
+      expect(prompt, role).toContain('"nonGoals":["input validation"]');
+    }
+  });
+
   it("parses structured judge JSON and rejects malformed or empty", () => {
     expect(parseJudgeVerdict('{"verdict":"VALID","rationale":"reproduced"}')).toEqual({
       verdict: "VALID",

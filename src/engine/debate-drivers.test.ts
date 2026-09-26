@@ -6,6 +6,7 @@ import type { BaselineSnapshot } from "../domain/checks.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import { defaultConfig } from "../domain/config.js";
 import { findingFingerprint, type Finding, type FindingValidation } from "../domain/finding.js";
+import type { MissionInterpretation } from "../domain/mission.js";
 import { createTaskFromRequirement } from "../domain/task.js";
 import { ScriptedFindingEvidenceWorker, type DebateRoles, type EvidenceAttempt } from "../findings/index.js";
 import { FakeClock } from "../shared/clock.js";
@@ -399,6 +400,34 @@ describe("C4 finding debate in createValidatingDriver", () => {
     expect(store.events.list(runId, { types: ["finding.debate_started"] })).toHaveLength(0);
     expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("UNCERTAIN");
     expect(store.repos.tasks.listByRun(runId)[0]?.kind).toBe("investigation");
+  });
+
+  it("8b. every debate role is given the run's interpreted mission", async () => {
+    engine.registerPhase("VALIDATING", debateDriver(() => uncertainWithEvidence(), recorder(judgeScript("REJECTED")), ROLES));
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    const run = store.repos.runs.get(runId)!;
+    const interpretation: MissionInterpretation = {
+      id: id("interp", clock.now()),
+      missionId: run.missionId,
+      version: 1,
+      supersedes: null,
+      basedOn: { profileHash: "a".repeat(64), baselineId: run.baselineId ?? "base" },
+      goals: ["add sums its arguments"],
+      requirements: [{ ref: "R1", statement: "add returns the sum of its arguments", acceptance: ["tests/add.test.mjs passes"] }],
+      constraints: [],
+      nonGoals: [],
+      definitionOfSuccess: ["Checks pass"],
+      ambiguities: [],
+      createdBy: { kind: "supervisor", role: "council" },
+      createdAt: clock.now(),
+    };
+    store.events.append([
+      { id: id("evt", clock.now()), runId, ts: clock.now(), type: "mission.interpreted", payload: { interpretation }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
+      { id: id("evt", clock.now()), runId, ts: clock.now(), type: "run.phase_changed", payload: { run: { ...run, interpretationId: interpretation.id } }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
+    ]);
+    await engine.tickRun(runId);
+    expect(calls.map((call) => call.role)).toEqual(["prosecutor", "defender", "judge"]);
+    for (const call of calls) expect(call.prompt, call.role).toContain('"statement":"add returns the sum of its arguments"');
   });
 
   it("9. resume after debate_started completes missing roles once and never strands VALIDATING", async () => {
