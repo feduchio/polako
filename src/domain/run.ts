@@ -37,7 +37,8 @@ export const RUN_PHASE_TABLE: TransitionTable<RunPhase> = {
     BASELINING: ["INTERPRETING_MISSION", "NEEDS_HUMAN", "FAILED"],
     INTERPRETING_MISSION: ["DISCOVERING_MODELS", "NEEDS_HUMAN", "FAILED"],
     DISCOVERING_MODELS: ["PLANNING", "NEEDS_HUMAN", "FAILED"],
-    PLANNING: ["EXECUTING", "REVIEWING", "CONVERGENCE_CHECK", "NEEDS_HUMAN", "FAILED"],
+    // VALIDATING: investigations done, the review round whose findings they settled is recorded there.
+    PLANNING: ["EXECUTING", "REVIEWING", "VALIDATING", "CONVERGENCE_CHECK", "NEEDS_HUMAN", "FAILED"],
     EXECUTING: ["GATING", "PLANNING", "NEEDS_HUMAN", "FAILED"],
     // NEEDS_HUMAN, because a provider that refused every candidate has not judged the work: an
     // exhausted allowance lifts on its own, and terminating the run instead throws away a

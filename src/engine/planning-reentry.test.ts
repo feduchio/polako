@@ -6,6 +6,7 @@ import type { BaselineSnapshot } from "../domain/checks.js";
 import { defaultConfig } from "../domain/config.js";
 import { findingFingerprint, type Finding } from "../domain/finding.js";
 import type { MissionInterpretation } from "../domain/mission.js";
+import { reviewAxesForRound, type ReviewExecution } from "../domain/review.js";
 import {
   createInvestigationTask,
   createTaskFromRequirement,
@@ -295,6 +296,39 @@ describe("planning re-entry", () => {
     expect(run.phase).toBe("NEEDS_HUMAN");
     expect(run.terminalReason?.summary).toMatch(/No reproduction the engine could run settled 1 uncertain finding/);
     expect(store.events.list(runId, { types: ["report.generated"] }).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a settled investigation hands the review round it came from to VALIDATING instead of opening a new round", async () => {
+    const { runId } = seedInvestigationOnly(store, clock);
+    const task = store.repos.tasks.listByRun(runId)[0]!;
+    forceTaskState(store, clock, task.id, "SATISFIED", 1);
+    seedCompletedReviewRound(store, clock, runId, 1);
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
+  });
+
+  it("a review round already recorded clean does not hold the run in VALIDATING", async () => {
+    const { runId } = seedInvestigationOnly(store, clock);
+    const task = store.repos.tasks.listByRun(runId)[0]!;
+    forceTaskState(store, clock, task.id, "SATISFIED", 1);
+    const executions = seedCompletedReviewRound(store, clock, runId, 1);
+    store.events.append([event(runId, clock, "clean_round.recorded", {
+      cleanRound: {
+        id: id("cr", clock.now()),
+        runId,
+        checkpointHash: HASH,
+        roundIndex: 1,
+        reviewRoundIndex: 1,
+        axes: executions.map((execution) => execution.axis),
+        ensemble: executions.map((execution) => execution.requestedModel),
+        rawFindings: 0,
+        validatedBlocking: 0,
+        novel: true,
+        createdAt: clock.now(),
+      },
+    })]);
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("REVIEWING");
   });
 
   it("exhausted BLOCKED coding work fails without a replacement task", async () => {
@@ -670,6 +704,23 @@ function seedInvestigationOnly(store: Store, clock: FakeClock): { runId: string 
     event(runId, clock, "task.created", { task }),
   ]);
   return { runId };
+}
+
+function seedCompletedReviewRound(store: Store, clock: FakeClock, runId: string, roundIndex: number): ReviewExecution[] {
+  const executions = reviewAxesForRound(defaultConfig().review.reviewersPerRound).map((axis, index): ReviewExecution => ({
+    id: id("rvex", clock.now()),
+    runId,
+    checkpointHash: HASH,
+    roundIndex,
+    axis,
+    requestedModel: { provider: "scripted", model: `reviewer-${String(index)}` },
+    completed: true,
+    findings: [],
+    startedAt: clock.now() + index,
+    finishedAt: clock.now() + index,
+  }));
+  store.events.append(executions.map((execution) => event(runId, clock, "review.finished", { execution })));
+  return executions;
 }
 
 function seedValidatingThenPlanning(store: Store, clock: FakeClock): { runId: string } {

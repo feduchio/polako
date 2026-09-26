@@ -5,6 +5,7 @@ import type { ProjectProfile } from "../project/profile.js";
 import { PolishError, isResumableCouncilFailure } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import { SupervisorCouncil, type CouncilEventSink, type CouncilRoleConfigs } from "../council/index.js";
+import { nextUnconsumedCompletedReviewRound } from "../convergence/record.js";
 import { emitNeedsHumanReport } from "../report/emit.js";
 import type { TerminalReason } from "../domain/run.js";
 import { dependenciesSettled, TASK_TABLE, type Task } from "../domain/task.js";
@@ -409,7 +410,25 @@ function nextPhaseForPlanningReentry(ctx: PhaseContext): PhaseDriverResult {
     if (ctx.run.terminalReason !== null) return { status: "complete", nextPhase: "NEEDS_HUMAN" };
     return { status: "complete", nextPhase: "FAILED" };
   }
+  if (hasUnsettledReviewRound(ctx)) return { status: "complete", nextPhase: "VALIDATING" };
   return { status: "complete", nextPhase: "REVIEWING" };
+}
+
+/**
+ * A completed review round on the current checkpoint that no clean round has consumed yet. Its
+ * findings sent the run here for investigation; only VALIDATING can now record it clean. Going
+ * straight to REVIEWING opened a new round whose new findings sent the run back here, so no round
+ * was ever recorded (run_01m3dt06gve60z50cqwgam: 11 rounds, every finding rejected, none clean).
+ */
+function hasUnsettledReviewRound(ctx: PhaseContext): boolean {
+  const hash = ctx.run.currentCheckpointHash;
+  if (hash === null) return false;
+  return nextUnconsumedCompletedReviewRound(
+    ctx.store.repos.cleanRounds.listByRun(ctx.run.id),
+    ctx.store.repos.reviewExecutions.listByRun(ctx.run.id),
+    hash,
+    ctx.config.review.reviewersPerRound,
+  ) !== null;
 }
 
 function recordCouncilUnavailable(ctx: PhaseContext, error: unknown): void {
