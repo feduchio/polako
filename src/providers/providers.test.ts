@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { FetchLike } from "./openaiCompat.js";
+import { rateLimitResetMs, type FetchLike } from "./openaiCompat.js";
 import { GeminiProvider } from "./gemini.js";
 import { GroqProvider } from "./groq.js";
 import { OpenRouterProvider } from "./openrouter.js";
@@ -286,5 +286,15 @@ describe("RecordReplayProvider request identity", () => {
       reasoning: { effort: "low", exclude: true },
     });
     expect(new Set([plain, strict, reasoning]).size).toBe(3);
+  });
+});
+
+describe("rateLimitResetMs", () => {
+  const body = (reset: number) => JSON.stringify({ error: { message: "Rate limit exceeded: free-models-per-min.", code: 429, metadata: { headers: { "X-RateLimit-Reset": String(reset) }, limit_source: "openrouter_free_tier_per_minute" } } });
+  it("waits for a per-minute reset, but not for a daily one", () => {
+    expect(rateLimitResetMs(body(1_000_045_000), 1_000_000_000)).toBe(45_000);
+    expect(rateLimitResetMs(body(1_000_000_000 + 6 * 3_600_000), 1_000_000_000)).toBeNull();
+    expect(rateLimitResetMs(body(999_000_000), 1_000_000_000)).toBeNull();
+    expect(rateLimitResetMs("not json", 1_000_000_000)).toBeNull();
   });
 });

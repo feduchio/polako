@@ -77,9 +77,11 @@ export class ModelBroker {
       try {
         return await this.completeOn({ ...request, model, metadata });
       } catch (err) {
-        const next = chain[index + 1];
-        if (next === undefined || !isRateLimited(err)) throw err;
+        const nextIndex = nextFallback(chain, index, err);
+        const next = nextIndex === null ? undefined : chain[nextIndex];
+        if (nextIndex === null || next === undefined) throw err;
         this.recordFallback(request, model, next, err);
+        index = nextIndex - 1;
       }
     }
   }
@@ -423,7 +425,16 @@ function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "
   }
 }
 
-/** Waiting on this model will not help soon: its rate limit held through the retries, or the account's quota is spent. */
-function isRateLimited(error: unknown): boolean {
-  return error instanceof ProviderError && (error.kind === "rate_limit" || isAccountScopedLimit(error));
+/**
+ * The next model worth trying after `chain[index]` failed with `error`, or null. Only a rate limit
+ * moves along the chain; one scoped to the account moves only to another provider, because every
+ * model on the same account shares that allowance.
+ */
+function nextFallback(chain: readonly ModelRef[], index: number, error: unknown): number | null {
+  if (!(error instanceof ProviderError) || error.kind !== "rate_limit") return null;
+  const provider = chain[index]?.provider;
+  for (let next = index + 1; next < chain.length; next += 1) {
+    if (!isAccountScopedLimit(error) || chain[next]?.provider !== provider) return next;
+  }
+  return null;
 }

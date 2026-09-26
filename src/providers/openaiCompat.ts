@@ -159,7 +159,7 @@ export class OpenAICompatProvider implements ProviderAdapter {
     if (status === 429) {
       return new ProviderError(this.id, "rate_limit", `rate limited: ${snippet}`, {
         status,
-        retryAfterMs,
+        retryAfterMs: retryAfterMs ?? rateLimitResetMs(body, Date.now()),
         limitScope: rateLimitScope(body),
       });
     }
@@ -189,6 +189,27 @@ export class OpenAICompatProvider implements ProviderAdapter {
     };
     return { ref: { provider: this.id, model: row.id }, displayName: row.name ?? row.id, capabilities, source: "provider" };
   }
+}
+
+/** Longest wait for an allowance's reset that is worth sleeping through; a daily reset is not. */
+const MAX_RESET_WAIT_MS = 120_000;
+
+/**
+ * How long until OpenRouter's allowance resets, from `error.metadata.headers["X-RateLimit-Reset"]`
+ * (epoch ms). The free tier's per-minute limit (20/min, shared by every free route) says when it
+ * lifts only there, not in `Retry-After`; without it every retry fell inside the same minute.
+ */
+export function rateLimitResetMs(body: string, now: number): number | null {
+  let reset: unknown;
+  try {
+    reset = (JSON.parse(body) as { error?: { metadata?: { headers?: Record<string, unknown> } } }).error?.metadata?.headers?.["X-RateLimit-Reset"];
+  } catch {
+    return null;
+  }
+  const at = Number(reset);
+  if (!Number.isFinite(at)) return null;
+  const wait = at - now;
+  return wait > 0 && wait <= MAX_RESET_WAIT_MS ? wait : null;
 }
 
 /**

@@ -214,7 +214,7 @@ describe("ModelBroker", () => {
   });
 
   it("falls back to the caller's next model when one stays rate-limited, and says so", async () => {
-    provider.script("big", [{ kind: "error", error: new ProviderError("p1", "rate_limit", "429", { status: 429, limitScope: "account" }) }]);
+    provider.script("big", [{ kind: "error", error: new ProviderError("p1", "rate_limit", "429", { status: 429, limitScope: "model" }) }]);
     provider.script("mid", [{ kind: "reply", content: "from mid", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0 } }]);
     const record = await broker.complete({
       ...req(runId, "big"),
@@ -224,6 +224,15 @@ describe("ModelBroker", () => {
     const [fallback] = store.events.list(runId, { types: ["model.fallback"] });
     expect(fallback?.payload).toMatchObject({ from: { model: "big" }, to: { model: "mid" }, role: "worker" });
     expect(store.events.list(runId, { types: ["model.call"] }).map((event) => (event.payload["model"] as { model: string }).model)).toEqual(["big", "mid"]);
+  });
+
+  it("does not fall back to a model on the same account when the account's allowance is spent", async () => {
+    provider.script("big", [{ kind: "error", error: new ProviderError("p1", "rate_limit", "429", { status: 429, limitScope: "account" }) }]);
+    await expect(broker.complete({
+      ...req(runId, "big"),
+      metadata: { runId, purpose: "agent_run", role: "worker", fallbacks: [{ provider: "p1", model: "mid" }], retryPolicy: { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 } },
+    })).rejects.toThrow(ProviderError);
+    expect(store.events.list(runId, { types: ["model.fallback"] })).toHaveLength(0);
   });
 
   it("does not fall back on an error that is not a rate limit", async () => {
