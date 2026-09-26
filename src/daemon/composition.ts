@@ -888,6 +888,7 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
       artifacts: deps.store.artifacts,
       model,
       commandPolicy: commandPolicyFor(ctx, profile),
+      testFramework: profile.framework,
       maxTurns: deps.config.agent.maxTurns,
       maxTokens,
       ...contextWindowOf(ranked[index % Math.max(ranked.length, 1)]?.entry.info.capabilities.contextWindow),

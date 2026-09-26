@@ -175,6 +175,7 @@ export class AgentRunner implements CandidateWorker {
       ...(this.deps.requestContext === undefined ? {} : { requestContext: this.deps.requestContext }),
       redact: this.redact,
       resultTokens: toolResultTokenBudget(this.deps.contextWindow),
+      ...(this.deps.testFramework === undefined ? {} : { testFramework: this.deps.testFramework }),
     });
 
     let totalTokens = 0;

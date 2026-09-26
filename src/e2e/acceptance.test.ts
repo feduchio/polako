@@ -186,10 +186,13 @@ describe("acceptance: a defect is demonstrated only by an execution that shows i
     expect(outcome.add).toBe(SUM.trim());
   });
 
-  it("a Jest-style reproduction under node:test proves nothing against correct code", async () => {
+  it("a Jest-style reproduction under node:test proves nothing against correct code: the write is refused before it runs", async () => {
     const outcome = await runCase("disputed-finding", { firstFix: SUM, reproContent: JEST_REPRO });
     expect(outcome.investigations).toBeGreaterThan(0);
-    expect(outcome.judged).toContain("not_examined:reproduction_broken");
+    expect(outcome.judged).not.toContain("demonstrated");
+    const refusals = env!.provider.calls
+      .filter((call) => call.messages.some((message) => message.role === "tool" && message.content.includes("write refused: tests/claim.test.mjs calls test, expect without importing them")));
+    expect(refusals.length).toBeGreaterThan(0);
     expect(outcome.statuses).not.toContain("VALID");
     expect(outcome.fixTasks).toBe(0);
   });

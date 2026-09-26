@@ -151,6 +151,8 @@ export interface AgentRunnerDeps {
   redact?: (text: string) => string;
   now?: () => number;
   signal?: AbortSignal;
+  /** The project's test framework; test files it cannot run are refused at write time. */
+  testFramework?: string;
 }
 
 export interface WorkerReproduction {

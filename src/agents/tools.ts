@@ -15,6 +15,7 @@ import type { SandboxHandle } from "../sandbox/worktree.js";
 import { PolishError } from "../shared/errors.js";
 import type { ArtifactStore } from "../store/artifacts.js";
 import { anchorOf, applyHashlineEdits, NoopTracker, parseEdits, renderAnchored } from "./hashline.js";
+import { testApiDenial } from "./testApiGuard.js";
 import type { AgentToolName, LoopEvidence, RequestContext } from "./types.js";
 
 export interface AgentToolsDeps {
@@ -27,6 +28,8 @@ export interface AgentToolsDeps {
   redact?: (text: string) => string;
   /** How many tokens one tool result may occupy; longer text is returned a page at a time. */
   resultTokens: number;
+  /** The project's test framework (`ProjectProfile.framework`), for refusing test files it cannot run. */
+  testFramework?: string;
 }
 
 export interface AgentTools {
@@ -211,6 +214,8 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
         case "write": {
           const rel = stringArg(args, "path");
           const path = safePath(root, rel, true);
+          const refusedTest = testApiDenial(deps.testFramework, rel, stringArg(args, "content"));
+          if (refusedTest !== null) throw new PolishError("INVALID_ARGUMENT", `write refused: ${refusedTest}`);
           mkdirSync(dirname(path), { recursive: true });
           const { content, finalNewlineKept } = keepFinalNewline(path, stringArg(args, "content"));
           writeFileSync(path, content, "utf8");
@@ -225,6 +230,8 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
           const edits = parseEdits(args["edits"]);
           const { after, changed } = applyHashlineEdits(before, edits);
           if (after === before) throw noops.refuse(rel, JSON.stringify(edits));
+          const refusedTest = testApiDenial(deps.testFramework, rel, after);
+          if (refusedTest !== null) throw new PolishError("INVALID_ARGUMENT", `edit refused: ${refusedTest}`);
           noops.reset(rel);
           writeFileSync(path, after, "utf8");
           deps.loopEvidence.patches.push(rel);
