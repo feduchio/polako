@@ -188,7 +188,7 @@ describe("acceptance: a defect is demonstrated only by an execution that shows i
 });
 
 describe("acceptance: a model's words neither run code nor decide a blocking finding", () => {
-  it.fails("a reviewer's reproduction text is never executed", async () => {
+  it("a reviewer's reproduction text is never executed", async () => {
     const marker = join(tmpdir(), `polish-acceptance-marker-${String(process.pid)}`);
     rmSync(marker, { force: true });
     const code = `require("fs").writeFileSync(${JSON.stringify(marker)},"x");process.exit(1)`;
@@ -211,7 +211,7 @@ describe("acceptance: a model's words neither run code nor decide a blocking fin
     }
   });
 
-  it.fails("a judge's VALID over an environment failure does not create a fix task", async () => {
+  it("a judge's VALID on a finding whose named script is missing does not create a fix task", async () => {
     const outcome = await runCase("disputed-finding", {
       firstFix: SUM,
       findings: [{

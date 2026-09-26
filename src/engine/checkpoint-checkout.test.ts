@@ -124,7 +124,7 @@ describe("B-selfhost-5 checkpoint checkout isolation", () => {
     expect(destroyed).toEqual(["val-leak"]);
   });
 
-  it("VALIDATING failing-test does not treat clean wrong-HEAD user content as VALID", async () => {
+  it("VALIDATING checks out the finding's checkpoint and runs nothing the finding names", async () => {
     const fixture = await polarityRepo({ withTests: true });
     const created: CheckoutSnap[] = [];
     const destroyed: string[] = [];
@@ -135,7 +135,9 @@ describe("B-selfhost-5 checkpoint checkout isolation", () => {
     expect(created.some((snap) => snap.baseCommit === fixture.checkpoint)).toBe(true);
     expect(created.every((snap) => snap.path !== realpathSync(fixture.repoDir))).toBe(true);
     expect(created.every((snap) => snap.head === fixture.checkpoint)).toBe(true);
-    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("REJECTED");
+    const finding = store.repos.findings.listByRun(runId)[0]!;
+    expect(finding.status).toBe("UNCERTAIN");
+    expect(store.repos.validations.listByFinding(finding.id).flatMap((validation) => validation.evidenceRefs)).toEqual([]);
     expect(destroyed.length).toBeGreaterThanOrEqual(1);
     expect(destroyed).toEqual(created.map((snap) => snap.id));
   });
@@ -150,18 +152,6 @@ describe("B-selfhost-5 checkpoint checkout isolation", () => {
     const validation = store.repos.validations.listByFinding(finding.id)[0];
     expect(validation?.verdict).toBe("UNCERTAIN");
     expect(validation?.rationale ?? "").toMatch(/no runtime\/ directory|no safe scenario|runtime reproduction requested/i);
-  });
-
-  it("checkout without installed deps is UNCERTAIN, not VALID", async () => {
-    const fixture = await polarityRepo({ missingDeps: true });
-    const { engine, store, clock } = validatingHarness(fixture, realSandbox(fixture));
-    const { runId } = seedRun(store, clock, fixture, "VALIDATING", [testFinding(fixture.checkpoint)]);
-    await engine.tickRun(runId);
-    const finding = store.repos.findings.listByRun(runId)[0]!;
-    expect(finding.status).toBe("UNCERTAIN");
-    const validation = store.repos.validations.listByFinding(finding.id)[0];
-    expect(validation?.verdict).toBe("UNCERTAIN");
-    expect(validation?.rationale ?? "").toMatch(/missing installed dependencies|command not found|before the test runner started/i);
   });
 
   it("zero-option drivers fail closed and never root evidence at projectPath", async () => {
@@ -207,7 +197,7 @@ describe("B-selfhost-5 checkpoint checkout isolation", () => {
     await engine.tickRun(runId);
     expect(created.some((snap) => snap.baseCommit === fixture.checkpoint)).toBe(true);
     expect(created.every((snap) => snap.path !== realpathSync(fixture.repoDir))).toBe(true);
-    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("REJECTED");
+    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("UNCERTAIN");
     expect(destroyed.length).toBeGreaterThanOrEqual(1);
     store.close();
   });
@@ -271,7 +261,7 @@ interface CheckoutSnap {
   hasUserFile: boolean;
 }
 
-async function polarityRepo(opts: { withTests?: boolean; withUserRuntime?: boolean; missingDeps?: boolean } = {}): Promise<Fixture> {
+async function polarityRepo(opts: { withTests?: boolean; withUserRuntime?: boolean } = {}): Promise<Fixture> {
   const root = mkdtempSync(join(tmpdir(), "polish-b5-checkout-"));
   cleanup.push(root);
   const repoDir = join(root, "repo");
@@ -289,14 +279,14 @@ async function polarityRepo(opts: { withTests?: boolean; withUserRuntime?: boole
     "process.exit(1);",
   ].join("\n");
   const pkg = (script: string) => JSON.stringify({ name: "polish-b5-checkout", private: true, scripts: { test: script } }, null, 2);
-  writeFileSync(join(repoDir, "package.json"), pkg(opts.missingDeps === true ? "node ./node_modules/vitest/vitest.mjs run" : "node tests/repro.test.mjs"));
+  writeFileSync(join(repoDir, "package.json"), pkg("node tests/repro.test.mjs"));
   writeFileSync(join(repoDir, "README.md"), "base\n");
   const git = await Git.init(repoDir);
   const base = await git.commitAll("base");
   if (base === null) throw new Error("base commit missing");
   await git.createBranch("run", base);
   mkdirSync(join(repoDir, "tests"), { recursive: true });
-  if (opts.withTests === true || opts.missingDeps === true) {
+  if (opts.withTests === true) {
     writeFileSync(join(repoDir, "tests/repro.test.mjs"), passingTest);
   }
   writeFileSync(join(repoDir, "checkpoint-only.ts"), "export const checkpoint = true;\n");

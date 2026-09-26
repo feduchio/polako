@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { canonicalJson } from "../shared/hash.js";
 import type { ArtifactRef } from "../domain/common.js";
 import type { Finding } from "../domain/finding.js";
@@ -7,9 +5,7 @@ import { discoverProjectRuntime } from "../runtime/projectDiscovery.js";
 import { discoverRuntimeValidator } from "../runtime/discovery.js";
 import { FixtureRuntimeValidator } from "../runtime/fixtureRunner.js";
 import { bindNodeScenario } from "../runtime/corpus.js";
-import { runProcess, type ProcessResult } from "../sandbox/process.js";
 import { PolishError } from "../shared/errors.js";
-import { untrustedForMissingDependencies } from "../shared/projectDependencies.js";
 import type { EvidenceAttempt, FindingEvidenceWorker } from "./validator.js";
 
 export interface ProjectEvidenceWorkerOptions {
@@ -18,7 +14,11 @@ export interface ProjectEvidenceWorkerOptions {
   now?: () => number;
 }
 
-/** Production evidence worker: reproduce via runtime scenarios or failing tests; never edits product code. */
+/**
+ * Production evidence worker: runs only the project's own runtime scenarios; never edits product
+ * code. A finding's reproduction text is model output and is never executed here. Reproducing it is
+ * the investigation's work, whose command the engine runs under the project's command policy.
+ */
 export class ProjectFindingEvidenceWorker implements FindingEvidenceWorker {
   private readonly now: () => number;
 
@@ -29,19 +29,16 @@ export class ProjectFindingEvidenceWorker implements FindingEvidenceWorker {
   async reproduce(finding: Finding): Promise<EvidenceAttempt> {
     const runtime = await this.tryRuntime(finding);
     if (runtime !== null) return runtime;
-    const test = await this.tryFailingTest(finding);
-    if (test !== null) return test;
     return {
       method: "investigation",
       verdict: "UNCERTAIN",
-      rationale: "no deterministic reproduction path matched the finding evidence",
+      rationale: "no project runtime scenario applies to the finding; nothing was executed",
       evidenceRefs: [],
     };
   }
 
   private async tryRuntime(finding: Finding): Promise<EvidenceAttempt | null> {
-    const hints = reproductionHints(finding);
-    if (!hints.runtime) return null;
+    if (!wantsRuntime(finding)) return null;
     const discovery = discoverProjectRuntime(this.options.projectPath);
     const template = discovery.templates[0];
     if (template === undefined) {
@@ -112,74 +109,9 @@ export class ProjectFindingEvidenceWorker implements FindingEvidenceWorker {
       evidenceRefs: [artifact],
     };
   }
-
-  private async tryFailingTest(finding: Finding): Promise<EvidenceAttempt | null> {
-    const hints = reproductionHints(finding);
-    if (!hints.test) return null;
-    const argv = testCommand(finding);
-    if (argv === null) {
-      return {
-        method: "failing_test",
-        verdict: "UNCERTAIN",
-        rationale: "test reproduction was requested but no runnable command was inferred",
-        evidenceRefs: [],
-      };
-    }
-    const missingDeps = missingInstalledDependencies(this.options.projectPath, argv);
-    if (missingDeps !== null) {
-      return {
-        method: "failing_test",
-        verdict: "UNCERTAIN",
-        rationale: missingDeps,
-        evidenceRefs: [],
-      };
-    }
-    try {
-      const result = await runProcess({
-        argv,
-        cwd: this.options.projectPath,
-        env: { PATH: process.env["PATH"] ?? "" },
-        timeoutMs: 120_000,
-        maxOutputBytes: 512_000,
-      });
-      const artifact = this.options.persistOutput(canonicalJson(result), "test_output", argv.join(" "));
-      const envReason = environmentFailureFromResult(result);
-      if (envReason !== null) {
-        return {
-          method: "failing_test",
-          verdict: "UNCERTAIN",
-          rationale: envReason,
-          evidenceRefs: [artifact],
-        };
-      }
-      if (result.exitCode !== 0) {
-        return {
-          method: "failing_test",
-          verdict: "VALID",
-          rationale: `command failed with exit code ${result.exitCode ?? "null"} and reproduced the defect`,
-          evidenceRefs: [artifact],
-        };
-      }
-      return {
-        method: "failing_test",
-        verdict: "REJECTED",
-        rationale: "command passed; the reported defect was not reproduced",
-        evidenceRefs: [artifact],
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const artifact = this.options.persistOutput(canonicalJson({ error: message }), "test_output", argv.join(" "));
-      return {
-        method: "failing_test",
-        verdict: "UNCERTAIN",
-        rationale: environmentFailureFromError(err) ?? `evidence command failed before the test runner started: ${message}`,
-        evidenceRefs: [artifact],
-      };
-    }
-  }
 }
 
-function reproductionHints(finding: Finding): { runtime: boolean; test: boolean } {
+function wantsRuntime(finding: Finding): boolean {
   const text = [
     finding.criterion,
     finding.claim,
@@ -188,45 +120,7 @@ function reproductionHints(finding: Finding): { runtime: boolean; test: boolean 
   ]
     .join(" ")
     .toLowerCase();
-  return {
-    runtime: /\bruntime\b|\.mjs\b|scenario/.test(text),
-    test: /\btest\b|vitest|jest|regression|pnpm test|npm test/.test(text),
-  };
-}
-
-function testCommand(finding: Finding): string[] | null {
-  for (const step of finding.reproduction) {
-    const trimmed = step.trim();
-    if (/^(pnpm|npm|npx|yarn)\b/.test(trimmed)) return trimmed.split(/\s+/);
-  }
-  if (finding.suggestedCheck !== undefined && /test|vitest|jest/i.test(finding.suggestedCheck)) {
-    return ["pnpm", "test"];
-  }
-  return null;
-}
-
-function missingInstalledDependencies(cwd: string, argv: readonly string[]): string | null {
-  return untrustedForMissingDependencies(cwd, argv, packageTestScript(cwd));
-}
-
-function packageTestScript(cwd: string): string | null {
-  try {
-    const pkg = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as { scripts?: Record<string, string> };
-    return pkg.scripts?.["test"] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function environmentFailureFromResult(result: ProcessResult): string | null {
-  const output = `${result.stdout}\n${result.stderr}`;
-  const fromText = environmentFailureFromText(output);
-  if (fromText !== null) return fromText;
-  if (result.exitCode === 127) return "command not found before the test runner started";
-  if (result.exitCode !== 0 && !testRunnerStarted(output)) {
-    return "failure before the test runner started";
-  }
-  return null;
+  return /\bruntime\b|\.mjs\b|scenario/.test(text);
 }
 
 function environmentFailureFromError(err: unknown): string | null {
@@ -250,16 +144,4 @@ function environmentFailureFromText(output: string): string | null {
     return "missing installed dependencies";
   }
   return null;
-}
-
-function testRunnerStarted(output: string): boolean {
-  return (
-    /\bTAP version\b/i.test(output) ||
-    /\bTest Files\b/.test(output) ||
-    /\bTest Suites:\b/.test(output) ||
-    /^PASS /m.test(output) ||
-    /^FAIL /m.test(output) ||
-    /\b# tests\b/.test(output) ||
-    /\bRUN {2}v\d/.test(output)
-  );
 }
