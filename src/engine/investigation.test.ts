@@ -9,7 +9,6 @@ import { createInvestigationTask } from "../domain/task.js";
 import { inspectManifestHashes } from "../project/discovery.js";
 import type { ProjectProfile } from "../project/profile.js";
 import { CommandPolicy } from "../sandbox/allowlist.js";
-import type { ProcessResult } from "../sandbox/process.js";
 import { Git } from "../sandbox/git.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
@@ -19,12 +18,22 @@ import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { createExecutingDriver, type CandidateDriverOptions } from "./candidateDrivers.js";
 import { ScriptedCandidateWorker } from "./candidates.js";
-import { classifyReproduction, INVESTIGATION_EVENT } from "./investigation.js";
+import { INVESTIGATION_EVENT } from "./investigation.js";
 import type { PhaseContext } from "./types.js";
 
 const NOW = 1_700_000_000_000;
-const REPRO = ["node", "repro.js"];
+const REPRO = ["node", "--test", "repro.test.js"];
 const LIMIT_SOURCE = "module.exports = (n) => Math.min(n, 10);\n";
+
+/** A node:test reproduction asserting `limit(20) === expected`; limit clamps, so 10 passes and 20 fails. */
+function limitTest(expected: number): string {
+  return [
+    'const test = require("node:test");',
+    'const assert = require("node:assert/strict");',
+    `test("limit(20)", () => { assert.equal(require("./limit.js")(20), ${String(expected)}); });`,
+    "",
+  ].join("\n");
+}
 
 type Script = (worktree: SandboxHandle) => WorkerOutcome;
 const openStores: Store[] = [];
@@ -36,10 +45,10 @@ describe("investigation tasks", () => {
     for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
   });
 
-  it("a reproduction that fails when the engine re-runs it makes the finding VALID and creates the fix", async () => {
+  it("a reproduction whose test fails an assertion when the engine re-runs it makes the finding VALID and creates the fix", async () => {
     const setup = await fixture(cleanup, (worktree) => {
-      writeFileSync(join(worktree.path, "repro.js"), "process.exit(require('./limit.js')(20) === 20 ? 0 : 1);\n");
-      return { status: "completed", reproduction: { argv: REPRO } };
+      writeFileSync(join(worktree.path, "repro.test.js"), limitTest(20));
+      return { status: "completed", reproduction: { argv: ["npm", "run", "test"] } };
     });
     const result = await setup.execute();
 
@@ -47,19 +56,19 @@ describe("investigation tasks", () => {
     expect(setup.store.repos.findings.get(setup.findingId)?.status).toBe("VALID");
     expect(setup.store.repos.tasks.get(setup.taskId)?.state).toBe("SATISFIED");
     const validation = setup.store.repos.validations.listByFinding(setup.findingId).at(-1);
-    expect(validation?.method).toBe("deterministic_reproduction");
-    expect(validation?.rationale).toMatch(/exit code 1/);
+    expect(validation).toMatchObject({ method: "deterministic_reproduction", outcome: "demonstrated", reason: null });
+    expect(validation?.rationale).toMatch(/limit\(20\) failed: AssertionError/);
     const fix = setup.store.repos.tasks.listByRun(setup.runId).find((task) => task.origin.kind === "valid_finding");
-    expect(fix?.acceptance).toEqual(["`node repro.js` exits 0 with the reproduction files in place"]);
-    expect(fix?.description).toContain("REPRODUCTION FILE repro.js:");
+    expect(fix?.acceptance).toEqual(["`node --test repro.test.js` exits 0 with the reproduction files in place"]);
+    expect(fix?.description).toContain("REPRODUCTION FILE repro.test.js:");
     const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
     expect(completed.map((event) => event.payload["verdict"])).toEqual(["VALID"]);
-    expect(completed[0]?.payload["addedFiles"]).toEqual(["repro.js"]);
+    expect(completed[0]?.payload).toMatchObject({ addedFiles: ["repro.test.js"], argv: REPRO, outcome: "demonstrated" });
   });
 
-  it("a worker that says the defect is real but whose command passes gets the finding REJECTED", async () => {
+  it("a worker that says the defect is real but whose test passes gets the finding REJECTED", async () => {
     const setup = await fixture(cleanup, (worktree) => {
-      writeFileSync(join(worktree.path, "repro.js"), "process.exit(require('./limit.js')(20) === 10 ? 0 : 1);\n");
+      writeFileSync(join(worktree.path, "repro.test.js"), limitTest(10));
       return { status: "completed", reproduction: { argv: REPRO } };
     });
     await setup.execute();
@@ -72,7 +81,7 @@ describe("investigation tasks", () => {
   it("refuses a reproduction that edits tracked files and leaves the finding UNCERTAIN", async () => {
     const setup = await fixture(cleanup, (worktree) => {
       writeFileSync(join(worktree.path, "limit.js"), "module.exports = (n) => n;\n");
-      writeFileSync(join(worktree.path, "repro.js"), "process.exit(1);\n");
+      writeFileSync(join(worktree.path, "repro.test.js"), limitTest(20));
       return { status: "completed", reproduction: { argv: REPRO } };
     });
     await setup.execute();
@@ -99,7 +108,7 @@ describe("investigation tasks", () => {
 
   it("records a confirmed reproduction in the mission's acceptance corpus, and a refuted one nowhere", async () => {
     const valid = await fixture(cleanup, (worktree) => {
-      writeFileSync(join(worktree.path, "repro.js"), "process.exit(1);\n");
+      writeFileSync(join(worktree.path, "repro.test.js"), limitTest(20));
       return { status: "completed", reproduction: { argv: REPRO } };
     });
     await valid.execute();
@@ -108,7 +117,7 @@ describe("investigation tasks", () => {
     expect(validEntries[0]).toMatchObject({ kind: "regression_test", metadata: { findingId: valid.findingId, argv: REPRO } });
 
     const rejected = await fixture(cleanup, (worktree) => {
-      writeFileSync(join(worktree.path, "repro.js"), "process.exit(0);\n");
+      writeFileSync(join(worktree.path, "repro.test.js"), limitTest(10));
       return { status: "completed", reproduction: { argv: REPRO } };
     });
     await rejected.execute();
@@ -116,19 +125,73 @@ describe("investigation tasks", () => {
     expect(corpusEntries(rejected.store, rejected.runId)).toEqual([]);
   });
 
-  it("a reproduction that never reached the question is retried, not applied as a verdict", async () => {
+  it("a reproduction that cannot load a module is not examined and not retried: the environment is not the model's to fix", async () => {
     const setup = await fixture(cleanup, (worktree) => {
-      writeFileSync(join(worktree.path, "repro.js"), "require('./missing-helper.js');\n");
+      writeFileSync(join(worktree.path, "repro.test.js"), "require('./missing-helper.js');\n");
       return { status: "completed", reproduction: { argv: REPRO } };
     });
     await setup.execute();
 
     expect(setup.store.repos.findings.get(setup.findingId)?.status).toBe("UNCERTAIN");
-    expect(setup.store.repos.tasks.get(setup.taskId)?.state).toBe("READY");
+    expect(setup.store.repos.tasks.get(setup.taskId)?.state).toBe("BLOCKED");
     expect(setup.store.repos.validations.listByFinding(setup.findingId)).toEqual([]);
     const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
     expect(completed.map((event) => event.payload["verdict"])).toEqual(["UNCERTAIN", null]);
-    expect(completed[1]?.payload["reason"]).toBe("reproduction could not load a module it needs");
+    expect(completed[0]?.payload).toMatchObject({ outcome: "not_examined", reason: "environment" });
+    expect(completed[1]?.payload["exhausted"]).toBe(true);
+  });
+
+  it("a Jest-style reproduction under node:test is broken, and the retry is told why", async () => {
+    const setup = await fixture(cleanup, (worktree) => {
+      writeFileSync(join(worktree.path, "repro.test.js"), "test('limit', () => { expect(require('./limit.js')(20)).toBe(20); });\n");
+      return { status: "completed", reproduction: { argv: REPRO } };
+    });
+    await setup.execute();
+
+    expect(setup.store.repos.findings.get(setup.findingId)?.status).toBe("UNCERTAIN");
+    const task = setup.store.repos.tasks.get(setup.taskId);
+    expect(task?.state).toBe("READY");
+    expect(task?.description).toMatch(/PREVIOUS ATTEMPT 1: the reproduction itself does not run: .*ReferenceError: test is not defined/);
+    const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
+    expect(completed[0]?.payload).toMatchObject({ verdict: "UNCERTAIN", outcome: "not_examined", reason: "reproduction_broken" });
+  });
+
+  it("a script that exits non-zero without a test report demonstrates nothing", async () => {
+    const setup = await fixture(cleanup, (worktree) => {
+      writeFileSync(join(worktree.path, "repro.js"), "process.exit(require('./limit.js')(20) === 20 ? 0 : 1);\n");
+      return { status: "completed", reproduction: { argv: ["node", "repro.js"] } };
+    }, undefined, "UNCERTAIN", [["node", "repro.js"]]);
+    await setup.execute();
+
+    expect(setup.store.repos.findings.get(setup.findingId)?.status).toBe("UNCERTAIN");
+    const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
+    expect(completed[0]?.payload).toMatchObject({ outcome: "not_examined", reason: "unrecognised_runner" });
+    expect(setup.store.repos.tasks.get(setup.taskId)?.state).toBe("READY");
+  });
+
+  it("a reproduction killed by a signal is not examined and not retried", async () => {
+    const setup = await fixture(cleanup, (worktree) => {
+      writeFileSync(join(worktree.path, "repro.test.js"), "require('node:test')('heavy', () => { process.kill(process.pid, 'SIGKILL'); });\n");
+      return { status: "completed", reproduction: { argv: REPRO } };
+    });
+    await setup.execute();
+
+    expect(setup.store.repos.findings.get(setup.findingId)?.status).toBe("UNCERTAIN");
+    expect(setup.store.repos.tasks.get(setup.taskId)?.state).toBe("BLOCKED");
+    const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
+    expect(completed[0]?.payload).toMatchObject({ outcome: "not_examined", reason: "killed" });
+  });
+
+  it("a reproduction command the policy refuses is not run, and the retry is told so", async () => {
+    const setup = await fixture(cleanup, (worktree) => {
+      writeFileSync(join(worktree.path, "check.mjs"), "process.exit(1);\n");
+      return { status: "completed", reproduction: { argv: ["node", "check.mjs"] } };
+    });
+    await setup.execute();
+
+    const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
+    expect(completed[0]?.payload).toMatchObject({ outcome: "not_examined", reason: "command_refused", exitCode: null });
+    expect(setup.store.repos.tasks.get(setup.taskId)?.description).toMatch(/PREVIOUS ATTEMPT 1: the project's command policy refuses/);
   });
 
   it("retries a worker that failed with the worker's own reason", async () => {
@@ -165,41 +228,6 @@ describe("investigation tasks", () => {
   });
 });
 
-describe("classifyReproduction", () => {
-  const base: ProcessResult = {
-    argv: REPRO,
-    cwd: "/tmp",
-    exitCode: 1,
-    signal: null,
-    stdout: "",
-    stderr: "",
-    truncated: false,
-    timedOut: false,
-    aborted: false,
-    durationMs: 1,
-    startedAt: NOW,
-  };
-
-  it("counts only a command that reached the question", () => {
-    expect(classifyReproduction(base, []).verdict).toBe("VALID");
-    expect(classifyReproduction({ ...base, exitCode: 0 }, []).verdict).toBe("REJECTED");
-    expect(classifyReproduction({ ...base, exitCode: 127 }, []).verdict).toBe("UNCERTAIN");
-    expect(classifyReproduction({ ...base, stderr: "Error: Cannot find module 'vitest'" }, []).verdict).toBe("UNCERTAIN");
-    expect(classifyReproduction({ ...base, timedOut: true, exitCode: null }, []).verdict).toBe("UNCERTAIN");
-    const syntax = { ...base, stderr: "/tmp/x/repro.js:1\nSyntaxError: Unexpected token" };
-    expect(classifyReproduction(syntax, [{ path: "repro.js" }]).verdict).toBe("UNCERTAIN");
-    expect(classifyReproduction(syntax, [{ path: "other.js" }]).verdict).toBe("VALID");
-  });
-
-  it("an aborted reproduction says nothing about the finding", () => {
-    expect(classifyReproduction({ ...base, aborted: true, exitCode: null }, [])).toEqual({
-      verdict: "UNCERTAIN",
-      rationale: "reproduction was aborted",
-      exitCode: null,
-    });
-  });
-});
-
 function corpusEntries(store: Store, runId: string) {
   return store.repos.acceptanceCorpus.forMission(store.repos.runs.get(runId)!.missionId).entries;
 }
@@ -209,6 +237,7 @@ async function fixture(
   script: Script,
   maxAttempts?: number,
   findingStatus: Finding["status"] = "UNCERTAIN",
+  extraCommands: string[][] = [],
 ): Promise<{
   store: Store;
   runId: string;
@@ -249,7 +278,8 @@ async function fixture(
     projectPath: repoDir,
     alias: null,
     packageManager: null,
-    framework: "unknown",
+    framework: "node-test",
+    testRunner: { fileArgv: ["node", "--test"], script: null },
     checks: [],
     manifestHashes: hashes.manifestHashes,
     scriptsHash: hashes.scriptsHash,
@@ -280,7 +310,7 @@ async function fixture(
   ]);
   const options: CandidateDriverOptions = {
     sandbox: new WorktreeSandbox(repoDir, join(root, "worktrees"), config.sandbox),
-    policy: CommandPolicy.forProject([REPRO], null),
+    policy: CommandPolicy.forProject(extraCommands, null, false, { testFileArgv: ["node", "--test"] }),
     workerFactory: () => () => new ScriptedCandidateWorker((_task, worktree) => script(worktree)),
     resolveGates: () => ({
       profile,

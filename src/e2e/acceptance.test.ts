@@ -109,6 +109,8 @@ interface Outcome {
   statuses: string[];
   fixTasks: number;
   investigations: number;
+  /** `outcome` or `outcome:reason` of each investigation that reached the judge. */
+  judged: string[];
   add: string;
 }
 
@@ -124,6 +126,9 @@ async function runCase(fixture: string, plan: Plan): Promise<Outcome> {
     statuses: store.repos.findings.listByRun(runId).map((finding) => finding.status),
     fixTasks: store.repos.tasks.listByRun(runId).filter((task) => task.origin.kind === "valid_finding").length,
     investigations: store.events.list(runId, { types: ["investigation.completed"] }).length,
+    judged: store.events.list(runId, { types: ["investigation.completed"] })
+      .filter((event) => typeof event.payload["outcome"] === "string")
+      .map((event) => [event.payload["outcome"], event.payload["reason"]].filter((part) => typeof part === "string").join(":")),
     add: await runBranchFile(env, run, "src/add.mjs"),
   };
 }
@@ -147,6 +152,7 @@ describe("acceptance: a defect is demonstrated only by an execution that shows i
   it("a planted defect whose reproduction runs and fails becomes a fix, and the run ends with correct code", async () => {
     const outcome = await runCase("disputed-finding", { firstFix: PASSES_ONLY_ITS_TEST });
     expect(outcome.statuses).toContain("VALID");
+    expect(outcome.judged).toEqual(["demonstrated"]);
     expect(outcome.run.phase).toBe("DONE");
     expect(outcome.add).toBe(SUM.trim());
   });
@@ -154,34 +160,50 @@ describe("acceptance: a defect is demonstrated only by an execution that shows i
   it("a false finding whose reproduction runs and passes is refuted without a fix task", async () => {
     const outcome = await runCase("disputed-finding", { firstFix: SUM });
     expect(outcome.statuses).toEqual(["REJECTED"]);
+    expect(outcome.judged).toEqual(["refuted"]);
     expect(outcome.fixTasks).toBe(0);
     expect(outcome.run.phase).toBe("DONE");
   });
 
-  it.fails("a reproduction the test script never runs does not refute a planted defect", async () => {
+  it("a reproduction the test script never runs does not refute a planted defect", async () => {
     const outcome = await runCase("named-runner", { firstFix: PASSES_ONLY_ITS_TEST });
     expect(outcome.investigations).toBeGreaterThan(0);
     expect(outcome.statuses).not.toContain("REJECTED");
     expect(outcome.run.phase === "DONE" && outcome.run.terminalReason?.code === "converged" && outcome.add.includes("a - b")).toBe(false);
+    expect(outcome.judged).toEqual(["demonstrated"]);
+    expect(outcome.add).toBe(SUM.trim());
   });
 
-  it.fails("a Jest-style reproduction under node:test proves nothing against correct code", async () => {
+  it("a Jest-style reproduction under node:test proves nothing against correct code", async () => {
     const outcome = await runCase("disputed-finding", { firstFix: SUM, reproContent: JEST_REPRO });
     expect(outcome.investigations).toBeGreaterThan(0);
+    expect(outcome.judged).toContain("not_examined:reproduction_broken");
     expect(outcome.statuses).not.toContain("VALID");
     expect(outcome.fixTasks).toBe(0);
   });
 
-  it.fails("a reproduction killed by a signal proves nothing against correct code", async () => {
+  it("a reproduction killed by a signal proves nothing against correct code", async () => {
     const outcome = await runCase("disputed-finding", { firstFix: SUM, reproContent: KILLED_REPRO });
     expect(outcome.investigations).toBeGreaterThan(0);
+    expect(outcome.judged).toEqual(["not_examined:killed"]);
     expect(outcome.statuses).not.toContain("VALID");
     expect(outcome.fixTasks).toBe(0);
   });
 
-  it.fails("an unrelated test failing next to a passing reproduction proves nothing", async () => {
+  it("a reproduction that needs a module the project lacks is not examined, and says what is missing", async () => {
+    const outcome = await runCase("disputed-finding", {
+      firstFix: SUM,
+      reproContent: 'import test from "node:test";\nimport { sum } from "../src/sum.mjs";\ntest("sum", () => { sum(1, 2); });\n',
+    });
+    expect(outcome.judged).toEqual(["not_examined:environment"]);
+    expect(outcome.statuses).not.toContain("VALID");
+    expect(outcome.fixTasks).toBe(0);
+  });
+
+  it("an unrelated test failing next to a passing reproduction proves nothing", async () => {
     const outcome = await runCase("layout-guard", { firstFix: SUM });
     expect(outcome.investigations).toBeGreaterThan(0);
+    expect(outcome.judged).toEqual(["refuted"]);
     expect(outcome.statuses).not.toContain("VALID");
     expect(outcome.fixTasks).toBe(0);
   });

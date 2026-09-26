@@ -202,6 +202,16 @@ describe("parseTestReport", () => {
     ]);
   });
 
+  it("marks a test file whose process died without printing an error as file_failed", () => {
+    const killed = "✖ tests/heavy.test.mjs (25.9ms)\nℹ tests 1\nℹ pass 0\nℹ fail 1\n\n✖ failing tests:\n\ntest at tests/heavy.test.mjs:1:1\n✖ tests/heavy.test.mjs (25.9ms)\n  'test failed'\n";
+    expect(parseTestReport("node-test", killed, "").failures).toEqual([{
+      identity: "tests/heavy.test.mjs",
+      kind: "file_failed",
+      message: "the test file's process ended without reporting a result",
+      location: null,
+    }]);
+  });
+
   it("reports no failures for a passing run", () => {
     expect(parseTestReport("node-test", "✔ fine (0.1ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n", "").failures).toEqual([]);
   });

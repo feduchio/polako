@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { assertTransition, type TransitionTable } from "./fsm.js";
 import { ActorSchema, ArtifactRefSchema, FileRefSchema, GitHashSchema, IdSchema, SeveritySchema, TimestampSchema } from "./common.js";
+import { EvidenceOutcomeSchema, NotExaminedReasonSchema } from "./evidence.js";
 import { sha256Hex } from "../shared/hash.js";
 
 export const ReviewAxisSchema = z.enum([
@@ -135,6 +136,9 @@ export const FindingValidationSchema = z.object({
   rationale: z.string().min(1),
   /** every verdict must point at what was actually executed or inspected */
   evidenceRefs: z.array(ArtifactRefSchema),
+  /** What an execution showed; absent on validations that executed nothing and on older records. */
+  outcome: EvidenceOutcomeSchema.optional(),
+  reason: NotExaminedReasonSchema.nullable().optional(),
   performedBy: ActorSchema,
   createdAt: TimestampSchema,
 });

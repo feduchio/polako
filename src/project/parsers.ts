@@ -197,7 +197,7 @@ function parseGenericPassed(text: string): TestSummary | null {
  * What stopped a failing test. `assertion` is the only kind that says the code under test behaved
  * differently from what the test expected; the others say the test could not ask.
  */
-export type FailureKind = "assertion" | "reference_error" | "syntax_error" | "module_not_found" | "error";
+export type FailureKind = "assertion" | "reference_error" | "syntax_error" | "module_not_found" | "error" | "file_failed";
 
 export interface TestFailure {
   /** `location > title` for a test, the file itself for a file that failed to load. */
@@ -286,7 +286,11 @@ function nodeSpecFailures(text: string): TestFailure[] {
     const location = projectRelativeLocation(at[1] ?? "");
     const loadFailure = body.every((line) => line.trim() === "" || line.trim() === "'test failed'");
     const cause = loadFailure ? uncaughtErrorFor(text, title) : null;
-    const classified = cause ?? classify(body) ?? { kind: "error" as const, message: body.find((line) => line.trim() !== "")?.trim() ?? "test failed" };
+    // A file whose process ended with no error printed was killed or exited on its own; the spec
+    // reporter keeps neither the signal nor the exit code.
+    const classified = cause ?? (loadFailure
+      ? { kind: "file_failed" as const, message: "the test file's process ended without reporting a result" }
+      : classify(body) ?? { kind: "error" as const, message: body.find((line) => line.trim() !== "")?.trim() ?? "test failed" });
     failures.push({
       identity: loadFailure ? title : `${location} > ${title}`,
       kind: classified.kind,

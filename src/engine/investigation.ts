@@ -13,14 +13,15 @@ import {
   type ValidationVerdict,
 } from "../domain/finding.js";
 import { createTaskFromValidFinding, type Task } from "../domain/task.js";
-import type { CommandPolicy } from "../sandbox/allowlist.js";
-import type { ProcessResult } from "../sandbox/process.js";
+import { notExamined, RETRYABLE_REASONS, verdictOfOutcome, type Evidence } from "../domain/evidence.js";
+import { testFileOperandDenial, type CommandPolicy } from "../sandbox/allowlist.js";
 import type { Sandbox, SandboxHandle } from "../sandbox/worktree.js";
 import { canonicalJson } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import { MissionAcceptanceService } from "../store/missionAcceptance.js";
 import { prepareWorkerCheckout, type CandidateGates } from "./candidates.js";
 import { assertIsolatedCheckout, createCheckpointCheckout, destroyCheckout, uniqueCheckoutId } from "./checkpointCheckout.js";
+import { judgeReproduction } from "./evidenceJudge.js";
 import { transitionTask } from "./taskTransition.js";
 import type { PhaseContext, PhaseDriverResult } from "./types.js";
 
@@ -40,8 +41,10 @@ interface AddedFile {
 }
 
 interface Reproduced {
+  evidence: Evidence;
   verdict: ValidationVerdict;
-  rationale: string;
+  /** The command the engine ran with the reproduction in place. */
+  argv: string[];
   exitCode: number | null;
   output: ArtifactRef;
 }
@@ -58,9 +61,9 @@ export function activeInvestigationTask(ctx: PhaseContext): Task | null {
  * Run one investigation to a verdict the engine can stand behind.
  *
  * A worker writes the reproduction; the engine re-runs it on a fresh checkout of the finding's
- * commit with only the files the worker added, and the exit code decides. The worker's summary is
- * never read as a verdict: an investigation that says "confirmed" and whose command passes is a
- * rejected finding.
+ * commit with only the files the worker added, and `judgeReproduction` decides from what the runner
+ * reports. An added test file runs alone through the project's runner; any other command is run
+ * once without the added files as a control. The worker's summary is never read as a verdict.
  */
 export async function runInvestigationTask(ctx: PhaseContext, task: Task, deps: InvestigationDeps): Promise<PhaseDriverResult> {
   if (task.origin.kind !== "investigation") return { status: "complete", nextPhase: "PLANNING" };
@@ -88,11 +91,12 @@ export async function runInvestigationTask(ctx: PhaseContext, task: Task, deps: 
   } catch (error) {
     return retryOrBlock(ctx, running, finding, `reproduction could not be re-run: ${errorText(error)}`);
   }
-  if (result.verdict === "UNCERTAIN") {
-    recordInvestigation(ctx, running, finding, reproduction, added, result);
-    return retryOrBlock(ctx, running, finding, result.rationale);
+  if (result.evidence.outcome === "not_examined") {
+    recordInvestigation(ctx, running, finding, added, result);
+    const reason = result.evidence.reason;
+    return retryOrBlock(ctx, running, finding, result.evidence.rationale, reason === null || RETRYABLE_REASONS.has(reason));
   }
-  applyVerdict(ctx, running, finding, reproduction, added, result);
+  applyVerdict(ctx, running, finding, added, result);
   return { status: "complete", nextPhase: "PLANNING" };
 }
 
@@ -147,10 +151,22 @@ async function rerun(
   reproduction: WorkerReproduction,
   added: readonly AddedFile[],
 ): Promise<Reproduced> {
+  const plan = reproductionCommand(deps.policy, reproduction.argv, added);
+  const refused = deps.policy.check(plan.argv);
+  const run = (handle: SandboxHandle) => handle.run(plan.argv, {
+    timeoutMs: REPRODUCTION_TIMEOUT_MS,
+    ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+  });
   let handle: SandboxHandle | undefined;
   try {
     handle = await isolatedCheckout(ctx, deps, finding, `${task.id}-v${String(task.attempts)}`);
     await prepareWorkerCheckout(handle, deps.gates, ctx.signal);
+    if (refused !== null) {
+      const output = ctx.store.artifacts.put(canonicalJson({ argv: plan.argv, refused }), "investigation_reproduction", plan.argv.join(" "), ctx.clock.now());
+      const evidence = notExamined("command_refused", `the project's command policy refuses the reproduction command: ${refused}`);
+      return { evidence, verdict: verdictOfOutcome(evidence.outcome), argv: plan.argv, exitCode: null, output };
+    }
+    const control = plan.scoped ? null : await run(handle);
     for (const file of added) {
       const target = resolve(handle.path, file.path);
       const rel = relative(handle.path, target);
@@ -160,48 +176,40 @@ async function rerun(
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, file.content);
     }
-    const result = await handle.run(reproduction.argv, {
-      timeoutMs: REPRODUCTION_TIMEOUT_MS,
-      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    const treatment = await run(handle);
+    const output = ctx.store.artifacts.put(
+      canonicalJson(control === null ? treatment : { treatment, control }),
+      "investigation_reproduction",
+      plan.argv.join(" "),
+      ctx.clock.now(),
+    );
+    const evidence = judgeReproduction({
+      framework: deps.gates.profile.framework,
+      treatment,
+      control,
+      added: added.map((file) => file.path),
+      scoped: plan.scoped,
     });
-    const output = ctx.store.artifacts.put(canonicalJson(result), "investigation_reproduction", reproduction.argv.join(" "), ctx.clock.now());
-    return { ...classifyReproduction(result, added), output };
+    return { evidence, verdict: verdictOfOutcome(evidence.outcome), argv: plan.argv, exitCode: treatment.exitCode, output };
   } finally {
     await destroyCheckout(handle);
   }
 }
 
 /**
- * Exit code decides, except where the command never reached the question: a missing binary, a
- * missing module, a timeout, or a reproduction script that does not itself parse. Those say nothing
- * about the finding and leave it UNCERTAIN.
+ * One added test file runs alone through the project's runner, whatever the worker named: that is
+ * the only command whose report is entirely the reproduction's. Otherwise the worker's command
+ * runs, scoped when it names an added file.
  */
-export function classifyReproduction(
-  result: ProcessResult,
+export function reproductionCommand(
+  policy: CommandPolicy,
+  workerArgv: readonly string[],
   added: readonly { path: string }[],
-): { verdict: ValidationVerdict; rationale: string; exitCode: number | null } {
-  const exitCode = result.exitCode;
-  const output = `${result.stdout}\n${result.stderr}`;
-  const uncertain = (rationale: string) => ({ verdict: "UNCERTAIN" as const, rationale, exitCode });
-  if (result.timedOut) return uncertain(`reproduction timed out after ${String(REPRODUCTION_TIMEOUT_MS)}ms`);
-  if (result.aborted) return uncertain("reproduction was aborted");
-  if (exitCode === 127 || /command not found|failed to spawn|enoent/i.test(output)) {
-    return uncertain("reproduction command was not found");
-  }
-  if (/cannot find module|cannot find package|err_module_not_found/i.test(output)) {
-    return uncertain("reproduction could not load a module it needs");
-  }
-  if (/\bSyntaxError\b/.test(output) && added.some((file) => output.includes(file.path))) {
-    return uncertain("the reproduction's own file does not parse");
-  }
-  if (exitCode === 0) {
-    return { verdict: "REJECTED", rationale: "the engine re-ran the reproduction and it passed: the defect is not there", exitCode };
-  }
-  return {
-    verdict: "VALID",
-    rationale: `the engine re-ran the reproduction and it failed with exit code ${String(exitCode)}`,
-    exitCode,
-  };
+): { argv: string[]; scoped: boolean } {
+  const tests = added.filter((file) => testFileOperandDenial(file.path) === null);
+  const single = tests.length === 1 ? policy.testFileCommand(tests[0]?.path ?? "") : null;
+  if (single !== null) return { argv: single, scoped: true };
+  return { argv: [...workerArgv], scoped: workerArgv.some((arg) => added.some((file) => file.path === arg || arg.endsWith(`/${file.path}`))) };
 }
 
 async function isolatedCheckout(ctx: PhaseContext, deps: InvestigationDeps, finding: Finding, key: string): Promise<SandboxHandle> {
@@ -223,8 +231,12 @@ function untracked(handle: SandboxHandle): Promise<string[]> {
   return handle.git.untrackedFiles();
 }
 
-function retryOrBlock(ctx: PhaseContext, task: Task, finding: Finding, reason: string): PhaseDriverResult {
-  const exhausted = task.attempts >= ctx.config.retry.maxAttempts;
+/**
+ * A reason the worker can act on is retried with that reason written into the task, so the next
+ * attempt is not blind; a killed, timed-out or environment-bound execution is not the model's to fix.
+ */
+function retryOrBlock(ctx: PhaseContext, task: Task, finding: Finding, reason: string, retry = true): PhaseDriverResult {
+  const exhausted = !retry || task.attempts >= ctx.config.retry.maxAttempts;
   ctx.store.events.append([{
     id: id("evt", ctx.clock.now()),
     runId: ctx.run.id,
@@ -238,6 +250,7 @@ function retryOrBlock(ctx: PhaseContext, task: Task, finding: Finding, reason: s
   transitionTask(ctx.store, ctx.clock, ctx.run.id, {
     ...task,
     state: exhausted ? "BLOCKED" : "READY",
+    ...(exhausted ? {} : { description: `${task.description}\nPREVIOUS ATTEMPT ${String(task.attempts)}: ${reason}` }),
     updatedAt: ctx.clock.now(),
   });
   return { status: "complete", nextPhase: "PLANNING" };
@@ -247,7 +260,6 @@ function recordInvestigation(
   ctx: PhaseContext,
   task: Task,
   finding: Finding,
-  reproduction: WorkerReproduction,
   added: readonly AddedFile[],
   result: Reproduced,
 ): string {
@@ -261,8 +273,10 @@ function recordInvestigation(
       taskId: task.id,
       findingId: finding.id,
       verdict: result.verdict,
-      rationale: result.rationale,
-      argv: reproduction.argv,
+      outcome: result.evidence.outcome,
+      reason: result.evidence.reason,
+      rationale: result.evidence.rationale,
+      argv: result.argv,
       exitCode: result.exitCode,
       addedFiles: added.map((file) => file.path),
       attempt: task.attempts,
@@ -278,11 +292,10 @@ function applyVerdict(
   ctx: PhaseContext,
   task: Task,
   before: Finding,
-  reproduction: WorkerReproduction,
   added: readonly AddedFile[],
   result: Reproduced,
 ): void {
-  const causal = recordInvestigation(ctx, task, before, reproduction, added, result);
+  const causal = recordInvestigation(ctx, task, before, added, result);
   const now = ctx.clock.now();
   const validating = FindingSchema.parse({ ...before, status: "VALIDATING", updatedAt: now });
   const terminal = FindingSchema.parse({ ...validating, status: result.verdict, updatedAt: now });
@@ -292,8 +305,10 @@ function applyVerdict(
     runId: before.runId,
     method: "deterministic_reproduction",
     verdict: result.verdict,
-    rationale: result.rationale,
+    rationale: result.evidence.rationale,
     evidenceRefs: [result.output],
+    outcome: result.evidence.outcome,
+    reason: result.evidence.reason,
     performedBy: SYSTEM_ACTOR,
     createdAt: now,
   });
@@ -305,9 +320,9 @@ function applyVerdict(
         id: id("task", now),
         runId: terminal.runId,
         title: `Fix: ${terminal.claim}`,
-        description: fixDescription(terminal, reproduction, added, result),
+        description: fixDescription(terminal, added, result),
         kind: "bugfix",
-        acceptance: [`\`${reproduction.argv.join(" ")}\` exits 0 with the reproduction files in place`],
+        acceptance: [`\`${result.argv.join(" ")}\` exits 0 with the reproduction files in place`],
         complexity: "normal",
         baseCheckpointHash: terminal.checkpointHash,
         now,
@@ -376,19 +391,19 @@ function applyVerdict(
         findingId: terminal.id,
         validationId: validation.id,
         method: "deterministic_reproduction",
-        argv: reproduction.argv,
+        argv: result.argv,
         executableStatus: fix === null ? CORPUS_EXECUTABLE_STATUS.noFixingTask : CORPUS_EXECUTABLE_STATUS.pendingIntegration,
       },
     });
   }
 }
 
-function fixDescription(finding: Finding, reproduction: WorkerReproduction, added: readonly AddedFile[], result: Reproduced): string {
+function fixDescription(finding: Finding, added: readonly AddedFile[], result: Reproduced): string {
   return [
     `WHAT: ${finding.claim}`,
-    `WHY: ${result.rationale}`,
+    `WHY: ${result.evidence.rationale}`,
     "CONSTRAINTS: keep the reproduction passing once fixed; do not weaken it",
-    `EVIDENCE: \`${reproduction.argv.join(" ")}\` failed on ${finding.checkpointHash}`,
+    `EVIDENCE: \`${result.argv.join(" ")}\` failed on ${finding.checkpointHash}`,
     ...added.map((file) => `REPRODUCTION FILE ${file.path}:\n${file.content}`),
   ].join("\n");
 }
