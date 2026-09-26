@@ -860,7 +860,11 @@ function contextWindowOf(contextWindow: number | undefined): { contextWindow?: n
 }
 
 export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
-  const ranked = deps.router.select({ role: "worker", count: deps.config.candidates.normal, requireTools: true });
+  // Enough models for every slot of every attempt: a retry takes the slots after its earlier
+  // attempts', and with `count: candidates.normal` a one-candidate config had one worker model, so
+  // run_01m3dna9m0hpn37zzy03ga sent both attempts of both tasks to the same model.
+  const slots = Math.max(...Object.values(deps.config.candidates)) * deps.config.retry.maxAttempts;
+  const ranked = deps.router.select({ role: "worker", count: slots, requireTools: true });
   const profile = resolveDiscoveredProfile(ctx);
   const maxTokens = deps.config.budget.maxTaskTokens ?? 32_000;
   const maxPackTokens = workerPackCap(maxTokens, deps.config.contextBudget.maxPackTokens);

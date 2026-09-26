@@ -1198,6 +1198,46 @@ describe("production composition", () => {
     expect(transcript.model).toEqual({ provider: "scripted", model: "worker" });
   });
 
+  it("createWorkerFactory has a second worker model for a one-candidate retry", async () => {
+    const free = { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 };
+    const provider = new ScriptedProvider("scripted", [
+      { name: "worker-a", capabilities: free },
+      { name: "worker-b", capabilities: free },
+    ]);
+    const config = defaultConfig();
+    config.candidates = { trivial: 1, normal: 1, complex: 1 };
+    config.retry.maxAttempts = 2;
+    const deps = buildProductionDeps({ store, clock, config, home: join(dir, "home"), providers: [provider] });
+    await deps.catalog.discover();
+    const repoDir = mkdtempSync(join(tmpdir(), "polish-worker-retry-"));
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "demo" }));
+    const ctx = {
+      run: {
+        id: id("run", clock.now()),
+        missionId: id("msn", clock.now()),
+        projectPath: repoDir,
+        runBranch: "polish/run",
+        phase: "EXECUTING",
+        control: "RUNNING",
+        currentCheckpointHash: null,
+        baselineId: null,
+        interpretationId: null,
+        createdAt: clock.now(),
+        updatedAt: clock.now(),
+        terminalReason: null,
+      },
+      store,
+      scheduler: new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 }),
+      clock,
+      config,
+    } satisfies PhaseContext;
+    const factory = createWorkerFactory(deps, ctx);
+    const first = factory(0);
+    const retry = factory(1);
+
+    expect(new Set([first.model.model, retry.model.model])).toEqual(new Set(["worker-a", "worker-b"]));
+  });
+
   it("createWorkerFactory uses agent.maxTurns instead of retry.maxAttempts", async () => {
     const provider = new ScriptedProvider("scripted", [
       { name: "worker", capabilities: { ...FAKE_CAPABILITIES.frontier, inputCostPerM: 0, outputCostPerM: 0 } },
