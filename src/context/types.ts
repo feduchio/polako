@@ -87,6 +87,8 @@ export interface BuildWorkerInput {
   tools: readonly string[];
   /** optional explore hits for request_context */
   extraHits?: readonly IntelHit[];
+  /** The head of an existing test file, for a task that writes tests. */
+  testExample?: { path: string; head: string } | null;
   maxPackTokens: number;
 }
 

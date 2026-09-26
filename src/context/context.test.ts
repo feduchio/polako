@@ -1,5 +1,6 @@
-import { workerPackCap } from "./workerInstruction.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { workerPackCap, writesTests } from "./workerInstruction.js";
+import { findTestExample } from "../project/testExample.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -193,6 +194,38 @@ describe("context builders", () => {
     expect(coding).not.toContain("new file");
     const investigation = build({ ...sampleTask(runId), kind: "investigation" }).sections["task"] ?? "";
     expect(investigation).toContain("Put the reproduction in a new file");
+  });
+
+  it("shows a test-writing task the head of an existing test file for the project's runner", () => {
+    const root = mkdtempSync(join(tmpdir(), "polish-test-example-"));
+    try {
+      mkdirSync(join(root, "src", "__tests__"), { recursive: true });
+      mkdirSync(join(root, "node_modules", "x"), { recursive: true });
+      writeFileSync(join(root, "node_modules", "x", "a.test.js"), 'import { test } from "vitest";\n');
+      writeFileSync(join(root, "src", "__tests__", "args.test.ts"), 'import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\n');
+      writeFileSync(join(root, "src", "index.ts"), "export {};\n");
+      const example = findTestExample(root, "node-test");
+      expect(example).toEqual({ path: "src/__tests__/args.test.ts", head: 'import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\n' });
+      const profile = { framework: "node-test", checks: [] } as unknown as ProjectProfile;
+      const pack = buildWorkerContextPack({
+        task: { ...sampleTask(runId), kind: "investigation" },
+        profile,
+        testExample: example,
+        facts: [],
+        findings: [],
+        fileFragments: [],
+        failedAttempts: [],
+        attemptNumber: 1,
+        tools: [],
+        maxPackTokens: 10_000,
+      });
+      expect(pack.sections["testStyle"]).toContain("This project's tests run with node-test. Write new tests in the style of src/__tests__/args.test.ts");
+      expect(pack.sections["testStyle"]).toContain('import { describe, it } from "node:test";');
+      expect(writesTests({ ...sampleTask(runId), kind: "investigation" })).toBe(true);
+      expect(writesTests({ ...sampleTask(runId), title: "Add tests/neg.test.mjs" })).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("throws when protected base protocol policy exceeds the worker budget", () => {

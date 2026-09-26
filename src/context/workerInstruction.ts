@@ -4,6 +4,7 @@ import type { ProtocolRegistry } from "../protocols/loader.js";
 import { composeForWorker } from "../protocols/composer.js";
 import type { TaskProtocolName } from "../protocols/types.js";
 import type { Task, TaskKind } from "../domain/task.js";
+import { findTestExample } from "../project/testExample.js";
 import { buildWorkerContextPack } from "./worker.js";
 
 /**
@@ -63,8 +64,15 @@ export function composeWorkerInstruction(
     failedAttempts: [],
     attemptNumber: input.task.attempts,
     tools: input.tools,
+    ...(input.profile !== null && writesTests(input.task) ? { testExample: findTestExample(input.profile.projectPath, input.profile.framework) } : {}),
     maxPackTokens: input.maxPackTokens,
   });
 
   return { text: pack.text, protocolHash: pack.protocolHash };
+}
+
+/** An investigation writes a reproduction test; any other task that names tests will likely write one. */
+export function writesTests(task: Task): boolean {
+  if (task.kind === "investigation") return true;
+  return /\btests?\b|\.test\.|\.spec\./i.test([task.title, task.description, ...task.acceptance].join("\n"));
 }

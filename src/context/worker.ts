@@ -14,6 +14,7 @@ const DROP_ORDER = [
   "failedAttempts",
   "findings",
   "fileFragments",
+  "testStyle",
   "architectureNotes",
   "invariants",
   "tools",
@@ -94,6 +95,15 @@ export function buildWorkerContextPack(input: BuildWorkerInput): WorkerContextPa
         .map((member) => `## Protocol: ${member.name}\n\n${member.body.trim()}`)
         .join("\n\n---\n\n");
     }
+  }
+
+  if (input.testExample != null) {
+    sections["testStyle"] = [
+      `This project's tests run with ${input.profile?.framework ?? "its own runner"}. Write new tests in the style of ${input.testExample.path}, whose head is:`,
+      "```",
+      input.testExample.head,
+      "```",
+    ].join("\n");
   }
 
   if (input.profile) {
