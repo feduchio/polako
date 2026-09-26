@@ -1112,6 +1112,38 @@ describe("B2 production candidate drivers", () => {
       s.close();
     });
 
+    it("names the demonstrated finding a failed fix task came from", async () => {
+      const { store: s, engine, runId, taskId } = await seedGating();
+      const task = s.repos.tasks.get(taskId)!;
+      const findingId = id("find", clock.now() + 41);
+      const validationId = id("fval", clock.now() + 41);
+      const finding = {
+        id: findingId, runId, checkpointHash: task.baseCheckpointHash, axis: "correctness", reportedBy: { kind: "reviewer" },
+        status: "VALID", duplicateOf: null, fingerprint: "f".repeat(24), investigationRounds: 0, createdAt: clock.now(), updatedAt: clock.now(),
+        criterion: "correctness", severity: "high", blocking: true, claim: "add(1, 2) returns -1", evidence: [], reproduction: [],
+      };
+      const validation = {
+        id: validationId, findingId, runId, method: "deterministic_reproduction", verdict: "VALID",
+        rationale: "the engine ran the reproduction and add(1, 2) is 3 failed: AssertionError", evidenceRefs: [{ sha256: "a".repeat(64), kind: "investigation_reproduction", bytes: 1 }],
+        outcome: "demonstrated", reason: null, performedBy: { kind: "system" }, createdAt: clock.now(),
+      };
+      s.events.append([
+        { id: id("evt", clock.now() + 41), runId, ts: clock.now() + 41, type: "finding.raised", payload: { finding }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
+        { id: id("evt", clock.now() + 42), runId, ts: clock.now() + 42, type: "finding.validated", payload: { validation, finding }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
+        {
+          id: id("evt", clock.now() + 43), runId, ts: clock.now() + 43, type: "task.state_changed",
+          payload: { task: { ...task, origin: { kind: "valid_finding", findingId, validationId, verdict: "VALID" } } },
+          causedBy: [], actor: { kind: "system" }, artifacts: [],
+        },
+      ]);
+      exhaust(s, runId, taskId, [{ state: "FAILED_GATES", gated: true }]);
+      await engine.tickRun(runId);
+
+      const summary = s.repos.runs.get(runId)?.terminalReason?.summary ?? "";
+      expect(summary).toContain(`the task fixes finding ${findingId} "add(1, 2) returns -1", demonstrated by deterministic_reproduction`);
+      s.close();
+    });
+
     // Waiting repairs an allowance and nothing else. Telling an operator to wait for a 404, a 400
     // or a local context-budget overflow is telling them to wait for something that never comes.
     // Three outcomes, not two. `repeated_failure` means the work was done and judged; when nothing

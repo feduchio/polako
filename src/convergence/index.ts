@@ -14,6 +14,7 @@ export {
 } from "./antiFakeDone.js";
 export { ConvergenceController, type ConvergenceDecision, type ConvergenceState } from "./controller.js";
 export { rollbackIfDominated, rollbackTarget } from "./dominance.js";
+export { describeDispositions, notExaminedCount, tallyDispositions, type DispositionInput, type DispositionTally } from "./dispositions.js";
 export {
   buildCleanRoundFromReview,
   cleanRoundsHaveReviewProof,

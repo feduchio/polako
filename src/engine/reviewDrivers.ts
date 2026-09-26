@@ -57,6 +57,7 @@ import {
 } from "../convergence/record.js";
 import { orderReviewersByEnsemble, pendingEnsembleOverride } from "../convergence/pathology/ensemble.js";
 import { MissionAcceptanceService } from "../store/missionAcceptance.js";
+import { runDispositions } from "./dispositions.js";
 import type { PhaseContext, PhaseDriver } from "./types.js";
 import {
   assertIsolatedCheckout,
@@ -744,7 +745,6 @@ function applyDebateOutcome(
   }
   ctx.store.events.append(events);
 
-  if (terminalStatus === "UNCERTAIN" && terminalFinding.blocking && !residualInvestigate) return "needs_human";
   return "ok";
 }
 
@@ -756,7 +756,7 @@ function handleResidualUncertain(
 ): "ok" | "needs_human" {
   if (!finding.blocking) return "ok";
   const max = ctx.config.convergence.maxInvestigationRoundsPerFinding;
-  if (finding.investigationRounds >= max) return "needs_human";
+  if (finding.investigationRounds >= max) return "ok";
   if (hasInvestigationForFinding(ctx, finding.id)) return "ok";
   const now = ctx.clock.now();
   const updated = FindingSchema.parse({
@@ -951,6 +951,7 @@ function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): 
     findings,
     existingCleanRounds,
     reviewRoundIndex,
+    dispositions: runDispositions(ctx, checkpointHash),
     now: ctx.clock.now(),
   });
   ctx.store.events.append([event]);

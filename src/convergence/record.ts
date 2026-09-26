@@ -1,5 +1,5 @@
 import { SYSTEM_ACTOR, type ModelRef } from "../domain/common.js";
-import { CleanRoundSchema, cleanRoundsFor, isNovelRound, type CleanRound } from "../domain/convergence.js";
+import { CleanRoundSchema, cleanRoundsFor, isNovelRound, type CleanRound, type DispositionTally } from "../domain/convergence.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Finding } from "../domain/finding.js";
 import type { ReviewAxis } from "../domain/finding.js";
@@ -18,6 +18,8 @@ export interface RecordCleanRoundInput {
   findings: readonly Finding[];
   existingCleanRounds: readonly CleanRound[];
   reviewRoundIndex?: number;
+  /** The checkpoint's findings by disposition, recorded on the round. */
+  dispositions?: DispositionTally;
   now: number;
 }
 
@@ -160,6 +162,7 @@ export function buildCleanRoundFromReview(input: RecordCleanRoundInput): CleanRo
     rawFindings,
     validatedBlocking: 0,
     novel: isNovelRound(input.existingCleanRounds, { checkpointHash: input.checkpointHash, axes, ensemble }),
+    ...(input.dispositions === undefined ? {} : { dispositions: input.dispositions }),
     createdAt: input.now,
   });
 }

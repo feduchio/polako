@@ -388,17 +388,8 @@ function nextPhaseForPlanningReentry(ctx: PhaseContext): PhaseDriverResult {
   if (openInvestigations.some((task) => task.state !== "BLOCKED")) {
     return { status: "complete", nextPhase: "EXECUTING" };
   }
-  if (openInvestigations.length > 0) {
-    const reason: TerminalReason = {
-      code: "product_decision_required",
-      summary: `No reproduction the engine could run settled ${String(openInvestigations.length)} uncertain finding(s) within ${String(maxAttempts)} attempts.`,
-      question: "Investigation attempts are exhausted. How should the run proceed?",
-      options: ["Provide investigation evidence", "Stop the run"],
-    };
-    emitNeedsHumanReport(ctx, reason, []);
-    appendRunSnapshot(ctx, { terminalReason: reason });
-    return { status: "complete", nextPhase: "NEEDS_HUMAN" };
-  }
+  // Every open investigation is BLOCKED: its finding stays not examined, and the run goes on to a
+  // DONE that names it (owner decision A) rather than asking a human what no execution could show.
 
   const exhausted = coding.filter((task) => isExhaustedCodingTask(task, maxAttempts));
   const findingWork = tasks.filter((task) =>

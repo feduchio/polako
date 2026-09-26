@@ -111,6 +111,8 @@ interface Outcome {
   investigations: number;
   /** `outcome` or `outcome:reason` of each investigation that reached the judge. */
   judged: string[];
+  /** Dispositions the last clean round recorded for its checkpoint. */
+  lastCleanRound: Record<string, unknown> | undefined;
   add: string;
 }
 
@@ -129,6 +131,7 @@ async function runCase(fixture: string, plan: Plan): Promise<Outcome> {
     judged: store.events.list(runId, { types: ["investigation.completed"] })
       .filter((event) => typeof event.payload["outcome"] === "string")
       .map((event) => [event.payload["outcome"], event.payload["reason"]].filter((part) => typeof part === "string").join(":")),
+    lastCleanRound: (store.events.list(runId, { types: ["clean_round.recorded"] }).at(-1)?.payload["cleanRound"] as { dispositions?: Record<string, unknown> } | undefined)?.dispositions,
     add: await runBranchFile(env, run, "src/add.mjs"),
   };
 }
@@ -163,6 +166,8 @@ describe("acceptance: a defect is demonstrated only by an execution that shows i
     expect(outcome.judged).toEqual(["refuted"]);
     expect(outcome.fixTasks).toBe(0);
     expect(outcome.run.phase).toBe("DONE");
+    expect(outcome.run.terminalReason).toMatchObject({ code: "converged", summary: expect.stringMatching(/1 finding: 0 demonstrated, 1 refuted/) });
+    expect(outcome.lastCleanRound).toMatchObject({ total: 1, refuted: 1, demonstrated: 0 });
   });
 
   it("a reproduction the test script never runs does not refute a planted defect", async () => {
@@ -186,6 +191,9 @@ describe("acceptance: a defect is demonstrated only by an execution that shows i
     const outcome = await runCase("disputed-finding", { firstFix: SUM, reproContent: KILLED_REPRO });
     expect(outcome.investigations).toBeGreaterThan(0);
     expect(outcome.judged).toEqual(["not_examined:killed"]);
+    expect(outcome.run.phase).toBe("DONE");
+    expect(outcome.run.terminalReason?.code).toBe("converged_with_unexamined");
+    expect(outcome.run.terminalReason?.summary).toMatch(/\(killed\).*1 not examined \(killed 1\)/);
     expect(outcome.statuses).not.toContain("VALID");
     expect(outcome.fixTasks).toBe(0);
   });
@@ -196,6 +204,7 @@ describe("acceptance: a defect is demonstrated only by an execution that shows i
       reproContent: 'import test from "node:test";\nimport { sum } from "../src/sum.mjs";\ntest("sum", () => { sum(1, 2); });\n',
     });
     expect(outcome.judged).toEqual(["not_examined:environment"]);
+    expect(outcome.run.terminalReason?.code).toBe("converged_with_unexamined");
     expect(outcome.statuses).not.toContain("VALID");
     expect(outcome.fixTasks).toBe(0);
   });

@@ -136,6 +136,11 @@ export function mustCancelInFlight(control: RunControl): boolean {
 export const TerminalReasonSchema = z.object({
   code: z.enum([
     "converged",
+    /**
+     * Converged, but at least one blocking finding was never settled by an execution (owner
+     * decision A, 2026-09-26): the summary names each and why. Not a plain `converged`.
+     */
+    "converged_with_unexamined",
     /** Converged on the baseline: the engine's own gates showed every coding task's acceptance already held. */
     "no_change_required",
     "stopped_by_user",

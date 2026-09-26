@@ -41,6 +41,8 @@ import { emitFinalReport, emitNeedsHumanReport } from "../report/emit.js";
 import type { TerminalReason } from "../domain/run.js";
 import type { PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
 import { id } from "../shared/ids.js";
+import { describeDispositions } from "../convergence/dispositions.js";
+import { runDispositions, unexaminedBlockingFindings } from "./dispositions.js";
 
 export interface ConvergenceDriverOptions {
   controller?: ConvergenceController;
@@ -81,17 +83,7 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
         return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: unverified };
       }
       emitFinalReport(ctx);
-      if (missionSatisfiedWithoutChange(evidence.tasks)) {
-        return {
-          status: "complete",
-          nextPhase: "DONE",
-          terminalReason: {
-            code: "no_change_required",
-            summary: "No code was changed: the engine's gates on the unchanged base passed for every coding task, and the required review rounds closed clean with no finding left standing.",
-          },
-        };
-      }
-      return { status: "complete", nextPhase: "DONE" };
+      return { status: "complete", nextPhase: "DONE", terminalReason: doneReason(ctx, missionSatisfiedWithoutChange(evidence.tasks)) };
     }
 
     const latestEvents = ctx.store.events.list(ctx.run.id);
@@ -202,6 +194,26 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
   };
 }
 
+/** DONE says what it rests on: every finding's disposition, and by name any blocking one left unexamined. */
+function doneReason(ctx: PhaseContext, noChange: boolean): TerminalReason {
+  const tally = describeDispositions(runDispositions(ctx));
+  const unexamined = unexaminedBlockingFindings(ctx);
+  if (unexamined.length > 0) {
+    const named = unexamined.map(({ finding, reason }) => `${finding.id} "${finding.claim}" (${reason})`).join("; ");
+    return {
+      code: "converged_with_unexamined",
+      summary: `Converged with ${String(unexamined.length)} blocking finding(s) no execution settled: ${named}. Findings: ${tally}.`,
+    };
+  }
+  if (noChange) {
+    return {
+      code: "no_change_required",
+      summary: `No code was changed: the engine's gates on the unchanged base passed for every coding task, and the required review rounds closed clean with no finding left standing. Findings: ${tally}.`,
+    };
+  }
+  return { code: "converged", summary: `Required clean rounds reached. Findings: ${tally}.` };
+}
+
 function acceptedB6Done(ctx: PhaseContext, controller: ConvergenceController, hash: string): boolean {
   if (!runtimeEvidenceAllowsDone(ctx, hash)) return false;
   return acceptedB6Decision(ctx, controller, hash).action === "DONE";
@@ -210,12 +222,6 @@ function acceptedB6Done(ctx: PhaseContext, controller: ConvergenceController, ha
 function acceptedB6Decision(ctx: PhaseContext, controller: ConvergenceController, hash: string) {
   const findings = ctx.store.repos.findings.openForCheckpoint(ctx.run.id, hash);
   const openBlocking = findings.filter((finding) => finding.blocking && finding.status === "VALID").length;
-  const investigationExhausted = findings.some(
-    (finding) =>
-      finding.blocking &&
-      finding.status === "UNCERTAIN" &&
-      finding.investigationRounds >= ctx.config.convergence.maxInvestigationRoundsPerFinding,
-  );
   const checkpoints = ctx.store.repos.checkpoints.listByRun(ctx.run.id);
   const current = checkpoints.find((checkpoint) => checkpoint.commitHash === hash) ?? syntheticCheckpoint(ctx, hash);
   const prior = checkpoints.filter((checkpoint) => checkpoint.commitHash !== hash);
@@ -225,7 +231,6 @@ function acceptedB6Decision(ctx: PhaseContext, controller: ConvergenceController
     cleanRounds: ctx.store.repos.cleanRounds.listByRun(ctx.run.id),
     requiredCleanRounds: ctx.config.convergence.requiredCleanRounds,
     openBlockingFindings: openBlocking,
-    investigationExhausted,
     consecutiveNoProgress: 0,
     simplifyAfterNoProgress: ctx.config.convergence.noProgressAttempts,
     simplificationAvailable: true,

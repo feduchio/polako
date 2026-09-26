@@ -14,7 +14,6 @@ export interface ConvergenceState {
   cleanRounds: readonly CleanRound[];
   requiredCleanRounds: number;
   openBlockingFindings: number;
-  investigationExhausted: boolean;
   consecutiveNoProgress: number;
   simplifyAfterNoProgress: number;
   simplificationAvailable?: boolean;
@@ -25,10 +24,6 @@ export class ConvergenceController {
     if (!Number.isInteger(state.requiredCleanRounds) || state.requiredCleanRounds < 1) {
       throw new RangeError("requiredCleanRounds must be a positive integer");
     }
-    if (state.investigationExhausted) {
-      return { action: "NEEDS_HUMAN", reason: "an uncertain finding exhausted its investigation budget" };
-    }
-
     const rollbackTo = rollbackTarget(state.current, state.priorCheckpoints);
     if (rollbackTo !== null) {
       return {

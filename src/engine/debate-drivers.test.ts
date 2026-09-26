@@ -183,7 +183,7 @@ describe("C4 finding debate in createValidatingDriver", () => {
     expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
   });
 
-  it("6. exhausted residual UNCERTAIN becomes NEEDS_HUMAN with no coding task or DONE", async () => {
+  it("6. exhausted residual UNCERTAIN stays not examined with no coding task and no question to a human", async () => {
     engine.registerPhase(
       "VALIDATING",
       debateDriver(() => uncertainAttempt(), recorder(judgeScript("UNCERTAIN")), ROLES),
@@ -192,7 +192,7 @@ describe("C4 finding debate in createValidatingDriver", () => {
       blockingFinding(fixture.integrated, { investigationRounds: 2 }),
     ]);
     await engine.tickRun(runId);
-    expect(store.repos.runs.get(runId)?.phase).toBe("NEEDS_HUMAN");
+    expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
     expect(store.repos.tasks.listByRun(runId)).toHaveLength(0);
     expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("UNCERTAIN");
   });
@@ -215,7 +215,7 @@ describe("C4 finding debate in createValidatingDriver", () => {
     await engine.tickRun(runId);
     expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("UNCERTAIN");
     expect(store.repos.tasks.listByRun(runId)).toHaveLength(0);
-    expect(store.repos.runs.get(runId)?.phase).toBe("NEEDS_HUMAN");
+    expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
   });
 
   it("7b. malformed judge JSON does not upgrade to VALID", async () => {

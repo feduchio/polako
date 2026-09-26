@@ -757,9 +757,23 @@ function handleZeroSurvivors(
         `${String(other)} ended otherwise` +
         (firstLine(candidates.find((candidate) => candidate.error !== null)?.error) === ""
           ? ""
-          : ` (${firstLine(candidates.find((candidate) => candidate.error !== null)?.error)})`),
+          : ` (${firstLine(candidates.find((candidate) => candidate.error !== null)?.error)})`) +
+        originOf(ctx, task),
     },
   };
+}
+
+/**
+ * A fix task that fails is read against the finding it came from: a worker that cannot fix a
+ * defect the engine demonstrated is not the same stall as a mission task that goes nowhere.
+ */
+function originOf(ctx: PhaseContext, task: Task): string {
+  if (task.origin.kind !== "valid_finding") return "";
+  const { findingId, validationId } = task.origin;
+  const finding = ctx.store.repos.findings.get(findingId);
+  const validation = ctx.store.repos.validations.listByFinding(findingId).find((item) => item.id === validationId);
+  return `; the task fixes finding ${findingId}${finding === null ? "" : ` "${finding.claim}"`}` +
+    (validation === undefined ? "" : `, ${validation.outcome ?? "judged"} by ${validation.method}: ${firstLine(validation.rationale)}`);
 }
 
 /**
@@ -795,7 +809,7 @@ function handleNoComparisonWinner(
   if (retry) return { status: "complete", nextPhase: "PLANNING" };
   const reason: RunTerminalReason = {
     code: "repeated_failure",
-    summary: `comparison produced no winner for task ${task.id} after ${task.attempts} attempts`,
+    summary: `comparison produced no winner for task ${task.id} after ${task.attempts} attempts${originOf(ctx, task)}`,
     question: "Tournament comparison produced no winner. How should the run proceed?",
     options: ["Retry planning", "Stop the run"],
   };

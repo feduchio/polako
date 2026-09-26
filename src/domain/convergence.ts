@@ -6,6 +6,22 @@ import { ReviewAxisSchema } from "./finding.js";
  * A clean round belongs to one checkpoint hash. Rounds for other hashes are simply not
  * counted, so any code change (integration, simplification, rollback) resets convergence.
  */
+/** What became of each finding, by what decided it; see `tallyDispositions`. */
+export const DispositionTallySchema = z.object({
+  total: z.number().int().nonnegative(),
+  demonstrated: z.number().int().nonnegative(),
+  refuted: z.number().int().nonnegative(),
+  /** Advisory findings a debate judged out of scope; nothing executed. */
+  dismissed: z.number().int().nonnegative(),
+  /** Findings no execution settled, counted by the reason. */
+  notExamined: z.record(z.string(), z.number().int().nonnegative()),
+  duplicate: z.number().int().nonnegative(),
+  noted: z.number().int().nonnegative(),
+  /** Not yet decided either way. */
+  open: z.number().int().nonnegative(),
+});
+export type DispositionTally = z.infer<typeof DispositionTallySchema>;
+
 export const CleanRoundSchema = z.object({
   id: IdSchema,
   runId: IdSchema,
@@ -23,6 +39,8 @@ export const CleanRoundSchema = z.object({
   validatedBlocking: z.literal(0),
   /** whether the ensemble/axes differed from previous clean rounds for this checkpoint */
   novel: z.boolean(),
+  /** The checkpoint's findings by disposition; absent on rounds recorded before it existed. */
+  dispositions: DispositionTallySchema.optional(),
   createdAt: TimestampSchema,
 });
 export type CleanRound = z.infer<typeof CleanRoundSchema>;

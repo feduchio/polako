@@ -289,15 +289,14 @@ describe("planning re-entry", () => {
     expect(run.terminalReason).toBeNull();
   });
 
-  it("an investigation that used up its attempts escalates to NEEDS_HUMAN", async () => {
+  it("an investigation that used up its attempts leaves its finding not examined and the run goes on (owner decision A)", async () => {
     const { runId } = seedInvestigationOnly(store, clock);
     const task = store.repos.tasks.listByRun(runId)[0]!;
     forceTaskState(store, clock, task.id, "BLOCKED", defaultConfig().retry.maxAttempts);
     await engine.tickRun(runId);
     const run = store.repos.runs.get(runId)!;
-    expect(run.phase).toBe("NEEDS_HUMAN");
-    expect(run.terminalReason?.summary).toMatch(/No reproduction the engine could run settled 1 uncertain finding/);
-    expect(store.events.list(runId, { types: ["report.generated"] }).length).toBeGreaterThanOrEqual(1);
+    expect(run.phase).toBe("REVIEWING");
+    expect(run.terminalReason).toBeNull();
   });
 
   it("a settled investigation hands the review round it came from to VALIDATING instead of opening a new round", async () => {
