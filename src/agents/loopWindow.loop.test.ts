@@ -13,6 +13,7 @@ import { Git } from "../sandbox/git.js";
 import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
+import { anchorOf } from "./hashline.js";
 import { AgentRunner } from "./runner.js";
 import type { AgentRunnerDeps, AgentTranscript } from "./types.js";
 
@@ -172,7 +173,7 @@ describe("the worker's context window", () => {
       reply([call("search", { query: "add", path: "src" })]),
       reply([call("repo_intel", { action: "symbol", query: "add" })]),
       reply([call("write", { path: "src/created.ts", content: "export const one = 1;\n" })]),
-      reply([call("apply_patch", { path: "src/math.ts", oldText: "a + b", newText: "a + b + 0" })]),
+      reply([call("edit", { path: "src/math.ts", edits: [{ op: "replace", start: anchorOf(1, "export const add = (a: number, b: number) => a + b;"), lines: ["export const add = (a: number, b: number) => a + b + 0;"] }] })]),
       reply([call("run_command", { argv: FAILING_EARLIER })]),
       reply([call("run_command", { argv: FAILING })]),
       reply([call("request_context", { query: "why is add wrong" })]),
@@ -192,7 +193,7 @@ describe("the worker's context window", () => {
       'search "add"',
       'symbol "add"',
       "src/created.ts (write)",
-      "src/math.ts (patch)",
+      "src/math.ts (edit)",
       'request_context "why is add wrong"',
       "exit 3",
       LATE_MARKER,

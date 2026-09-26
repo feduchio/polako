@@ -19,6 +19,7 @@ import { estimateTokens } from "../context/types.js";
 import { AgentRunner, toolResultTokenBudget } from "./runner.js";
 import type { AgentRunnerDeps } from "./types.js";
 import { AGENT_TOOL_DEFINITIONS, createAgentTools, createLoopEvidence, pageLines } from "./tools.js";
+import { anchorOf } from "./hashline.js";
 import { EmpiricalProgressTracker } from "./progressTracker.js";
 import { defaultProtocolsRoot, ProtocolRegistry } from "../protocols/loader.js";
 import { progressSystemPrompt } from "../context/progressInstruction.js";
@@ -47,7 +48,10 @@ describe("AgentRunner", () => {
     provider.script("worker", [
       replyWith(tool("read", { path: "src/math.ts" }, "read")),
       replyWith(tool("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 1;\n" }, "write")),
-      replyWith(tool("apply_patch", { path: "src/math.ts", oldText: "a + b", newText: "a + b + 0" }, "patch")),
+      replyWith(tool("edit", {
+        path: "src/math.ts",
+        edits: [{ op: "replace", start: anchorOf(1, "export const add = (a: number, b: number) => a + b + 1;"), lines: ["export const add = (a: number, b: number) => a + b + 0;"] }],
+      }, "patch")),
       replyWith(tool("search", { query: "add", path: "src" }, "search")),
       replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "cmd")),
       replyWith(tool("finish", { summary: "done" }, "finish")),
@@ -58,7 +62,7 @@ describe("AgentRunner", () => {
 
     expect(result.status).toBe("completed");
     expect(provider.calls[0]?.tools?.map((spec) => spec.name)).toEqual([
-      "read", "list", "search", "repo_intel", "write", "apply_patch", "run_command", "request_context", "read_output", "request_split", "finish",
+      "read", "list", "search", "repo_intel", "write", "edit", "run_command", "request_context", "read_output", "request_split", "finish",
     ]);
     expect(readFileSync(join(handle.path, "src/math.ts"), "utf8")).toContain("a + b + 0");
     expect(result.transcriptRef).toBeDefined();
@@ -419,11 +423,12 @@ describe("AgentRunner", () => {
     const [whole, ...rest] = results;
     expect(whole).toMatchObject({ path: "src/small.ts", startLine: 1, endLine: 200, totalLines: 200 });
     expect(whole?.["nextStartLine"]).toBeUndefined();
-    expect(whole?.["content"]).toBe(small.join("\n"));
+    const anchored = (lines: string[]) => lines.map((line, index) => `${anchorOf(index + 1, line)}|${line}`).join("\n");
+    expect(whole?.["content"]).toBe(anchored(small));
     const longResults = rest.filter((result) => result["path"] === "src/long.ts");
     expect(longPages).toBe(longResults.length);
     expect(longResults.length).toBeGreaterThan(1);
-    expect(longResults.map((result) => result["content"]).join("\n")).toBe(large.join("\n"));
+    expect(longResults.map((result) => result["content"]).join("\n")).toBe(anchored(large));
     for (const [index, result] of longResults.entries()) {
       expect(result["totalLines"]).toBe(3_000);
       if (index > 0) expect(result["startLine"]).toBe(Number(longResults[index - 1]?.["endLine"]) + 1);
@@ -564,7 +569,7 @@ describe("AgentRunner", () => {
 
     provider.script("worker", [
       replyWith(tool("write", { path: "../escaped.txt", content: "owned" }, "write")),
-      replyWith(tool("apply_patch", { path: "../escaped.txt", oldText: "owned", newText: "still-owned" }, "patch")),
+      replyWith(tool("edit", { path: "../escaped.txt", edits: [{ op: "replace", start: "1:00", lines: ["still-owned"] }] }, "patch")),
       replyWith(tool("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => a + b + 2;\n" }, "good-write")),
       replyWith(tool("finish", { summary: "recovered" }, "finish")),
     ]);
@@ -1145,6 +1150,28 @@ describe("agent tools", () => {
     });
     return { store, handle, loopEvidence, tools };
   }
+
+  it("edits by anchor, returns fresh anchors, and refuses a no-op edit until it says stop", async () => {
+    const { store, handle, loopEvidence, tools } = await toolsFixture();
+    const read = await tools.execute("read", { path: "src/math.ts" }) as { content: string };
+    const anchor = read.content.split("|")[0] ?? "";
+    expect(anchor).toMatch(/^1:[0-9a-f]{2}$/);
+    const edited = await tools.execute("edit", {
+      path: "src/math.ts",
+      edits: [{ op: "replace", start: anchor, lines: ["export const add = (a: number, b: number) => b + a;"] }],
+    }) as { lines: string };
+    expect(edited.lines).toBe(`${anchorOf(1, "export const add = (a: number, b: number) => b + a;")}|export const add = (a: number, b: number) => b + a;`);
+    expect(loopEvidence.patches).toEqual(["src/math.ts"]);
+    const same = { path: "src/math.ts", edits: [{ op: "replace", start: edited.lines.split("|")[0], lines: ["export const add = (a: number, b: number) => b + a;"] }] };
+    await expect(tools.execute("edit", same)).rejects.toThrow(/produced no change/);
+    await expect(tools.execute("edit", same)).rejects.toThrow(/produced no change/);
+    await expect(tools.execute("edit", same)).rejects.toThrow(/^STOP\./);
+    await expect(tools.execute("edit", { path: "src/math.ts", edits: [{ op: "replace", start: anchor, lines: ["x"] }] }))
+      .rejects.toThrow(/changed since it was read/);
+    expect(loopEvidence.patches).toEqual(["src/math.ts"]);
+    store.close();
+    await handle.destroy();
+  });
 
   it("lists a subdirectory's direct children, or every nested path below it without the directory itself", async () => {
     const { store, handle, tools } = await toolsFixture();

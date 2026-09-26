@@ -48,7 +48,7 @@ describe("buildLoopDigest", () => {
         turn(3, [ok("search", { query: "addTwo" }, { exitCode: 0 })]),
         turn(4, [ok("repo_intel", { action: "callers", query: "addTwo" }, {})]),
         turn(5, [ok("write", { path: "src/beta.ts" }, { path: "src/beta.ts" })]),
-        turn(6, [ok("apply_patch", { path: "src/gamma.ts" }, { path: "src/gamma.ts" })]),
+        turn(6, [ok("edit", { path: "src/gamma.ts" }, { path: "src/gamma.ts" })]),
         turn(7, [ok("request_context", { query: "why is it slow" }, {})]),
       ],
       400,
@@ -58,7 +58,7 @@ describe("buildLoopDigest", () => {
     expect(digest).toContain('search "addTwo"');
     expect(digest).toContain('callers "addTwo"');
     expect(digest).toContain("src/beta.ts (write)");
-    expect(digest).toContain("src/gamma.ts (patch)");
+    expect(digest).toContain("src/gamma.ts (edit)");
     expect(digest).toContain('request_context "why is it slow"');
   });
 

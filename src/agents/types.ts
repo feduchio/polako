@@ -45,7 +45,7 @@ export const AGENT_TOOL_NAMES = [
   "search",
   "repo_intel",
   "write",
-  "apply_patch",
+  "edit",
   "run_command",
   "request_context",
   "read_output",

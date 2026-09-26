@@ -397,7 +397,7 @@ export class AgentRunner implements CandidateWorker {
     if (!hasLoopEvidence(loopEvidence)) {
       throw new PolishError(
         "INVALID_ARGUMENT",
-        "finish rejected: produce fresh evidence in this loop (write, apply_patch, or run_command) before finishing",
+        "finish rejected: produce fresh evidence in this loop (write, edit, or run_command) before finishing",
       );
     }
     if (task.kind === "investigation") {
@@ -516,7 +516,7 @@ export class AgentRunner implements CandidateWorker {
     // progress tracker's case (scored at turns 8 and 12), not this one. The loops that burned a
     // budget were search and list. An accepted `finish` ends the loop before this, so a `finish`
     // that gets here was rejected: run_01m3dqgjp7s5fgzmgfhm9t sent one rejected noChange 23 times.
-    if (name === "read" || name === "write" || name === "apply_patch" || name === "request_split") return null;
+    if (name === "read" || name === "write" || name === "edit" || name === "request_split") return null;
     const key = `${name}\n${encodedArgs}\n${sha256Hex(stableResult(name, message))}`;
     const prior = repeats.get(key);
     const count = (prior?.count ?? 0) + 1;

@@ -132,8 +132,8 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
         errorCounts.set(key, { seq, count: (prior?.count ?? 0) + 1 });
         continue;
       }
-      if (result.name === "write" || result.name === "apply_patch") {
-        const tag = result.name === "write" ? "write" : "patch";
+      if (result.name === "write" || result.name === "edit") {
+        const tag = result.name === "write" ? "write" : "edit";
         const key = `${shortPath(pathOf(result.output, parsed))} (${tag})`;
         if (!seenChanged.has(key)) {
           seenChanged.add(key);
@@ -242,7 +242,7 @@ function identifyingArgument(name: string, output: unknown, args: Record<string,
     case "read":
     case "list":
     case "write":
-    case "apply_patch":
+    case "edit":
       return shortPath(pathOf(output, args));
     case "run_command":
       return stringField(args, "argv") ?? "";

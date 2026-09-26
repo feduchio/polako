@@ -14,6 +14,7 @@ import type { CommandPolicy } from "../sandbox/allowlist.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import { PolishError } from "../shared/errors.js";
 import type { ArtifactStore } from "../store/artifacts.js";
+import { anchorOf, applyHashlineEdits, NoopTracker, parseEdits, renderAnchored } from "./hashline.js";
 import type { AgentToolName, LoopEvidence, RequestContext } from "./types.js";
 
 export interface AgentToolsDeps {
@@ -64,12 +65,38 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
 });
 
 export const AGENT_TOOL_DEFINITIONS: ToolSpec[] = [
-  { name: "read", description: "Read a UTF-8 file in the worktree. The whole file when it fits; otherwise a page, with nextStartLine to continue from.", parameters: objectSchema({ path: { type: "string" }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, ["path"]) },
+  {
+    name: "read",
+    description:
+      "Read a UTF-8 file in the worktree. Each line comes as `N:hh|text`: `N:hh` is the line's anchor for edit, and the text after `|` is the line. " +
+      "The whole file when it fits; otherwise a page, with nextStartLine to continue from.",
+    parameters: objectSchema({ path: { type: "string" }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, ["path"]),
+  },
   { name: "list", description: "List files and directories git knows about or would add (ignored files are left out).", parameters: objectSchema({ path: { type: "string" }, recursive: { type: "boolean" } }) },
   { name: "search", description: "Search worktree text with ripgrep.", parameters: objectSchema({ query: { type: "string" }, path: { type: "string" } }, ["query"]) },
   { name: "repo_intel", description: "Query repository symbols, relationships, impact, tests, or health.", parameters: objectSchema({ action: { type: "string", enum: ["explore", "symbol", "callers", "callees", "impact", "affected_tests", "health"] }, query: { type: "string" }, files: { type: "array", items: { type: "string" } }, depth: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } }, ["action"]) },
   { name: "write", description: "Write a UTF-8 file inside the worktree.", parameters: objectSchema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"]) },
-  { name: "apply_patch", description: "Replace one exact text fragment in a worktree file.", parameters: objectSchema({ path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } }, ["path", "oldText", "newText"]) },
+  {
+    name: "edit",
+    description:
+      "Change lines of an existing file by the anchors read showed (the `N:hh` before `|`), without retyping them. " +
+      "Each edit is {op:\"replace\", start, end?, lines} (lines start..end become lines), {op:\"insert_after\", start, lines} (start \"0\" = top of file) " +
+      "or {op:\"delete\", start, end?}. All anchors refer to the file as you last read it; a line that changed since is refused, so read again. " +
+      "lines are the new lines without anchors. Returns the changed lines with fresh anchors. Use write for a new file.",
+    parameters: objectSchema({
+      path: { type: "string" },
+      edits: {
+        type: "array",
+        minItems: 1,
+        items: objectSchema({
+          op: { type: "string", enum: ["replace", "insert_after", "delete"] },
+          start: { type: "string" },
+          end: { type: "string" },
+          lines: { type: "array", items: { type: "string" } },
+        }, ["op", "start"]),
+      },
+    }, ["path", "edits"]),
+  },
   { name: "run_command", description: "Run an argv command allowed by the command policy.", parameters: objectSchema({ argv: { type: "array", items: { type: "string" }, minItems: 1 }, cwd: { type: "string" }, timeoutMs: { type: "integer", minimum: 1 } }, ["argv"]) },
   { name: "request_context", description: "Request additional task or repository context.", parameters: objectSchema({ query: { type: "string" } }, ["query"]) },
   { name: "read_output", description: "Read more of a paged tool output by its outputRef.", parameters: objectSchema({ ref: { type: "string" }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, ["ref"]) },
@@ -117,6 +144,7 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
   const budget = Math.max(deps.resultTokens - PAGE_ENVELOPE_TOKENS, 1);
   /** Outputs this loop stored; `read_output` reads nothing else from the artifact store. */
   const pageable = new Set<string>();
+  const noops = new NoopTracker();
 
   const page = (text: string, label: string): PagedText => {
     const lines = splitLines(text);
@@ -137,7 +165,8 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
         case "read": {
           const path = safePath(root, stringArg(args, "path"));
           const lines = splitLines(readFileSync(path, "utf8"));
-          const window = pageLines(lines, optionalInteger(args, "startLine") ?? 1, optionalInteger(args, "endLine"), budget);
+          const anchored = lines.length === 1 && lines[0] === "" ? lines : lines.map((line, index) => `${anchorOf(index + 1, line)}|${line}`);
+          const window = pageLines(anchored, optionalInteger(args, "startLine") ?? 1, optionalInteger(args, "endLine"), budget);
           return { path: relative(root, path), ...window };
         }
         case "list": {
@@ -188,19 +217,21 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
           deps.loopEvidence.writes.push(rel);
           return { path: relative(root, path), bytes: Buffer.byteLength(content), ...(finalNewlineKept ? { finalNewlineKept } : {}) };
         }
-        case "apply_patch": {
+        case "edit": {
           const rel = stringArg(args, "path");
           const path = safePath(root, rel);
+          if (!existsSync(path)) throw new PolishError("INVALID_ARGUMENT", `${rel} does not exist; create it with write`);
           const before = readFileSync(path, "utf8");
-          const oldText = stringArg(args, "oldText");
-          const occurrences = before.split(oldText).length - 1;
-          if (oldText.length === 0 || occurrences !== 1) {
-            throw new PolishError("CONFLICT", `patch oldText must match exactly once (matched ${occurrences})`);
-          }
-          const after = before.replace(oldText, stringArg(args, "newText"));
+          const edits = parseEdits(args["edits"]);
+          const { after, changed } = applyHashlineEdits(before, edits);
+          if (after === before) throw noops.refuse(rel, JSON.stringify(edits));
+          noops.reset(rel);
           writeFileSync(path, after, "utf8");
           deps.loopEvidence.patches.push(rel);
-          return { path: relative(root, path), bytes: Buffer.byteLength(after) };
+          const lines = splitLines(after);
+          const from = Math.max(1, changed.from - 1);
+          const to = Math.min(lines.length, changed.to + 1);
+          return { path: relative(root, path), bytes: Buffer.byteLength(after), totalLines: lines.length, lines: renderAnchored(lines, from, to) };
         }
         case "run_command": {
           const argv = stringArrayArg(args, "argv");
