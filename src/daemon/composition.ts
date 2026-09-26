@@ -1180,6 +1180,7 @@ function commandPolicyFor(ctx: PhaseContext, profile: ProjectProfile): CommandPo
     {
       packageScripts: Object.keys(readPackageScripts(profile.projectPath)),
       search: true,
+      ...(profile.testRunner == null ? {} : { testFileArgv: profile.testRunner.fileArgv }),
     },
   );
 }

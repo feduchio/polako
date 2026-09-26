@@ -181,6 +181,25 @@ describe("CommandPolicy", () => {
     expect(trailing.check(["pnpm", "run", "test", "--config", "x.ts"])).toBeNull();
   });
 
+  it("admits the runner's argv with exactly one test file inside the worktree", () => {
+    const policy = CommandPolicy.forProject([["npm", "run", "test"]], "npm", false, {
+      testFileArgv: ["node", "--import", "tsx", "--test"],
+    });
+    expect(policy.check(["node", "--import", "tsx", "--test", "src/__tests__/args.test.ts"])).toBeNull();
+    expect(policy.check(["node", "--import", "tsx", "--test", "tests/repro.mjs"])).toBeNull();
+    expect(policy.check(["node", "--import", "tsx", "--test", "../x.test.ts"])).toMatch(/outside the worktree/);
+    expect(policy.check(["node", "--import", "tsx", "--test", "/etc/x.test.ts"])).toMatch(/outside the worktree/);
+    expect(policy.check(["node", "--import", "tsx", "--test", "src/a.test.ts", "src/b.test.ts"])).toMatch(/not in allowlist/);
+    expect(policy.check(["node", "--import", "tsx", "--test", "src/**/*.test.ts"])).toMatch(/one file, not a pattern/);
+    expect(policy.check(["node", "--import", "tsx", "--test", "src/index.ts"])).toMatch(/not a test file/);
+    expect(policy.check(["node", "--import", "tsx", "--test", "--test-reporter=tap"])).toMatch(/not an option/);
+    expect(policy.check(["node", "--import", "tsx", "--test"])).toMatch(/not in allowlist/);
+    expect(policy.check(["node", "src/x.test.ts"])).toMatch(/not in allowlist/);
+    expect(policy.testFileCommand("tests/a.test.mjs")).toEqual(["node", "--import", "tsx", "--test", "tests/a.test.mjs"]);
+    expect(policy.allowedCommands()).toContain("node --import tsx --test <one test file>");
+    expect(CommandPolicy.forProject([], "npm").testFileCommand("tests/a.test.mjs")).toBeNull();
+  });
+
   it("rejects empty command and task-grant prefixes", () => {
     expect(() => new CommandPolicy([{ prefix: [], description: "vacuous" }])).toThrow(/non-empty/);
     expect(() => CommandPolicy.forProject([], null, false, {

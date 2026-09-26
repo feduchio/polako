@@ -101,6 +101,9 @@ export function buildWorkerContextPack(input: BuildWorkerInput): WorkerContextPa
       `packageManager=${input.profile.packageManager}`,
       `framework=${input.profile.framework}`,
       `checks=${input.profile.checks.map((c) => c.name).join(",")}`,
+      ...(input.profile.testRunner == null
+        ? []
+        : [`runOneTestFile=${input.profile.testRunner.fileArgv.join(" ")} <path/to/file.test.ext> (run_command; one file while iterating, the project's test check before finishing)`]),
     ];
     sections["architectureNotes"] = notes.join("\n");
   }

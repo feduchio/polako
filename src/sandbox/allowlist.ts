@@ -27,6 +27,23 @@ export interface ProjectCommandCapabilities {
    * read/search rather than arbitrary shell.
    */
   search?: boolean;
+  /**
+   * The project runner's argv for one test file (`ProjectProfile.testRunner.fileArgv`). Admits that
+   * argv followed by exactly one relative test-file path inside the worktree: less than the project's
+   * whole test script already runs.
+   */
+  testFileArgv?: readonly string[];
+}
+
+const TEST_FILE = /(?:^|\/)(?:[^/]+\.(?:test|spec)\.[cm]?[jt]sx?|(?:tests?|__tests__)\/.+\.[cm]?[jt]sx?)$/;
+
+/** Null when `operand` is a test file the single-file rule may name, otherwise why not. */
+export function testFileOperandDenial(operand: string): string | null {
+  if (operand.startsWith("-")) return `test file must be a path, not an option: ${operand}`;
+  if (isEscapingPathOperand(operand)) return `test file is outside the worktree: ${operand}`;
+  if (/[*?[\]{}]/.test(operand)) return `test file must name one file, not a pattern: ${operand}`;
+  if (!TEST_FILE.test(operand.replaceAll("\\", "/"))) return `not a test file (*.test.*, *.spec.* or under tests/): ${operand}`;
+  return null;
 }
 
 export const READONLY_GIT_RULES: readonly CommandRule[] = [
@@ -165,8 +182,12 @@ export function invokesShellScript(argv: readonly string[]): boolean {
 export class CommandPolicy {
   private readonly rules: CommandRule[];
 
-  constructor(rules: readonly CommandRule[], private readonly allowArbitrary = false) {
-    if (rules.some((rule) => rule.prefix.length === 0)) {
+  constructor(
+    rules: readonly CommandRule[],
+    private readonly allowArbitrary = false,
+    private readonly testFileArgv: readonly string[] | null = null,
+  ) {
+    if (rules.some((rule) => rule.prefix.length === 0) || testFileArgv?.length === 0) {
       throw new TypeError("command rules must have a non-empty argv prefix");
     }
     this.rules = [...rules];
@@ -207,7 +228,12 @@ export class CommandPolicy {
     for (const grant of capabilities.taskGrants ?? []) {
       rules.push({ ...grant, match: "prefix" });
     }
-    return new CommandPolicy(rules, allowArbitrary);
+    return new CommandPolicy(rules, allowArbitrary, capabilities.testFileArgv ?? null);
+  }
+
+  /** The argv that runs `file` alone, or null when the policy has no single-file rule. */
+  testFileCommand(file: string): string[] | null {
+    return this.testFileArgv === null ? null : [...this.testFileArgv, file];
   }
 
   /** Returns null when allowed, otherwise a human-readable denial reason. */
@@ -232,6 +258,10 @@ export class CommandPolicy {
       return lengthMatches && r.prefix.every((p, i) => argv[i] === p);
     });
     if (matched) return null;
+    const testFile = this.testFileArgv;
+    if (testFile !== null && argv.length === testFile.length + 1 && testFile.every((p, i) => argv[i] === p)) {
+      return testFileOperandDenial(argv[testFile.length] ?? "");
+    }
     // A worker told only "no" guesses the next spelling: one live investigation tried `npm test`
     // four times against a policy that admits exactly `npm run test`.
     return `command not in allowlist: ${argv.join(" ")}. Allowed: ${this.allowedCommands().join("; ")}`;
@@ -240,6 +270,7 @@ export class CommandPolicy {
   /** Each admitted command as argv, with `…` where trailing arguments are accepted. */
   allowedCommands(): string[] {
     const listed = this.rules.map((rule) => (rule.match === "prefix" ? `${rule.prefix.join(" ")} …` : rule.prefix.join(" ")));
+    if (this.testFileArgv !== null) listed.push(`${this.testFileArgv.join(" ")} <one test file>`);
     return [...new Set(listed)];
   }
 }
