@@ -207,8 +207,14 @@ the run branch, and the DONE tally.
   **Owner, 2026-09-26: no. A blocking finding closes only through an investigation that executed.**
   Debate still routes and prioritises; its REJECTED no longer closes a blocking finding.
 - **C. The single-test-file grant** (item 5). Two lanes call it product work; recorded for a veto.
+  **Owner, 2026-09-26: granted.**
 - **D. How structured the council's acceptance output must be** (item 7).
+  **Owner, 2026-09-26: structured checks** (`file_exists`, `command`, `test_file`) the engine runs
+  on the base; without them, noChange is refused when an acceptance line names a path absent on the
+  base.
 - **E. The token cap's value and scope names** (item 9), and the live-tier n.
+  **Owner, 2026-09-26: no cap unless set explicitly (`null`); live tier 20 distinct pairs, one run
+  of each side (40 runs).**
 
 ## What is good, and stays
 
@@ -219,3 +225,48 @@ invariant in one place; family diversity with the `run.mechanisms` manifest; the
 baseline-relative gates with silencing detection; paging instead of truncation; finish guards that
 require a fresh passing command; and a scripted scenario harness cheap enough (about a second a run)
 to make the acceptance suite routine.
+
+## Plan revision 2 (2026-09-26): the council's plan plus oh-my-pi
+
+Items 1 (`066065f`) and 2 (`e8a6526`) are done. Revision 2 adds what a read of
+[oh-my-pi](https://github.com/can1357/oh-my-pi) at `061f21e` (MIT) offered, and reorders the rest so
+each shared file changes in one block and each verified part is re-verified once.
+
+**What oh-my-pi does not have.** No evidence contract, control run, per-test outcome from runner
+output, or rule that a model verdict cannot create a fix task. Its `cleanse/` turns an unparsed
+non-zero exit into a failure — the same defect as `classifyReproduction`; not taken.
+
+**Taken, with provenance.**
+
+| Addition | From oh-my-pi | Polish item |
+|---|---|---|
+| Hashline edits replace `apply_patch`: anchored ops, stale anchors refused, no-op refused, a third identical no-op answered with STOP (owner, 2026-09-26: replace, not A/B) | `crates/pi-edit` (Rust; our TS implementation, message wording adapted) | 2.1 |
+| Test-API write guard: Jest globals written into a `node:test` project are refused | the idea of TTSR stream rules, without streaming | 2.2 |
+| Test output: passes folded, failures and summary verbatim, full text by ref | `crates/pi-shell` minimizer (partly from RTK, MIT); it has no `node:test` filter, ours does | 2.3 |
+| Superseded command and stale read results stubbed in the window | `packages/agent` pruning, `shake.ts` | 2.4 |
+| Reviewer admissibility (in the diff or a named mission requirement, provable impact, no unstated assumption) and an emission guard | `prompts/agents/reviewer.md`, `advisor/emission-guard.ts` | 3.2 |
+| `node_modules` cache per lockfile hash, materialized by APFS clone | `crates/pi-iso` (`clonefile`); we use `cp -c -R` | 4.1 |
+| Provider fallback on 429 / quota | `retry.fallbackChains` | 4.2 |
+| Paired fixtures from source mutations, each with a mechanically validated oracle test | `packages/typescript-edit-benchmark` mutation operators | 5.1 |
+| Experiment store: arms, pair x model matrix, rates with 95% upper bounds | `packages/metaharness` | 5.2 |
+| Optional advisor on worker turns, off by default, adopted only on measured net gain | `advisor/` | 6.1 |
+
+**Order and why.**
+
+- **Phase 0 — shared ground.** 0.1 `detectFramework` fix and `ProjectProfile.testRunner` (read by
+  items 3, 8, 10 and the write guard). 0.2 one per-test parser in `src/project/parsers.ts` for
+  `node:test`, vitest and jest with the failure kind; the silencing gate moves onto it with its
+  tests unchanged. 0.3 the path-confined `test_file` rule (item 5's policy half, owner C) — before
+  item 3, so `investigation.ts` is rewritten once, with its default argv.
+- **Phase 1 — honesty.** 1.1 item 3; 1.2 item 4 plus the dead verdict vocabulary and the dropped
+  validator task (`reviewDrivers.ts:313`); 1.3 item 6; 1.4 item 7. Scripted workers edit through
+  `write`, so hashline does not force rework here.
+- **Phase 2 — worker surface, one block over `tools.ts`, `loopWindow.ts`, `runner.ts`.** 2.1
+  hashline, 2.2 write guard, 2.3 item 8, 2.4 pruning, 2.5 item 10's rest, 2.6 item 9 (numbers after
+  2.3 and 2.4 change them).
+- **Phase 3 — findings and reviewers.** 3.1 item 11, 3.2 reviewer admissibility and emission guard,
+  3.3 one re-measure: blinded corpus, canary, and the mutant sweep over the verdict lines.
+- **Phase 4 — cost and reliability before live runs.** 4.1 dependency cache, 4.2 provider fallback.
+- **Phase 5 — live tier.** 5.1 paired fixtures, 5.2 experiment store, 5.3 SAT offline replay
+  (item 12), 5.4 live paired runs (20 pairs x 2 sides).
+- **Phase 6 — optional.** 6.1 advisor.
