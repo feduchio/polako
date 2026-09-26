@@ -21,6 +21,7 @@ import { projectExperiment, renderExperiment, trialsFrom } from "../src/observe/
 
 const TERMINAL = new Set(["DONE", "NEEDS_HUMAN", "FAILED"]);
 const RUN_WALL_CLOCK_MS = 50 * 60_000;
+const MAX_RESUMES = 6;
 
 function flag(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`);
@@ -33,15 +34,42 @@ const arm = flag("arm") ?? "base";
 const onlySide = flag("only-side");
 const experimentId = flag("experiment") ?? "r13-live";
 
-function prepareHome(): void {
+/**
+ * Council models from OpenRouter's live catalogue: free (both prices 0), JSON-capable, one per
+ * family, the largest context first. Free routes come and go (minimax-m3:free became paid on the
+ * day of the first live smoke), so a list pinned in a config file goes stale.
+ */
+async function freeCouncilModels(): Promise<string[]> {
+  const response = await fetch("https://openrouter.ai/api/v1/models");
+  const rows = ((await response.json()) as { data: { id: string; context_length?: number; pricing?: { prompt?: unknown; completion?: unknown }; supported_parameters?: string[] }[] }).data;
+  const families = new Set<string>();
+  return rows
+    .filter((row) => row.id.endsWith(":free") && String(row.pricing?.prompt) === "0" && String(row.pricing?.completion) === "0")
+    .filter((row) => (row.supported_parameters ?? []).some((parameter) => parameter === "response_format" || parameter === "structured_outputs"))
+    .filter((row) => (row.context_length ?? 0) >= 128_000)
+    .sort((a, b) => (b.context_length ?? 0) - (a.context_length ?? 0) || a.id.localeCompare(b.id))
+    .filter((row) => {
+      const family = row.id.split("/")[0] ?? row.id;
+      if (families.has(family)) return false;
+      families.add(family);
+      return true;
+    })
+    .slice(0, 4)
+    .map((row) => `openrouter:${row.id}`);
+}
+
+async function prepareHome(): Promise<void> {
   mkdirSync(home, { recursive: true });
   const owner = parse(readFileSync(join(homedir(), ".polish", "polish.toml"), "utf8")) as Record<string, unknown>;
   const providers = (owner["providers"] as Record<string, unknown>[] | undefined ?? []).filter((provider) => provider["kind"] === "openrouter");
-  const freeModels = [...new Set(((owner["supervisors"] as { models?: string[] }[] | undefined) ?? [])
-    .flatMap((supervisor) => supervisor.models ?? [])
-    .filter((model) => model.startsWith("openrouter:") && model.endsWith(":free")))];
-  if (freeModels.length === 0) throw new Error("no :free supervisor model in ~/.polish/polish.toml");
-  const supervisors = ((owner["supervisors"] as Record<string, unknown>[] | undefined) ?? []).map((supervisor) => ({ ...supervisor, models: freeModels }));
+  const freeModels = await freeCouncilModels();
+  if (freeModels.length < 2) throw new Error(`too few free JSON council models on OpenRouter: ${freeModels.join(", ")}`);
+  console.log(`council models: ${freeModels.join(", ")}`);
+  const supervisors = ((owner["supervisors"] as Record<string, unknown>[] | undefined) ?? []).map((supervisor, index) => ({
+    ...supervisor,
+    // Each role leads with a different model, so one rate-limited route does not stall all three.
+    models: [...freeModels.slice(index % freeModels.length), ...freeModels.slice(0, index % freeModels.length)],
+  }));
   const config = {
     ...owner,
     providers,
@@ -59,7 +87,7 @@ function prepareHome(): void {
 }
 
 async function main(): Promise<void> {
-  prepareHome();
+  await prepareHome();
   const service = new DaemonService({ home });
   service.start();
   try {
@@ -74,10 +102,18 @@ async function main(): Promise<void> {
       startRun: async (project, mission) => ((await service.handle("run", { project, mission, runtime: "auto" })) as { id: string }).id,
       waitForTerminal: async (runId) => {
         const deadline = Date.now() + RUN_WALL_CLOCK_MS;
+        let resumes = 0;
         for (;;) {
           const run = service.store.repos.runs.get(runId);
           if (run !== null && TERMINAL.has(run.phase)) return run;
-          // A driver failure pauses a run for an operator; for a trial that is where it ended.
+          // A driver failure pauses a run for an operator. Free routes are paused mostly by the
+          // shared per-minute allowance, which lifts on its own, so wait and resume a few times.
+          if (run?.control === "PAUSED" && resumes < MAX_RESUMES && Date.now() < deadline) {
+            resumes += 1;
+            await new Promise((resolve) => setTimeout(resolve, 90_000));
+            await service.handle("resume", { runId });
+            continue;
+          }
           if (run?.control === "PAUSED" || Date.now() > deadline) {
             await service.handle("stop", { runId });
             return service.store.repos.runs.get(runId) as Run;
