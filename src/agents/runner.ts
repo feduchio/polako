@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathsNamedByAcceptance, type Task } from "../domain/task.js";
 import { PolishError, errorToString } from "../shared/errors.js";
+import { AdvisorNotes, turnSummary } from "./advisor.js";
 import { buildWireWindow, loopDigestCap } from "./loopWindow.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import {
@@ -190,6 +191,7 @@ export class AgentRunner implements CandidateWorker {
     const progressTracker = this.deps.createProgressTracker?.(task) ?? null;
     const progress: AgentProgressRecord[] = [];
     const progressStates = new Map<number, AgentProgressState>();
+    const advisorNotes = new AdvisorNotes();
 
     while (turns.length < this.deps.maxTurns && totalTokens < cap) {
       let call;
@@ -273,6 +275,11 @@ export class AgentRunner implements CandidateWorker {
         }
       }
       if (status === "FINISHED" || status === "STALLED") break;
+      if (this.deps.advise !== undefined) {
+        const note = await this.deps.advise({ task, turn: turn.turn, summary: turnSummary(turn) }).catch(() => null);
+        const said = advisorNotes.accept(note);
+        if (said !== null) messages.push({ role: "user", content: said });
+      }
       if (progressTracker !== null && (turn.turn === 4 || turn.turn === 8 || turn.turn === 12)) {
         const state = await this.progressState(task, worktree, loopEvidence);
         if (state !== null) {

@@ -175,6 +175,8 @@ export const AgentConfigSchema = z.object({
   /** max tool-loop turns per worker invocation (not task retry attempts) */
   maxTurns: z.number().int().min(1).default(32),
   progressEnabled: z.boolean().default(true),
+  /** A second model of another family notes each worker turn. Off until the live tier shows it pays. */
+  advisor: z.boolean().default(false),
 });
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 

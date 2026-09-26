@@ -576,6 +576,33 @@ describe("AgentRunner", () => {
     await handle.destroy();
   });
 
+  it("puts an advisor's note before the worker's next turn, and a failing advisor changes nothing", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    let asked = 0;
+    const { provider, deps } = harness(store, fixture.policy, {
+      advise: async ({ turn }) => {
+        asked += 1;
+        if (turn === 2) throw new Error("advisor down");
+        return turn === 1 ? { level: "concern", text: "read the test before editing" } : null;
+      },
+    });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+    provider.script("worker", [
+      replyWith(tool("read", { path: "src/math.ts" }, "read")),
+      replyWith(tool("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => b + a;\n" }, "write")),
+      replyWith(tool("finish", { summary: "done" }, "finish")),
+    ]);
+    const result = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("completed");
+    expect(asked).toBe(2);
+    expect(provider.calls[1]?.messages.at(-1)).toEqual({ role: "user", content: "[advisor concern] read the test before editing" });
+    expect(provider.calls[2]?.messages.filter((message) => message.content.startsWith("[advisor"))).toHaveLength(1);
+    store.close();
+    await handle.destroy();
+  });
+
   it("denies writes and patches that escape the worktree", async () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });

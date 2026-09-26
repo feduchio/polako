@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { ADVISOR_SYSTEM_PROMPT, parseAdvisorReply, type Advise } from "../agents/advisor.js";
 import { AgentRunner, toolResultTokenBudget } from "../agents/runner.js";
 import { EmpiricalProgressTracker, type ProgressModel } from "../agents/progressTracker.js";
 import { AGENT_TOOL_NAMES } from "../agents/types.js";
@@ -894,6 +895,7 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
       artifacts: deps.store.artifacts,
       model,
       fallbackModels: workerFallbacks(ranked.map((item) => item.entry.info.ref), model),
+      ...advisorFor(deps, ctx, model),
       commandPolicy: commandPolicyFor(ctx, profile),
       testFramework: profile.framework,
       maxTurns: deps.config.agent.maxTurns,
@@ -1384,4 +1386,33 @@ export function workerFallbacks(ranked: readonly ModelRef[], primary: ModelRef):
     if (out.length === MAX_WORKER_FALLBACKS) break;
   }
   return out;
+}
+
+/**
+ * `agent.advisor`: one model of another family than the worker's, under the same cost policy, that
+ * reads each turn and may leave a note. No advisor when the setting is off or no such model exists.
+ */
+function advisorFor(deps: ProductionDeps, ctx: PhaseContext, worker: ModelRef): { advise?: Advise } {
+  if (!deps.config.agent.advisor) return {};
+  const workerFamily = familyOfModel(deps, worker);
+  const [chosen] = deps.router.select({ role: "verifier", count: 1, requireJson: true, exclude: [worker], avoidFamilies: [workerFamily] });
+  const model = chosen?.entry.info.ref;
+  if (model === undefined || familyOfModel(deps, model) === workerFamily) return {};
+  const client = brokerCouncilClient(deps.broker);
+  return {
+    advise: async ({ task, summary }) => {
+      const record = await client.complete({
+        model,
+        messages: [
+          { role: "system", content: ADVISOR_SYSTEM_PROMPT },
+          { role: "user", content: `Task: ${task.title}\nAcceptance: ${task.acceptance.join("; ")}\n\n${summary}` },
+        ],
+        responseFormat: "json",
+        maxTokens: 300,
+        metadata: { runId: ctx.run.id, purpose: "agent_advisor", role: "verifier", subjectTaskId: task.id },
+      });
+      const response = "response" in record ? record.response : record;
+      return parseAdvisorReply(response.message.content);
+    },
+  };
 }

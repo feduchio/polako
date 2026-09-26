@@ -128,6 +128,16 @@ export interface AgentTranscript {
 
 export type RequestContext = (query: string) => Promise<unknown>;
 
+export type AdvisorLevel = "nit" | "concern" | "blocker";
+
+export interface AdvisorNote {
+  level: AdvisorLevel;
+  text: string;
+}
+
+/** A second model's note on one worker turn; see `advisor.ts`. */
+export type Advise = (input: { task: Task; turn: number; summary: string }) => Promise<AdvisorNote | null>;
+
 export interface AgentRunnerDeps {
   complete: (request: CompletionRequest) => Promise<CompletionResponse>;
   artifacts: ArtifactStore;
@@ -156,6 +166,8 @@ export interface AgentRunnerDeps {
   signal?: AbortSignal;
   /** The project's test framework; test files it cannot run are refused at write time. */
   testFramework?: string;
+  /** A second model's note after each turn (`agent.advisor`); absent means no advisor. */
+  advise?: Advise;
 }
 
 export interface WorkerReproduction {
