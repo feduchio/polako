@@ -233,7 +233,10 @@ function boundedResult(name: string, output: unknown): string {
     const start = numberField(output, "startLine");
     const end = numberField(output, "endLine");
     if (start === null || end === null) return "";
-    return `(lines ${String(start)}-${String(end)})`;
+    const total = numberField(output, "totalLines");
+    return total === null || (start === 1 && end === total)
+      ? `(lines ${String(start)}-${String(end)})`
+      : `(lines ${String(start)}-${String(end)} of ${String(total)})`;
   }
   return "";
 }
@@ -306,7 +309,9 @@ function outputOf(output: unknown): string {
   const content = stringField(output, "content");
   if (content !== null) {
     const marker = content.indexOf("[stderr]\n");
-    const shown = marker === -1 ? content : content.slice(marker + "[stderr]\n".length);
+    const stderr = marker === -1 ? "" : content.slice(marker + "[stderr]\n".length);
+    const stdout = marker === -1 ? content : content.slice(0, marker);
+    const shown = stderr.trim() === "" ? stdout : stderr;
     const more = numberField(output, "nextStartLine");
     const total = numberField(output, "totalLines");
     const note = more === null || total === null ? "" : ` (first ${String(more - 1)} of ${String(total)} lines)`;

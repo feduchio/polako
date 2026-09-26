@@ -100,6 +100,36 @@ describe("AgentRunner", () => {
     await handle.destroy();
   });
 
+  it("stops a command re-run three times with the same output on an unchanged tree, but not one re-run after an edit", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const argv = ["node", "-e", "console.log('ok')"];
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 6, maxTokens: 64_000 });
+    const stalled: { tool: string; repeats: number }[] = [];
+    deps.onLoopStalled = (_task, info) => { stalled.push(info); };
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+    provider.script("worker", Array.from({ length: 6 }, (_, index) => replyWith(tool("run_command", { argv }, `run-${index}`))));
+    const result = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    expect(result).toMatchObject({ status: "failed", error: "STALLED" });
+    expect(provider.calls).toHaveLength(3);
+    expect(stalled).toEqual([{ tool: "run_command", repeats: 3 }]);
+    await handle.destroy();
+
+    const editing = harness(store, fixture.policy, { maxTurns: 6, maxTokens: 64_000 });
+    const editHandle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+    editing.provider.script("worker", [
+      replyWith(tool("run_command", { argv }, "run-0")),
+      replyWith(tool("run_command", { argv }, "run-1")),
+      replyWith(tool("write", { path: "notes.txt", content: "edited\n" }, "edit")),
+      replyWith(tool("run_command", { argv }, "run-2")),
+      replyWith(tool("finish", { summary: "edited and checked" }, "finish")),
+    ]);
+    expect(await new AgentRunner(editing.deps).run(codingTask(fixture.runId, fixture.base), editHandle)).toMatchObject({ status: "completed" });
+    await editHandle.destroy();
+    store.close();
+  });
+
   it("omits node_modules from a listing small enough to return whole", async () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });

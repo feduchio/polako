@@ -473,7 +473,7 @@ export class AgentRunner implements CandidateWorker {
     // progress tracker's case (scored at turns 8 and 12), not this one. The loops that burned a
     // budget were search and list.
     if (name === "read" || name === "write" || name === "apply_patch" || name === "finish" || name === "request_split") return null;
-    const key = `${name}\n${encodedArgs}\n${sha256Hex(message)}`;
+    const key = `${name}\n${encodedArgs}\n${sha256Hex(stableResult(message))}`;
     const prior = repeats.get(key);
     const count = (prior?.count ?? 0) + 1;
     if (count < 3) {
@@ -509,6 +509,20 @@ export class AgentRunner implements CandidateWorker {
       return null;
     }
   }
+}
+
+/** A tool result without its timing: two runs of one command that print the same are a repeat. */
+function stableResult(message: string): string {
+  try {
+    const parsed = JSON.parse(message) as { output?: unknown };
+    if (typeof parsed.output === "object" && parsed.output !== null && "durationMs" in parsed.output) {
+      const { durationMs: _durationMs, ...rest } = parsed.output as Record<string, unknown>;
+      return JSON.stringify({ ...parsed, output: rest });
+    }
+  } catch {
+    // not JSON; compared as it is
+  }
+  return message;
 }
 
 export function createAgentRunnerFactory(deps: AgentRunnerDeps): (index: number) => AgentRunner {

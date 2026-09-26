@@ -72,6 +72,32 @@ describe("buildLoopDigest", () => {
     expect(digest).toContain('search "commit duration" (0 matches) (x4)');
   });
 
+  it("says which part of a paged file a read saw, and how many entries a paged listing has", () => {
+    const digest = buildLoopDigest(
+      [
+        turn(1, [ok("read", { path: "src/small.ts" }, { path: "src/small.ts", startLine: 1, endLine: 40, totalLines: 40, content: "x" })]),
+        turn(2, [ok("read", { path: "src/long.ts" }, { path: "src/long.ts", startLine: 1, endLine: 700, totalLines: 3000, nextStartLine: 701, content: "x" })]),
+        turn(3, [ok("read", { path: "src/long.ts", startLine: 701 }, { path: "src/long.ts", startLine: 701, endLine: 1400, totalLines: 3000, nextStartLine: 1401, content: "x" })]),
+        turn(4, [ok("list", { path: "." }, { path: ".", entryCount: 1500, startLine: 1, endLine: 400, totalLines: 1500, nextStartLine: 401, content: "a\nb" })]),
+      ],
+      400,
+    );
+    expect(digest).toContain("read src/small.ts (lines 1-40)");
+    expect(digest).not.toContain("(lines 1-40 of");
+    expect(digest).toContain("read src/long.ts (lines 1-700 of 3000)");
+    expect(digest).toContain("read src/long.ts (lines 701-1400 of 3000)");
+    expect(digest).toContain("list . (1500 entries)");
+  });
+
+  it("keeps a failed command's stdout when its stderr is empty", () => {
+    const digest = buildLoopDigest(
+      [turn(1, [ok("run_command", { argv: ["npm", "test"] }, { exitCode: 1, content: "FAIL src/a.test.ts STDOUT-ONLY-FAILURE\n[stderr]\n" })])],
+      400,
+    );
+    expect(digest).toContain("npm test -> exit 1: FAIL src/a.test.ts STDOUT-ONLY-FAILURE");
+    expect(digest).not.toContain("(no output)");
+  });
+
   it("evicts the oldest low-priority entry and keeps the newest command whole", () => {
     const turns = [
       turn(1, [ok("read", { path: "src/very-old-file.ts" }, { path: "src/very-old-file.ts" })]),

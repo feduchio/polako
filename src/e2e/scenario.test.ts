@@ -10,10 +10,12 @@ import {
   emptyReview,
   fixtureTestFails,
   loadTranscript,
+  scriptByPurpose,
   scriptPipeline,
   startScenario,
   toolSteps,
   workerTokens,
+  type Responders,
   type ScenarioEnv,
 } from "./scenario.js";
 
@@ -197,6 +199,112 @@ describe("run scenarios", () => {
     expect(run.terminalReason?.summary).toContain("insufficient_families: 0 of 1");
     expect(run.terminalReason?.summary).toContain("author families excluded: wkr");
     expect(env.service.store.repos.reviewExecutions.listByRun(runId).filter((execution) => execution.completed)).toHaveLength(0);
+  });
+});
+
+describe("disputed findings", () => {
+  const MODELS = ["wkr", "xrev", "yjdg", "zdef"];
+  const CLAIM = "add(1, 2) returns -1 instead of 3";
+  const SUM = "export function add(a, b) {\n  return a + b;\n}\n";
+  const CLAIM_TEST = [
+    'import assert from "node:assert/strict";',
+    'import test from "node:test";',
+    'import { add } from "../src/add.mjs";',
+    "",
+    'test("add(1, 2) is 3", () => {',
+    "  assert.equal(add(1, 2), 3);",
+    "});",
+    "",
+  ].join("\n");
+  const finding = {
+    criterion: "correctness",
+    severity: "high",
+    blocking: true,
+    claim: CLAIM,
+    evidence: [{ path: "src/add.mjs", line: 2 }],
+    reproduction: ["call add(1, 2) and compare the result with 3"],
+  };
+
+  function responders(firstFix: string): Responders {
+    let raised = false;
+    return {
+      agent: [
+        {
+          matches: (text) => text.includes("REPRODUCTION FILE"),
+          calls: [
+            { name: "write", arguments: { path: "src/add.mjs", content: SUM } },
+            { name: "finish", arguments: { summary: "add sums" } },
+          ],
+        },
+        {
+          matches: (text) => text.includes(CLAIM),
+          calls: [
+            { name: "write", arguments: { path: "tests/claim.test.mjs", content: CLAIM_TEST } },
+            { name: "finish", arguments: { summary: "reproduction for the claim", reproduction: { argv: ["npm", "run", "test"] } } },
+          ],
+        },
+        {
+          matches: () => true,
+          calls: [
+            { name: "write", arguments: { path: "src/add.mjs", content: firstFix } },
+            { name: "finish", arguments: { summary: "add fixed" } },
+          ],
+        },
+      ],
+      review: () => {
+        if (raised) return [];
+        raised = true;
+        return [finding];
+      },
+      debate: (role) => {
+        if (role === "judge") return "Probably valid, though I would want to see it run.";
+        return `${role}: the evidence is a line reference; nothing was executed.`;
+      },
+    };
+  }
+
+  it("rejects a false finding when the engine re-runs the investigation's reproduction and it passes", async () => {
+    env = await startScenario("disputed-finding", { models: MODELS, investigationRounds: 1 });
+    const unknown: string[] = [];
+    scriptByPurpose(env.provider, MODELS, responders(SUM), unknown);
+    const runId = await begin(env, "Make add return the sum of its arguments.");
+    const { run, ticks } = await drive(env, runId, 150);
+    const store = env.service.store;
+    const findings = store.repos.findings.listByRun(runId).filter((item) => item.claim === CLAIM);
+    expect(unknown).toEqual([]);
+    expect(ticks).toBeLessThan(150);
+    expect(findings).toHaveLength(1);
+    const disputed = findings[0]!;
+    expect(disputed.status).toBe("REJECTED");
+    const methods = store.repos.validations.listByFinding(disputed.id).map((validation) => [validation.method, validation.verdict]);
+    expect(methods).toContainEqual(["finding_debate", "UNCERTAIN"]);
+    expect(methods.at(-1)).toEqual(["deterministic_reproduction", "REJECTED"]);
+    const investigation = store.repos.tasks.listByRun(runId).find((task) => task.kind === "investigation");
+    expect(investigation?.state).toBe("SATISFIED");
+    expect(store.repos.tasks.listByRun(runId).filter((task) => task.kind !== "investigation").map((task) => task.state)).toEqual(["INTEGRATED"]);
+    expect(run.phase).toBe("DONE");
+  });
+
+  it("turns a true finding into a fix when the engine re-runs the investigation's reproduction and it fails", async () => {
+    env = await startScenario("disputed-finding", { models: MODELS, investigationRounds: 1 });
+    const unknown: string[] = [];
+    const passesOnlyItsTest = "export function add(a, b) {\n  return a === 2 && b === 3 ? 5 : a - b;\n}\n";
+    scriptByPurpose(env.provider, MODELS, responders(passesOnlyItsTest), unknown);
+    const runId = await begin(env, "Make add return the sum of its arguments.");
+    const { run, ticks } = await drive(env, runId, 200);
+    const store = env.service.store;
+    const disputed = store.repos.findings.listByRun(runId).find((item) => item.claim === CLAIM);
+    expect(unknown).toEqual([]);
+    expect(ticks).toBeLessThan(200);
+    expect(disputed?.status).toBe("VALID");
+    const methods = store.repos.validations.listByFinding(disputed!.id).map((validation) => [validation.method, validation.verdict]);
+    expect(methods.at(-1)).toEqual(["deterministic_reproduction", "VALID"]);
+    const tasks = store.repos.tasks.listByRun(runId);
+    const fix = tasks.find((task) => task.description.includes("REPRODUCTION FILE"));
+    expect(fix?.state).toBe("INTEGRATED");
+    expect(run.phase).toBe("DONE");
+    const head = await new Git(env.repoDir).out(["show", `${run.runBranch}:src/add.mjs`]);
+    expect(head.trim()).toBe(SUM.trim());
   });
 });
 

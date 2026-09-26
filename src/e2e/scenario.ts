@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { ProviderError } from "../broker/types.js";
 import { DaemonService } from "../daemon/service.js";
 import type { Run } from "../domain/run.js";
+import type { CompletionRequest } from "../broker/types.js";
 import { reply, type ScriptedProvider, type ScriptStep } from "../providers/scripted.js";
 import { FakeClock } from "../shared/clock.js";
 import { Git } from "../sandbox/git.js";
@@ -37,6 +38,8 @@ export interface ScenarioOptions {
    */
   models?: string[];
   progressEnabled?: boolean;
+  /** `convergence.maxInvestigationRoundsPerFinding`; 0 by default. */
+  investigationRounds?: number;
 }
 
 export async function startScenario(fixture: string, options: ScenarioOptions = {}): Promise<ScenarioEnv> {
@@ -49,7 +52,7 @@ export async function startScenario(fixture: string, options: ScenarioOptions = 
   const home = join(dir, "home");
   mkdirSync(home, { recursive: true });
   const { writeFileSync } = await import("node:fs");
-  writeFileSync(join(home, "polish.toml"), scenarioToml(options.models ?? ["wkr", "xrev"], options.progressEnabled ?? false));
+  writeFileSync(join(home, "polish.toml"), scenarioToml(options.models ?? ["wkr", "xrev"], options.progressEnabled ?? false, options.investigationRounds ?? 0));
   const clock = new FakeClock(1_700_000_000_000);
   const service = new DaemonService({ home, clock, tickMs: 1, requiredCleanRounds: 1 });
   const provider = service.productionComposition().providers[0] as ScriptedProvider;
@@ -167,7 +170,7 @@ export function add(a, b) {
 }
 `;
 
-function scenarioToml(models: readonly string[], progressEnabled: boolean): string {
+function scenarioToml(models: readonly string[], progressEnabled: boolean, investigationRounds: number): string {
   return `
 [[providers]]
 id = "scripted"
@@ -202,7 +205,7 @@ minQualityForRotation = 0
 
 [convergence]
 requiredCleanRounds = 1
-maxInvestigationRoundsPerFinding = 0
+maxInvestigationRoundsPerFinding = ${String(investigationRounds)}
 
 [retry]
 maxAttempts = 2
@@ -214,6 +217,82 @@ maxTaskTokens = 96000
 [runtimeValidation]
 mode = "auto"
 `;
+}
+
+/** What a scripted model does when asked to work on a task, by which task it is. */
+export interface AgentPlan {
+  /** Recognises the task from the worker's instruction. */
+  matches: (instruction: string) => boolean;
+  /** The tool calls, in order; the loop's own tool results decide which one is next. */
+  calls: { name: string; arguments: Record<string, unknown> }[];
+}
+
+export interface Responders {
+  agent: AgentPlan[];
+  /** A review answer for a request that is not the seeded-defect canary. */
+  review: (request: CompletionRequest) => unknown[];
+  debate: (role: string, request: CompletionRequest) => string;
+}
+
+/**
+ * One responder for every model, answering by what was asked rather than by call order. Which
+ * model the router picks for a role depends on probes, families and exclusions; a script in call
+ * order breaks the moment that changes, and a script by purpose does not.
+ */
+export function scriptByPurpose(provider: ScriptedProvider, models: readonly string[], responders: Responders, unknown: string[] = []): void {
+  const step: ScriptStep = {
+    kind: "fn",
+    fn: (request) => {
+      const purpose = request.metadata.purpose;
+      switch (purpose) {
+        case "capability_probe_tools":
+          return reply("", 1, 1, null, [{ id: "probe", name: "probe_ping", arguments: "{}" }]);
+        case "capability_probe_json":
+          return reply('{"probe":"ok"}', 1, 1);
+        case "council_intake_planner":
+          return reply(plannerIntake(), 10, 5);
+        case "council_intake_scope":
+        case "council_decompose_scope":
+          return reply(supervisorApprove({ dropRefs: [] }), 10, 5);
+        case "council_intake_judge":
+        case "council_decompose_judge":
+          return reply(judgeApprove({ restoreRefs: [] }), 10, 5);
+        case "council_decompose_planner":
+          return reply(plannerDecompose(), 10, 5);
+        case "finding_debate":
+          return reply(responders.debate(request.metadata.role, request), 10, 5);
+        case "agent_run": {
+          const instruction = request.messages.filter((message) => message.role === "user").map((message) => message.content).join("\n");
+          const plan = responders.agent.find((candidate) => candidate.matches(instruction));
+          if (plan === undefined) {
+            unknown.push(`agent_run: ${instruction.slice(0, 120)}`);
+            return reply("no plan for this task", 1, 1);
+          }
+          const done = request.messages.filter((message) => message.role === "tool").length;
+          const call = plan.calls[Math.min(done, plan.calls.length - 1)];
+          if (call === undefined) return reply("empty plan", 1, 1);
+          return reply("", 10, 5, null, [{ id: `c${String(done)}`, name: call.name, arguments: JSON.stringify(call.arguments) }]);
+        }
+        default:
+          if (purpose.startsWith("review_")) {
+            const findings = JSON.stringify(request.messages).includes("evictStale")
+              ? [{
+                criterion: "correctness",
+                severity: "high",
+                blocking: false,
+                claim: "evictStale reads one past the end",
+                evidence: [{ path: "src/cache.ts", line: 8 }],
+                reproduction: ["call evictStale([], 0)"],
+              }]
+              : responders.review(request);
+            return reply(JSON.stringify({ findings }), 10, 5);
+          }
+          unknown.push(purpose);
+          return reply(JSON.stringify({ decision: "approve", rationale: "ok", concerns: [] }), 1, 1);
+      }
+    },
+  };
+  for (const model of models) provider.script(model, Array.from({ length: 400 }, () => step));
 }
 
 function opinion(content: string): ScriptStep {

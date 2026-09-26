@@ -6,7 +6,8 @@ import { defaultConfig } from "../domain/config.js";
 import { createMission } from "../domain/mission.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { ProjectProfile } from "../project/profile.js";
-import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { FAKE_CAPABILITIES, ScriptedProvider, reply } from "../providers/scripted.js";
+import { createTaskFromRequirement } from "../domain/task.js";
 import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
@@ -131,6 +132,66 @@ describe("council phase drivers", () => {
       // Exactly one set of tasks, whichever driver produced it.
       expect(new Set(tasks.map((task) => task.title)).size).toBe(tasks.length);
       expect(discarded.length).toBeLessThanOrEqual(1);
+    });
+
+    // The claim stops a second driver starting; the re-read after the await stops one that started
+    // before the claim existed. This forces the second case: tasks land while decompose is awaited.
+    it("a driver whose decomposition finishes after another created the tasks appends nothing and records the discard", async () => {
+      const { runId } = seedRun(store, clock);
+      await engine.tickRun(runId);
+      await engine.tickRun(runId);
+      const run = { ...store.repos.runs.get(runId)!, phase: "PLANNING" as const };
+      const interpretationId = run.interpretationId!;
+      const earlier = createTaskFromRequirement(interpretationId, "R1", {
+        id: id("task", clock.now()),
+        runId,
+        title: "Fix login (earlier driver)",
+        description: "WHAT: fix login",
+        kind: "bugfix",
+        acceptance: ["Login works"],
+        complexity: "normal",
+        baseCheckpointHash: run.currentCheckpointHash!,
+        now: clock.now(),
+      });
+      const late = new ScriptedProvider("council", [
+        { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
+        { name: "scope", capabilities: FAKE_CAPABILITIES.strong },
+        { name: "judge", capabilities: FAKE_CAPABILITIES.strong },
+      ]);
+      late.script("planner", [{
+        kind: "fn",
+        fn: () => {
+          store.events.append([{
+            id: id("evt", clock.now()),
+            runId,
+            ts: clock.now(),
+            type: "task.created",
+            payload: { task: earlier },
+            causedBy: [],
+            actor: { kind: "supervisor", role: "council" },
+            artifacts: [],
+          }]);
+          return reply(JSON.stringify({
+            decision: "approve",
+            rationale: "One coding task.",
+            concerns: [],
+            proposal: { tasks: [{ title: "Fix login", requirementRef: "R1", acceptance: ["Login works"], kind: "bugfix", dependsOn: [] }] },
+          }), 1, 1);
+        },
+      }]);
+      late.script("scope", [opinion("approve", "In scope.", [])]);
+      late.script("judge", [opinion("approve", "Executable.", [])]);
+
+      const result = await createPlanningDriver({ roles: councilRoles(late) })({ run, store, scheduler: sched, clock, config: defaultConfig() });
+
+      expect(result).toMatchObject({ status: "complete", nextPhase: "EXECUTING" });
+      expect(store.repos.tasks.listByRun(runId).map((task) => task.id)).toEqual([earlier.id]);
+      expect(store.events.list(runId, { types: ["task.created"] })).toHaveLength(1);
+      const discarded = store.events.list(runId, { types: ["planning.decompose_discarded"] });
+      expect(discarded).toHaveLength(1);
+      expect(discarded[0]?.payload).toMatchObject({ interpretationId, discardedTasks: 1 });
+      const released = store.events.list(runId, { types: ["planning.decompose_released"] });
+      expect(released.map((event) => event.payload["reason"])).toEqual(["another driver had already created the tasks"]);
     });
 
     // A claim whose owner died is a claim nobody can release, and PLANNING would return `waiting`
