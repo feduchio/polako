@@ -18,7 +18,7 @@ import { openStore, type Store } from "../store/index.js";
 import { estimateTokens } from "../context/types.js";
 import { AgentRunner, toolResultTokenBudget } from "./runner.js";
 import type { AgentRunnerDeps } from "./types.js";
-import { createAgentTools, createLoopEvidence, pageLines } from "./tools.js";
+import { AGENT_TOOL_DEFINITIONS, createAgentTools, createLoopEvidence, pageLines } from "./tools.js";
 import { EmpiricalProgressTracker } from "./progressTracker.js";
 import { defaultProtocolsRoot, ProtocolRegistry } from "../protocols/loader.js";
 import { progressSystemPrompt } from "../context/progressInstruction.js";
@@ -334,6 +334,36 @@ describe("AgentRunner", () => {
     ]);
     await new AgentRunner(deps).run({ ...codingTask(fixture.runId, fixture.base), touchesProductCode: false }, sandbox);
     expect(argvSeen[0]).toEqual(["rg", "-n", "--glob", "!node_modules", "--glob", "!.git", "add", "src"]);
+    store.close();
+    await handle.destroy();
+  });
+
+  it("searches the text itself when ripgrep is missing, with ripgrep's exit codes", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 5, maxTokens: 32_000 });
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      policy: fixture.policy,
+    });
+    writeFileSync(join(handle.path, "src/calc.mjs"), "export function add(a, b) {\n  return a + b;\n}\n");
+    const sandbox = { ...handle, run: () => Promise.reject(new Error("spawn rg ENOENT")) };
+    provider.script("worker", [
+      replyWith(tool("search", { query: "add\\(", path: "." }, "hit")),
+      replyWith(tool("search", { query: "no_such_text_anywhere", path: "src" }, "miss")),
+      replyWith(tool("search", { query: "add(", path: "." }, "bad")),
+      replyWith(tool("finish", { summary: "searched" }, "finish")),
+    ]);
+    await new AgentRunner(deps).run({ ...codingTask(fixture.runId, fixture.base), touchesProductCode: false }, sandbox);
+
+    const output = (callIndex: number) =>
+      (JSON.parse(provider.calls[callIndex]?.messages.at(-1)?.content ?? "{}") as { output: Record<string, unknown> }).output;
+    expect(output(1)).toMatchObject({ exitCode: 0, matchCount: 1, content: "src/calc.mjs:1:export function add(a, b) {", fallback: "text_scan" });
+    expect(output(2)).toMatchObject({ exitCode: 1, matchCount: 0 });
+    expect(output(3)["exitCode"]).toBe(2);
+    expect(output(3)["stderr"]).toMatch(/regex parse error/);
     store.close();
     await handle.destroy();
   });
@@ -689,6 +719,7 @@ describe("AgentRunner", () => {
     const replies = provider.calls.map((call) => call.messages.at(-1)?.content ?? "");
     expect(replies[2]).toContain("noChange needs an acceptance check run with run_command");
     expect(replies[5]).toContain("noChange with a non-empty diff");
+    expect(replies[5]).toContain("call finish again with summary only, without noChange");
     expect(replies[5]).toContain("+++ b/notes.txt");
     expect(replies[5]).toContain("+scratch");
     expect(outcome.status).not.toBe("completed");
@@ -1091,6 +1122,12 @@ async function repositoryFixture(): Promise<{
 }
 
 describe("agent tools", () => {
+  it("tells the worker that noChange is for a task it did not edit", () => {
+    const finish = AGENT_TOOL_DEFINITIONS.find((definition) => definition.name === "finish");
+    expect(finish?.description).toContain("before you changed anything");
+    expect(finish?.description).toContain("A task you edited finishes without noChange.");
+  });
+
   async function toolsFixture(run?: () => ProcessResult) {
     const fixture = await repositoryFixture();
     cleanup.push(fixture.root);

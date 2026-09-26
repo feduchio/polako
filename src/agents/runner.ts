@@ -50,7 +50,9 @@ function validateNoChange(value: unknown, diff: string, loopEvidence: LoopEviden
   if (diff.trim() !== "") {
     throw new PolishError(
       "INVALID_ARGUMENT",
-      "finish rejected: noChange with a non-empty diff; revert the edits or finish without noChange. " + describeDiff(diff, diffTokens),
+      "finish rejected: noChange with a non-empty diff. noChange says the task needed no edit, and the worktree has edits. " +
+        "To submit them as your change, call finish again with summary only, without noChange; " +
+        "to say no edit was needed, revert them first. " + describeDiff(diff, diffTokens),
     );
   }
   if (loopEvidence.passedCommands.length === 0) {

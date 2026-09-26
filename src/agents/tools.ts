@@ -96,8 +96,9 @@ export const AGENT_TOOL_DEFINITIONS: ToolSpec[] = [
     description:
       "Finish with a summary after producing fresh loop evidence. An investigation finishes with reproduction.argv: " +
       "the command that fails on this checkout if the finding is real and passes if it is not; the engine re-runs it itself. " +
-      "A coding task whose acceptance already holds finishes with noChange.reason, after run_command showed a passing check; " +
-      "the engine then runs the gates on the unchanged code and decides.",
+      "A coding task that needed no edit, because its acceptance already held on the checkout before you changed anything, " +
+      "finishes with noChange.reason after run_command showed a passing check, with no edit left in the worktree; " +
+      "the engine then runs the gates on the unchanged code and decides. A task you edited finishes without noChange.",
     parameters: objectSchema({
       summary: { type: "string" },
       reproduction: objectSchema({ argv: { type: "array", items: { type: "string" }, minItems: 1 } }, ["argv"]),
@@ -165,9 +166,15 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
             };
           } catch (error) {
             if (!isSpawnError(error, "rg")) throw error;
-            const hits = await deps.intelligence.explore(query, 50);
-            const matches = redact(JSON.stringify(hits, null, 2));
-            return { exitCode: 0, matchCount: hits.length, ...page(matches, `search ${query}`), stderr: "", fallback: "repo_intel" };
+            const scan = await scanText(deps.sandbox, root, relative(root, safePath(root, requested)) || ".", query);
+            const matches = redact(scan.lines.join("\n"));
+            return {
+              exitCode: scan.error !== null ? 2 : scan.lines.length > 0 ? 0 : 1,
+              matchCount: scan.lines.length,
+              ...page(matches, `search ${query}`),
+              stderr: scan.error ?? "",
+              fallback: "text_scan",
+            };
           }
         }
         case "repo_intel":
@@ -289,8 +296,7 @@ function pathHitsSkippedDir(rel: string): boolean {
  * walk showed build output and vendored trees the repository itself ignores.
  */
 async function listEntries(sandbox: SandboxHandle, root: string, rel: string, recursive: boolean): Promise<string[]> {
-  const files = (await sandbox.git.listFiles(rel === "." ? "." : rel))
-    .filter((file) => !pathHitsSkippedDir(file) && existsSync(resolve(root, file)));
+  const files = await listedFiles(sandbox, root, rel);
   if (recursive) {
     const dirs = new Set<string>();
     for (const file of files) {
@@ -310,6 +316,34 @@ async function listEntries(sandbox: SandboxHandle, root: string, rel: string, re
     children.add(slash === -1 ? file : `${prefix}${rest.slice(0, slash)}/`);
   }
   return [...children].sort();
+}
+
+async function listedFiles(sandbox: SandboxHandle, root: string, rel: string): Promise<string[]> {
+  return (await sandbox.git.listFiles(rel === "." ? "." : rel))
+    .filter((file) => !pathHitsSkippedDir(file) && existsSync(resolve(root, file)));
+}
+
+/**
+ * `rg -n` over the files `list` shows, for a sandbox without ripgrep. The fallback used to be a
+ * symbol lookup, which answered a text query such as `add\(` with zero matches and exit 0; a
+ * worker trusted it and searched again until it stalled (run_01m3dvhg6rz2c5217xqmsh).
+ */
+async function scanText(sandbox: SandboxHandle, root: string, rel: string, query: string): Promise<{ lines: string[]; error: string | null }> {
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(query);
+  } catch (error) {
+    return { lines: [], error: `regex parse error: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const lines: string[] = [];
+  for (const file of await listedFiles(sandbox, root, rel)) {
+    const bytes = readFileSync(resolve(root, file));
+    if (bytes.includes(0)) continue;
+    splitLines(bytes.toString("utf8")).forEach((line, index) => {
+      if (pattern.test(line)) lines.push(`${file}:${String(index + 1)}:${line}`);
+    });
+  }
+  return { lines, error: null };
 }
 
 function splitLines(text: string): string[] {
