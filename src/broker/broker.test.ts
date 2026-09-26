@@ -235,6 +235,14 @@ describe("ModelBroker", () => {
     expect(store.events.list(runId, { types: ["model.fallback"] })).toHaveLength(0);
   });
 
+  it("takes the price away from a model advertised free that billed a call", async () => {
+    const mid = catalog.get({ provider: "p1", model: "mid" })!;
+    catalog.upsert({ ...mid.info, capabilities: { ...mid.info.capabilities, inputCostPerM: 0, outputCostPerM: 0 } });
+    provider.script("mid", [{ kind: "reply", content: "ok", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.04 } }]);
+    await broker.complete(req(runId, "mid"));
+    expect(catalog.get({ provider: "p1", model: "mid" })?.info.capabilities).toMatchObject({ inputCostPerM: null, outputCostPerM: null });
+  });
+
   it("does not fall back on an error that is not a rate limit", async () => {
     provider.script("big", [{ kind: "error", error: new ProviderError("p1", "bad_request", "no") }]);
     await expect(broker.complete({

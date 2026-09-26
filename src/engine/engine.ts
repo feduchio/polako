@@ -15,6 +15,7 @@ import type { Scheduler } from "../scheduler/index.js";
 import { assertRepositoryClean } from "../project/index.js";
 import type { RepositoryStartPolicy } from "../project/index.js";
 import type { Clock } from "../shared/clock.js";
+import { isBudgetError } from "../broker/quota.js";
 import { PolishError } from "../shared/errors.js";
 import { id } from "../shared/ids.js";
 import type { Store } from "../store/index.js";
@@ -247,6 +248,22 @@ export class RunEngine {
         }, SYSTEM_ACTOR);
       } catch {
         // deliberately swallowed
+      }
+      // A spent run budget will be spent on the next tick too. Outside the council phases nothing
+      // paused the run, so the daemon retried it at tick rate: 26,616 driver failures in 36
+      // minutes of one live trial. The run ends, and says why.
+      if (isBudgetError(err) && !councilPhase) {
+        try {
+          if (this.requireRun(runId).control === "RUNNING") {
+            this.applyPhaseAdvance(runId, "FAILED", {
+              code: "budget_exhausted",
+              summary: `run budget exhausted in ${phase}: ${err instanceof Error ? err.message : String(err)}`,
+            });
+          }
+        } catch {
+          // deliberately swallowed: the driver's error is rethrown below
+        }
+        return;
       }
       if (
         councilPhase ||

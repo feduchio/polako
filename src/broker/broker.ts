@@ -195,6 +195,7 @@ export class ModelBroker {
         outcomes.push(outcome);
         this.recordRoutingStats(tagged, outcome);
         const snapshot = budget.record(tagged.metadata.runId, response.usage, taskBudgetKey(tagged.metadata.taskId, tagged.metadata.taskAttempt), callId);
+        this.unpriceIfBilled(tagged.model, response.usage.costUsd);
         const eventId = this.recordEvent(tagged, response, attempt, outcomes, null, snapshot.runUsd, callId);
         return { eventId, response, attempts: attempt, callId };
       } catch (err) {
@@ -272,6 +273,18 @@ export class ModelBroker {
       artifacts: [],
     };
     store.events.append([event]);
+  }
+
+  /**
+   * A model advertised at 0/0 that bills a call is not free, whatever the catalogue says: its price
+   * becomes unknown, so no cost policy admits it again in this daemon.
+   */
+  private unpriceIfBilled(model: ModelRef, costUsd: number | null): void {
+    if (costUsd === null || costUsd <= 0) return;
+    const entry = this.deps.catalog.get(model);
+    const capabilities = entry?.info.capabilities;
+    if (entry === undefined || capabilities?.inputCostPerM !== 0 || capabilities.outputCostPerM !== 0) return;
+    this.deps.catalog.upsert({ ...entry.info, capabilities: { ...capabilities, inputCostPerM: null, outputCostPerM: null } });
   }
 
   private recordFallback(request: CompletionRequest, from: ModelRef, to: ModelRef, error: unknown): void {

@@ -10,6 +10,7 @@ import { FakeClock, flushMicrotasks } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { Scheduler } from "../scheduler/index.js";
+import { PolishError } from "../shared/errors.js";
 import { RunEngine } from "./engine.js";
 
 const NOW = 1_700_000_000_000;
@@ -88,6 +89,22 @@ describe("RunEngine", () => {
     expect(done.phase).toBe("DONE");
     expect(done.terminalReason?.code).toBe("converged");
     expect(store.events.list(run.id, { types: ["run.phase_changed"] }).length).toBeGreaterThan(10);
+  });
+
+  it("ends a run whose budget is spent outside the council phases, instead of retrying it every tick", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    await advanceTo(run.id, "EXECUTING");
+    let calls = 0;
+    engine.registerPhase("EXECUTING", () => {
+      calls += 1;
+      throw new PolishError("CONFLICT", "run USD budget exhausted", { budget: "run_usd" });
+    });
+    await engine.tickRun(run.id);
+    await engine.tickRun(run.id);
+    const ended = store.repos.runs.get(run.id)!;
+    expect(ended.phase).toBe("FAILED");
+    expect(ended.terminalReason).toMatchObject({ code: "budget_exhausted", summary: expect.stringMatching(/run budget exhausted in EXECUTING/) });
+    expect(calls).toBe(1);
   });
 
   it("checks repository cleanliness before persisting a run", () => {

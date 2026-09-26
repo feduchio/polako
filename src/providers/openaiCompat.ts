@@ -31,7 +31,7 @@ interface OpenAIModelRow {
   top_provider?: { max_completion_tokens?: number | null };
   pricing?: { prompt?: string; completion?: string };
   supported_parameters?: string[];
-  architecture?: { input_modalities?: string[] };
+  architecture?: { input_modalities?: string[]; output_modalities?: string[] };
 }
 
 /**
@@ -177,8 +177,11 @@ export class OpenAICompatProvider implements ProviderAdapter {
   private toModelInfo(row: OpenAIModelRow): ModelInfo {
     const hints = this.opts.capabilityHints;
     const hint = hints?.[row.id] ?? hints?.[row.id.replace(/^models\//, "")] ?? {};
-    const input = advertisedPricePerM(row.pricing?.prompt);
-    const output = advertisedPricePerM(row.pricing?.completion);
+    // A model that produces more than text is billed for it per unit the token prices do not
+    // state: google/lyria-3-clip-preview advertises 0/0 and charged $0.04 for one debate call.
+    const nonText = (row.architecture?.output_modalities ?? []).some((modality) => modality !== "text");
+    const input = nonText ? null : advertisedPricePerM(row.pricing?.prompt);
+    const output = nonText ? null : advertisedPricePerM(row.pricing?.completion);
     const supported = new Set(row.supported_parameters ?? []);
     const contextWindow = row.context_length ?? 8192;
     const capabilities: ModelInfo["capabilities"] = {

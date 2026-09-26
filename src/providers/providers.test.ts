@@ -73,6 +73,7 @@ describe("OpenRouterProvider", () => {
             { id: "vendor/tiny", pricing: { prompt: "1e-9", completion: "0e0" }, context_length: 131_072 },
             { id: "vendor/priced", pricing: { prompt: "0.00000015", completion: "0.0000005" }, context_length: 131_072 },
             { id: "vendor/free", pricing: { prompt: "0", completion: "0" }, context_length: 131_072 },
+            { id: "google/lyria-3-clip-preview", pricing: { prompt: "0", completion: "0" }, context_length: 131_072, architecture: { output_modalities: ["text", "audio"] } },
           ],
         },
       })),
@@ -92,6 +93,8 @@ describe("OpenRouterProvider", () => {
     expect(priced["vendor/overflow"]).toEqual([null, 0]);
     // Zero written with an exponent is still zero; only the mantissa says whether it underflowed.
     expect(priced["vendor/zero-exponent"]).toEqual([0, 0]);
+    // Advertised 0/0 and billed $0.04 for one call: its audio is priced in a unit the fields omit.
+    expect(priced["google/lyria-3-clip-preview"]).toEqual([null, null]);
     expect(priced["vendor/tiny"]).toEqual([0.001, 0]);
     expect(priced["vendor/priced"]).toEqual([0.15, 0.5]);
     expect(priced["vendor/free"]).toEqual([0, 0]);
