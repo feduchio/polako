@@ -35,6 +35,18 @@ export const REVIEWER_CONTEXT_RULE =
   "Do not report a requirement as unmet when a listed passing check verifies it.";
 
 /**
+ * What makes a claim worth an investigation. Live runs recorded 151 findings with none shown
+ * real; the criteria follow oh-my-pi's reviewer prompt (`prompts/agents/reviewer.md`, MIT): a
+ * finding is about this change, its impact is shown, and it rests on nothing unstated.
+ */
+export const REVIEWER_ADMISSIBILITY_RULE =
+  "Report a defect only when all three hold. (1) It is in the change under review — a line the change added, " +
+  "removed or altered, or code that line calls — or it names a mission requirement the change leaves unmet. " +
+  "(2) Its impact is shown from the code: name the input or state and the wrong result it produces. " +
+  "(3) It needs no assumption the context does not state. Style preferences, speculation (might, could, " +
+  "potentially) and pre-existing problems the change does not touch are not findings.";
+
+/**
  * Eight axes, five role protocols. The three without one of their own are mapped explicitly
  * rather than defaulted: a reviewer given another axis's role is being told to do a different
  * job, which is worse than being told nothing.
@@ -70,5 +82,11 @@ export function reviewerSystemPrompt(registry: ProtocolRegistry, axis: ReviewAxi
   if (role.meta.kind !== "role") {
     throw new PolishError("INVARIANT_VIOLATION", `${role.meta.name} must have kind role`, { axis });
   }
-  return [`You are an independent ${axis} reviewer.`, role.body.trim(), REVIEWER_CONTEXT_RULE, REVIEWER_OUTPUT_CONTRACT].join("\n\n");
+  return [
+    `You are an independent ${axis} reviewer.`,
+    role.body.trim(),
+    REVIEWER_CONTEXT_RULE,
+    REVIEWER_ADMISSIBILITY_RULE,
+    REVIEWER_OUTPUT_CONTRACT,
+  ].join("\n\n");
 }

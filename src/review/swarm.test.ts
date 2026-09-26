@@ -1,5 +1,5 @@
 import { ReviewAxisSchema } from "../domain/finding.js";
-import { assertReviewerRolesResolvable, REVIEWER_OUTPUT_CONTRACT } from "./reviewerProtocol.js";
+import { assertReviewerRolesResolvable, REVIEWER_ADMISSIBILITY_RULE, REVIEWER_OUTPUT_CONTRACT, reviewerSystemPrompt } from "./reviewerProtocol.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,7 +9,7 @@ import type { Checkpoint } from "../domain/checkpoint.js";
 import { FindingSchema } from "../domain/finding.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
-import { REVIEW_DATA_HEADER, REVIEW_TRUSTED_HEADER, quoteMatches, runAxisReview, runReviewSwarm } from "./swarm.js";
+import { guardEmissions, REVIEW_DATA_HEADER, REVIEW_TRUSTED_HEADER, quoteMatches, runAxisReview, runReviewSwarm } from "./swarm.js";
 import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 
 const roots: string[] = [];
@@ -520,3 +520,30 @@ function response(criterion: string, path: string, line: number): string {
     suggestedCheck: "Add a focused test",
   }]);
 }
+
+describe("reviewer admissibility and emission guard", () => {
+  it("tells every reviewer what makes a finding admissible", () => {
+    for (const axis of ReviewAxisSchema.options) expect(reviewerSystemPrompt(PROTOCOLS, axis)).toContain(REVIEWER_ADMISSIBILITY_RULE);
+    expect(REVIEWER_ADMISSIBILITY_RULE).toMatch(/in the change under review/);
+    expect(REVIEWER_ADMISSIBILITY_RULE).toMatch(/name the input or state and the wrong result/);
+  });
+
+  it("drops content-free and repeated claims and caps advisory findings, never blocking ones", () => {
+    const item = (claim: string, blocking: boolean, severity: "high" | "low" = "low", path = "a.ts") => ({ claim, blocking, severity, evidence: [{ path }] });
+    const advisory = Array.from({ length: 7 }, (_, index) => item(`advisory claim number ${String(index)}`, false, index === 6 ? "high" : "low"));
+    const blocking = Array.from({ length: 7 }, (_, index) => item(`blocking claim number ${String(index)}`, true, "high"));
+    const { kept, suppressed } = guardEmissions([
+      item("LGTM", false),
+      item("No issues found.", true),
+      item("add subtracts", true, "high"),
+      item("add  Subtracts", true, "high"),
+      item("add subtracts", true, "high", "b.ts"),
+      ...advisory,
+      ...blocking,
+    ]);
+    expect(suppressed.map((entry) => entry.reason)).toEqual(["content_free", "content_free", "repeated", "advisory_cap", "advisory_cap"]);
+    expect(kept.filter((finding) => finding.blocking)).toHaveLength(9);
+    expect(kept.filter((finding) => !finding.blocking).map((finding) => finding.claim)).toContain("advisory claim number 6");
+    expect(kept.filter((finding) => !finding.blocking)).toHaveLength(5);
+  });
+});

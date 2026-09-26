@@ -75,6 +75,8 @@ export interface ReviewTrustedContext {
 export interface RunAxisReviewResult {
   model: ModelRef;
   findings: ReviewedFinding[];
+  /** Claims the emission guard left out, and why; the raw response keeps them in full. */
+  suppressed: { claim: string; reason: string }[];
   promptDigest: string;
   rawContent: string;
 }
@@ -156,12 +158,51 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
     }),
   );
 
+  const guarded = guardEmissions(findings);
   return {
     model,
-    findings,
+    findings: guarded.kept,
+    suppressed: guarded.suppressed,
     promptDigest: sha256Hex(userContent),
     rawContent: response.message.content,
   };
+}
+
+const MAX_ADVISORY_PER_REVIEWER = 5;
+const CONTENT_FREE = /^(?:lgtm|looks good(?: to me)?|no (?:issues?|defects?|problems?)(?: found)?|none|n\/a|ok(?:ay)?|fine|nothing(?: to report)?|all (?:good|checks pass))[.!]?$/i;
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 } as const;
+
+/**
+ * One reviewer's output before it costs anything downstream: content-free claims are dropped, a
+ * claim repeated with the same evidence is kept once, and advisory findings are capped per reviewer,
+ * most severe first. Blocking findings are never capped (after oh-my-pi's advisor emission guard).
+ */
+export function guardEmissions<T extends { claim: string; blocking: boolean; severity: keyof typeof SEVERITY_RANK; evidence: readonly unknown[] }>(
+  findings: readonly T[],
+): { kept: T[]; suppressed: { claim: string; reason: string }[] } {
+  const suppressed: { claim: string; reason: string }[] = [];
+  const seen = new Set<string>();
+  const distinct: T[] = [];
+  for (const finding of findings) {
+    const claim = finding.claim.trim();
+    if (CONTENT_FREE.test(claim) || !/[a-z]{3}/i.test(claim)) {
+      suppressed.push({ claim, reason: "content_free" });
+      continue;
+    }
+    const key = `${claim.toLowerCase().replace(/\s+/g, " ")}|${JSON.stringify(finding.evidence)}`;
+    if (seen.has(key)) {
+      suppressed.push({ claim, reason: "repeated" });
+      continue;
+    }
+    seen.add(key);
+    distinct.push(finding);
+  }
+  const advisory = distinct
+    .filter((finding) => !finding.blocking)
+    .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
+  const overCap = new Set(advisory.slice(MAX_ADVISORY_PER_REVIEWER));
+  for (const finding of overCap) suppressed.push({ claim: finding.claim, reason: "advisory_cap" });
+  return { kept: distinct.filter((finding) => !overCap.has(finding)), suppressed };
 }
 
 /** Run independent, stateless reviews. Each axis receives a newly constructed context pack. */
