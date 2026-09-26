@@ -30,12 +30,13 @@ const WEAK_RELATIVE_PATH = "tests/weak.test.mjs";
  * with an assertion — not a load error or a crash. Pairs spread over seeds first and operators
  * second, so a live tier's trials are not one oracle shape repeated.
  */
-export function generatePairs(outDir: string, options: { limit?: number } = {}): { pairs: PairRecord[]; rejected: number } {
+export function generatePairs(outDir: string, options: { limit?: number; seeds?: readonly string[] } = {}): { pairs: PairRecord[]; rejected: number } {
   const limit = options.limit ?? 20;
-  const perSeed = Math.ceil(limit / SEEDS.length) + 1;
+  const seeds = options.seeds === undefined ? SEEDS : SEEDS.filter((seed) => options.seeds?.includes(seed.id) === true);
+  const perSeed = Math.ceil(limit / seeds.length) + 1;
   let rejected = 0;
   const bySeed: PairRecord[][] = [];
-  for (const seed of SEEDS) {
+  for (const seed of seeds) {
     const root = join(outDir, seed.id);
     const correctDir = join(root, "correct");
     writeFixture(correctDir, seed, seed.source);
