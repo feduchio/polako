@@ -131,9 +131,11 @@ export class ModelCatalog {
   }
 
   upsert(info: ModelInfo): CatalogEntry {
-    const normalized = stripUnprobedStrictCapabilities(info);
-    const key = modelRefKey(normalized.ref);
+    const key = modelRefKey(info.ref);
     const existing = this.entries.get(key);
+    const normalized = existing?.info.source === "probe" && info.source !== "probe"
+      ? keepProbedCapabilities(info, existing.info)
+      : stripUnprobedStrictCapabilities(info);
     const entry: CatalogEntry = {
       info: normalized,
       stats: existing?.stats ?? { calls: 0, failures: 0, latencyMs: 0, quality: null, lastErrorKind: null, lastUsedAt: null },
@@ -207,6 +209,29 @@ export class ModelCatalog {
     const q = Math.min(1, Math.max(0, quality));
     e.stats.quality = e.stats.quality === null ? q : e.stats.quality * (1 - EMA) + q * EMA;
   }
+}
+
+/**
+ * A listing refreshes price and context; it says nothing about what a probe established. The
+ * catalog is shared by every run in the daemon, and discovery lists before it probes: dropping the
+ * probed flags on the listing left a strict reviewer non-strict until the probe reached it again,
+ * and run_01m3dqgjf0zw2knptvsq98 chose its reviewers inside another run's discovery and found two
+ * families of four.
+ */
+function keepProbedCapabilities(listed: ModelInfo, probed: ModelInfo): ModelInfo {
+  const kept = probed.capabilities;
+  return {
+    ...listed,
+    source: "probe",
+    capabilities: {
+      ...listed.capabilities,
+      supportsTools: kept.supportsTools,
+      supportsJson: kept.supportsJson,
+      ...(kept.supportsStrictReviewSchema === undefined ? {} : { supportsStrictReviewSchema: kept.supportsStrictReviewSchema }),
+      ...(kept.supportsStrictScoreSchema === undefined ? {} : { supportsStrictScoreSchema: kept.supportsStrictScoreSchema }),
+      ...(kept.supportsStrictProgressSchema === undefined ? {} : { supportsStrictProgressSchema: kept.supportsStrictProgressSchema }),
+    },
+  };
 }
 
 function stripUnprobedStrictCapabilities(info: ModelInfo): ModelInfo {

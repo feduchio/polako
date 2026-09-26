@@ -15,7 +15,7 @@ import { ModelCatalog } from "./catalog.js";
 import { BudgetTracker, QuotaTracker, isBudgetError } from "./quota.js";
 import { ModelRouter } from "./router.js";
 import { SecretStore, parseDotenv } from "./secrets.js";
-import { ProviderError, type CompletionRequest } from "./types.js";
+import { ProviderError, taskBudgetKey, type CompletionRequest } from "./types.js";
 import { DISABLED_REASONING, EMPIRICAL_SCORE_RESPONSE_SCHEMA } from "./responseSchemas.js";
 
 const NOW = 1_700_000_000_000;
@@ -782,5 +782,14 @@ describe("ScriptedProvider", () => {
     const r = await p.complete(req("run_s", "m", "s", "echo me"));
     expect(r.message.content).toBe("echo me");
     expect(reply("x").finishReason).toBe("stop");
+  });
+});
+
+describe("taskBudgetKey", () => {
+  it("charges a task attempt on its own key and charges nothing without a task", () => {
+    expect(taskBudgetKey("task_a", 2)).toBe("task_a#2");
+    expect(taskBudgetKey("task_a", undefined)).toBe("task_a");
+    expect(taskBudgetKey(undefined, 2)).toBeUndefined();
+    expect(taskBudgetKey(null, 2)).toBeUndefined();
   });
 });

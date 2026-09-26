@@ -131,6 +131,53 @@ describe("AgentRunner", () => {
     store.close();
   });
 
+  it("stops a command re-run on an unchanged tree even when each run prints its own timings", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const argv = ["node", "-e", "console.log('# duration_ms', process.hrtime.bigint().toString())"];
+    const policy = CommandPolicy.forProject([argv], null, false, { search: true });
+    const { provider, deps } = harness(store, policy, { maxTurns: 6, maxTokens: 64_000 });
+    const stalled: { tool: string; repeats: number }[] = [];
+    deps.onLoopStalled = (_task, info) => { stalled.push(info); };
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy });
+    provider.script("worker", Array.from({ length: 6 }, (_, index) => replyWith(tool("run_command", { argv }, `run-${index}`))));
+    const result = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    const printed = ["run-0", "run-1"].map((callId) =>
+      provider.calls[2]?.messages.find((message) => message.role === "tool" && message.toolCallId === callId)?.content);
+    expect(printed[0]).toContain("duration_ms");
+    expect(printed[1]).toContain("duration_ms");
+    expect(printed[0]).not.toBe(printed[1]);
+    expect(result).toMatchObject({ status: "failed", error: "STALLED" });
+    expect(provider.calls).toHaveLength(3);
+    expect(stalled).toEqual([{ tool: "run_command", repeats: 3 }]);
+    await handle.destroy();
+    store.close();
+  });
+
+  it("stops a rejected finish sent again and again on an unchanged tree", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 64_000 });
+    const stalled: { tool: string; repeats: number }[] = [];
+    deps.onLoopStalled = (_task, info) => { stalled.push(info); };
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+    const noChange = { reason: "add already sums" };
+    provider.script("worker", [
+      replyWith(tool("write", { path: "notes.txt", content: "scratch\n" }, "scratch")),
+      replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "check")),
+      ...Array.from({ length: 6 }, (_, index) => replyWith(tool("finish", { summary: "fine", noChange }, `finish-${index}`))),
+    ]);
+    const result = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    expect(provider.calls.at(-1)?.messages.at(-1)?.content).toContain("noChange with a non-empty diff");
+    expect(result).toMatchObject({ status: "failed", error: "STALLED" });
+    expect(provider.calls).toHaveLength(5);
+    expect(stalled).toEqual([{ tool: "finish", repeats: 3 }]);
+    await handle.destroy();
+    store.close();
+  });
+
   it("omits node_modules from a listing small enough to return whole", async () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });

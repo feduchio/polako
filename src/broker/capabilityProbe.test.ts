@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { probeModelCapabilities } from "./capabilityProbe.js";
+import { probeModelCapabilities, type CapabilityProbeResult } from "./capabilityProbe.js";
 import { ModelCatalog } from "./catalog.js";
 import { buildDiscoveryShortlist } from "./discoveryShortlist.js";
 import { FAKE_CAPABILITIES, ScriptedProvider, reply, type ScriptedModel } from "../providers/scripted.js";
@@ -383,6 +383,40 @@ describe("bounded catalog discovery", () => {
     expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictReviewSchema).toBe(true);
     expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictScoreSchema).toBe(true);
     expect(catalog.get(advertised.ref)?.info.capabilities.supportsStrictProgressSchema).toBe(true);
+  });
+
+  it("keeps what a probe established while a later discovery relists the model and before it probes it again", async () => {
+    let price = 1;
+    const provider = new ScriptedProvider("p", []);
+    const adapter: ProviderAdapter = {
+      health: provider.health.bind(provider),
+      listModels: () => Promise.resolve(["a", "b"].map((name) => model(name, FAKE_CAPABILITIES.strong, price))),
+      complete: provider.complete.bind(provider),
+      id: provider.id,
+      kind: provider.kind,
+      concurrency: provider.concurrency,
+    };
+    const catalog = new ModelCatalog();
+    catalog.register(adapter);
+    const strictReview = (name: string): boolean | undefined => catalog.get({ provider: "p", model: name })?.info.capabilities.supportsStrictReviewSchema;
+    const seen: (boolean | undefined)[] = [];
+    const probe = (_adapter: ProviderAdapter, info: ModelInfo): Promise<CapabilityProbeResult> => {
+      if (info.ref.model === "a") seen.push(strictReview("b"));
+      return Promise.resolve({
+        info: { ...info, source: "probe", capabilities: { ...info.capabilities, supportsStrictReviewSchema: true } },
+        available: true,
+        checks: {} as CapabilityProbeResult["checks"],
+      });
+    };
+
+    await catalog.discover({ capabilityProbe: probe });
+    price = 2;
+    await catalog.discover({ capabilityProbe: probe });
+
+    // The second discovery probes a before b: b's strict flag must survive the relisting meanwhile.
+    expect(seen).toEqual([undefined, true]);
+    expect(strictReview("b")).toBe(true);
+    expect(catalog.get({ provider: "p", model: "b" })?.info.capabilities.inputCostPerM).toBe(2);
   });
 
   it("probes only the shortlist cap, not every listed model", async () => {

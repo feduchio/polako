@@ -472,9 +472,10 @@ export class AgentRunner implements CandidateWorker {
   ): Promise<{ tool: string; repeats: number } | null> {
     // `read` is how a worker looks at a file before editing it. Three reads of one file are the
     // progress tracker's case (scored at turns 8 and 12), not this one. The loops that burned a
-    // budget were search and list.
-    if (name === "read" || name === "write" || name === "apply_patch" || name === "finish" || name === "request_split") return null;
-    const key = `${name}\n${encodedArgs}\n${sha256Hex(stableResult(message))}`;
+    // budget were search and list. An accepted `finish` ends the loop before this, so a `finish`
+    // that gets here was rejected: run_01m3dqgjp7s5fgzmgfhm9t sent one rejected noChange 23 times.
+    if (name === "read" || name === "write" || name === "apply_patch" || name === "request_split") return null;
+    const key = `${name}\n${encodedArgs}\n${sha256Hex(stableResult(name, message))}`;
     const prior = repeats.get(key);
     const count = (prior?.count ?? 0) + 1;
     if (count < 3) {
@@ -512,10 +513,18 @@ export class AgentRunner implements CandidateWorker {
   }
 }
 
-/** A tool result without its timing: two runs of one command that print the same are a repeat. */
-function stableResult(message: string): string {
+/**
+ * What makes two results of one call the same. A command is compared by how it ended, not by what
+ * it printed: test runners print their own timings (`duration_ms`), so no two runs print alike, and
+ * run_01m3dqgjp7s5fgzmgfhm9t ran one passing `npm run test` 18 times on an unchanged tree.
+ */
+function stableResult(name: string, message: string): string {
   try {
-    const parsed = JSON.parse(message) as { output?: unknown };
+    const parsed = JSON.parse(message) as { ok?: unknown; error?: unknown; output?: unknown };
+    if (name === "run_command" && typeof parsed.output === "object" && parsed.output !== null) {
+      const { exitCode, signal, timedOut } = parsed.output as Record<string, unknown>;
+      return JSON.stringify({ ok: parsed.ok, exitCode, signal, timedOut });
+    }
     if (typeof parsed.output === "object" && parsed.output !== null && "durationMs" in parsed.output) {
       const { durationMs: _durationMs, ...rest } = parsed.output as Record<string, unknown>;
       return JSON.stringify({ ...parsed, output: rest });

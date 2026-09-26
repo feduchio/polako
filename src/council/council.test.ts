@@ -103,6 +103,20 @@ describe("SupervisorCouncil", () => {
     await expect(council.intake(BUGFIX_MISSION, PROFILE, BASELINE)).rejects.toMatchObject({ code: "OUTPUT_CONTRACT" });
   });
 
+  it("rejects a planner task that names a requirement the interpretation does not have", async () => {
+    const provider = scriptedCouncil(false, {
+      decomposeTasks: [{ title: "Fix login", requirementRef: "R9", acceptance: ["Login works"], kind: "bugfix", dependsOn: [] }],
+    });
+    const council = new SupervisorCouncil({ roles: councilRoles(provider), now: () => 10 });
+    const intake = await council.intake(BUGFIX_MISSION, PROFILE, BASELINE);
+    expect(intake.status).toBe("READY");
+    if (intake.status !== "READY") return;
+    await expect(council.decompose(intake.interpretation)).rejects.toMatchObject({
+      code: "OUTPUT_CONTRACT",
+      message: expect.stringContaining("unknown requirement R9"),
+    });
+  });
+
   it("returns NEEDS_HUMAN when every coding task is dropped", async () => {
     const provider = scriptedCouncil(false, { dropRefs: ["R1", "R2"] });
     const council = new SupervisorCouncil({ roles: councilRoles(provider), now: () => 10 });
