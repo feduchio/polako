@@ -568,7 +568,7 @@ export function detectSilencing(input: {
         findings.push({
           kind: "skip_only",
           path: currentPath,
-          detail: `baseline failing test left unmodified while wrapping: ${detail}`,
+          detail: `code around a baseline failing test changed while the test itself was kept: ${detail}`,
         });
       }
     }
@@ -819,10 +819,15 @@ function resolveNewlyPassingTestFile(
   return TEST_FILE.test(mapped) ? mapped : null;
 }
 
+/**
+ * node:test names a failure `tests/add.test.mjs:5:1 > title`; the `:line:column` is not part of
+ * the path. Kept, it matched no changed file, and a candidate that rewrote the failing test's
+ * expected value passed the silencing gate (run_01m3dwdnwn1fm5jv27h3mb).
+ */
 function filePartOfIdentity(testName: string): string {
   const viaColon = testName.split("::")[0] ?? testName;
   const viaGt = viaColon.split(" > ")[0] ?? viaColon;
-  return normalizeChangedPath(viaGt.trim());
+  return normalizeChangedPath(viaGt.trim().replace(/:\d+(?::\d+)?$/, ""));
 }
 
 function titleOfIdentity(testName: string): string | null {

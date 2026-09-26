@@ -641,6 +641,47 @@ describe("silencing + baseline", () => {
     expect(viteInclude.some((s) => s.kind === "weakened_config" && s.path === "vite.config.ts")).toBe(true);
   });
 
+  it("flags a rewritten expectation in a node:test failure named with its line and column", () => {
+    const profile = discoverProject(projDir);
+    const baseline = buildBaselineSnapshot({
+      runId: "run_0000000000000000000000",
+      commitHash: "a".repeat(40),
+      checks: [{
+        name: "test",
+        kind: "test",
+        status: "fail",
+        exitCode: 1,
+        durationMs: 1,
+        summary: { total: 1, passed: 0, failed: 1, skipped: 0, failingTests: ["tests/add.test.mjs:5:1 > add sums its arguments"] },
+        outputRef: null,
+      }],
+      profile,
+    });
+    const rewritten = detectSilencing({
+      baseline,
+      candidateConfigHashes: baseline.configHashes,
+      candidateScriptsHash: baseline.scriptsHash,
+      changedFiles: ["src/add.mjs", "tests/add.test.mjs"],
+      diffText: [
+        "diff --git a/tests/add.test.mjs b/tests/add.test.mjs",
+        "--- a/tests/add.test.mjs",
+        "+++ b/tests/add.test.mjs",
+        "@@ -3,5 +3,5 @@ import test from \"node:test\";",
+        " import { add } from \"../src/add.mjs\";",
+        " ",
+        " test(\"add sums its arguments\", () => {",
+        "-  assert.equal(add(1, 1), \"2\");",
+        "+  assert.equal(add(1, 1), 2);",
+        " });",
+      ].join("\n"),
+    });
+    expect(rewritten).toEqual([{
+      kind: "skip_only",
+      path: "tests/add.test.mjs",
+      detail: "code around a baseline failing test changed while the test itself was kept: test(\"add sums its arguments\", () => {",
+    }]);
+  });
+
   it("detects skipIf / xdescribe wraps that hide a baseline failure without reindenting it()", () => {
     const profile = discoverProject(projDir);
     const baseline = buildBaselineSnapshot({
