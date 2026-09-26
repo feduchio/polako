@@ -69,6 +69,7 @@ describe("B-selfhost-19 composed reviewer instruction", () => {
         expect(system).toContain(field);
       }
       expect(system).toContain("Return JSON only");
+      expect(system).toContain("Correct behavior and passing checks are not findings");
       // Finding 23's rule, reaching a provider because it lives in the role bodies.
       expect(system).toContain("blocking only when it is a plausible omission");
     }

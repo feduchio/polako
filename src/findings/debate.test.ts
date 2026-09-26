@@ -9,6 +9,7 @@ import {
   legalDebateValid,
   nextDebateStep,
   parseJudgeVerdict,
+  rolePrompt,
   threeDistinctDebateRoles,
 } from "./debate.js";
 
@@ -60,6 +61,15 @@ describe("finding debate helpers", () => {
     expect(threeDistinctDebateRoles({ prosecutor: a, defender: b, judge: c })).toBe(true);
     expect(threeDistinctDebateRoles({ prosecutor: a, defender: b, judge: a })).toBe(false);
     expect(threeDistinctDebateRoles({ prosecutor: a, defender: a, judge: b })).toBe(false);
+  });
+
+  it("tells prosecutor, defender and judge that a true claim of correct behavior is not a defect", () => {
+    const praise = finding({ claim: "The add function returns the sum of its arguments." });
+    for (const role of ["prosecutor", "defender", "judge"] as const) {
+      const prompt = rolePrompt(role, praise, [], [], [], 1);
+      expect(prompt, role).toContain("VALID means the change has the defect the claim describes");
+      expect(prompt, role).toContain("names no defect and is REJECTED however true it is");
+    }
   });
 
   it("parses structured judge JSON and rejects malformed or empty", () => {

@@ -17,7 +17,9 @@ export const REVIEWER_OUTPUT_CONTRACT =
   "reproduction, and suggestedCheck. Evidence is an array of {path,line,endLine,quote}; use null for " +
   "unknown line/endLine. quote is the cited code copied exactly from the file after the change " +
   "(without diff markers), or null; a quote that is not in the file makes the finding void. " +
-  "Reproduction is an array. Use null when suggestedCheck is absent.";
+  "Reproduction is an array. Use null when suggestedCheck is absent. " +
+  "A finding is a defect: its claim says what is wrong. Correct behavior and passing checks are not " +
+  'findings; when you find no defect, return {"findings": []}.';
 
 /**
  * How a reviewer is to weigh the two sections of its input. A finding that says a passing check is

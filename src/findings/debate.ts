@@ -222,6 +222,17 @@ export function nextDebateStep(
   return { done: true, lastVerdict: parsed?.verdict ?? "UNCERTAIN" };
 }
 
+/**
+ * What the three verdicts mean, said to all three roles. Without it a claim that was simply true
+ * won: in run_01m3drb07720355x3z1s63 a reviewer reported "The add function returns the sum of its
+ * arguments." as blocking, the prosecutor argued the claim matched the code, and the judge said
+ * VALID, which cost an investigation to undo.
+ */
+export const DEBATE_VERDICT_MEANING =
+  "VALID means the change has the defect the claim describes: the cited code fails a mission requirement the way the claim says. " +
+  "A claim that the code is correct, or that a check passes, names no defect and is REJECTED however true it is. " +
+  "UNCERTAIN means the supplied evidence cannot decide whether that defect exists.";
+
 export function rolePrompt(
   role: DebateRole,
   finding: Finding,
@@ -248,6 +259,7 @@ export function rolePrompt(
     return [
       "Prosecutor in an evidence-bound software finding debate.",
       "Argue VALID using only the supplied finding fields, prior validations, and artifact refs.",
+      DEBATE_VERDICT_MEANING,
       "Do not invent file paths, command output, or reproduction steps.",
       "Free-text persuasion cannot create evidence refs.",
       JSON.stringify(evidenceBound),
@@ -258,6 +270,7 @@ export function rolePrompt(
     return [
       "Defender in an evidence-bound software finding debate.",
       "Challenge weak or non-reproducible claims. Prefer REJECTED or residual UNCERTAIN over false VALID.",
+      DEBATE_VERDICT_MEANING,
       "Cite only supplied evidence. Do not invent facts.",
       JSON.stringify({ ...evidenceBound, prosecution }),
     ].join("\n");
@@ -266,6 +279,7 @@ export function rolePrompt(
   return [
     "Judge an evidence-bound software finding debate.",
     "Decide from arguments plus persisted evidence only. Do not invent evidence refs.",
+    DEBATE_VERDICT_MEANING,
     'Return JSON only: {"verdict":"VALID|REJECTED|UNCERTAIN","rationale":"non-empty explanation"}.',
     JSON.stringify({ ...evidenceBound, prosecution, defense }),
   ].join("\n");
