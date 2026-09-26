@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { triageFinding } from "./triage.js";
 import type { CorpusEntry } from "../domain/acceptance.js";
 import { findingFingerprint, type Finding } from "../domain/finding.js";
 import { createTaskFromValidFinding } from "../domain/task.js";
@@ -105,6 +106,11 @@ describe("finding fingerprint and triage", () => {
     expect(result.finding.status).toBe("DUPLICATE");
     expect(result.finding.duplicateOf).toBe(existing.id);
     expect(calls).toBe(0);
+  });
+
+  it("does not absorb a finding raised on a different checkpoint: changed code is a new claim", () => {
+    const earlier = rawFinding({ id: id("find", NOW + 1), status: "VALID", checkpointHash: "c".repeat(40) });
+    expect(triageFinding(rawFinding({ runId: earlier.runId }), [earlier]).disposition).toBe("validate");
   });
 
   it("notes unsupported reviewer opinions as noise", async () => {

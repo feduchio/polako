@@ -25,7 +25,9 @@ export function tallyDispositions(input: DispositionInput): DispositionTally {
         tally.duplicate += 1;
         break;
       case "NOTED":
-        tally.noted += 1;
+        // A citation that is not in the code voids the citation, not the claim: nothing examined it.
+        if (finding.evidenceMismatch !== undefined) countNotExamined(tally, "citation_unverifiable");
+        else tally.noted += 1;
         break;
       case "VALID":
       case "RESOLVED":

@@ -23,6 +23,8 @@ export function triageFinding(finding: Finding, existing: readonly Finding[]): F
       candidate.runId === finding.runId &&
       candidate.status !== "RAW" &&
       candidate.status !== "DUPLICATE" &&
+      // A finding re-raised on changed code is a new claim about that code, examined again.
+      candidate.checkpointHash === finding.checkpointHash &&
       // A void citation must not absorb a later finding that cites the code correctly.
       candidate.evidenceMismatch === undefined &&
       (candidate.fingerprint === fingerprint || fingerprintFinding(candidate) === fingerprint),

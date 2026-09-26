@@ -30,7 +30,7 @@ export class ProjectFindingEvidenceWorker implements FindingEvidenceWorker {
     const runtime = await this.tryRuntime(finding);
     if (runtime !== null) return runtime;
     return {
-      method: "investigation",
+      method: "none",
       verdict: "UNCERTAIN",
       rationale: "no project runtime scenario applies to the finding; nothing was executed",
       evidenceRefs: [],
@@ -43,7 +43,7 @@ export class ProjectFindingEvidenceWorker implements FindingEvidenceWorker {
     const template = discovery.templates[0];
     if (template === undefined) {
       return {
-        method: "runtime_evidence",
+        method: "none",
         verdict: "UNCERTAIN",
         rationale: `runtime reproduction requested but project has no safe scenario (${discovery.reason})`,
         evidenceRefs: [],
@@ -58,7 +58,7 @@ export class ProjectFindingEvidenceWorker implements FindingEvidenceWorker {
     const selection = await discoverRuntimeValidator("auto", scenario, [new FixtureRuntimeValidator({ now: this.now })]);
     if (selection.validator === null) {
       return {
-        method: "runtime_evidence",
+        method: "none",
         verdict: "UNCERTAIN",
         rationale: selection.reason,
         evidenceRefs: [],
@@ -70,7 +70,7 @@ export class ProjectFindingEvidenceWorker implements FindingEvidenceWorker {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {
-        method: "runtime_evidence",
+        method: "none",
         verdict: "UNCERTAIN",
         rationale: environmentFailureFromError(err) ?? `runtime evidence failed before the runner started: ${message}`,
         evidenceRefs: [],

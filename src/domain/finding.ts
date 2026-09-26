@@ -121,6 +121,8 @@ export const ValidationMethodSchema = z.enum([
   "runtime_evidence",
   "investigation",
   "finding_debate",
+  /** Nothing was executed: the validator had no scenario that applies. */
+  "none",
 ]);
 export type ValidationMethod = z.infer<typeof ValidationMethodSchema>;
 

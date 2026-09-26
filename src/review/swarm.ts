@@ -129,11 +129,13 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
   const raws = parseRawFindings(response.message.content);
   const findings = await Promise.all(
     raws.map(async (raw) => {
-      const evidenceIssues = await checkEvidence(raw.evidence, input.repositoryRoot);
+      const evidenceIssues = await checkEvidence(raw.evidence, input.repositoryRoot, removedLines(input.artifact.diff));
       const mismatches = evidenceIssues.filter((issue) => issue.startsWith(EVIDENCE_MISMATCH));
+      // One bad citation marks that citation; the finding is void only when none of its refs holds.
+      const voided = mismatches.length > 0 && evidenceIssues.length >= raw.evidence.length;
       const finding = FindingSchema.parse({
         ...raw,
-        ...(mismatches.length === 0 ? {} : { evidenceMismatch: mismatches.join("; ") }),
+        ...(voided ? { evidenceMismatch: mismatches.join("; ") } : {}),
         id: id("find", now),
         runId: input.checkpoint.runId,
         checkpointHash: input.checkpoint.commitHash,
@@ -270,9 +272,15 @@ function normalizeFinding(value: unknown): unknown {
   return out;
 }
 
+/** Lines the change removed, which a reviewer may quote as what the change took away. */
+export function removedLines(diff: string): string[] {
+  return diff.split(/\r?\n/).filter((line) => line.startsWith("-") && !line.startsWith("---")).map((line) => line.slice(1));
+}
+
 async function checkEvidence(
   evidence: RawFinding["evidence"],
   repositoryRoot: string | undefined,
+  removed: readonly string[] = [],
 ): Promise<string[]> {
   if (evidence.length === 0) return ["finding has no evidence references"];
   if (repositoryRoot === undefined) return evidence.map((ref) => `${ref.path}: repository root unavailable`);
@@ -307,7 +315,7 @@ async function checkEvidence(
           if (ref.line !== undefined && ref.endLine !== undefined && ref.endLine < ref.line) {
             return `${ref.path}: end line precedes start line`;
           }
-          if (ref.quote !== undefined && !quoteMatches(ref.quote, lines, ref.line, ref.endLine)) {
+          if (ref.quote !== undefined && !quoteMatches(ref.quote, lines, ref.line, ref.endLine) && !quoteMatches(ref.quote, removed)) {
             return `${EVIDENCE_MISMATCH}: ${ref.path}${ref.line === undefined ? "" : `:${String(ref.line)}`} does not contain the quoted text`;
           }
         }

@@ -56,7 +56,7 @@ describe("ProjectFindingEvidenceWorker", () => {
     const attempt = await worker.reproduce(testFinding([`npm exec --yes -- node -e ${code}`, "pnpm test"]));
 
     expect(existsSync(marker)).toBe(false);
-    expect(attempt).toMatchObject({ method: "investigation", verdict: "UNCERTAIN" });
+    expect(attempt).toMatchObject({ method: "none", verdict: "UNCERTAIN" });
     expect(attempt.rationale).toContain("nothing was executed");
     expect(attempt.evidenceRefs).toEqual([]);
   });

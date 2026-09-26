@@ -146,6 +146,34 @@ describe("B-selfhost-19 composed reviewer instruction", () => {
     expect(findings[2]?.evidence[0]).not.toHaveProperty("quote");
   });
 
+  it("keeps a finding that quotes the line the change removed, and one with a single bad citation among good ones", async () => {
+    const root = await mkdtemp(join(tmpdir(), "polish-quote-"));
+    roots.push(root);
+    await writeFile(join(root, "add.mjs"), "import { pad } from \"pad\";\n\nexport function add(a, b) {\n  return pad(a + b);\n}\n");
+    const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+    const finding = (evidence: Record<string, unknown>[]) => ({
+      criterion: "correctness", severity: "high", blocking: true, claim: "the change altered add", evidence, reproduction: ["node --test"], suggestedCheck: null,
+    });
+    provider.script("reviewer", [{
+      kind: "reply",
+      content: JSON.stringify({ findings: [
+        finding([{ path: "add.mjs", line: 4, endLine: null, quote: "-  return pad(a - b);" }]),
+        finding([{ path: "add.mjs", line: 4, endLine: null, quote: "return pad(a + b);" }, { path: "add.mjs", line: 1, endLine: null, quote: "import { left } from \"left-pad\";" }]),
+        finding([{ path: "add.mjs", line: 1, endLine: null, quote: "import { left } from \"left-pad\";" }]),
+      ] }),
+    }]);
+    const { findings } = await runAxisReview({
+      checkpoint: CHECKPOINT,
+      axis: "correctness",
+      artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "b", diff: "@@ -4 +4 @@\n-  return pad(a - b);\n+  return pad(a + b);\n", checkpoint: CHECKPOINT },
+      provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+      protocols: PROTOCOLS,
+      repositoryRoot: root,
+    });
+    expect(findings.map((item) => item.evidenceMismatch === undefined)).toEqual([true, true, false]);
+    expect(findings[1]?.evidenceIssues).toEqual(["evidence_mismatch: add.mjs:1 does not contain the quoted text"]);
+  });
+
   it("matches a quote across rewrapped whitespace and nearby lines, but not a paraphrase", () => {
     const lines = ["function f(a) {", "  if (a >", "      0) return a;", "  return -1;", "}"];
     expect(quoteMatches("if (a > 0) return a;", lines, 2, 3)).toBe(true);
