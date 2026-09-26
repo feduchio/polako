@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, ToolCall } from "../broker/types.js";
 import { estimateTokens } from "../context/types.js";
-import { buildLoopDigest, buildWireWindow, loopDigestCap } from "./loopWindow.js";
+import { buildLoopDigest, buildWireWindow, loopDigestCap, stubSupersededResults } from "./loopWindow.js";
 import type { AgentToolResult, AgentTurn } from "./types.js";
 
 /**
@@ -363,6 +363,36 @@ describe("buildLoopDigest", () => {
 
   it("is empty before there is any history to summarise", () => {
     expect(buildLoopDigest([], 400)).toBe("");
+  });
+});
+
+describe("stubSupersededResults", () => {
+  const suite = JSON.stringify({ ok: true, output: { argv: ["npm", "run", "test"], exitCode: 1, content: "✔ x\n".repeat(400), fullOutputRef: "ref-1" } });
+  const call = (id: string, name: string, args: Record<string, unknown>): ChatMessage =>
+    ({ role: "assistant", content: "", toolCalls: [{ id, name, arguments: JSON.stringify(args) }] });
+  const result = (id: string, content: string): ChatMessage => ({ role: "tool", toolCallId: id, content });
+
+  it("stubs a command's output once the same command ran again, and a read once the file was edited", () => {
+    const archive: ChatMessage[] = [
+      { role: "user", content: "pack" },
+      call("r1", "read", { path: "src/add.mjs" }),
+      result("r1", JSON.stringify({ ok: true, output: { path: "src/add.mjs", content: "1:aa|return a - b;" } })),
+      call("t1", "run_command", { argv: ["npm", "run", "test"] }),
+      result("t1", suite),
+      call("e1", "edit", { path: "src/add.mjs", edits: [] }),
+      result("e1", JSON.stringify({ ok: true, output: { path: "src/add.mjs" } })),
+      call("t2", "run_command", { argv: ["npm", "run", "test"] }),
+      result("t2", suite),
+    ];
+    const stubbed = stubSupersededResults(archive);
+    expect(JSON.parse(stubbed[2]?.content ?? "{}")).toEqual({ ok: true, output: { path: "src/add.mjs", superseded: expect.stringMatching(/read, written or edited again later/) } });
+    expect(JSON.parse(stubbed[4]?.content ?? "{}")).toEqual({
+      ok: true,
+      output: { argv: ["npm", "run", "test"], exitCode: 1, fullOutputRef: "ref-1", superseded: expect.stringMatching(/same command ran again later/) },
+    });
+    expect(stubbed[6]).toEqual(archive[6]);
+    expect(stubbed[8]).toEqual(archive[8]);
+    expect(stubbed.reduce((sum, message) => sum + message.content.length, 0)).toBeLessThan(archive.reduce((sum, message) => sum + message.content.length, 0) * 0.6);
   });
 });
 

@@ -347,12 +347,13 @@ export function buildWireWindow(input: {
   readonly digestCap: number;
   readonly verbatimTokens: number;
 }): ChatMessage[] {
-  const prefixEnd = input.archive.findIndex((message) => message.role === "user");
-  const prefix = prefixEnd === -1 ? [...input.archive] : input.archive.slice(0, prefixEnd + 1);
+  const archive = stubSupersededResults(input.archive);
+  const prefixEnd = archive.findIndex((message) => message.role === "user");
+  const prefix = prefixEnd === -1 ? [...archive] : archive.slice(0, prefixEnd + 1);
   if (input.turns.length === 0) return prefix;
 
   const turnStarts: number[] = [];
-  input.archive.forEach((message, index) => {
+  archive.forEach((message, index) => {
     if (index > prefixEnd && message.role === "assistant") turnStarts.push(index);
   });
   const newest = turnStarts.at(-1);
@@ -360,10 +361,10 @@ export function buildWireWindow(input: {
 
   let start = newest;
   let kept = 1;
-  let spent = tokensOf(input.archive.slice(newest));
+  let spent = tokensOf(archive.slice(newest));
   for (let k = turnStarts.length - 2; k >= 0 && kept < input.turns.length; k -= 1) {
     const from = turnStarts[k] ?? start;
-    const cost = tokensOf(input.archive.slice(from, start));
+    const cost = tokensOf(archive.slice(from, start));
     if (spent + cost > input.verbatimTokens) break;
     spent += cost;
     start = from;
@@ -374,8 +375,67 @@ export function buildWireWindow(input: {
   return [
     ...prefix,
     ...(digest === "" ? [] : [{ role: "user" as const, content: digest }]),
-    ...input.archive.slice(start),
+    ...archive.slice(start),
   ];
+}
+
+/**
+ * Tool results a later call has made stale, replaced by a short stub: a `run_command` whose argv
+ * runs again later, and a `read` of a file that is read, written or edited again later. The worker
+ * acts on the newer result; carrying the old one in full is what spent a SAT attempt's tokens
+ * (a 385-line suite output re-sent every turn). Stubs keep the call paired with its result and
+ * name the output ref, so nothing becomes unreadable (after oh-my-pi's tool-output pruning).
+ */
+export function stubSupersededResults(archive: readonly ChatMessage[]): ChatMessage[] {
+  const calls = new Map<string, { name: string; key: string | null }>();
+  for (const message of archive) {
+    if (message.role !== "assistant") continue;
+    for (const call of message.toolCalls ?? []) calls.set(call.id, { name: call.name, key: supersedeKey(call.name, call.arguments) });
+  }
+  const laterKeys = new Set<string>();
+  const out = [...archive];
+  for (let index = archive.length - 1; index >= 0; index -= 1) {
+    const message = archive[index];
+    if (message?.role !== "tool") continue;
+    const call = calls.get(message.toolCallId);
+    if (call?.key == null) continue;
+    const stale = (call.name === "run_command" || call.name === "read") && laterKeys.has(call.key);
+    if (stale) out[index] = { ...message, content: stubFor(call.name, message.content) };
+    laterKeys.add(call.key);
+  }
+  return out;
+}
+
+function supersedeKey(name: string, rawArgs: string): string | null {
+  let args: Record<string, unknown>;
+  try {
+    args = JSON.parse(rawArgs) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (name === "run_command") return Array.isArray(args["argv"]) ? `run ${JSON.stringify([args["argv"], args["cwd"] ?? null])}` : null;
+  // A read, write or edit of a path all make an earlier read of it stale; paged reads are left alone.
+  if ((name === "read" && args["startLine"] === undefined) || name === "write" || name === "edit") {
+    return typeof args["path"] === "string" ? `file ${args["path"]}` : null;
+  }
+  return null;
+}
+
+function stubFor(name: string, content: string): string {
+  let output: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(content) as { output?: unknown };
+    if (typeof parsed.output === "object" && parsed.output !== null) output = parsed.output as Record<string, unknown>;
+  } catch {
+    // an unparseable result keeps nothing but the stub
+  }
+  const kept = Object.fromEntries(
+    ["path", "argv", "exitCode", "outputRef", "fullOutputRef"].filter((key) => output[key] !== undefined).map((key) => [key, output[key]]),
+  );
+  const why = name === "run_command"
+    ? "superseded: the same command ran again later in this loop; its later result is current"
+    : "superseded: this file was read, written or edited again later; use the later result for its content and anchors";
+  return JSON.stringify({ ok: true, output: { ...kept, superseded: why } });
 }
 
 function tokensOf(messages: readonly ChatMessage[]): number {
