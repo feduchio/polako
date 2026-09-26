@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { hashJson, sha256File } from "../shared/hash.js";
-import { defaultCheckCommands, FrameworkHintSchema, PackageManagerSchema, ProjectProfileSchema, type ProjectProfile } from "./profile.js";
+import { defaultCheckCommands, PackageManagerSchema, ProjectProfileSchema, type ProjectProfile, type TestRunner } from "./profile.js";
 
 const MANIFEST_FILES = [
   "package.json",
@@ -52,19 +52,20 @@ export function inspectManifestHashes(projectPath: string): {
 export function discoverProject(projectPath: string, alias: string | null = null): ProjectProfile {
   const pkgPath = join(projectPath, "package.json");
   if (!existsSync(pkgPath)) throw new Error(`no package.json at ${projectPath}`);
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as Record<string, unknown> & {
     scripts?: Record<string, string>;
     packageManager?: unknown;
   };
   const scripts = pkg.scripts ?? {};
   const pm = detectPackageManager(projectPath, pkg);
   const { manifestHashes, scriptsHash } = inspectManifestHashes(projectPath);
-  const framework = detectFramework(projectPath, scripts);
+  const { framework, testRunner } = detectTestRunner(projectPath, pkg, scripts);
   const profile = ProjectProfileSchema.parse({
     projectPath,
     alias,
     packageManager: pm,
     framework,
+    testRunner,
     checks: defaultCheckCommands(pm, scripts),
     manifestHashes,
     scriptsHash,
@@ -97,16 +98,76 @@ function parsePackageManagerField(raw: unknown): ProjectProfile["packageManager"
   return parsed.success ? parsed.data : null;
 }
 
-function detectFramework(projectPath: string, scripts: Record<string, string>): ProjectProfile["framework"] {
-  const pkg = readFileSync(join(projectPath, "package.json"), "utf8");
-  if (pkg.includes("vitest") || Object.values(scripts).some((s) => s.includes("vitest"))) return FrameworkHintSchema.parse("vitest");
-  if (pkg.includes("jest") || existsSync(join(projectPath, "jest.config.js")) || existsSync(join(projectPath, "jest.config.ts"))) {
-    return FrameworkHintSchema.parse("jest");
+type Framework = ProjectProfile["framework"];
+
+interface Invocation {
+  framework: Exclude<Framework, "unknown">;
+  fileArgv: string[];
+}
+
+const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
+const VITEST_CONFIGS = ["vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs", "vitest.config.cjs"];
+const JEST_CONFIGS = ["jest.config.js", "jest.config.ts", "jest.config.mjs", "jest.config.cjs", "jest.config.json"];
+
+/**
+ * The runner the test script itself invokes decides; installed dependencies and config files only
+ * decide when no script names a runner. A package name is never read as a runner.
+ */
+function detectTestRunner(projectPath: string, pkg: Record<string, unknown>, scripts: Record<string, string>): {
+  framework: Framework;
+  testRunner: TestRunner | null;
+} {
+  const testScript = scripts["test"] !== undefined ? "test" : scripts["vitest"] !== undefined ? "vitest" : null;
+  const ordered = [...(testScript === null ? [] : [testScript]), ...Object.keys(scripts).filter((name) => name !== testScript)];
+  for (const name of ordered) {
+    const invocation = invocationIn(scripts[name] ?? "");
+    if (invocation !== null) return { framework: invocation.framework, testRunner: { fileArgv: invocation.fileArgv, script: name } };
   }
-  if (Object.values(scripts).some((script) => /\bnode\s+--test\b/.test(script) || script.includes("node:test"))) {
-    return FrameworkHintSchema.parse("node-test");
+  const deps = new Set(DEPENDENCY_FIELDS.flatMap((field) => Object.keys((pkg[field] as Record<string, unknown> | undefined) ?? {})));
+  if (deps.has("vitest") || VITEST_CONFIGS.some((file) => existsSync(join(projectPath, file)))) {
+    return { framework: "vitest", testRunner: { fileArgv: ["node_modules/.bin/vitest", "run"], script: null } };
   }
-  return FrameworkHintSchema.parse("unknown");
+  if (deps.has("jest") || pkg["jest"] !== undefined || JEST_CONFIGS.some((file) => existsSync(join(projectPath, file)))) {
+    return { framework: "jest", testRunner: { fileArgv: ["node_modules/.bin/jest"], script: null } };
+  }
+  if (Object.values(scripts).some((script) => script.includes("node:test"))) {
+    return { framework: "node-test", testRunner: { fileArgv: ["node", "--test"], script: null } };
+  }
+  return { framework: "unknown", testRunner: null };
+}
+
+/** The first shell segment of `script` that runs a known test runner, with its single-file argv. */
+function invocationIn(script: string): Invocation | null {
+  for (const segment of script.split(/&&|\|\||;|\|/)) {
+    const words = shellWords(segment).filter((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+    const start = words.findIndex((word) => word === "node" || word === "vitest" || word === "jest");
+    if (start === -1) continue;
+    const program = words[start];
+    if (program === "vitest") return { framework: "vitest", fileArgv: ["node_modules/.bin/vitest", "run"] };
+    if (program === "jest") return { framework: "jest", fileArgv: ["node_modules/.bin/jest"] };
+    const test = words.indexOf("--test", start + 1);
+    if (test !== -1 && onlyOptionsBetween(words, start + 1, test)) {
+      return { framework: "node-test", fileArgv: words.slice(start, test + 1) };
+    }
+  }
+  return null;
+}
+
+/** Node options before `--test` are flags and their values; a bare path there means node runs a script, not the runner. */
+function onlyOptionsBetween(words: readonly string[], from: number, to: number): boolean {
+  for (let i = from; i < to; i += 1) {
+    const word = words[i] ?? "";
+    if (word.startsWith("-")) continue;
+    const previous = words[i - 1] ?? "";
+    if (!(i > from && previous.startsWith("--") && !previous.includes("="))) return false;
+  }
+  return true;
+}
+
+function shellWords(segment: string): string[] {
+  const words: string[] = [];
+  for (const match of segment.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) words.push(match[1] ?? match[2] ?? match[3] ?? "");
+  return words;
 }
 
 /** In-memory profile cache invalidated when manifest hashes change. */

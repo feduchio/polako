@@ -8,6 +8,14 @@ export type PackageManager = z.infer<typeof PackageManagerSchema>;
 export const FrameworkHintSchema = z.enum(["vitest", "jest", "node-test", "unknown"]);
 export type FrameworkHint = z.infer<typeof FrameworkHintSchema>;
 
+/** How the project's test runner runs one test file: `fileArgv` with the file's path appended. */
+export const TestRunnerSchema = z.object({
+  fileArgv: z.array(z.string().min(1)).min(1),
+  /** The package script the argv was derived from; null when it comes from the framework alone. */
+  script: z.string().min(1).nullable(),
+});
+export type TestRunner = z.infer<typeof TestRunnerSchema>;
+
 export const ProfileScoutFindingSchema = z.object({
   kind: z.enum(["architecture", "vocabulary", "entrypoint"]),
   statement: z.string().min(1),
@@ -26,6 +34,8 @@ export const ProjectProfileSchema = z.object({
   alias: z.string().min(1).nullable(),
   packageManager: PackageManagerSchema.nullable(),
   framework: FrameworkHintSchema,
+  /** Absent on profiles recorded before it existed; null when no single-file form is known. */
+  testRunner: TestRunnerSchema.nullable().optional(),
   checks: z.array(CheckDefinitionSchema).min(1),
   /** relative path -> sha256 of files that define checks (package.json, vitest.config.*, ...) */
   manifestHashes: z.record(z.string(), Sha256Schema),

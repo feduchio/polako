@@ -124,6 +124,47 @@ describe("Project discovery", () => {
     expect(p.checks[0]?.command).toEqual(["npm", "run", "test"]);
   });
 
+  it("recognizes node --test behind node flags and derives the argv that runs one test file", () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "screen-audit-toolkit", scripts: { test: 'node --import tsx --test "src/**/*.test.ts"' }, devDependencies: { tsx: "^4" } }),
+    );
+    const p = discoverProject(dir);
+    expect(p.framework).toBe("node-test");
+    expect(p.testRunner).toEqual({ fileArgv: ["node", "--import", "tsx", "--test"], script: "test" });
+  });
+
+  it("takes the runner from the test script's own segment of a compound script", () => {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "tsc -p . && node --test tests/add.test.mjs" } }));
+    const p = discoverProject(dir);
+    expect(p.framework).toBe("node-test");
+    expect(p.testRunner).toEqual({ fileArgv: ["node", "--test"], script: "test" });
+  });
+
+  it("does not read jest out of a package name that merely contains the letters", () => {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "majestic-app", scripts: { test: "node --test" } }));
+    expect(discoverProject(dir).framework).toBe("node-test");
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "majestic-app", scripts: { build: "tsc" } }));
+    const unknown = discoverProject(dir);
+    expect(unknown.framework).toBe("unknown");
+    expect(unknown.testRunner).toBeNull();
+  });
+
+  it("prefers the runner the test script invokes over a dependency that is merely installed", () => {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" }, devDependencies: { vitest: "^4" } }));
+    expect(discoverProject(dir).framework).toBe("node-test");
+  });
+
+  it("derives a local-binary single-file argv for vitest and jest", () => {
+    const vitest = discoverProject(dir);
+    expect(vitest.framework).toBe("vitest");
+    expect(vitest.testRunner).toEqual({ fileArgv: ["node_modules/.bin/vitest", "run"], script: "test" });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "react-scripts test" }, devDependencies: { jest: "^30" } }));
+    const jest = discoverProject(dir);
+    expect(jest.framework).toBe("jest");
+    expect(jest.testRunner).toEqual({ fileArgv: ["node_modules/.bin/jest"], script: null });
+  });
+
   it("resume-dup-fetch smoke shape is node-test with no lockfile and still has an executable test command", () => {
     const fixture = join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/resume-dup-fetch");
     const p = discoverProject(fixture);
