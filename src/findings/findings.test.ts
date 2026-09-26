@@ -55,10 +55,11 @@ class MemoryCorpus implements CorpusAppender {
 
 function attempt(verdict: EvidenceAttempt["verdict"]): EvidenceAttempt {
   return {
-    method: verdict === "VALID" ? "failing_test" : "deterministic_reproduction",
+    method: "deterministic_reproduction",
     verdict,
     rationale: `${verdict} after isolated reproduction`,
     evidenceRefs: verdict === "VALID" ? [{ sha256: SHA, kind: "test_output", bytes: 42 }] : [],
+    ...(verdict === "VALID" ? { outcome: "demonstrated" as const, performedBy: { kind: "system" as const } } : {}),
   };
 }
 
@@ -71,7 +72,7 @@ function validator(verdict: EvidenceAttempt["verdict"], corpus = new MemoryCorpu
       clock: new FakeClock(NOW),
       worker: new ScriptedFindingEvidenceWorker(() => attempt(verdict)),
       corpus,
-      maxInvestigationRounds: 2,
+
     }),
     corpus,
   };
@@ -99,7 +100,7 @@ describe("finding fingerprint and triage", () => {
         return attempt("VALID");
       }),
       corpus: new MemoryCorpus(),
-      maxInvestigationRounds: 2,
+
     }).validate({ finding, existingFindings: [existing], missionId: id("msn", NOW), requirementRef: "R1" });
     expect(result.finding.status).toBe("DUPLICATE");
     expect(result.finding.duplicateOf).toBe(existing.id);
@@ -128,7 +129,7 @@ describe("finding fingerprint and triage", () => {
         return attempt("VALID");
       }),
       corpus: new MemoryCorpus(),
-      maxInvestigationRounds: 2,
+
     });
     const mismatched = rawFinding({ evidenceMismatch: "evidence_mismatch: src/auth/store.ts:81 does not contain the quoted text" });
     const result = await subject.validate({ finding: mismatched, existingFindings: [], missionId: id("msn", NOW), requirementRef: "R1" });
@@ -162,7 +163,7 @@ describe("FindingValidator verdicts", () => {
     expect(corpus.entries).toHaveLength(1);
   });
 
-  it("UNCERTAIN creates investigation-only work and no corpus entry", async () => {
+  it("UNCERTAIN creates no task and no corpus entry: debate routes it to an investigation", async () => {
     const { validator: subject, corpus } = validator("UNCERTAIN");
     const result = await subject.validate({
       finding: rawFinding(),
@@ -171,9 +172,24 @@ describe("FindingValidator verdicts", () => {
       requirementRef: "R1",
     });
     expect(result.finding.status).toBe("UNCERTAIN");
-    expect(result.task).toMatchObject({ kind: "investigation", touchesProductCode: false });
+    expect(result.task).toBeNull();
     expect(result.corpusEntry).toBeNull();
     expect(corpus.entries).toHaveLength(0);
+  });
+
+  it("a VALID no execution demonstrated is doubt, not a fix", async () => {
+    const subject = new FindingValidator({
+      clock: new FakeClock(NOW),
+      worker: new ScriptedFindingEvidenceWorker(() => {
+        const { outcome: _outcome, ...claimed } = attempt("VALID");
+        return { ...claimed, performedBy: { kind: "evidence_agent" } };
+      }),
+      corpus: new MemoryCorpus(),
+    });
+    const result = await subject.validate({ finding: rawFinding(), existingFindings: [], missionId: id("msn", NOW), requirementRef: "R1" });
+    expect(result.finding.status).toBe("UNCERTAIN");
+    expect(result.validation?.rationale).toMatch(/no execution the engine judged demonstrated it/);
+    expect(result.task).toBeNull();
   });
 
   it("REJECTED creates no task and no corpus entry", async () => {

@@ -10,8 +10,8 @@ import {
   type ValidationMethod,
   type ValidationVerdict,
 } from "../domain/finding.js";
+import type { EvidenceOutcome } from "../domain/evidence.js";
 import {
-  createInvestigationTask,
   createTaskFromValidFinding,
   type Task,
   type TaskKind,
@@ -28,6 +28,8 @@ export interface EvidenceAttempt {
   /** Causal event ids, when the harness persisted evidence as events. */
   corpusEvidenceRefs?: string[];
   performedBy?: Actor;
+  /** Set by a worker whose own execution the engine judged; a VALID without `demonstrated` is doubt. */
+  outcome?: EvidenceOutcome;
 }
 
 /** Evidence workers reproduce or disprove a claim; they never edit the product checkout. */
@@ -51,7 +53,6 @@ export interface FindingValidatorOptions {
   clock: Clock;
   worker: FindingEvidenceWorker;
   corpus: CorpusAppender;
-  maxInvestigationRounds: number;
 }
 
 export interface ValidateFindingInput {
@@ -100,15 +101,18 @@ export class FindingValidator {
     }
 
     const attempt = await this.options.worker.reproduce(triagedFinding);
+    const performedBy = attempt.performedBy ?? { kind: "evidence_agent" as const };
+    const earned = attempt.verdict !== "VALID" || (attempt.outcome === "demonstrated" && performedBy.kind === "system");
     const validation = FindingValidationStrictSchema.parse({
       id: id("fval", now),
       findingId: triagedFinding.id,
       runId: triagedFinding.runId,
       method: attempt.method,
-      verdict: attempt.verdict,
-      rationale: attempt.rationale,
+      verdict: earned ? attempt.verdict : "UNCERTAIN",
+      rationale: earned ? attempt.rationale : `${attempt.rationale}; no execution the engine judged demonstrated it`,
       evidenceRefs: attempt.evidenceRefs,
-      performedBy: attempt.performedBy ?? { kind: "evidence_agent" },
+      ...(attempt.outcome === undefined ? {} : { outcome: attempt.outcome, reason: null }),
+      performedBy,
       createdAt: now,
     });
     const validatedStatus = findingStatusFromVerdict(validation.verdict);
@@ -135,19 +139,14 @@ export class FindingValidator {
       now,
     };
 
-    if (validation.verdict === "UNCERTAIN") {
-      const task =
-        finding.investigationRounds < this.options.maxInvestigationRounds
-          ? createInvestigationTask(finding, this.options.maxInvestigationRounds, draft)
-          : null;
-      return { finding, triage, validation, task, corpusEntry: null };
-    }
+    // Doubt goes to debate, which routes it to an investigation; the validator creates no task for it.
+    if (validation.verdict === "UNCERTAIN") return { finding, triage, validation, task: null, corpusEntry: null };
 
     const corpusEntry = this.options.corpus.record({
       missionId: input.missionId,
       sourceRunId: finding.runId,
       requirementRef: input.requirementRef,
-      kind: validation.method === "failing_test" ? "regression_test" : "runtime_scenario",
+      kind: "runtime_scenario",
       summary: `Validated finding: ${finding.claim}`,
       evidenceRefs: attempt.corpusEvidenceRefs ?? [],
       artifactHashes: validation.evidenceRefs.map((ref) => ref.sha256),

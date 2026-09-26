@@ -1,11 +1,11 @@
 import { assertReviewerRolesResolvable } from "../review/reviewerProtocol.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
 import { SYSTEM_ACTOR, modelRefKey, type ModelRef } from "../domain/common.js";
-import { CORPUS_EXECUTABLE_STATUS, type CorpusEntry } from "../domain/acceptance.js";
+import type { CorpusEntry } from "../domain/acceptance.js";
 import type { Event, NewEvent } from "../domain/event.js";
 import { commitFindingStatus, FINDING_TABLE, FindingSchema, FindingValidationStrictSchema, findingStatusFromVerdict, type Finding, type FindingStatus, type FindingValidation, type ValidationVerdict } from "../domain/finding.js";
 import type { ReviewAxis } from "../domain/finding.js";
-import { createInvestigationTask, createTaskFromValidFinding, type Task } from "../domain/task.js";
+import { createInvestigationTask, type Task } from "../domain/task.js";
 import { ProviderError, isAccountScopedLimit } from "../broker/types.js";
 import { inferFamily } from "../broker/diversity.js";
 import {
@@ -21,8 +21,6 @@ import {
   debateActor,
   debateEventsFor,
   debateValidationFor,
-  deriveDebateCorpusKind,
-  legalDebateValid,
   nextDebateStep,
   outcomePayload,
   parseJudgeVerdict,
@@ -300,7 +298,6 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
         clock: ctx.clock,
         worker,
         corpus: deferredCorpus,
-        maxInvestigationRounds: ctx.config.convergence.maxInvestigationRoundsPerFinding,
       });
 
       for (const finding of raw) {
@@ -312,8 +309,7 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
         });
         known = known.map((item) => (item.id === finding.id ? result.finding : item));
         const causedBy = findRaisedEventId(ctx, finding.id);
-        const persist = result.finding.status === "UNCERTAIN" ? { ...result, task: null } : result;
-        const validationEventId = persistValidationResult(ctx, finding, persist, causedBy === null ? [] : [causedBy]);
+        const validationEventId = persistValidationResult(ctx, finding, result, causedBy === null ? [] : [causedBy]);
         if (deferredCorpus.pending !== null && validationEventId !== null) {
           const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
           corpus.record({
@@ -639,19 +635,16 @@ function applyDebateOutcome(
     return "ok";
   }
   const outcome = outcomePayload(outcomeEvent);
-  const validations = ctx.store.repos.validations.listByFinding(before.id);
-  const preDebateRefs = collectPreDebateEvidenceRefs(before, validations);
-  let verdict: ValidationVerdict = outcome.verdict;
-  let rationale = outcome.rationale;
-  if (verdict === "VALID" && !legalDebateValid(preDebateRefs)) {
-    verdict = "UNCERTAIN";
-    rationale = "debate VALID without pre-debate evidence refs is a hard failure";
-  }
+  // Debate decides relevance and routing, never existence. A judge's VALID is a brief for an
+  // investigation; a judge's REJECTED closes only an advisory finding, and says it was dismissed.
+  const dismissed = outcome.verdict === "REJECTED" && !before.blocking;
+  const verdict: ValidationVerdict = dismissed ? "REJECTED" : "UNCERTAIN";
+  const rationale = outcome.verdict === "UNCERTAIN" || dismissed
+    ? outcome.rationale
+    : `the judge answered ${outcome.verdict}; only an execution decides a blocking finding: ${outcome.rationale}`;
 
   const now = ctx.clock.now();
   const debateState = debateEventsFor(ctx.store.events.list(ctx.run.id), before.id, before.checkpointHash);
-  const debateArtifacts = debateState.arguments.flatMap((event) => event.artifacts);
-  const evidenceRefs = verdict === "VALID" ? [...preDebateRefs, ...debateArtifacts] : debateArtifacts;
   if (debateState.started === null) {
     return handleResidualUncertain(ctx, before, requirementRef, null);
   }
@@ -678,7 +671,9 @@ function applyDebateOutcome(
     method: DEBATE_METHOD,
     verdict,
     rationale,
-    evidenceRefs,
+    evidenceRefs: [],
+    outcome: "not_examined",
+    reason: dismissed ? "debate_dismissed" : null,
     performedBy: debateActor("judge", judgeModel),
     createdAt: now,
   });
@@ -687,19 +682,7 @@ function applyDebateOutcome(
   commitFindingStatus("VALIDATING", terminalStatus, before.id);
 
   let task: Task | null = null;
-  if (verdict === "VALID" && terminalFinding.blocking) {
-    task = createTaskFromValidFinding(terminalFinding, validation, {
-      id: id("task", now),
-      runId: terminalFinding.runId,
-      title: `Fix: ${terminalFinding.claim}`,
-      description: `WHAT: ${terminalFinding.claim}\nWHY: ${validation.rationale}`,
-      kind: "bugfix",
-      acceptance: acceptanceLines(terminalFinding),
-      complexity: "normal",
-      baseCheckpointHash: terminalFinding.checkpointHash,
-      now,
-    });
-  } else if (residualInvestigate) {
+  if (residualInvestigate) {
     task = createInvestigationTask({ ...terminalFinding, investigationRounds: before.investigationRounds }, ctx.config.convergence.maxInvestigationRoundsPerFinding, {
       id: id("task", now),
       runId: terminalFinding.runId,
@@ -760,27 +743,6 @@ function applyDebateOutcome(
     });
   }
   ctx.store.events.append(events);
-
-  if (verdict === "VALID") {
-    const corpus = new MissionAcceptanceService(ctx.store, ctx.clock);
-    corpus.record({
-      missionId: ctx.run.missionId,
-      sourceRunId: terminalFinding.runId,
-      requirementRef,
-      kind: deriveDebateCorpusKind(validations, preDebateRefs),
-      summary: `Debate-validated finding: ${terminalFinding.claim}`,
-      evidenceRefs: [debateValidatedId],
-      artifactHashes: preDebateRefs.map((ref) => ref.sha256),
-      metadata: {
-        findingId: terminalFinding.id,
-        validationId: validation.id,
-        method: DEBATE_METHOD,
-        executableStatus: task === null
-          ? CORPUS_EXECUTABLE_STATUS.noFixingTask
-          : CORPUS_EXECUTABLE_STATUS.pendingIntegration,
-      },
-    });
-  }
 
   if (terminalStatus === "UNCERTAIN" && terminalFinding.blocking && !residualInvestigate) return "needs_human";
   return "ok";

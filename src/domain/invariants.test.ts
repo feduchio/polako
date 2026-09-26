@@ -59,11 +59,13 @@ function validation(f: Finding, overrides: Partial<FindingValidation> = {}): Fin
     id: id("fval"),
     findingId: f.id,
     runId: f.runId,
-    method: "failing_test",
+    method: "deterministic_reproduction",
     verdict: "VALID",
     rationale: "regression test fails on base and reproduces the claim",
     evidenceRefs: [{ sha256: SHA, kind: "test_output", bytes: 10 }],
-    performedBy: { kind: "evidence_agent" },
+    outcome: "demonstrated",
+    reason: null,
+    performedBy: { kind: "system" },
     createdAt: NOW,
     ...overrides,
   };
@@ -89,6 +91,19 @@ describe("task origin invariant", () => {
     const t = createTaskFromValidFinding(f, validation(f), draft());
     expect(t.origin.kind).toBe("valid_finding");
     expect(t.touchesProductCode).toBe(true);
+  });
+
+  it("refuses a fix task from any VALID the engine did not demonstrate by execution", () => {
+    const f = finding();
+    const judge = { kind: "judge" as const, role: "judge" };
+    expect(() => createTaskFromValidFinding(f, validation(f, { method: "finding_debate", performedBy: judge }), draft()))
+      .toThrow(/demonstrated by execution/);
+    expect(() => createTaskFromValidFinding(f, validation(f, { performedBy: { kind: "evidence_agent" } }), draft()))
+      .toThrow(/demonstrated by execution/);
+    expect(() => createTaskFromValidFinding(f, validation(f, { outcome: "not_examined", reason: "killed" }), draft()))
+      .toThrow(/demonstrated by execution/);
+    const { outcome: _outcome, ...unjudged } = validation(f);
+    expect(() => createTaskFromValidFinding(f, unjudged, draft())).toThrow(/demonstrated by execution/);
   });
 
   it("rejects UNCERTAIN, REJECTED, RAW, non-blocking findings and mismatched validations", () => {

@@ -1,4 +1,3 @@
-import type { CorpusEntryKind } from "../domain/acceptance.js";
 import { modelRefKey, type Actor, type ArtifactRef, type ModelRef } from "../domain/common.js";
 import type { Event } from "../domain/event.js";
 import {
@@ -109,31 +108,6 @@ export function collectPreDebateEvidenceRefs(
     for (const ref of validation.evidenceRefs) add(ref);
   }
   return refs;
-}
-
-export function deriveDebateCorpusKind(
-  validations: readonly FindingValidation[],
-  preDebateRefs: readonly ArtifactRef[],
-): CorpusEntryKind {
-  const methods = validations.filter((item) => item.method !== DEBATE_METHOD).map((item) => item.method);
-  if (methods.includes("failing_test") || preDebateRefs.some((ref) => isRegressionArtifact(ref.kind))) {
-    return "regression_test";
-  }
-  if (methods.includes("runtime_evidence") || preDebateRefs.some((ref) => isRuntimeArtifact(ref.kind))) {
-    return "runtime_evidence";
-  }
-  if (methods.includes("static_proof") || preDebateRefs.some((ref) => ref.kind === "check_output" || ref.kind === "static_proof")) {
-    return "check_config";
-  }
-  return "runtime_scenario";
-}
-
-function isRegressionArtifact(kind: string): boolean {
-  return kind === "test_output" || kind === "failing_test" || kind === "regression_test";
-}
-
-function isRuntimeArtifact(kind: string): boolean {
-  return kind === "runtime_evidence" || kind === "runtime_scenario" || kind.startsWith("runtime");
 }
 
 export function parseJudgeVerdict(content: string): { verdict: ValidationVerdict; rationale: string } | null {
@@ -310,10 +284,6 @@ export function startedPayload(event: Event): DebateStartedPayload {
 
 export function outcomePayload(event: Event): DebateOutcomePayload {
   return event.payload as unknown as DebateOutcomePayload;
-}
-
-export function legalDebateValid(preDebateRefs: readonly ArtifactRef[]): boolean {
-  return preDebateRefs.length > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -228,10 +228,12 @@ describe("planning re-entry", () => {
       createValidatingDriver({
         resolveWorker: () =>
           new ScriptedFindingEvidenceWorker(() => ({
-            method: "failing_test",
+            method: "deterministic_reproduction",
             verdict: "VALID",
             rationale: "reproduced",
             evidenceRefs: [{ sha256: SHA, kind: "test_output", bytes: 12 }],
+            outcome: "demonstrated",
+            performedBy: { kind: "system" },
           })),
       }),
     );

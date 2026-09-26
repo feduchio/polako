@@ -250,7 +250,7 @@ describe("acceptance: a model's words neither run code nor decide a blocking fin
     expect(outcome.add).toBe(SUM.trim());
   });
 
-  it.fails("a judge's REJECTED does not close a blocking finding that nothing executed", async () => {
+  it("a judge's REJECTED does not close a blocking finding that nothing executed", async () => {
     const outcome = await runCase("disputed-finding", {
       firstFix: SUM,
       judge: JSON.stringify({ verdict: "REJECTED", rationale: "No mission requirement asks for this." }),

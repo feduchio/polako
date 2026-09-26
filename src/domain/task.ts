@@ -233,6 +233,14 @@ export function createTaskFromValidFinding(finding: Finding, validation: Finding
       issues: strict.error.issues.map((i) => i.message),
     });
   }
+  // No model verdict creates product work: only an execution the engine judged.
+  if (validation.outcome !== "demonstrated" || validation.performedBy.kind !== "system") {
+    throw new PolishError("INVARIANT_VIOLATION", "a fix task requires a defect the engine demonstrated by execution", {
+      validationId: validation.id,
+      outcome: validation.outcome ?? null,
+      performedBy: validation.performedBy.kind,
+    });
+  }
   return TaskStrictSchema.parse({
     ...baseTask(draft),
     kind: draft.kind,

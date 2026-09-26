@@ -65,7 +65,7 @@ describe("C4 finding debate in createValidatingDriver", () => {
     expect(store.events.list(runId, { types: ["finding.debate_started"] })).toHaveLength(0);
   });
 
-  it("2. scripted VALID with pre-debate evidence creates one coding task and honest corpus", async () => {
+  it("2. a judge's VALID over earlier evidence is a brief for an investigation, never a fix", async () => {
     engine.registerPhase(
       "VALIDATING",
       debateDriver(() => uncertainWithEvidence(), recorder(judgeScript("VALID")), ROLES),
@@ -74,24 +74,19 @@ describe("C4 finding debate in createValidatingDriver", () => {
     await engine.tickRun(runId);
 
     const finding = store.repos.findings.listByRun(runId)[0]!;
-    expect(finding.status).toBe("VALID");
+    expect(finding.status).toBe("UNCERTAIN");
     const tasks = store.repos.tasks.listByRun(runId);
     expect(tasks).toHaveLength(1);
-    expect(tasks[0]?.origin).toMatchObject({ kind: "valid_finding", verdict: "VALID" });
-    const validations = store.repos.validations.listByFinding(finding.id);
-    expect(validations.some((item) => item.method === "investigation" || item.method === "failing_test" || item.verdict === "UNCERTAIN")).toBe(true);
-    const debate = validations.find((item) => item.method === "finding_debate");
-    expect(debate?.verdict).toBe("VALID");
-    expect(debate?.evidenceRefs.some((ref) => ref.sha256 === SHA)).toBe(true);
-    const corpus = store.repos.acceptanceCorpus.forMission(store.repos.runs.get(runId)!.missionId);
-    expect(corpus.entries).toHaveLength(1);
-    expect(corpus.entries[0]?.kind).toBe("regression_test");
-    expect(corpus.entries[0]?.artifactHashes).toEqual([SHA]);
+    expect(tasks[0]).toMatchObject({ kind: "investigation", touchesProductCode: false });
+    const debate = store.repos.validations.listByFinding(finding.id).find((item) => item.method === "finding_debate");
+    expect(debate).toMatchObject({ verdict: "UNCERTAIN", outcome: "not_examined", evidenceRefs: [] });
+    expect(debate?.rationale).toMatch(/judge answered VALID; only an execution decides/);
+    expect(store.repos.acceptanceCorpus.forMission(store.repos.runs.get(runId)!.missionId).entries).toHaveLength(0);
     assertDebateBeforeTask(store, runId);
     expect(store.repos.runs.get(runId)?.phase).toBe("PLANNING");
   });
 
-  it("2b. debate VALID non-blocking registers corpus and creates no coding task", async () => {
+  it("2b. a judge's VALID on an advisory finding leaves it advisory, with no task and no corpus entry", async () => {
     engine.registerPhase(
       "VALIDATING",
       debateDriver(() => uncertainWithEvidence(), recorder(judgeScript("VALID")), ROLES),
@@ -99,8 +94,8 @@ describe("C4 finding debate in createValidatingDriver", () => {
     const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated, { blocking: false })]);
     await engine.tickRun(runId);
     expect(store.repos.tasks.listByRun(runId)).toHaveLength(0);
-    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("VALID");
-    expect(store.repos.acceptanceCorpus.forMission(store.repos.runs.get(runId)!.missionId).entries).toHaveLength(1);
+    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("UNCERTAIN");
+    expect(store.repos.acceptanceCorpus.forMission(store.repos.runs.get(runId)!.missionId).entries).toHaveLength(0);
   });
 
   it("3. scripted VALID without pre-debate evidence fails closed", async () => {
@@ -119,14 +114,29 @@ describe("C4 finding debate in createValidatingDriver", () => {
     );
   });
 
-  it("4. scripted REJECTED leaves zero tasks", async () => {
+  it("4. a judge's REJECTED does not close a blocking finding: an investigation still decides it", async () => {
     engine.registerPhase(
       "VALIDATING",
       debateDriver(() => uncertainWithEvidence(), recorder(judgeScript("REJECTED")), ROLES),
     );
     const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
     await engine.tickRun(runId);
-    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("REJECTED");
+    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("UNCERTAIN");
+    const tasks = store.repos.tasks.listByRun(runId);
+    expect(tasks.map((task) => task.kind)).toEqual(["investigation"]);
+    expect(store.repos.runs.get(runId)?.phase).toBe("PLANNING");
+  });
+
+  it("4b. a judge's REJECTED dismisses an advisory finding and says it was dismissed, not refuted", async () => {
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(() => uncertainWithEvidence(), recorder(judgeScript("REJECTED")), ROLES),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated, { blocking: false })]);
+    await engine.tickRun(runId);
+    const finding = store.repos.findings.listByRun(runId)[0]!;
+    expect(finding.status).toBe("REJECTED");
+    expect(store.repos.validations.listByFinding(finding.id).at(-1)).toMatchObject({ outcome: "not_examined", reason: "debate_dismissed" });
     expect(store.repos.tasks.listByRun(runId)).toHaveLength(0);
     expect(store.repos.runs.get(runId)?.phase).toBe("CONVERGENCE_CHECK");
   });
@@ -240,7 +250,7 @@ describe("C4 finding debate in createValidatingDriver", () => {
     const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
     await engine.tickRun(runId);
     expect(judged).toBe(2);
-    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("REJECTED");
+    expect(store.repos.findings.listByRun(runId)[0]?.status).toBe("UNCERTAIN");
     const outcome = store.events.list(runId, { types: ["finding.debate_outcome"] })[0];
     expect(outcome?.payload).toMatchObject({ verdict: "REJECTED", hardFailure: false });
   });
@@ -264,7 +274,7 @@ describe("C4 finding debate in createValidatingDriver", () => {
     const judgeCalls = calls.filter((call) => call.role === "judge").map((call) => call.model.model);
     expect(judgeCalls).toEqual(["judge", "judge", "alternate-judge"]);
     const finding = store.repos.findings.listByRun(runId)[0];
-    expect(finding?.status).toBe("REJECTED");
+    expect(finding?.status).toBe("UNCERTAIN");
     const validation = store.repos.validations.listByFinding(finding!.id).at(-1);
     expect(JSON.stringify(validation)).toContain("alternate-judge");
   });
@@ -437,7 +447,7 @@ describe("C4 finding debate in createValidatingDriver", () => {
     engine.registerPhase("VALIDATING", debateDriver(() => uncertainWithEvidence(), recorder(judgeScript("REJECTED")), ROLES));
     await engine.tickRun(runId);
     expect(calls.map((item) => item.role)).toEqual(["defender", "judge"]);
-    expect(store.repos.findings.get(finding.id)?.status).toBe("REJECTED");
+    expect(store.repos.findings.get(finding.id)?.status).toBe("UNCERTAIN");
     expect(store.repos.findings.get(finding.id)?.status).not.toBe("VALIDATING");
     expect(store.events.list(runId, { types: ["finding.debate_started"] })).toHaveLength(1);
   });
@@ -454,7 +464,7 @@ describe("C4 finding debate in createValidatingDriver", () => {
     expect(calls).toHaveLength(0);
     expect(store.events.list(runId, { types: ["finding.debate_started"] })).toHaveLength(1);
     expect(store.events.list(runId, { types: ["finding.debate_outcome"] })).toHaveLength(1);
-    expect(store.repos.findings.get(finding.id)?.status).toBe("REJECTED");
+    expect(store.repos.findings.get(finding.id)?.status).toBe("UNCERTAIN");
     expect(store.repos.validations.listByFinding(finding.id).filter((item) => item.method === "finding_debate")).toHaveLength(1);
   });
 

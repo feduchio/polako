@@ -25,8 +25,6 @@ export {
   debateEventsFor,
   debateKey,
   debateValidationFor,
-  deriveDebateCorpusKind,
-  legalDebateValid,
   nextDebateStep,
   outcomePayload,
   parseJudgeVerdict,

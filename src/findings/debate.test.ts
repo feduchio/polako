@@ -5,8 +5,6 @@ import { id } from "../shared/ids.js";
 import {
   assertDebateMayStart,
   collectPreDebateEvidenceRefs,
-  deriveDebateCorpusKind,
-  legalDebateValid,
   nextDebateStep,
   parseJudgeVerdict,
   rolePrompt,
@@ -126,10 +124,6 @@ describe("finding debate helpers", () => {
     };
     const refs = collectPreDebateEvidenceRefs(subject, [prior, debateOnly]);
     expect(refs).toEqual([{ sha256: SHA, kind: "test_output", bytes: 12 }]);
-    expect(legalDebateValid(refs)).toBe(true);
-    expect(legalDebateValid([])).toBe(false);
-    expect(deriveDebateCorpusKind([prior], refs)).toBe("regression_test");
-    expect(deriveDebateCorpusKind([debateOnly], [])).toBe("runtime_scenario");
   });
 
   it("walks prosecutor/defender/judge per round without re-rolling completed roles", () => {

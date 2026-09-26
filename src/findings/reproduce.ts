@@ -86,19 +86,13 @@ export class ProjectFindingEvidenceWorker implements FindingEvidenceWorker {
         evidenceRefs: [artifact],
       };
     }
-    if (evidence.status === "failed") {
+    // The scenario is the project's, not this finding's reproduction: its result is context for the
+    // investigation, never the verdict.
+    if (evidence.status === "failed" || evidence.status === "passed") {
       return {
         method: "runtime_evidence",
-        verdict: "VALID",
-        rationale: `runtime scenario ${scenario.id} failed and reproduced the defect`,
-        evidenceRefs: [artifact],
-      };
-    }
-    if (evidence.status === "passed") {
-      return {
-        method: "runtime_evidence",
-        verdict: "REJECTED",
-        rationale: `runtime scenario ${scenario.id} passed; defect was not reproduced`,
+        verdict: "UNCERTAIN",
+        rationale: `project runtime scenario ${scenario.id} ${evidence.status}; it is not this finding's reproduction, so an investigation decides`,
         evidenceRefs: [artifact],
       };
     }
@@ -120,7 +114,7 @@ function wantsRuntime(finding: Finding): boolean {
   ]
     .join(" ")
     .toLowerCase();
-  return /\bruntime\b|\.mjs\b|scenario/.test(text);
+  return /\bruntime\b|scenario/.test(text);
 }
 
 function environmentFailureFromError(err: unknown): string | null {
