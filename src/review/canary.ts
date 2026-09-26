@@ -4,7 +4,7 @@ import { modelRefKey, type ModelRef } from "../domain/common.js";
 import type { ProtocolRegistry } from "../protocols/loader.js";
 import { PolishError, isAbortError } from "../shared/errors.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
-import { runAxisReview, type ReviewProvider, type ReviewTrustedContext } from "./swarm.js";
+import { MIN_QUOTE_CHARS, quoteMatches, runAxisReview, type ReviewProvider, type ReviewTrustedContext } from "./swarm.js";
 
 function isCancellation(error: unknown): boolean {
   return isAbortError(error) || (error instanceof PolishError && error.code === "CANCELLED");
@@ -68,9 +68,29 @@ export const CANARY_COMMIT = "ca4a24" + "0".repeat(32) + "ca";
  */
 export const CANARY_DEFECT = { path: "src/cache.ts", firstLine: 8, lastLine: 9 } as const;
 
+/** The post-image of `CANARY_DIFF`, line 1 first: the file a reviewer's line numbers refer to. */
+const CANARY_POST_IMAGE = CANARY_DIFF.split("\n").slice(3, -1).map((row) => row.slice(1));
+const CANARY_DEFECT_LINES = CANARY_POST_IMAGE.slice(CANARY_DEFECT.firstLine - 1, CANARY_DEFECT.lastLine);
+
 /** `a/src/cache.ts`, `b/src/cache.ts` and `./src/cache.ts` are the same file as `src/cache.ts`. */
 function samePath(reported: string): boolean {
   return reported.replace(/^\.?\/?/, "").replace(/^[ab]\//, "") === CANARY_DEFECT.path;
+}
+
+/**
+ * The line named, or the defect's own text quoted near where it was cited, under the rule a real
+ * review's evidence meets (`quoteMatches`). run_01m3dpv29geqje78bb3s2d: dots quoted the loop header
+ * word for word at line 10, counting from the diff rather than the file, and a canary that read
+ * only the number recorded a reviewer that found the bug as one that missed it.
+ */
+function locatesDefect(entry: { path: string; line?: number | undefined; endLine?: number | undefined; quote?: string | undefined }): boolean {
+  if (!samePath(entry.path)) return false;
+  if (entry.line !== undefined && entry.line >= CANARY_DEFECT.firstLine && entry.line <= CANARY_DEFECT.lastLine) return true;
+  const quote = entry.quote;
+  return quote !== undefined &&
+    quote.replace(/\s/g, "").length >= MIN_QUOTE_CHARS &&
+    quoteMatches(quote, CANARY_DEFECT_LINES) &&
+    quoteMatches(quote, CANARY_POST_IMAGE, entry.line, entry.endLine);
 }
 
 export const CANARY_EVENT_TYPE = "review.canary_recorded";
@@ -133,12 +153,7 @@ export async function runReviewerCanary(input: {
     // Counting findings is not enough: a reviewer that answers "something is wrong" to anything
     // passes that, and its clean verdict still carries no information. A finding has to point at
     // the planted defect.
-    const located = result.findings.filter((finding) =>
-      finding.evidence.some((entry) =>
-        samePath(entry.path) &&
-        entry.line !== undefined &&
-        entry.line >= CANARY_DEFECT.firstLine &&
-        entry.line <= CANARY_DEFECT.lastLine)).length;
+    const located = result.findings.filter((finding) => finding.evidence.some(locatesDefect)).length;
     return {
       model: result.model,
       findings: result.findings.length,

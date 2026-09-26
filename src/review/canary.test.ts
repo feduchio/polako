@@ -57,6 +57,36 @@ describe("reviewer canary", () => {
     }
   });
 
+  it("verifies a finding that quotes the defect near a miscounted line, as a real review's evidence rule would", async () => {
+    for (const [line, quote, verified] of [
+      // run_01m3dpv29geqje78bb3s2d: the loop header word for word, cited as line 10.
+      [10, "for (let i = 0; i <= entries.length; i++) {", true],
+      [11, "if (now - entries[i].touchedAt < TTL_MS)", true],
+      [7, "kept.push(entries[i]);", true],
+      [6, "kept.push(entries[i]);", false],
+      // The defect's text cited too far from it, which is not a drift but a different place.
+      [5, "if (now - entries[i].touchedAt < TTL_MS) kept.push(entries[i]);", false],
+      // Text near the defect that is not the defect: the comment, the declaration, the return.
+      [10, "Drop entries that have not been touched within the TTL.", false],
+      [10, "const kept: Entry[] = [];", false],
+      [10, "return kept;", false],
+      // Too short to prove anything, and a paraphrase.
+      [10, "i++", false],
+      [10, "loop goes one past the end", false],
+    ] as const) {
+      const content = JSON.stringify([{
+        criterion: "correctness",
+        severity: "high",
+        blocking: true,
+        claim: "reads one past the end",
+        evidence: [{ path: CANARY_DEFECT.path, line, quote }],
+        reproduction: ["call evictStale([{ key: 'a', touchedAt: 0 }], 0)"],
+      }]);
+      const result = await runReviewerCanary({ provider: reviewerReturning(content), protocols, runId: RUN, now: 1 });
+      expect({ line, quote, verified: result.verified }).toEqual({ line, quote, verified });
+    }
+  });
+
   it("sends the planted defect, so a canary that stopped sending it would fail", async () => {
     const reviewer = reviewerReturning(JSON.stringify({ findings: [] }));
     await runReviewerCanary({ provider: reviewer, protocols, runId: RUN, now: 1 });

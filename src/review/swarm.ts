@@ -324,7 +324,7 @@ export const EVIDENCE_MISMATCH = "evidence_mismatch";
 /** Lines either side of the cited range that a quote may come from: line numbers drift by one or two. */
 const QUOTE_SLACK_LINES = 2;
 /** A quote shorter than this, once whitespace is dropped, matches almost anywhere and proves nothing. */
-const MIN_QUOTE_CHARS = 8;
+export const MIN_QUOTE_CHARS = 8;
 
 /**
  * True when the quote is the text at the cited place. Compared after dropping diff markers and
