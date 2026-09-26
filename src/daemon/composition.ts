@@ -26,7 +26,7 @@ import { createRoleContractClient } from "../council/roles.js";
 import { createStructuredCouncilClient } from "../council/structuredOutput.js";
 import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } from "../council/types.js";
 import type { PolishConfig } from "../domain/config.js";
-import { supervisorModelChain } from "../domain/config.js";
+import { attemptTokenCap, supervisorModelChain } from "../domain/config.js";
 import type { CheckResult } from "../domain/checks.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
 import { modelRefKey, SYSTEM_ACTOR, type ModelRef } from "../domain/common.js";
@@ -862,6 +862,9 @@ function contextWindowOf(contextWindow: number | undefined): { contextWindow?: n
   return contextWindow === undefined ? {} : { contextWindow };
 }
 
+/** Budget the worker pack is sized from when no attempt cap is set. */
+const PACK_BASIS_TOKENS = 96_000;
+
 export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
   // Enough models for every slot of every attempt: a retry takes the slots after its earlier
   // attempts', and with `count: candidates.normal` a one-candidate config had one worker model, so
@@ -869,8 +872,10 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
   const slots = Math.max(...Object.values(deps.config.candidates)) * deps.config.retry.maxAttempts;
   const ranked = deps.router.select({ role: "worker", count: slots, requireTools: true });
   const profile = resolveDiscoveredProfile(ctx);
-  const maxTokens = deps.config.budget.maxTaskTokens ?? 32_000;
-  const maxPackTokens = workerPackCap(maxTokens, deps.config.contextBudget.maxPackTokens);
+  // No cap unless one is set: the 32k fallback here once made "unset" mean a hidden 32k.
+  const maxTokens = attemptTokenCap(deps.config.budget);
+  // The pack is resent every turn; its size follows the cap when there is one, not its absence.
+  const maxPackTokens = workerPackCap(maxTokens ?? PACK_BASIS_TOKENS, deps.config.contextBudget.maxPackTokens);
   const progressModels = selectProgressModels(deps);
   return (index: number) => {
     appendRunMechanisms(deps, ctx);

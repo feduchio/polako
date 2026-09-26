@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { PolishConfigSchema, defaultConfig } from "./config.js";
+import { PolishConfigSchema, attemptTokenCap, defaultConfig } from "./config.js";
 
 describe("PolishConfig", () => {
+  it("has no worker attempt cap unless one is set, and reads the earlier name when the new one is unset", () => {
+    expect(attemptTokenCap(defaultConfig().budget)).toBeNull();
+    expect(attemptTokenCap(PolishConfigSchema.parse({ budget: { maxTaskTokens: 96_000 } }).budget)).toBe(96_000);
+    expect(attemptTokenCap(PolishConfigSchema.parse({ budget: { maxTaskTokens: 96_000, maxAttemptTokens: 50_000 } }).budget)).toBe(50_000);
+  });
+
   it("produces complete defaults from an empty object", () => {
     const cfg = defaultConfig();
     expect(cfg.lanes.integration).toBe(1);

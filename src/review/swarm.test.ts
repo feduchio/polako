@@ -49,6 +49,9 @@ describe("B-selfhost-19 composed reviewer instruction", () => {
       });
       const call = provider.calls[0]!;
       const system = call.messages[0]!.content;
+      // The reviewed task is named, but not as a budget key: review is not spent from a worker attempt.
+      expect(call.metadata.taskId).toBeUndefined();
+      expect(call.metadata.subjectTaskId).toBe(CHECKPOINT.taskId ?? undefined);
       // Two messages, so a prepended policy goes inside the system message rather than becoming
       // a third and breaking the shape reviewers already rely on.
       expect(call.messages).toHaveLength(2);

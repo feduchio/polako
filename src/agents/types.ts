@@ -134,7 +134,8 @@ export interface AgentRunnerDeps {
   model: ModelRef;
   commandPolicy: CommandPolicy;
   maxTurns: number;
-  maxTokens: number;
+  /** Tokens this attempt may spend over all its turns (`budget.maxAttemptTokens`); null is no cap. */
+  maxTokens: number | null;
   /** The worker model's context window; one tool result may fill a fixed share of it. */
   contextWindow?: number;
   systemPrompt?: string;

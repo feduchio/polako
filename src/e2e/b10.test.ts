@@ -656,10 +656,12 @@ describe("B10 positive path – production E2E", () => {
       .map((event) => event.payload as { purpose?: string; usage?: { inputTokens: number; outputTokens: number } | null })
       .filter((payload) => payload.purpose === "agent_run")
       .map((payload) => (payload.usage === null || payload.usage === undefined ? 0 : payload.usage.inputTokens + payload.usage.outputTokens));
-    let remaining = config.budget.maxTaskTokens ?? 32_000;
+    // Unset means no cap: a worker turn carries no token limit, where it once carried a hidden 32k.
+    const cap = config.budget.maxAttemptTokens ?? config.budget.maxTaskTokens;
+    let remaining = cap;
     for (const [index, request] of workerRequests.entries()) {
-      expect(request.maxTokens, `worker turn ${String(index + 1)} budget`).toBe(remaining);
-      remaining -= workerSpend[index] ?? 0;
+      expect(request.maxTokens, `worker turn ${String(index + 1)} budget`).toBe(remaining ?? undefined);
+      if (remaining !== null) remaining -= workerSpend[index] ?? 0;
     }
   });
 });

@@ -557,6 +557,25 @@ describe("AgentRunner", () => {
     await handle.destroy();
   });
 
+  it("with no attempt cap, three 12k-token turns finish instead of hitting a hidden limit", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTokens: null });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+    const turn = (call: ToolCall) => ({ kind: "reply" as const, content: "", toolCalls: [call], usage: { inputTokens: 11_000, outputTokens: 1_000 } });
+    provider.script("worker", [
+      turn(tool("read", { path: "src/math.ts" }, "read")),
+      turn(tool("write", { path: "src/math.ts", content: "export const add = (a: number, b: number) => b + a;\n" }, "write")),
+      turn(tool("finish", { summary: "done" }, "finish")),
+    ]);
+    const result = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    expect(result.status).toBe("completed");
+    expect(provider.calls.every((call) => call.maxTokens === undefined)).toBe(true);
+    store.close();
+    await handle.destroy();
+  });
+
   it("denies writes and patches that escape the worktree", async () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });

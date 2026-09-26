@@ -156,6 +156,9 @@ export const ContextBudgetSchema = z.object({
 export const BudgetSchema = z.object({
   maxRunUsd: z.number().min(0).nullable().default(null),
   maxRunTokens: z.number().int().min(0).nullable().default(null),
+  /** Tokens one worker attempt may spend, summed over its turns; null is no cap (owner E, 2026-09-26). */
+  maxAttemptTokens: z.number().int().min(0).nullable().default(null),
+  /** Earlier name of `maxAttemptTokens`, read when that is unset. */
   maxTaskTokens: z.number().int().min(0).nullable().default(null),
   maxRunWallClockMinutes: z.number().int().min(1).nullable().default(null),
 });
@@ -373,4 +376,9 @@ export function withRuntimeValidationMode(
   // Unconditional. Returning `base` when the modes happen to match hands the caller the shared
   // config object, and that case is exactly the one a default-mode run takes.
   return { ...base, runtimeValidation: { ...base.runtimeValidation, mode } };
+}
+
+/** The per-attempt worker token cap, or null for none. */
+export function attemptTokenCap(budget: { maxAttemptTokens: number | null; maxTaskTokens: number | null }): number | null {
+  return budget.maxAttemptTokens ?? budget.maxTaskTokens;
 }

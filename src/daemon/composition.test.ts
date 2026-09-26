@@ -1394,7 +1394,7 @@ describe("production composition", () => {
    * and a check that looked only at `reasoning` passed. `AgentRunner` builds exactly these five
    * keys (`src/agents/runner.ts:86-98`), and `signal` only when one is supplied.
    */
-  const workerRequestKeys = ["maxTokens", "messages", "metadata", "model", "tools"];
+  const workerRequestKeys = ["messages", "metadata", "model", "tools"];
   interface WorkerArm { calls: CompletionRequest[]; task: Task; prompt: string }
   const runWorkerArm = async (disableReasoning: boolean): Promise<WorkerArm> => {
     const provider = new ScriptedProvider("scripted", [
@@ -1469,7 +1469,7 @@ describe("production composition", () => {
       findings: store.repos.findings.listByRun(runId),
       profile: resolveDiscoveredProfile(ctx),
       tools: [...AGENT_TOOL_NAMES],
-      maxPackTokens: workerPackCap(32_000, config.contextBudget.maxPackTokens),
+      maxPackTokens: workerPackCap(96_000, config.contextBudget.maxPackTokens),
     });
     try {
       await createWorkerFactory(deps, ctx)(0).runLoop(task, sandbox);
@@ -1515,7 +1515,7 @@ describe("production composition", () => {
     // by that comparison: turn one is exactly the composed instruction, and nothing beside it.
     expect(base[0]?.messages).toEqual([{ role: "user", content: baseArm.prompt }]);
     expect(flagged[0]?.messages).toEqual([{ role: "user", content: flaggedArm.prompt }]);
-    expect(base[0]?.maxTokens).toBe(32_000);
+    expect(base[0]?.maxTokens).toBeUndefined();
     expect(base[0]?.metadata).toMatchObject({
       purpose: "agent_run",
       role: "worker",

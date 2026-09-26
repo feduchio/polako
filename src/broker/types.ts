@@ -72,7 +72,9 @@ export interface CompletionRequest {
     purpose: string;
     role: string;
     taskId?: string;
-    /** The task's attempt this call belongs to; `budget.maxTaskTokens` is spent per attempt. */
+    /** The task a review call reviews; recorded for attribution, never charged to its budget. */
+    subjectTaskId?: string;
+    /** The task's attempt this call belongs to; `budget.maxAttemptTokens` is spent per attempt. */
     taskAttempt?: number;
     /** event ids that caused this call (why-chain) */
     causedBy?: string[];

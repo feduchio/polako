@@ -114,7 +114,8 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
       runId: input.checkpoint.runId,
       purpose: `review_${input.axis}`,
       role: "reviewer",
-      ...(input.checkpoint.taskId === null ? {} : { taskId: input.checkpoint.taskId }),
+      // The task under review, not a budget key: review is not spent from a worker attempt's cap.
+      ...(input.checkpoint.taskId === null ? {} : { subjectTaskId: input.checkpoint.taskId }),
     },
   });
 

@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { withRuntimeValidationMode, type PolishConfig } from "../domain/config.js";
+import { attemptTokenCap, withRuntimeValidationMode, type PolishConfig } from "../domain/config.js";
 import { createMission } from "../domain/mission.js";
 import type { NewEvent } from "../domain/event.js";
 import { GLOBAL_MODEL_OBSERVATIONS_RUN_ID } from "../domain/event.js";
@@ -622,7 +622,7 @@ export class DaemonService implements RpcHandler {
       budget: {
         maxRunUsd: config.budget.maxRunUsd,
         maxRunTokens: config.budget.maxRunTokens,
-        maxTaskTokens: config.budget.maxTaskTokens,
+        maxTaskTokens: attemptTokenCap(config.budget),
       },
       overrides,
     };

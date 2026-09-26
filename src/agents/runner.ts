@@ -160,7 +160,8 @@ export class AgentRunner implements CandidateWorker {
     // One array, two jobs, and they are no longer the same array's problem: `messages` is the
     // archive and may never shrink, while each request carries a window built from it.
     const messages: ChatMessage[] = [];
-    const digestCap = loopDigestCap(this.deps.maxTokens);
+    const cap = this.deps.maxTokens ?? Number.POSITIVE_INFINITY;
+    const digestCap = loopDigestCap(this.deps.maxTokens ?? this.deps.contextWindow ?? 32_000);
     if (this.deps.systemPrompt !== undefined) messages.push({ role: "system", content: this.deps.systemPrompt });
     const composed = this.deps.prompt?.(task) ?? null;
     messages.push({ role: "user", content: composed?.text ?? task.description });
@@ -190,15 +191,14 @@ export class AgentRunner implements CandidateWorker {
     const progress: AgentProgressRecord[] = [];
     const progressStates = new Map<number, AgentProgressState>();
 
-    while (turns.length < this.deps.maxTurns && totalTokens < this.deps.maxTokens) {
-      const remainingTokens = this.deps.maxTokens - totalTokens;
+    while (turns.length < this.deps.maxTurns && totalTokens < cap) {
       let call;
       try {
         call = await this.deps.complete({
           model: this.deps.model,
           messages: buildWireWindow({ archive: messages, turns, digestCap, verbatimTokens: historyTokenBudget(this.deps.contextWindow) }),
           tools: tools.definitions,
-          maxTokens: remainingTokens,
+          ...(Number.isFinite(cap) ? { maxTokens: cap - totalTokens } : {}),
           metadata: {
             runId: task.runId,
             purpose: "agent_run",
@@ -225,7 +225,7 @@ export class AgentRunner implements CandidateWorker {
       };
       turns.push(turn);
 
-      if (totalTokens > this.deps.maxTokens) {
+      if (totalTokens > cap) {
         status = "BUDGET_EXCEEDED";
         break;
       }
@@ -301,7 +301,7 @@ export class AgentRunner implements CandidateWorker {
           }
         }
       }
-      if (turns.length >= this.deps.maxTurns || totalTokens >= this.deps.maxTokens) {
+      if (turns.length >= this.deps.maxTurns || totalTokens >= cap) {
         status = "BUDGET_EXCEEDED";
         break;
       }
@@ -311,7 +311,7 @@ export class AgentRunner implements CandidateWorker {
       status !== "FINISHED" &&
       status !== "ABANDONED_PROGRESS" &&
       status !== "STALLED" &&
-      (turns.length >= this.deps.maxTurns || totalTokens >= this.deps.maxTokens)
+      (turns.length >= this.deps.maxTurns || totalTokens >= cap)
     ) {
       status = "BUDGET_EXCEEDED";
     }
@@ -635,8 +635,8 @@ function validateBudgets(deps: AgentRunnerDeps): void {
   if (!Number.isInteger(deps.maxTurns) || deps.maxTurns < 1) {
     throw new PolishError("INVALID_ARGUMENT", "maxTurns must be a positive integer");
   }
-  if (!Number.isInteger(deps.maxTokens) || deps.maxTokens < 1) {
-    throw new PolishError("INVALID_ARGUMENT", "maxTokens must be a positive integer");
+  if (deps.maxTokens !== null && (!Number.isInteger(deps.maxTokens) || deps.maxTokens < 1)) {
+    throw new PolishError("INVALID_ARGUMENT", "maxTokens must be a positive integer or null");
   }
 }
 

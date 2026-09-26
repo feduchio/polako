@@ -108,6 +108,7 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(fixture.service.getConfig().budget).toEqual({
       maxRunUsd: null,
       maxRunTokens: 50,
+      maxAttemptTokens: null,
       maxTaskTokens: null,
       maxRunWallClockMinutes: null,
     });
@@ -287,6 +288,7 @@ describe("B-selfhost-8 per-run budget overrides", () => {
     expect(fixture.service.getConfig().budget).toEqual({
       maxRunTokens: 50,
       maxRunUsd: 4,
+      maxAttemptTokens: null,
       maxTaskTokens: 25,
       maxRunWallClockMinutes: 90,
     });

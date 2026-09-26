@@ -230,7 +230,7 @@ export class BudgetTracker {
       throw new PolishError("CONFLICT", "run token budget exhausted", { runId, spent: s.runTokens, limit: limits.maxRunTokens, budget: "run_tokens" });
     }
     if (taskId !== undefined && limits.maxTaskTokens !== null && taskTokens(s.perTask, taskId) >= limits.maxTaskTokens) {
-      throw new PolishError("CONFLICT", "task token budget exhausted", { runId, taskId, spent: taskTokens(s.perTask, taskId), limit: limits.maxTaskTokens, budget: "task_tokens" });
+      throw new PolishError("CONFLICT", `attempt token budget exhausted: ${String(taskTokens(s.perTask, taskId))} of budget.maxAttemptTokens ${String(limits.maxTaskTokens)} spent on ${taskId}`, { runId, taskId, spent: taskTokens(s.perTask, taskId), limit: limits.maxTaskTokens, budget: "task_tokens" });
     }
   }
 

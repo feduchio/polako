@@ -1,5 +1,5 @@
 import type { Event } from "../../domain/event.js";
-import type { PolishConfig } from "../../domain/config.js";
+import { attemptTokenCap, type PolishConfig } from "../../domain/config.js";
 import type { BudgetSnapshot } from "../../broker/quota.js";
 import { taskBudgetKey } from "../../broker/types.js";
 import type {
@@ -120,7 +120,7 @@ export function liveBudgetLimits(config: Pick<PolishConfig, "budget">): Patholog
   return {
     maxRunTokens: config.budget.maxRunTokens,
     maxRunUsd: config.budget.maxRunUsd,
-    maxTaskTokens: config.budget.maxTaskTokens,
+    maxTaskTokens: attemptTokenCap(config.budget),
     maxRunWallClockMinutes: config.budget.maxRunWallClockMinutes,
   };
 }
