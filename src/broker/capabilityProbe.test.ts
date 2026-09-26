@@ -588,4 +588,15 @@ describe("buildDiscoveryShortlist", () => {
     ]);
     expect(new Set(shortlist.map((entry) => entry.capabilities.family)).size).toBe(5);
   });
+
+  it("stops at the probe limit between the free and the priced pick of one round", () => {
+    const routed = (name: string, family: string, price: number): ModelInfo => ({
+      ref: { provider: "p", model: name },
+      displayName: name,
+      capabilities: { ...FAKE_CAPABILITIES.fast, family, inputCostPerM: price, outputCostPerM: price },
+      source: "provider",
+    });
+    const models = [routed("google-free", "google", 0), routed("openai-paid", "openai", 0.05)];
+    expect(buildDiscoveryShortlist(models, "p", [], 1).map((entry) => entry.ref.model)).toEqual(["google-free"]);
+  });
 });

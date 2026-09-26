@@ -78,9 +78,22 @@ describe("B5 production VALIDATING driver", () => {
     expect(store.events.list(runId, { types: ["finding.validated"] })).toHaveLength(1);
   });
 
+  it("records a validated finding's history through VALIDATING, one step per event", async () => {
+    const finding = blockingFinding(fixture.integrated);
+    const { runId } = seedValidatingRun(store, clock, fixture, [finding]);
+    await engine.tickRun(runId);
+
+    const steps = store.events
+      .list(runId, { types: ["finding.status_changed"] })
+      .filter((event) => (event.payload["finding"] as Finding).id === finding.id)
+      .map((event) => [event.payload["from"], event.payload["to"]]);
+    expect(steps).toEqual([["RAW", "VALIDATING"], ["VALIDATING", "VALID"]]);
+  });
+
   it("does not treat a missing reviewer as a canary pass", async () => {
     const config = defaultConfig();
     config.review.reviewersPerRound = 1;
+    config.review.maxCanaryRotations = 0;
     const local = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
     local.registerPhase("VALIDATING", createValidatingDriver({
       resolveWorker: () => new ScriptedFindingEvidenceWorker(() => validAttempt()),

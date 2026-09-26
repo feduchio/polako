@@ -286,6 +286,89 @@ describe("C4 finding debate in createValidatingDriver", () => {
     expect(String(outcome?.payload["rationale"])).toContain("scripted:alternate-judge: unreadable verdict");
   });
 
+  it("7g. judges that only answer unreadably end the debate once, keeping the last judge's words", async () => {
+    const alternate = { provider: "scripted", model: "alternate-judge" };
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(
+        () => uncertainWithEvidence(),
+        recorder((request) => (request.role === "judge" ? `unreadable from ${request.model.model}` : `${request.role} argument`)),
+        { ...ROLES, judgeAlternates: [alternate] },
+      ),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    await engine.tickRun(runId);
+    expect(calls.filter((call) => call.role === "judge")).toHaveLength(3);
+    expect(store.events.list(runId, { types: ["finding.debate_outcome"] })).toHaveLength(1);
+    const judgeArguments = store.events
+      .list(runId, { types: ["finding.debate_argument"] })
+      .filter((event) => event.payload["role"] === "judge");
+    expect(judgeArguments).toHaveLength(1);
+    expect(judgeArguments[0]?.payload["text"]).toBe("unreadable from alternate-judge");
+    expect(judgeArguments[0]?.actor).toMatchObject({ role: "judge", model: alternate });
+  });
+
+  it("7h. a judge that never answers ends the debate once, with no judge argument on record", async () => {
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(
+        () => uncertainWithEvidence(),
+        recorder((request) => {
+          if (request.role === "judge") throw new Error("judge timed out");
+          return `${request.role} argument`;
+        }),
+        ROLES,
+      ),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    await engine.tickRun(runId);
+    expect(calls.filter((call) => call.role === "judge")).toHaveLength(2);
+    const outcomes = store.events.list(runId, { types: ["finding.debate_outcome"] });
+    expect(outcomes).toHaveLength(1);
+    expect(String(outcomes[0]?.payload["rationale"])).toContain("from every judge asked");
+    const judgeArguments = store.events
+      .list(runId, { types: ["finding.debate_argument"] })
+      .filter((event) => event.payload["role"] === "judge");
+    expect(judgeArguments).toEqual([]);
+  });
+
+  it("7i. a thrown advocate ends the debate without asking any judge", async () => {
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(
+        () => uncertainWithEvidence(),
+        recorder((request) => {
+          if (request.role === "prosecutor") throw new Error("advocate crashed");
+          return judgeScript("VALID")(request);
+        }),
+        ROLES,
+      ),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    await engine.tickRun(runId);
+    expect(calls.map((call) => call.role)).toEqual(["prosecutor"]);
+    const outcomes = store.events.list(runId, { types: ["finding.debate_outcome"] });
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.payload["rationale"]).toBe("debate role prosecutor failed: advocate crashed");
+  });
+
+  it("7j. a debate that stopped before any judge spoke is recorded against the seated judge", async () => {
+    engine.registerPhase(
+      "VALIDATING",
+      debateDriver(
+        () => uncertainWithEvidence(),
+        recorder((request) => (request.role === "defender" ? "" : judgeScript("VALID")(request))),
+        ROLES,
+      ),
+    );
+    const { runId } = seedValidatingRun(store, clock, fixture, [blockingFinding(fixture.integrated)]);
+    await engine.tickRun(runId);
+    const finding = store.repos.findings.listByRun(runId)[0]!;
+    const debate = store.repos.validations.listByFinding(finding.id).find((item) => item.method === "finding_debate");
+    expect(debate?.verdict).toBe("UNCERTAIN");
+    expect(debate?.performedBy).toEqual({ kind: "judge", role: "judge", model: ROLES.judge });
+  });
+
   it("7c. thrown advocate does not upgrade to VALID", async () => {
     engine.registerPhase(
       "VALIDATING",

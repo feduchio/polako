@@ -246,6 +246,31 @@ describe("B4 production REVIEWING driver", () => {
     expect(fallback.calls.filter((call) => call.model.model === "reviewer")).toHaveLength(1);
   });
 
+  it("passes over a family that answered an earlier axis in the same tick", async () => {
+    const families = new ScriptedProvider("reviews", [
+      { name: "a-large", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "a-small", capabilities: FAKE_CAPABILITIES.fast },
+      { name: "b-1", capabilities: FAKE_CAPABILITIES.strong },
+      { name: "c-1", capabilities: FAKE_CAPABILITIES.strong },
+    ]);
+    for (const name of ["a-large", "a-small", "b-1", "c-1"]) families.script(name, [{ kind: "reply", content: "[]" }]);
+    engine.registerPhase("REVIEWING", createReviewingDriver(reviewingOptions(fixture, () => [
+      { provider: families, model: { provider: "reviews", model: "a-large" }, family: "a" },
+      { provider: families, model: { provider: "reviews", model: "a-small" }, family: "a" },
+      { provider: families, model: { provider: "reviews", model: "b-1" }, family: "b" },
+      { provider: families, model: { provider: "reviews", model: "c-1" }, family: "c" },
+    ])));
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await engine.tickRun(runId);
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    expect(executions.map((execution) => [execution.axis, execution.requestedModel.model])).toEqual([
+      ["correctness", "a-large"],
+      ["regression", "b-1"],
+      ["adversarial", "c-1"],
+    ]);
+    expect(families.calls.filter((call) => call.model.model === "a-small")).toHaveLength(0);
+  });
+
   it("skips a JSON-incapable 400 reviewer in the same tick and uses the next model", async () => {
     const fallback = new ScriptedProvider("reviews", [
       { name: "lyria", capabilities: FAKE_CAPABILITIES.fast },

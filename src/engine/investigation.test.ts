@@ -97,6 +97,65 @@ describe("investigation tasks", () => {
     });
   });
 
+  it("records a confirmed reproduction in the mission's acceptance corpus, and a refuted one nowhere", async () => {
+    const valid = await fixture(cleanup, (worktree) => {
+      writeFileSync(join(worktree.path, "repro.js"), "process.exit(1);\n");
+      return { status: "completed", reproduction: { argv: REPRO } };
+    });
+    await valid.execute();
+    const validEntries = corpusEntries(valid.store, valid.runId);
+    expect(validEntries).toHaveLength(1);
+    expect(validEntries[0]).toMatchObject({ kind: "regression_test", metadata: { findingId: valid.findingId, argv: REPRO } });
+
+    const rejected = await fixture(cleanup, (worktree) => {
+      writeFileSync(join(worktree.path, "repro.js"), "process.exit(0);\n");
+      return { status: "completed", reproduction: { argv: REPRO } };
+    });
+    await rejected.execute();
+    expect(rejected.store.repos.findings.get(rejected.findingId)?.status).toBe("REJECTED");
+    expect(corpusEntries(rejected.store, rejected.runId)).toEqual([]);
+  });
+
+  it("a reproduction that never reached the question is retried, not applied as a verdict", async () => {
+    const setup = await fixture(cleanup, (worktree) => {
+      writeFileSync(join(worktree.path, "repro.js"), "require('./missing-helper.js');\n");
+      return { status: "completed", reproduction: { argv: REPRO } };
+    });
+    await setup.execute();
+
+    expect(setup.store.repos.findings.get(setup.findingId)?.status).toBe("UNCERTAIN");
+    expect(setup.store.repos.tasks.get(setup.taskId)?.state).toBe("READY");
+    expect(setup.store.repos.validations.listByFinding(setup.findingId)).toEqual([]);
+    const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
+    expect(completed.map((event) => event.payload["verdict"])).toEqual(["UNCERTAIN", null]);
+    expect(completed[1]?.payload["reason"]).toBe("reproduction could not load a module it needs");
+  });
+
+  it("retries a worker that failed with the worker's own reason", async () => {
+    const setup = await fixture(cleanup, () => ({ status: "failed", error: "worker ran out of turns" }));
+    await setup.execute();
+
+    expect(setup.store.repos.findings.get(setup.findingId)?.status).toBe("UNCERTAIN");
+    const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
+    expect(completed.map((event) => event.payload["reason"])).toEqual(["investigation worker failed: worker ran out of turns"]);
+  });
+
+  it("resumes a RUNNING investigation on its current attempt", async () => {
+    const setup = await fixture(cleanup, () => ({ status: "completed" }));
+    const task = setup.store.repos.tasks.get(setup.taskId)!;
+    setup.store.events.append([event(setup.runId, "task.state_changed", { task: { ...task, state: "RUNNING", attempts: 1 } })]);
+    await setup.execute();
+
+    const after = setup.store.repos.tasks.get(setup.taskId);
+    expect(after).toMatchObject({ state: "READY", attempts: 1 });
+    const completed = setup.store.events.list(setup.runId, { types: [INVESTIGATION_EVENT] });
+    expect(completed.map((item) => item.payload["attempt"])).toEqual([1]);
+    const states = setup.store.events
+      .list(setup.runId, { types: ["task.state_changed"] })
+      .map((item) => (item.payload["task"] as { state: string }).state);
+    expect(states).toEqual(["RUNNING", "READY"]);
+  });
+
   it("cancels an investigation whose finding was decided some other way", async () => {
     const setup = await fixture(cleanup, () => {
       throw new Error("must not run a worker");
@@ -131,7 +190,19 @@ describe("classifyReproduction", () => {
     expect(classifyReproduction(syntax, [{ path: "repro.js" }]).verdict).toBe("UNCERTAIN");
     expect(classifyReproduction(syntax, [{ path: "other.js" }]).verdict).toBe("VALID");
   });
+
+  it("an aborted reproduction says nothing about the finding", () => {
+    expect(classifyReproduction({ ...base, aborted: true, exitCode: null }, [])).toEqual({
+      verdict: "UNCERTAIN",
+      rationale: "reproduction was aborted",
+      exitCode: null,
+    });
+  });
 });
+
+function corpusEntries(store: Store, runId: string) {
+  return store.repos.acceptanceCorpus.forMission(store.repos.runs.get(runId)!.missionId).entries;
+}
 
 async function fixture(
   cleanup: string[],

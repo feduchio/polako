@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { autostartDaemon } from "../cli/client.js";
 import { polishPidPath } from "../daemon/main.js";
+import { McpFacade, runMcpServer } from "./index.js";
 
 let daemonPid: number | null = null;
 let home: string | null = null;
@@ -82,5 +84,37 @@ describe("polish-mcp", () => {
     expect(JSON.stringify(status["result"])).toContain("structuredContent");
 
     child.kill();
+  });
+});
+
+describe("polish-mcp in process", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("answers ping with an empty result without shadowing the methods after it", async () => {
+    const facade = new McpFacade();
+    await expect(facade.handle({ method: "ping" })).resolves.toEqual({});
+    const listed = await facade.handle({ method: "tools/list" }) as { tools?: { name: string }[] };
+    expect(listed.tools?.map((tool) => tool.name)).toContain("status");
+  });
+
+  it("replies to a request with its id and stays silent on a notification", async () => {
+    const stdin = new PassThrough();
+    const written: string[] = [];
+    vi.spyOn(process, "stdin", "get").mockReturnValue(stdin as unknown as typeof process.stdin);
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    });
+    runMcpServer();
+    stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 7, method: "ping" })}\n`);
+    await vi.waitFor(() => {
+      expect(written.some((line) => line.includes('"id":7'))).toBe(true);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    stdin.end();
+    expect(written.map((line) => JSON.parse(line) as unknown)).toEqual([{ jsonrpc: "2.0", id: 7, result: {} }]);
   });
 });

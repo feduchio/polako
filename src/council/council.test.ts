@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { defaultConfig } from "../domain/config.js";
-import { createInvestigationTask } from "../domain/task.js";
+import type { SplitRequest } from "../domain/candidate.js";
+import { createInvestigationTask, createTaskFromRequirement, type Task } from "../domain/task.js";
 import { createMission, missionHash } from "../domain/mission.js";
 import type { Finding } from "../domain/finding.js";
 import { findingFingerprint } from "../domain/finding.js";
@@ -477,7 +478,46 @@ describe("SupervisorCouncil", () => {
     await expect(council.intake(BUGFIX_MISSION, PROFILE, BASELINE)).rejects.toMatchObject({ code: "OUTPUT_CONTRACT" });
     expect(provider.calls).toHaveLength(3);
   });
+
+  it("split orders a subtask after the sibling its dependsOn names by title", async () => {
+    const provider = splitCouncil([
+      { title: "Parser", acceptance: ["parser tests pass"] },
+      { title: "Printer", acceptance: ["printer tests pass"], dependsOn: ["Parser"] },
+    ]);
+    const council = new SupervisorCouncil({ roles: councilRoles(provider), now: () => 10 });
+    const dag = await council.split(SPLIT_PARENT, SPLIT_REQUEST);
+    expect(dag.decision.decision).toBe("APPROVED");
+    expect(dag.tasks.map((task) => task.title)).toEqual(["Parser", "Printer"]);
+    expect(dag.tasks[1]?.dependsOn).toEqual([dag.tasks[0]?.id]);
+    expect(dag.roots).toEqual([dag.tasks[0]?.id]);
+  });
+
+  it("split refuses a plan left with fewer than two subtasks that have a title and acceptance", async () => {
+    const provider = splitCouncil([
+      { title: "Parser", acceptance: ["parser tests pass"] },
+      { title: "Printer", acceptance: [] },
+    ]);
+    const council = new SupervisorCouncil({ roles: councilRoles(provider), now: () => 10 });
+    const dag = await council.split(SPLIT_PARENT, SPLIT_REQUEST);
+    expect(dag.tasks).toEqual([]);
+    expect(dag.decision.decision).toBe("NEEDS_HUMAN");
+  });
 });
+
+function splitCouncil(tasks: Record<string, unknown>[]): ScriptedProvider {
+  const provider = new ScriptedProvider("council", [
+    { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
+    { name: "scope", capabilities: FAKE_CAPABILITIES.strong },
+    { name: "judge", capabilities: FAKE_CAPABILITIES.strong },
+  ]);
+  provider.script("planner", [{
+    kind: "reply",
+    content: JSON.stringify({ decision: "approve", rationale: "Two parts.", concerns: [], proposal: { tasks } }),
+  }]);
+  provider.script("scope", [opinion("approve", "In scope.", [])]);
+  provider.script("judge", [opinion("approve", "Covers the task.", [])]);
+  return provider;
+}
 
 function councilRoles(provider: ScriptedProvider) {
   return {
@@ -596,6 +636,29 @@ const BASELINE: BaselineSnapshot = {
   scriptsHash: "a".repeat(64),
   toolchain: {},
   createdAt: 1,
+};
+
+const SPLIT_PARENT: Task = {
+  ...createTaskFromRequirement("mint_0000000000000000000000", "R1", {
+    id: "task_0000000000000000000000",
+    runId: "run_0000000000000000000000",
+    title: "Parse and print",
+    description: "WHAT: parser and printer",
+    kind: "bugfix",
+    acceptance: ["parser tests pass", "printer tests pass"],
+    complexity: "normal",
+    baseCheckpointHash: BASELINE.commitHash,
+    now: 1,
+  }),
+  state: "NEEDS_SPLIT",
+};
+
+const SPLIT_REQUEST: SplitRequest = {
+  reason: "parser and printer are separate",
+  parts: [
+    { title: "Parser", acceptance: ["parser tests pass"], files: [] },
+    { title: "Printer", acceptance: ["printer tests pass"], files: [] },
+  ],
 };
 
 const SMOKE_OUTPUT_SHA = "2f978b24b034778d852a6cef080ff689153b8e2318635bab6e44b48eec228b62";

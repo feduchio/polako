@@ -18,7 +18,7 @@ import { openStore, type Store } from "../store/index.js";
 import { estimateTokens } from "../context/types.js";
 import { AgentRunner, toolResultTokenBudget } from "./runner.js";
 import type { AgentRunnerDeps } from "./types.js";
-import { pageLines } from "./tools.js";
+import { createAgentTools, createLoopEvidence, pageLines } from "./tools.js";
 import { EmpiricalProgressTracker } from "./progressTracker.js";
 import { defaultProtocolsRoot, ProtocolRegistry } from "../protocols/loader.js";
 import { progressSystemPrompt } from "../context/progressInstruction.js";
@@ -1019,6 +1019,56 @@ async function repositoryFixture(): Promise<{
     policy,
   };
 }
+
+describe("agent tools", () => {
+  async function toolsFixture(run?: () => ProcessResult) {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+    const loopEvidence = createLoopEvidence();
+    const tools = createAgentTools({
+      sandbox: run === undefined ? handle : trackingSandbox(handle, run),
+      commandPolicy: fixture.policy,
+      intelligence: new BasicIntel(handle.path),
+      artifacts: store.artifacts,
+      loopEvidence,
+      resultTokens: 10_000,
+    });
+    return { store, handle, loopEvidence, tools };
+  }
+
+  it("lists a subdirectory's direct children, or every nested path below it without the directory itself", async () => {
+    const { store, handle, tools } = await toolsFixture();
+    mkdirSync(join(handle.path, "src", "a", "b"), { recursive: true });
+    writeFileSync(join(handle.path, "src", "a", "b", "c.ts"), "export {};\n");
+    writeFileSync(join(handle.path, "src", "a", "d.ts"), "export {};\n");
+    const flat = await tools.execute("list", { path: "src" }) as { content: string };
+    expect(flat.content.split("\n")).toEqual(["src/a/", "src/math.ts"]);
+    const nested = await tools.execute("list", { path: "src", recursive: true }) as { content: string };
+    expect(nested.content.split("\n")).toEqual(["src/a/", "src/a/b/", "src/a/b/c.ts", "src/a/d.ts", "src/math.ts"]);
+    store.close();
+    await handle.destroy();
+  });
+
+  it("counts only a command that exited 0 without timing out as a passed check", async () => {
+    const results = [
+      { ...processResult("fail"), exitCode: 1 },
+      { ...processResult("slow"), timedOut: true },
+      processResult("ok"),
+    ];
+    const { store, handle, loopEvidence, tools } = await toolsFixture(() => results.shift() ?? processResult("ok"));
+    const argv = ["node", "-e", "console.log('ok')"];
+    await tools.execute("run_command", { argv });
+    await tools.execute("run_command", { argv });
+    expect(loopEvidence.passedCommands).toEqual([]);
+    await tools.execute("run_command", { argv });
+    expect(loopEvidence.passedCommands).toEqual([argv]);
+    expect(loopEvidence.commandOutputRefs).toHaveLength(3);
+    store.close();
+    await handle.destroy();
+  });
+});
 
 describe("pageLines", () => {
   const lines = Array.from({ length: 10 }, (_, i) => `line ${String(i + 1)}`);

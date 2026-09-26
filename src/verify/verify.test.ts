@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { BaselineSnapshot, CheckResult, RegressionDelta } from "../domain/checks.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { createVerifierStrategy } from "./createStrategy.js";
+import { decomposeCriteria } from "./criteria.js";
 import { candidateMetrics } from "./metrics.js";
 import { PairwiseJudge } from "./pairwise.js";
 import type { VerifierStrategy } from "./strategy.js";
@@ -35,6 +37,22 @@ const NO_REGRESSION: RegressionDelta = {
   degradedChecks: [],
   diagnosticChanges: [],
 };
+
+describe("verifier strategy factory", () => {
+  it("refuses the empirical backend instead of falling back to the pairwise judge", () => {
+    expect(() => createVerifierStrategy({ backend: "empirical" })).toThrow(/requires production broker/);
+    expect(createVerifierStrategy({ backend: "ts" })).toBeInstanceOf(PairwiseJudge);
+  });
+});
+
+describe("criteria decomposition", () => {
+  it("uses configured criteria, then the built-in defaults, only when task and acceptance give none", () => {
+    expect(decomposeCriteria("Keep the API. Add a guard", ["  tests pass  "], ["security"]))
+      .toEqual(["Keep the API", "Add a guard", "tests pass"]);
+    expect(decomposeCriteria("  ", [" "], [" security ", ""])).toEqual(["security"]);
+    expect(decomposeCriteria(undefined)).toEqual(["correctness", "regression safety", "simplicity"]);
+  });
+});
 
 describe("candidate metrics", () => {
   it("derives deterministic gate, diff, and baseline-relative failure metrics", () => {

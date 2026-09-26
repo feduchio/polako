@@ -127,6 +127,27 @@ describe("production diversity selection", () => {
     expect(families).not.toContain("a");
   });
 
+  it("counts only a winning candidate's family as an author", async () => {
+    const deps = await depsWith([
+      { name: "a-1", family: "a" },
+      { name: "b-1", family: "b" },
+    ]);
+    const ctx = {
+      run: { id: "run_x", currentCheckpointHash: null },
+      store: {
+        repos: {
+          candidates: {
+            listByRun: () => [
+              { state: "LOSER", model: { provider: "free", model: "a-1" } },
+              { state: "WINNER", model: { provider: "free", model: "b-1" } },
+            ],
+          },
+        },
+      },
+    } as unknown as PhaseContext;
+    expect([...authorFamilies(deps, ctx)]).toEqual(["b"]);
+  });
+
   it("skips debate rather than seat the author's family", async () => {
     const deps = await depsWith([
       { name: "a-1", family: "a" },

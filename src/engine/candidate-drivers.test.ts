@@ -813,6 +813,131 @@ describe("B2 production candidate drivers", () => {
     emptyStore.close();
   });
 
+  it("EXECUTING waits when no coding task and no investigation can run", async () => {
+    const { runId, taskId } = seedRun(store, clock, fixture);
+    const task = store.repos.tasks.get(taskId)!;
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId,
+      ts: clock.now(),
+      type: "task.state_changed",
+      payload: { task: { ...task, state: "CANCELLED", updatedAt: clock.now() } },
+      causedBy: [],
+      actor: { kind: "system" },
+      artifacts: [],
+    }]);
+    const run = store.repos.runs.get(runId)!;
+    const result = await createExecutingDriver(driverOptions)({ run, store, scheduler: sched, clock, config: defaultConfig() });
+    expect(result).toEqual({ status: "waiting" });
+    expect(await fixture.sandbox.list()).toHaveLength(0);
+  });
+
+  it("EXECUTING reports waiting on an aborted tick even when a task reached the gates", async () => {
+    const { runId, taskId } = seedRun(store, clock, fixture);
+    const task = store.repos.tasks.get(taskId)!;
+    const now = clock.now();
+    const candidate = {
+      id: id("cand", now),
+      runId,
+      taskId,
+      attempt: 1,
+      model: { provider: "worker", model: "candidate-0" },
+      baseCheckpointHash: fixture.base,
+      branch: `polish/${runId}/implemented`,
+      worktreePath: null,
+      headCommit: fixture.base,
+      state: "IMPLEMENTED" as const,
+      gateReport: null,
+      transcriptRef: null,
+      diffRef: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.events.append([
+      {
+        id: id("evt", now),
+        runId,
+        ts: now,
+        type: "task.state_changed",
+        payload: { task: { ...task, state: "RUNNING", attempts: 1, updatedAt: now } },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      },
+      {
+        id: id("evt", now + 1),
+        runId,
+        ts: now + 1,
+        type: "candidate.created",
+        payload: { candidate },
+        causedBy: [],
+        actor: { kind: "worker", model: candidate.model },
+        artifacts: [],
+      },
+    ]);
+    const run = store.repos.runs.get(runId)!;
+    const result = await createExecutingDriver(driverOptions)({
+      run,
+      store,
+      scheduler: sched,
+      clock,
+      config: defaultConfig(),
+      signal: AbortSignal.abort(),
+    });
+    expect(result).toEqual({ status: "waiting" });
+    expect(store.repos.tasks.get(taskId)?.state).toBe("GATED");
+  });
+
+  it("discards implemented candidates once another shows the task's acceptance already holds", async () => {
+    const splitFixture = await repositoryFixture();
+    const splitStore = openStore({ artifactsDir: join(splitFixture.root, "artifacts") });
+    let sequence = 0;
+    const options = buildDriverOptions(splitFixture, () => {
+      const index = sequence++;
+      return new ScriptedCandidateWorker((_task, worktree) => {
+        if (index === 0) return { status: "completed", noChange: { reason: "outcome.txt already passes the gate" } };
+        writeFileSync(join(worktree.path, "outcome.txt"), "pass");
+        return { status: "completed" };
+      });
+    });
+    const { runId, taskId } = seedRun(splitStore, clock, splitFixture);
+    const run = splitStore.repos.runs.get(runId)!;
+    await createExecutingDriver(options)({ run, store: splitStore, scheduler: sched, clock, config: defaultConfig() });
+
+    expect(splitStore.repos.tasks.get(taskId)?.state).toBe("SATISFIED");
+    const candidates = splitStore.repos.candidates.listByTask(taskId);
+    expect(candidates.map((candidate) => candidate.state)).toEqual(["DISCARDED", "DISCARDED"]);
+    expect(candidates.map((candidate) => candidate.error?.split(":")[0]).sort()).toEqual(["no_change_verified", "superseded"]);
+    splitStore.close();
+  });
+
+  it("keeps the base's gate evidence on a no-change claim the gates refuted", async () => {
+    const refutedFixture = await repositoryFixture();
+    const refutedStore = openStore({ artifactsDir: join(refutedFixture.root, "artifacts") });
+    const failing = ["node", "-e", "process.exit(1)"];
+    const gates: CandidateGates = {
+      ...refutedFixture.gates,
+      profile: { ...refutedFixture.gates.profile, checks: [{ name: "gate", kind: "custom", command: failing, mandatory: true }] },
+    };
+    const options = buildDriverOptions(
+      { ...refutedFixture, policy: CommandPolicy.forProject([failing], null), gates },
+      () => new ScriptedCandidateWorker(() => ({ status: "completed", noChange: { reason: "nothing to do" } })),
+    );
+    const { runId, taskId } = seedRun(refutedStore, clock, refutedFixture);
+    const run = refutedStore.repos.runs.get(runId)!;
+    await createExecutingDriver(options)({ run, store: refutedStore, scheduler: sched, clock, config: defaultConfig() });
+
+    const candidates = refutedStore.repos.candidates.listByTask(taskId);
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const candidate of candidates) {
+      expect(candidate.state).toBe("FAILED_GATES");
+      expect(candidate.gateReport?.failures[0]?.reason).toBe("no_changes");
+      expect(candidate.gateReport?.checks.map((check) => [check.name, check.status])).toEqual([["gate", "fail"]]);
+      expect(candidate.gateReport?.failures.map((failure) => failure.reason)).toContain("mandatory_check_failed");
+    }
+    refutedStore.close();
+  });
+
   it("retries EXECUTING after zero survivors instead of waiting on failed candidates", async () => {
     const emptyFixture = await repositoryFixture();
     const emptyStore = openStore({ artifactsDir: join(emptyFixture.root, "artifacts") });
@@ -838,6 +963,38 @@ describe("B2 production candidate drivers", () => {
     expect(emptyStore.repos.runs.get(runId)?.phase).toBe("GATING");
     expect(emptyStore.repos.candidates.listByTask(taskId).length).toBeGreaterThan(firstAttempt);
     emptyStore.close();
+  });
+
+  it("gives a retry the worker slots after the ones its earlier attempt used", async () => {
+    const retryFixture = await repositoryFixture();
+    const retryStore = openStore({ artifactsDir: join(retryFixture.root, "artifacts") });
+    const retryEngine = new RunEngine({
+      store: retryStore,
+      clock,
+      scheduler: sched,
+      config: defaultConfig(),
+      assertProjectClean: () => undefined,
+    }, false);
+    const slots: number[] = [];
+    const retryOptions: CandidateDriverOptions = {
+      ...buildDriverOptions(retryFixture),
+      workerFactory: () => (index) => {
+        slots.push(index);
+        return new ScriptedCandidateWorker(async () => ({ status: "completed" }));
+      },
+    };
+    retryEngine.registerPhase("EXECUTING", createExecutingDriver(retryOptions));
+    retryEngine.registerPhase("GATING", createGatingDriver(retryOptions));
+    retryEngine.registerPhase("PLANNING", stubDriverFor("PLANNING"));
+    const { runId } = seedRun(retryStore, clock, retryFixture);
+    await retryEngine.tickRun(runId);
+    await retryEngine.tickRun(runId);
+    const firstAttempt = slots.length;
+    await retryEngine.tickRun(runId);
+    await retryEngine.tickRun(runId);
+    expect(firstAttempt).toBeGreaterThan(0);
+    expect(slots.slice(firstAttempt)).toEqual(slots.slice(0, firstAttempt).map((slot) => slot + firstAttempt));
+    retryStore.close();
   });
 
   /**

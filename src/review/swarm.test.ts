@@ -1,7 +1,7 @@
 import { ReviewAxisSchema } from "../domain/finding.js";
 import { assertReviewerRolesResolvable, REVIEWER_OUTPUT_CONTRACT } from "./reviewerProtocol.js";
 import { ProtocolRegistry, defaultProtocolsRoot } from "../protocols/loader.js";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -276,6 +276,38 @@ describe("review swarm", () => {
     expect(result.findings[0]?.evidence).toEqual([{ path: "limits.ts", line: 1 }]);
     expect(result.findings[0]?.reproduction).toEqual(["Call withinBudget(cap, cap) and observe true"]);
   });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "accepts a path-only reference to an existing file without reading it",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "polish-review-path-only-"));
+      roots.push(root);
+      await writeFile(join(root, "locked.ts"), "export const x = 1;\n");
+      await chmod(join(root, "locked.ts"), 0o000);
+      const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);
+      provider.script("reviewer", [{
+        kind: "reply",
+        content: JSON.stringify({
+          criterion: "guard admits the equal case",
+          severity: "high",
+          blocking: true,
+          claim: "withinBudget admits a spend equal to an exclusive cap",
+          evidence: [{ path: "locked.ts" }],
+          reproduction: ["Call withinBudget(cap, cap)"],
+        }),
+      }]);
+      const result = await runAxisReview({
+        protocols: PROTOCOLS,
+        checkpoint: CHECKPOINT,
+        axis: "correctness",
+        artifact: { commitHash: CHECKPOINT.commitHash, diffBase: "bbbbbbb", diff: "d", checkpoint: CHECKPOINT },
+        provider: { provider, model: { provider: "reviews", model: "reviewer" } },
+        repositoryRoot: root,
+      });
+      expect(result.findings[0]?.evidenceIssues).toEqual([]);
+      expect(result.findings[0]?.evidenceStrength).toBe("strong");
+    },
+  );
 
   it("normalises the container without loosening the fields", async () => {
     const provider = new ScriptedProvider("reviews", [{ name: "reviewer", capabilities: FAKE_CAPABILITIES.strong }]);

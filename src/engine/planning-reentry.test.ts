@@ -11,7 +11,7 @@ import {
   createTaskFromRequirement,
   type TaskState,
 } from "../domain/task.js";
-import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { FAKE_CAPABILITIES, ScriptedProvider, reply } from "../providers/scripted.js";
 import { FakeClock } from "../shared/clock.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
@@ -128,6 +128,45 @@ describe("planning re-entry", () => {
     expect(store.repos.tasks.get(taskId)?.state).toBe("READY");
     expect(store.repos.tasks.listByRun(runId)).toHaveLength(1);
     expect(store.repos.runs.get(runId)?.phase).toBe("EXECUTING");
+  });
+
+  it("re-entry with nothing to split never resolves council roles", async () => {
+    engine.registerPhase("PLANNING", createPlanningDriver({
+      roles: () => {
+        throw new Error("council roles must not be resolved without a split request");
+      },
+    }));
+    const { runId, taskId } = seedPlannedRun(store, clock, { phase: "PLANNING", tasks: [{ state: "READY" }] });
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("EXECUTING");
+    expect(store.repos.tasks.get(taskId)?.state).toBe("READY");
+  });
+
+  it("a NEEDS_SPLIT task with no split request for its attempt is retried whole without asking the council", async () => {
+    provider = splitCouncilProvider("approve");
+    engine.registerPhase("PLANNING", createPlanningDriver({ roles: councilRoles(provider) }));
+    const { runId, taskId } = seedPlannedRun(store, clock, { phase: "PLANNING", tasks: [{ state: "NEEDS_SPLIT", attempts: 1 }] });
+    await engine.tickRun(runId);
+    expect(provider.calls).toHaveLength(0);
+    expect(store.repos.tasks.get(taskId)?.state).toBe("READY");
+    expect(store.repos.tasks.listByRun(runId)).toHaveLength(1);
+  });
+
+  it("a split finished by another driver while the council deliberated is not applied twice", async () => {
+    const { runId, taskId } = seedPlannedRun(store, clock, { phase: "PLANNING", tasks: [{ state: "NEEDS_SPLIT", attempts: 1 }] });
+    seedSplitCandidate(store, clock, runId, taskId);
+    provider = splitCouncilProvider("approve", () => {
+      forceTaskState(store, clock, taskId, "SPLIT", 1);
+    });
+    engine.registerPhase("PLANNING", createPlanningDriver({ roles: councilRoles(provider) }));
+    await engine.tickRun(runId);
+    expect(provider.calls.filter((call) => call.metadata.purpose.startsWith("council_split_"))).toHaveLength(3);
+    expect(store.repos.tasks.get(taskId)?.state).toBe("SPLIT");
+    expect(store.repos.tasks.listByRun(runId).filter((task) => task.splitFrom === taskId)).toEqual([]);
+    const transitions = store.events
+      .list(runId, { types: ["task.state_changed"] })
+      .filter((event) => (event.payload["task"] as { id: string }).id === taskId);
+    expect(transitions).toHaveLength(1);
   });
 
   it("GATING retry re-enters PLANNING without decompose or a new task.created", async () => {
@@ -415,7 +454,7 @@ function scriptedCouncilProvider(opts: { dropAll?: boolean } = {}): ScriptedProv
   return provider;
 }
 
-function splitCouncilProvider(judge: "approve" | "needs_human"): ScriptedProvider {
+function splitCouncilProvider(judge: "approve" | "needs_human", onJudge?: () => void): ScriptedProvider {
   const provider = new ScriptedProvider("council", [
     { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
     { name: "scope", capabilities: FAKE_CAPABILITIES.strong },
@@ -436,14 +475,20 @@ function splitCouncilProvider(judge: "approve" | "needs_human"): ScriptedProvide
     }),
   }]);
   provider.script("scope", [{ kind: "reply", content: JSON.stringify({ decision: "approve", rationale: "In scope.", concerns: [] }) }]);
-  provider.script("judge", [{
-    kind: "reply",
-    content: JSON.stringify({
-      decision: judge,
-      rationale: judge === "approve" ? "Covers the task." : "The parts drop the login behaviour.",
-      concerns: judge === "approve" ? [] : ["The parts drop the login behaviour."],
-    }),
-  }]);
+  const verdict = JSON.stringify({
+    decision: judge,
+    rationale: judge === "approve" ? "Covers the task." : "The parts drop the login behaviour.",
+    concerns: judge === "approve" ? [] : ["The parts drop the login behaviour."],
+  });
+  provider.script("judge", [onJudge === undefined
+    ? { kind: "reply", content: verdict }
+    : {
+        kind: "fn",
+        fn: () => {
+          onJudge();
+          return reply(verdict, 1, 1);
+        },
+      }]);
   return provider;
 }
 

@@ -142,7 +142,6 @@ async function executeCodingTask(ctx: PhaseContext, options: CandidateDriverOpti
   const running = task.state === "READY"
     ? patchTask(ctx, { ...task, state: "RUNNING", attempts: task.attempts + 1, updatedAt: ctx.clock.now() })
     : task;
-  if (running.state !== "RUNNING") return "waiting";
 
   const baseCheckpoint = running.baseCheckpointHash;
   const n = candidateCount(ctx.config, running.complexity);

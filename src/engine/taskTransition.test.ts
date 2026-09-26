@@ -37,6 +37,18 @@ describe("transitionTask", () => {
     expect(store.repos.tasks.get(task.id)?.attempts).toBe(2);
     store.close();
   });
+
+  it("names a task that does not exist as NOT_FOUND", () => {
+    const { store, clock, runId, task } = blockedTask();
+    const missing = { ...task, id: id("task", clock.now() + 1), state: "READY" as const };
+    expect(() => transitionTask(store, clock, runId, missing)).toThrow(PolishError);
+    try {
+      transitionTask(store, clock, runId, missing);
+    } catch (error) {
+      expect((error as PolishError).code).toBe("NOT_FOUND");
+    }
+    store.close();
+  });
 });
 
 describe("commitFindingStatus", () => {

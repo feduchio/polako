@@ -993,6 +993,74 @@ describe("runChecks and runIndependentGates", () => {
       );
       expect(result).toMatchObject({ attempted: true, ready: false, detail: "install succeeded but dependencies are still unreachable" });
     });
+
+    function installingSandbox(
+      dir: string,
+      listings: readonly (string | Error)[],
+      exclude?: (paths: readonly string[]) => void,
+    ): SandboxHandle {
+      const pending = [...listings];
+      const out = async () => {
+        const next = pending.shift() ?? "";
+        if (next instanceof Error) throw next;
+        return next;
+      };
+      const run = async () => {
+        mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+        writeFileSync(join(dir, "node_modules", "vitest", "package.json"), '{"name":"vitest"}');
+        return processResult({});
+      };
+      return {
+        ...mockSandbox(run, [], dir),
+        git: { out, ...(exclude === undefined ? {} : { exclude }) } as unknown as SandboxHandle["git"],
+      };
+    }
+
+    it("excludes only the entries the install added and reports them", async () => {
+      const dir = uninstalled();
+      const exclude = vi.fn();
+      const result = await ensureProjectDependencies(
+        installingSandbox(dir, ["notes.txt\n", "notes.txt\nnode_modules/\n"], exclude),
+        discoverProject(dir),
+        { enabled: true, timeoutMs: 1000 },
+      );
+      expect(result).toMatchObject({ attempted: true, ready: true, installedPaths: ["node_modules"] });
+      expect(exclude).toHaveBeenCalledExactlyOnceWith(["node_modules"]);
+    });
+
+    it("records no installed paths when either untracked listing fails", async () => {
+      for (const listings of [[new Error("git busy"), "node_modules/\n"], ["", new Error("git busy")]]) {
+        const dir = uninstalled();
+        const exclude = vi.fn();
+        const result = await ensureProjectDependencies(installingSandbox(dir, listings, exclude), discoverProject(dir), {
+          enabled: true,
+          timeoutMs: 1000,
+        });
+        expect(result).toMatchObject({ attempted: true, ready: true });
+        expect(result.installedPaths).toBeUndefined();
+        expect(exclude).not.toHaveBeenCalled();
+      }
+    });
+
+    it("asks git to exclude nothing when the install added nothing, and tolerates a git handle that cannot exclude", async () => {
+      const unchanged = uninstalled();
+      const exclude = vi.fn();
+      const quiet = await ensureProjectDependencies(
+        installingSandbox(unchanged, ["notes.txt\n", "notes.txt\n"], exclude),
+        discoverProject(unchanged),
+        { enabled: true, timeoutMs: 1000 },
+      );
+      expect(quiet.installedPaths).toBeUndefined();
+      expect(exclude).not.toHaveBeenCalled();
+
+      const noExclude = uninstalled();
+      const reported = await ensureProjectDependencies(
+        installingSandbox(noExclude, ["", "node_modules/\n"]),
+        discoverProject(noExclude),
+        { enabled: true, timeoutMs: 1000 },
+      );
+      expect(reported).toMatchObject({ ready: true, installedPaths: ["node_modules"] });
+    });
   });
 
   it("records a failure in an uninstalled project as error without a fingerprint", async () => {

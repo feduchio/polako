@@ -206,6 +206,56 @@ describe("reports", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("lists well-formed mechanism manifest entries and skips malformed ones", () => {
+    const dir = mkdtempSync(join(tmpdir(), "polish-mechanisms-"));
+    const store = openStore({ artifactsDir: join(dir, "artifacts") });
+    try {
+      const clock = new FakeClock(NOW);
+      const runId = id("run", clock.now());
+      store.events.append([{
+        id: id("evt", clock.now()),
+        runId,
+        ts: clock.now(),
+        type: "run.mechanisms",
+        payload: {
+          mechanisms: [
+            null,
+            "review_quorum",
+            { name: 7, on: true },
+            { name: "debate_diversity" },
+            { name: "progress_tracker", on: false, reason: "insufficient_families: 1" },
+            { name: "review_quorum", on: true },
+          ],
+        },
+        causedBy: [],
+        actor: { kind: "system" },
+        artifacts: [],
+      }]);
+      const run: Run = {
+        id: runId,
+        missionId: id("msn", clock.now()),
+        projectPath: "/repo",
+        runBranch: "run",
+        phase: "DONE",
+        control: "RUNNING",
+        currentCheckpointHash: null,
+        baselineId: null,
+        interpretationId: null,
+        createdAt: clock.now(),
+        updatedAt: clock.now(),
+        terminalReason: null,
+      };
+      const input = buildFinalReportInput(reportCtx(run, store, clock));
+      expect((input.evidence ?? []).filter((line) => line.startsWith("Mechanism"))).toEqual([
+        "Mechanism progress_tracker: off (insufficient_families: 1)",
+        "Mechanism review_quorum: on",
+      ]);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("production report emission", () => {

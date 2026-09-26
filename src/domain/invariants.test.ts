@@ -14,7 +14,7 @@ import { IdSchema } from "./common.js";
 import { dominates, emptyFindingCounts, equivalentEvidence, type EvidenceVector } from "./checkpoint.js";
 import { cleanRoundsFor, hasConverged, isNovelRound, type CleanRound } from "./convergence.js";
 import { FactStrictSchema, isGroundTruth, promoteToVerified, type Fact } from "./fact.js";
-import { FindingValidationStrictSchema, findingFingerprint, type Finding, type FindingValidation } from "./finding.js";
+import { FindingValidationStrictSchema, commitFindingStatus, findingFingerprint, type Finding, type FindingValidation } from "./finding.js";
 import { createMission, missionIsIntact } from "./mission.js";
 import {
   TaskOriginSchema,
@@ -200,6 +200,21 @@ describe("task origin invariant", () => {
     expect(dependenciesSettled(dependent, [parent, one, two, dependent])).toBe(false);
     expect(dependenciesSettled(dependent, [parent, one, { ...two, state: "SATISFIED" as const }, dependent])).toBe(true);
     expect(dependenciesSettled(dependent, [parent, dependent])).toBe(false);
+  });
+
+  it("a dependency that is missing, or not yet SPLIT although its parts are done, is not settled", () => {
+    const parent = { ...createTaskFromRequirement(id("mint"), "R1", draft("feature")), state: "NEEDS_SPLIT" as const };
+    const part = { ...createTaskFromRequirement(id("mint"), "R1", draft("feature")), splitFrom: parent.id, state: "INTEGRATED" as const };
+    const dependent = { ...createTaskFromRequirement(id("mint"), "R1", draft("feature")), dependsOn: [parent.id] };
+    expect(dependenciesSettled(dependent, [parent, part, dependent])).toBe(false);
+    expect(dependenciesSettled(dependent, [part, dependent])).toBe(false);
+  });
+});
+
+describe("finding status commit", () => {
+  it("treats a finding staying in its status as no transition", () => {
+    expect(() => { commitFindingStatus("VALID", "VALID", "finding"); }).not.toThrow();
+    expect(() => { commitFindingStatus("RESOLVED", "RESOLVED", "finding"); }).not.toThrow();
   });
 });
 

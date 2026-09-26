@@ -225,6 +225,45 @@ describe("createProviderFromConfig", () => {
     expect(or?.kind).toBe("openrouter");
     expect(or?.id).toBe("or");
   });
+
+  it("overrides only the capabilities a catalog hint states", async () => {
+    const { createProviderFromConfig } = await import("./factory.js");
+    const row = (id: string) => ({
+      id,
+      context_length: 100_000,
+      pricing: { prompt: "0.000001", completion: "0.000002" },
+      top_provider: { max_completion_tokens: 4096 },
+    });
+    const provider = createProviderFromConfig(
+      {
+        id: "or",
+        kind: "openrouter",
+        enabled: true,
+        apiKeyEnv: "OPENROUTER_API_KEY",
+        capabilityHints: {
+          "vendor/a": { maxOutputTokens: 777, family: "Claude" },
+          "vendor/b": { contextWindow: 5000, inputCostPerM: 3, outputCostPerM: 4 },
+        },
+      },
+      "sk-secret",
+      { fetch: fakeFetch(() => ({ status: 200, body: { data: [row("vendor/a"), row("vendor/b")] } })) },
+    );
+    const capabilities = Object.fromEntries((await provider!.listModels()).map((m) => [m.ref.model, m.capabilities]));
+    expect(capabilities["vendor/a"]).toMatchObject({
+      contextWindow: 100_000,
+      maxOutputTokens: 777,
+      inputCostPerM: 1,
+      outputCostPerM: 2,
+      family: "claude",
+    });
+    expect(capabilities["vendor/b"]).toMatchObject({
+      contextWindow: 5000,
+      maxOutputTokens: 4096,
+      inputCostPerM: 3,
+      outputCostPerM: 4,
+      family: "vendor",
+    });
+  });
 });
 
 describe("RecordReplayProvider request identity", () => {
