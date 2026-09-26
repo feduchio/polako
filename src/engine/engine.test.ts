@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hasConverged, type CleanRound } from "../domain/convergence.js";
 import { defaultConfig } from "../domain/config.js";
 import { SYSTEM_ACTOR } from "../domain/common.js";
@@ -168,6 +168,34 @@ describe("RunEngine", () => {
     await engine.tickRun(run.id);
     expect(resumedDispatched).toBe(true);
     expect(store.repos.runs.get(run.id)!.phase).toBe("DISCOVERING_PROJECT");
+  });
+
+  it("waits on one settle per run however many ticks arrive while a job is still in flight", async () => {
+    const run = engine.createRun({ projectPath: "/tmp/p" });
+    let finish = (): void => undefined;
+    sched.register("hold", async () => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return {};
+    });
+    await advanceTo(run.id, "CONVERGENCE_CHECK");
+    const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    engine.setCurrentCheckpoint(run.id, hash);
+    recordCleanRounds(run.id, hash, 3);
+    sched.enqueue({ runId: run.id, type: "hold", lane: "local.shell" });
+    sched.tick();
+    await engine.tickRun(run.id);
+    expect(store.repos.runs.get(run.id)!.phase).toBe("DONE");
+    engine.control(run.id, "pause");
+    expect(store.repos.runs.get(run.id)!.control).toBe("PAUSE_REQUESTED");
+
+    const settle = vi.spyOn(sched, "settle");
+    const ticks = [engine.tick(), engine.tick(), engine.tick()];
+    expect(settle.mock.calls.filter(([runId]) => runId === run.id)).toHaveLength(1);
+    finish();
+    await Promise.all(ticks);
+    expect(store.repos.runs.get(run.id)!.control).toBe("PAUSED");
   });
 
   it("stop cancels in-flight jobs and terminates as stopped_by_user", async () => {

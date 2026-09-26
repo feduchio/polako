@@ -47,6 +47,7 @@ export class RunEngine {
   private readonly assertProjectClean: (projectPath: string, policy?: RepositoryStartPolicy) => void;
   private readonly drivers = new Map<RunPhase, PhaseDriver>();
   private readonly driving = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+  private readonly acknowledging = new Map<string, Promise<void>>();
 
   constructor(options: EngineOptions, installStubs = true) {
     this.store = options.store;
@@ -298,9 +299,18 @@ export class RunEngine {
     }
   }
 
-  private async acknowledgeControl(runId: string): Promise<void> {
-    await this.scheduler.settle(runId);
-    this.acknowledgeControlSync(runId);
+  /** One settle per run at a time: the daemon ticks again while a settle is still waiting. */
+  private acknowledgeControl(runId: string): Promise<void> {
+    const inFlight = this.acknowledging.get(runId);
+    if (inFlight !== undefined) return inFlight;
+    const promise = this.scheduler
+      .settle(runId)
+      .then(() => {
+        this.acknowledgeControlSync(runId);
+      })
+      .finally(() => this.acknowledging.delete(runId));
+    this.acknowledging.set(runId, promise);
+    return promise;
   }
 
   private acknowledgeControlSync(runId: string): void {

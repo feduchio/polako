@@ -153,7 +153,7 @@ export class DaemonService implements RpcHandler {
   start(): void {
     if (this.timer !== null) return;
     this.timer = setInterval(() => {
-      void this.tick();
+      void this.tick(false);
     }, this.tickMs);
     this.timer.unref();
   }
@@ -493,12 +493,23 @@ export class DaemonService implements RpcHandler {
     await this.tick();
   }
 
-  private async tick(): Promise<void> {
+  /**
+   * One engine pass. The interval does not wait for a phase driver that is still working (a debate,
+   * a worker loop): the engine refuses to re-enter a run it is driving, and a run created meanwhile
+   * sat in CREATED until another run's VALIDATING returned. Explicit callers wait for the pass.
+   */
+  private async tick(waitForDrives = true): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     this.tickStartedAt = this.clock.now();
     try {
-      await this.engine.tick();
+      const round = this.engine.tick();
+      if (waitForDrives) {
+        await round;
+      } else {
+        round.catch(() => undefined);
+        await Promise.race([round, new Promise((resolve) => setTimeout(resolve, this.tickMs).unref())]);
+      }
       for (const run of this.store.repos.runs.listAll()) {
         if (
           run.phase === "DONE" ||
