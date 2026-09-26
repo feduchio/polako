@@ -213,7 +213,13 @@ export class SupervisorCouncil {
     });
     const tasks = drafts.map((draft, index) => {
       const requirement = interpretation.requirements.find((item) => item.ref === draft.requirementRef);
-      if (requirement === undefined) throw new PolishError("INVARIANT_VIOLATION", `unknown requirement ${String(draft.requirementRef)}`);
+      if (requirement === undefined) {
+        throw outputContractError(`planner task names unknown requirement ${String(draft.requirementRef)}`, {
+          role: "planner",
+          purpose: "council_decompose_planner",
+          issues: [{ path: `$.proposal.tasks[${index}].requirementRef`, message: "must name a payload.interpretation requirement" }],
+        });
+      }
       const taskId = taskIds[index];
       if (taskId === undefined) throw new PolishError("INVARIANT_VIOLATION", "task id allocation failed");
       const dependencies = stringArray(draft.dependsOn).map((dependency) => refToTask.get(dependency) ?? dependency);

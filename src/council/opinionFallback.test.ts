@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CompletionRequest, CompletionResponse } from "../broker/types.js";
 import { createResilientCouncilClient } from "./fallback.js";
-import { Judge, createOpinionCheckingClient } from "./roles.js";
+import { Judge, createRoleContractClient } from "./roles.js";
 import type { CouncilCompletionClient } from "./types.js";
 import { systemClock } from "../shared/clock.js";
 
@@ -28,7 +28,7 @@ describe("council opinion contract inside the model chain", () => {
       { provider: "gemini", model: "second" },
     ];
     const client = createResilientCouncilClient({
-      inner: createOpinionCheckingClient(broker, "judge"),
+      inner: createRoleContractClient(broker, "judge"),
       models,
       role: "judge",
       clock: systemClock,
@@ -43,17 +43,33 @@ describe("council opinion contract inside the model chain", () => {
   });
 
   it("is OUTPUT_CONTRACT when every model answers with something other than an opinion", async () => {
-    const client = createOpinionCheckingClient({ complete: () => Promise.resolve(reply(ACTION_PLAN)) }, "judge");
+    const client = createRoleContractClient({ complete: () => Promise.resolve(reply(ACTION_PLAN)) }, "judge");
 
     await expect(client.complete(request())).rejects.toMatchObject({ code: "OUTPUT_CONTRACT" });
   });
+
+  // run_01m3dm6eaz7evkv4wp3t16: the decompose planner's single task carried no requirementRef and
+  // the council threw INVARIANT_VIOLATION after the chain had already returned.
+  it("rejects decompose tasks that do not name the requirement they deliver, and accepts ones that do", async () => {
+    const decompose = (task: Record<string, unknown>) =>
+      JSON.stringify({ decision: "approve", rationale: "ok", concerns: [], proposal: { tasks: [task] } });
+    const task = { title: "Add args tests", acceptance: ["tests exist"], dependsOn: [] };
+    const planner = (content: string) => createRoleContractClient({ complete: () => Promise.resolve(reply(content)) }, "planner");
+
+    await expect(planner(decompose(task)).complete(request("council_decompose_planner"))).rejects.toMatchObject({
+      code: "OUTPUT_CONTRACT",
+      details: { issues: [{ path: "$.proposal.tasks[0].requirementRef" }] },
+    });
+    await expect(planner(decompose({ ...task, requirementRef: "R1" })).complete(request("council_decompose_planner"))).resolves.toBeDefined();
+    await expect(planner(decompose(task)).complete(request("council_split_planner"))).resolves.toBeDefined();
+  });
 });
 
-function request(): CompletionRequest {
+function request(purpose = "council_intake_judge"): CompletionRequest {
   return {
     model: { provider: "openrouter", model: "first" },
     messages: [{ role: "user", content: "x" }],
-    metadata: { runId: "run_0000000000000000000000", purpose: "council_intake_judge", role: "judge" },
+    metadata: { runId: "run_0000000000000000000000", purpose, role: "judge" },
   };
 }
 

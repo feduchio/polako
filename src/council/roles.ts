@@ -45,19 +45,35 @@ export class CouncilRoleAgent {
 }
 
 /**
- * Checks the opinion inside the model chain, so a model that answers with something other than
- * an opinion is that model's output-contract failure and the next model is tried, rather than
- * the whole run pausing on the first model's malformed answer.
+ * Checks the role's contract inside the model chain, so a model that answers off-contract is that
+ * model's output-contract failure and the next model is tried, rather than the whole run pausing
+ * on the first model's malformed answer.
  */
-export function createOpinionCheckingClient(inner: CouncilCompletionClient, role: CouncilRole): CouncilCompletionClient {
+export function createRoleContractClient(inner: CouncilCompletionClient, role: CouncilRole): CouncilCompletionClient {
   return {
     async complete(request) {
       const raw = await inner.complete(request);
       const response = isBrokerResponse(raw) ? raw.response : raw;
-      parseRoleOpinion(role, request.metadata.purpose, response.message.content);
+      const { parsed } = parseRoleOpinion(role, request.metadata.purpose, response.message.content);
+      if (request.metadata.purpose === "council_decompose_planner") {
+        const issues = decomposeTaskIssues(isRecord(parsed) && "proposal" in parsed ? parsed["proposal"] : parsed);
+        if (issues.length > 0) {
+          throw outputContractError(`${role} returned decompose tasks without a requirementRef`, { role, purpose: request.metadata.purpose, issues });
+        }
+      }
       return raw;
     },
   };
+}
+
+function decomposeTaskIssues(proposal: unknown): { path: string; message: string }[] {
+  const tasks = isRecord(proposal) ? proposal["tasks"] : undefined;
+  if (!Array.isArray(tasks)) return [];
+  return tasks.flatMap((task, index) =>
+    isRecord(task) && typeof task["requirementRef"] === "string" && task["requirementRef"] !== ""
+      ? []
+      : [{ path: `$.proposal.tasks[${index}].requirementRef`, message: "required: the interpretation requirement this task delivers" }],
+  );
 }
 
 function parseRoleOpinion(role: CouncilRole, purpose: string, content: string): { opinion: RoleOpinion; parsed: unknown } {
@@ -120,6 +136,10 @@ export function systemPrompt(role: CouncilRole): string {
       : role === "scope_guardian"
         ? ' During decomposition, classify simplify/refactor work with proposal.classifications as [{"requirementRef":"R1","workClass":"functional|style_only","classifiedBy":"scope_guardian","sourceRef":"R1"}] or proposal.workClasses keyed by requirement ref. style_only is legal only for simplify/refactor whose sourceRef is that requirement. Never infer workClass from title or description keywords.'
         : "";
+  const decompose =
+    role === "planner"
+      ? ' During decomposition (the payload has interpretation), return proposal.tasks as [{"requirementRef":"R1","title":"...","description":"...","acceptance":["..."],"files":["..."],"dependsOn":[],"complexity":"normal"}]; every task names by requirementRef the payload.interpretation.requirements entry it delivers.'
+      : "";
   const split =
     role === "planner"
       ? ' When the payload has splitRequest, a worker found payload.task too large for one change: re-plan it as proposal.tasks, [{"title":"...","description":"...","acceptance":["..."],"files":["..."],"dependsOn":[0],"complexity":"normal"}] with at least two entries, dependsOn naming earlier entries by index, and every criterion of payload.task.acceptance covered by some entry.'
@@ -133,7 +153,7 @@ export function systemPrompt(role: CouncilRole): string {
         ? `Protect explicit constraints and non-goals. Identify ambiguity that blocks safe execution of the mission itself. profileHints (framework, packageManager) are informational labels, not blocking uncertainty. ${evidence} During decomposition return dropRefs for out-of-scope requirements.${workClass}`
         : `Independently adjudicate whether the mission plus baselineEvidence is sufficient to interpret a bounded coding task. At intake there is no code proposal or diff (roles run in parallel); do not vote needs_human for a missing code proposal, a CAS hash, or missing inlined source. profileHints are informational. ${evidence} During decomposition you may restore dropped refs via restoreRefs.`;
   return (
-    `You are the supervisor council ${role}. ${focus}${split} Return JSON only: ` +
+    `You are the supervisor council ${role}. ${focus}${decompose}${split} Return JSON only: ` +
     '{"decision":"approve|revise|needs_human","rationale":"...","concerns":["..."],"proposal":{...}}.'
   );
 }
