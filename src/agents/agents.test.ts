@@ -408,8 +408,8 @@ describe("AgentRunner", () => {
           } else if (output["path"] === "src/long.ts") {
             longPages += 1;
             call = tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "cmd");
-          } else if (typeof output["outputRef"] === "string" && typeof output["nextStartLine"] === "number") {
-            call = tool("read_output", { ref: output["outputRef"], startLine: 1_790, endLine: 1_810 }, "window");
+          } else if (typeof output["fullOutputRef"] === "string") {
+            call = tool("read_output", { ref: output["fullOutputRef"], startLine: 1_790, endLine: 1_810 }, "window");
           } else {
             call = tool("finish", { summary: "read" }, `finish-${String(index)}`);
           }
@@ -434,8 +434,9 @@ describe("AgentRunner", () => {
       if (index > 0) expect(result["startLine"]).toBe(Number(longResults[index - 1]?.["endLine"]) + 1);
     }
     const command = rest.find((result) => Array.isArray(result["argv"]));
-    expect(command).toMatchObject({ exitCode: 0, startLine: 1, totalLines: 2_201 });
+    expect(command).toMatchObject({ exitCode: 0, startLine: 1, folded: expect.stringMatching(/^208\d middle lines omitted$/) });
     expect(command?.["content"]).not.toContain("UNIQUE-MIDDLE-LINE");
+    expect(command?.["content"]).toContain("tail line");
     const window = rest.find((result) => result["startLine"] === 1_790);
     expect(window).toMatchObject({ endLine: 1_810, nextStartLine: 1_811 });
     expect(window?.["content"]).toContain("UNIQUE-MIDDLE-LINE");

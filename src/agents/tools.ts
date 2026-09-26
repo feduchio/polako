@@ -15,6 +15,7 @@ import type { SandboxHandle } from "../sandbox/worktree.js";
 import { PolishError } from "../shared/errors.js";
 import type { ArtifactStore } from "../store/artifacts.js";
 import { anchorOf, applyHashlineEdits, NoopTracker, parseEdits, renderAnchored } from "./hashline.js";
+import { shapeCommandOutput } from "./outputShape.js";
 import { testApiDenial } from "./testApiGuard.js";
 import type { AgentToolName, LoopEvidence, RequestContext } from "./types.js";
 
@@ -100,7 +101,7 @@ export const AGENT_TOOL_DEFINITIONS: ToolSpec[] = [
       },
     }, ["path", "edits"]),
   },
-  { name: "run_command", description: "Run an argv command allowed by the command policy.", parameters: objectSchema({ argv: { type: "array", items: { type: "string" }, minItems: 1 }, cwd: { type: "string" }, timeoutMs: { type: "integer", minimum: 1 } }, ["argv"]) },
+  { name: "run_command", description: "Run an argv command allowed by the command policy. Test output leads with the runner's report and folds passing-test lines; long output keeps its head and tail. When lines were left out, fullOutputRef reads the whole output with read_output.", parameters: objectSchema({ argv: { type: "array", items: { type: "string" }, minItems: 1 }, cwd: { type: "string" }, timeoutMs: { type: "integer", minimum: 1 } }, ["argv"]) },
   { name: "request_context", description: "Request additional task or repository context.", parameters: objectSchema({ query: { type: "string" } }, ["query"]) },
   { name: "read_output", description: "Read more of a paged tool output by its outputRef.", parameters: objectSchema({ ref: { type: "string" }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, ["ref"]) },
   {
@@ -148,6 +149,13 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
   /** Outputs this loop stored; `read_output` reads nothing else from the artifact store. */
   const pageable = new Set<string>();
   const noops = new NoopTracker();
+
+  /** Store `text` whole for `read_output`, whatever was shown of it. */
+  const keep = (text: string, label: string): string => {
+    const ref = deps.artifacts.put(text, "agent_output_text", label);
+    pageable.add(ref.sha256);
+    return ref.sha256;
+  };
 
   const page = (text: string, label: string): PagedText => {
     const lines = splitLines(text);
@@ -258,6 +266,7 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
           deps.loopEvidence.commandOutputRefs.push(evidenceRef);
           if (result.exitCode === 0 && !result.timedOut) deps.loopEvidence.passedCommands.push([...argv]);
           const text = stderr === "" ? stdout : stdout === "" ? `[stderr]\n${stderr}` : `${stdout}\n[stderr]\n${stderr}`;
+          const shaped = shapeCommandOutput(text, deps.testFramework ?? "unknown");
           return {
             argv: result.argv,
             exitCode: result.exitCode,
@@ -266,7 +275,8 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
             aborted: result.aborted,
             durationMs: result.durationMs,
             processOutputCut: result.truncated,
-            ...page(text, argv.join(" ")),
+            ...page(shaped.text, argv.join(" ")),
+            ...(shaped.folded === null ? {} : { folded: shaped.folded, fullOutputRef: keep(text, argv.join(" ")) }),
           };
         }
         case "request_context": {

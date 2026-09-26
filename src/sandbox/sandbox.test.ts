@@ -6,7 +6,6 @@ import { defaultConfig } from "../domain/config.js";
 import { CommandPolicy } from "./allowlist.js";
 import { scrubEnv, suspiciousEnvNames } from "./env.js";
 import { Git } from "./git.js";
-import { compressOutput, renderCompressed } from "./outputCompressor.js";
 import { runProcess } from "./process.js";
 import { WorktreeSandbox } from "./worktree.js";
 
@@ -477,16 +476,3 @@ describe("WorktreeSandbox", () => {
   });
 });
 
-describe("compressOutput", () => {
-  it("surfaces error-like lines and keeps head/tail", () => {
-    const lines = ["Progress: 1%", "starting", ...Array.from({ length: 100 }, (_, i) => `line ${i}`), "FAIL src/x.test.ts > does thing", "AssertionError: expected 1 to be 2", "Tests: 1 failed, 4 passed"];
-    const c = compressOutput(lines.join("\n"), { headLines: 3, tailLines: 3 });
-    expect(c.errorLines.some((l) => l.includes("AssertionError"))).toBe(true);
-    expect(c.errorLines.some((l) => l.includes("FAIL src/x.test.ts"))).toBe(true);
-    expect(c.head.split("\n")).toEqual(["starting", "line 0", "line 1"]);
-    expect(c.tail.split("\n")).toHaveLength(3);
-    const rendered = renderCompressed(c, 500);
-    expect(rendered.length).toBeLessThanOrEqual(500);
-    expect(rendered).toContain("error-like lines");
-  });
-});

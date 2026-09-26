@@ -8,5 +8,3 @@ export { Git } from "./git.js";
 export type { DiffStat } from "./git.js";
 export { WorktreeSandbox } from "./worktree.js";
 export type { Sandbox, SandboxHandle, CreateSandboxInput } from "./worktree.js";
-export { compressOutput, renderCompressed } from "./outputCompressor.js";
-export type { CompressedOutput } from "./outputCompressor.js";
