@@ -893,6 +893,7 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
           .then((record) => ("response" in record ? record.response : record)),
       artifacts: deps.store.artifacts,
       model,
+      fallbackModels: workerFallbacks(ranked.map((item) => item.entry.info.ref), model),
       commandPolicy: commandPolicyFor(ctx, profile),
       testFramework: profile.framework,
       maxTurns: deps.config.agent.maxTurns,
@@ -1368,4 +1369,19 @@ export { syntheticCheckpoint };
 function cacheDirOf(config: PolishConfig): { cacheDir?: string } {
   const dir = dependencyCacheDir(config);
   return dir === null ? {} : { cacheDir: dir };
+}
+
+const MAX_WORKER_FALLBACKS = 3;
+
+/** The next worker models the router ranked, under the same cost policy, for a rate-limited call. */
+export function workerFallbacks(ranked: readonly ModelRef[], primary: ModelRef): ModelRef[] {
+  const seen = new Set([modelRefKey(primary)]);
+  const out: ModelRef[] = [];
+  for (const ref of ranked) {
+    if (seen.has(modelRefKey(ref))) continue;
+    seen.add(modelRefKey(ref));
+    out.push(ref);
+    if (out.length === MAX_WORKER_FALLBACKS) break;
+  }
+  return out;
 }

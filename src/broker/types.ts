@@ -80,6 +80,12 @@ export interface CompletionRequest {
     causedBy?: string[];
     /** Correlate start/retry/completion events for one logical call. */
     callId?: string;
+    /**
+     * Models to try, in order, when this one is rate-limited or out of quota after its retries.
+     * The caller chooses them under its own constraints (cost policy, family diversity); the
+     * broker only walks the list (after oh-my-pi's retry.fallbackChains).
+     */
+    fallbacks?: ModelRef[];
     /** Override constructor retry policy for this request (council uses a tighter bound). */
     retryPolicy?: { maxAttempts: number; baseDelayMs: number; maxDelayMs: number };
   };

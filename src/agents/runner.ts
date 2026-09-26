@@ -205,6 +205,7 @@ export class AgentRunner implements CandidateWorker {
             role: "worker",
             taskId: task.id,
             taskAttempt: task.attempts,
+            ...(this.deps.fallbackModels === undefined || this.deps.fallbackModels.length === 0 ? {} : { fallbacks: this.deps.fallbackModels }),
           },
           ...(this.deps.signal === undefined ? {} : { signal: this.deps.signal }),
         });

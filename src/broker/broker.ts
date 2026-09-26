@@ -1,4 +1,4 @@
-import { modelRefKey } from "../domain/common.js";
+import { modelRefKey, type ModelRef } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
 import type { Store } from "../store/index.js";
 import type { Clock } from "../shared/clock.js";
@@ -70,6 +70,21 @@ export class ModelBroker {
   }
 
   async complete(request: CompletionRequest): Promise<ModelCallRecord> {
+    const chain = [request.model, ...(request.metadata.fallbacks ?? [])];
+    for (let index = 0; ; index += 1) {
+      const model = chain[index] ?? request.model;
+      const { fallbacks: _fallbacks, ...metadata } = request.metadata;
+      try {
+        return await this.completeOn({ ...request, model, metadata });
+      } catch (err) {
+        const next = chain[index + 1];
+        if (next === undefined || !isRateLimited(err)) throw err;
+        this.recordFallback(request, model, next, err);
+      }
+    }
+  }
+
+  private async completeOn(request: CompletionRequest): Promise<ModelCallRecord> {
     const adapter = this.deps.catalog.provider(request.model.provider);
     if (!adapter) throw new PolishError("CONFIG_ERROR", `unknown provider ${request.model.provider}`);
     // One hold per provider invocation, not per call: the retry loop makes up to `maxAttempts` of
@@ -257,6 +272,20 @@ export class ModelBroker {
     store.events.append([event]);
   }
 
+  private recordFallback(request: CompletionRequest, from: ModelRef, to: ModelRef, error: unknown): void {
+    const { store, clock } = this.deps;
+    store.events.append([{
+      id: id("evt", clock.now()),
+      runId: request.metadata.runId,
+      ts: clock.now(),
+      type: "model.fallback",
+      payload: { from, to, role: request.metadata.role, purpose: request.metadata.purpose, error: errorToString(error) },
+      causedBy: request.metadata.causedBy ?? [],
+      actor: { kind: roleToActorKind(request.metadata.role), role: request.metadata.role, model: from },
+      artifacts: [],
+    }]);
+  }
+
   private recordRetryScheduled(
     request: CompletionRequest,
     callId: string,
@@ -392,4 +421,9 @@ function roleToActorKind(role: string): "supervisor" | "worker" | "reviewer" | "
     default:
       return "system";
   }
+}
+
+/** Waiting on this model will not help soon: its rate limit held through the retries, or the account's quota is spent. */
+function isRateLimited(error: unknown): boolean {
+  return error instanceof ProviderError && (error.kind === "rate_limit" || isAccountScopedLimit(error));
 }

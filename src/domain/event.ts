@@ -67,6 +67,7 @@ export const KNOWN_EVENT_TYPES = [
   "model.call",
   "model.call_started",
   "model.retry_scheduled",
+  "model.fallback",
   "model.fallback_selected",
   "model.output_invalid",
   "model.output_repair_attempted",

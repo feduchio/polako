@@ -28,6 +28,7 @@ import {
   resolveDiscoveredProfile,
   resolveEnsembleAlternatives,
   resolveProductionVerifier,
+  workerFallbacks,
 } from "./composition.js";
 import { selectEligibleEnsemble } from "../convergence/pathology/index.js";
 import { createInvestigationTask, createTaskFromRequirement } from "../domain/task.js";
@@ -1769,5 +1770,13 @@ describe("DISCOVERING_PROJECT and BASELINING drivers", () => {
     expect(stopped?.terminalReason?.summary).toContain("still unreachable");
     // The checks still ran, so the operator has the real output to act on.
     expect(store.events.list(run.id, { types: ["shell.command_started"] }).length).toBeGreaterThan(0);
+  });
+});
+
+describe("workerFallbacks", () => {
+  it("takes the next ranked worker models, never the primary, at most three", () => {
+    const ref = (model: string) => ({ provider: "p", model });
+    expect(workerFallbacks([ref("a"), ref("b"), ref("c"), ref("d"), ref("e")], ref("b"))).toEqual([ref("a"), ref("c"), ref("d")]);
+    expect(workerFallbacks([ref("a")], ref("a"))).toEqual([]);
   });
 });

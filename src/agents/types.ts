@@ -133,6 +133,8 @@ export interface AgentRunnerDeps {
   artifacts: ArtifactStore;
   model: ModelRef;
   commandPolicy: CommandPolicy;
+  /** Models the broker may fall back to when `model` is rate-limited or out of quota. */
+  fallbackModels?: ModelRef[];
   maxTurns: number;
   /** Tokens this attempt may spend over all its turns (`budget.maxAttemptTokens`); null is no cap. */
   maxTokens: number | null;
