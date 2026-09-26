@@ -1,8 +1,8 @@
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   realpathSync,
   writeFileSync,
 } from "node:fs";
@@ -24,17 +24,37 @@ export interface AgentToolsDeps {
   loopEvidence: LoopEvidence;
   requestContext?: RequestContext;
   redact?: (text: string) => string;
+  /** How many tokens one tool result may occupy; longer text is returned a page at a time. */
+  resultTokens: number;
 }
 
 export interface AgentTools {
   definitions: ToolSpec[];
   execute(name: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
+  /** Store `text` and return its first page, readable further with `read_output`. */
+  page(text: string, label: string): PagedText;
 }
 
-/** Directories a recursive listing must not walk. A checkout with dependencies is mostly these. */
-const SKIP_LIST_DIRS = new Set(["node_modules", ".git", "dist", ".polish"]);
-/** How much of a file `read` returns when the caller names no range. */
-const DEFAULT_READ_LINES = 400;
+/**
+ * A window onto longer text. `endLine` is the last line actually returned and `nextStartLine` is
+ * present exactly when more follows, so nothing is ever cut without the caller being told where.
+ */
+export interface TextPage {
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  nextStartLine?: number;
+  content: string;
+  /** The one line shown is longer than a page; only its first `shownChars` characters are here. */
+  partialLine?: { line: number; shownChars: number; totalChars: number };
+}
+
+export type PagedText = TextPage & { outputRef?: string };
+
+/** Never the project's own source: git's store, installed dependencies, and Polish's scratch. */
+const SKIP_LIST_DIRS = new Set([".git", "node_modules", ".polish"]);
+/** Room left in a page for the fields around its content. */
+const PAGE_ENVELOPE_TOKENS = 200;
 
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({
   type: "object",
@@ -44,14 +64,15 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
 });
 
 export const AGENT_TOOL_DEFINITIONS: ToolSpec[] = [
-  { name: "read", description: "Read a UTF-8 file in the worktree.", parameters: objectSchema({ path: { type: "string" }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, ["path"]) },
-  { name: "list", description: "List files and directories inside the worktree.", parameters: objectSchema({ path: { type: "string" }, recursive: { type: "boolean" } }) },
+  { name: "read", description: "Read a UTF-8 file in the worktree. The whole file when it fits; otherwise a page, with nextStartLine to continue from.", parameters: objectSchema({ path: { type: "string" }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, ["path"]) },
+  { name: "list", description: "List files and directories git knows about or would add (ignored files are left out).", parameters: objectSchema({ path: { type: "string" }, recursive: { type: "boolean" } }) },
   { name: "search", description: "Search worktree text with ripgrep.", parameters: objectSchema({ query: { type: "string" }, path: { type: "string" } }, ["query"]) },
   { name: "repo_intel", description: "Query repository symbols, relationships, impact, tests, or health.", parameters: objectSchema({ action: { type: "string", enum: ["explore", "symbol", "callers", "callees", "impact", "affected_tests", "health"] }, query: { type: "string" }, files: { type: "array", items: { type: "string" } }, depth: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } }, ["action"]) },
   { name: "write", description: "Write a UTF-8 file inside the worktree.", parameters: objectSchema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"]) },
   { name: "apply_patch", description: "Replace one exact text fragment in a worktree file.", parameters: objectSchema({ path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } }, ["path", "oldText", "newText"]) },
   { name: "run_command", description: "Run an argv command allowed by the command policy.", parameters: objectSchema({ argv: { type: "array", items: { type: "string" }, minItems: 1 }, cwd: { type: "string" }, timeoutMs: { type: "integer", minimum: 1 } }, ["argv"]) },
   { name: "request_context", description: "Request additional task or repository context.", parameters: objectSchema({ query: { type: "string" } }, ["query"]) },
+  { name: "read_output", description: "Read more of a paged tool output by its outputRef.", parameters: objectSchema({ ref: { type: "string" }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, ["ref"]) },
   {
     name: "finish",
     description:
@@ -74,35 +95,38 @@ export function createLoopEvidence(): LoopEvidence {
 export function createAgentTools(deps: AgentToolsDeps): AgentTools {
   const root = realpathSync(deps.sandbox.path);
   const redact = deps.redact ?? ((text: string) => text);
+  const budget = Math.max(deps.resultTokens - PAGE_ENVELOPE_TOKENS, 1);
+  /** Outputs this loop stored; `read_output` reads nothing else from the artifact store. */
+  const pageable = new Set<string>();
+
+  const page = (text: string, label: string): PagedText => {
+    const lines = splitLines(text);
+    const first = pageLines(lines, 1, undefined, budget);
+    if (first.nextStartLine === undefined && first.partialLine === undefined) return first;
+    const ref = deps.artifacts.put(text, "agent_output_text", label);
+    pageable.add(ref.sha256);
+    return { ...first, outputRef: ref.sha256 };
+  };
 
   return {
     definitions: AGENT_TOOL_DEFINITIONS.map((tool) => ({ ...tool })),
+    page,
     async execute(name, rawArgs, signal) {
       if (!isAgentToolName(name)) throw new PolishError("INVALID_ARGUMENT", `unknown agent tool: ${name}`);
       const args = asRecord(rawArgs);
       switch (name) {
         case "read": {
           const path = safePath(root, stringArg(args, "path"));
-          const lines = readFileSync(path, "utf8").split(/\r?\n/);
-          const startGiven = optionalInteger(args, "startLine");
-          const endGiven = optionalInteger(args, "endLine");
-          const start = startGiven ?? 1;
-          const end = endGiven ?? (startGiven === undefined ? start + DEFAULT_READ_LINES - 1 : lines.length);
-          const endLine = Math.min(end, lines.length);
-          return {
-            path: relative(root, path),
-            startLine: start,
-            endLine,
-            totalLines: lines.length,
-            truncated: start > 1 || endLine < lines.length,
-            content: lines.slice(start - 1, endLine).join("\n"),
-          };
+          const lines = splitLines(readFileSync(path, "utf8"));
+          const window = pageLines(lines, optionalInteger(args, "startLine") ?? 1, optionalInteger(args, "endLine"), budget);
+          return { path: relative(root, path), ...window };
         }
         case "list": {
           const path = safePath(root, optionalString(args, "path") ?? ".");
           const rel = relative(root, path) || ".";
-          if (pathHitsSkippedDir(rel)) return { path: rel, entries: [], skipped: true };
-          return { path: rel, entries: listEntries(root, path, args["recursive"] === true) };
+          if (pathHitsSkippedDir(rel)) return { path: rel, entryCount: 0, entries: [], skipped: true };
+          const entries = await listEntries(deps.sandbox, root, rel, args["recursive"] === true);
+          return { path: rel, entryCount: entries.length, ...page(entries.join("\n"), `list ${rel}`) };
         }
         case "search": {
           const query = stringArg(args, "query");
@@ -113,11 +137,19 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
               ["rg", "-n", "--glob", "!node_modules", "--glob", "!.git", query, requested],
               signal === undefined ? {} : { signal },
             );
-            return { exitCode: result.exitCode, matches: redact(result.stdout), stderr: redact(result.stderr), truncated: result.truncated };
+            const matches = redact(result.stdout);
+            return {
+              exitCode: result.exitCode,
+              matchCount: countNonEmptyLines(matches),
+              ...page(matches, `search ${query}`),
+              stderr: redact(result.stderr),
+              processOutputCut: result.truncated,
+            };
           } catch (error) {
             if (!isSpawnError(error, "rg")) throw error;
             const hits = await deps.intelligence.explore(query, 50);
-            return { exitCode: 0, matches: redact(JSON.stringify(hits)), stderr: "", truncated: false, fallback: "repo_intel" };
+            const matches = redact(JSON.stringify(hits, null, 2));
+            return { exitCode: 0, matchCount: hits.length, ...page(matches, `search ${query}`), stderr: "", fallback: "repo_intel" };
           }
         }
         case "repo_intel":
@@ -156,19 +188,34 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
           const timeoutMs = optionalInteger(args, "timeoutMs");
           if (timeoutMs !== undefined) opts.timeoutMs = timeoutMs;
           const result = await deps.sandbox.run(argv, opts);
-          const logged = {
-            ...result,
-            stdout: redact(result.stdout),
-            stderr: redact(result.stderr),
-          };
-          const outputRef = deps.artifacts.put(JSON.stringify(logged), "agent_command_output", argv.join(" "));
-          deps.loopEvidence.commandOutputRefs.push(outputRef);
+          const stdout = redact(result.stdout);
+          const stderr = redact(result.stderr);
+          const evidenceRef = deps.artifacts.put(JSON.stringify({ ...result, stdout, stderr }), "agent_command_output", argv.join(" "));
+          deps.loopEvidence.commandOutputRefs.push(evidenceRef);
           if (result.exitCode === 0 && !result.timedOut) deps.loopEvidence.passedCommands.push([...argv]);
-          return { ...logged, outputRef };
+          const text = stderr === "" ? stdout : stdout === "" ? `[stderr]\n${stderr}` : `${stdout}\n[stderr]\n${stderr}`;
+          return {
+            argv: result.argv,
+            exitCode: result.exitCode,
+            signal: result.signal,
+            timedOut: result.timedOut,
+            aborted: result.aborted,
+            durationMs: result.durationMs,
+            processOutputCut: result.truncated,
+            ...page(text, argv.join(" ")),
+          };
         }
         case "request_context": {
           const query = stringArg(args, "query");
           return deps.requestContext ? await deps.requestContext(query) : deps.intelligence.explore(query);
+        }
+        case "read_output": {
+          const ref = stringArg(args, "ref");
+          if (!pageable.has(ref)) {
+            throw new PolishError("INVALID_ARGUMENT", `no paged output ${ref} in this loop; use the outputRef a tool result gave you`);
+          }
+          const lines = splitLines(deps.artifacts.getText(ref));
+          return { outputRef: ref, ...pageLines(lines, optionalInteger(args, "startLine") ?? 1, optionalInteger(args, "endLine"), budget) };
         }
         case "finish":
           return args;
@@ -218,20 +265,80 @@ function pathHitsSkippedDir(rel: string): boolean {
   return rel.split(sep).some((part) => SKIP_LIST_DIRS.has(part));
 }
 
-function listEntries(root: string, path: string, recursive: boolean): string[] {
-  const out: string[] = [];
-  const visit = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isSymbolicLink()) continue;
-      if (SKIP_LIST_DIRS.has(entry.name)) continue;
-      const full = resolve(dir, entry.name);
-      out.push(relative(root, full) + (entry.isDirectory() ? "/" : ""));
-      if (recursive && entry.isDirectory() && out.length < 2_000) visit(full);
-      if (out.length >= 2_000) return;
+/**
+ * What git tracks or would add under `rel`, minus ignored files and install output. A directory
+ * walk showed build output and vendored trees the repository itself ignores.
+ */
+async function listEntries(sandbox: SandboxHandle, root: string, rel: string, recursive: boolean): Promise<string[]> {
+  const files = (await sandbox.git.listFiles(rel === "." ? "." : rel))
+    .filter((file) => !pathHitsSkippedDir(file) && existsSync(resolve(root, file)));
+  if (recursive) {
+    const dirs = new Set<string>();
+    for (const file of files) {
+      const parts = file.split("/");
+      for (let depth = 1; depth < parts.length; depth += 1) {
+        const dir = parts.slice(0, depth).join("/");
+        if (rel === "." || dir.length > rel.length) dirs.add(`${dir}/`);
+      }
     }
+    return [...files, ...dirs].sort();
+  }
+  const prefix = rel === "." ? "" : `${rel}/`;
+  const children = new Set<string>();
+  for (const file of files) {
+    const rest = file.slice(prefix.length);
+    const slash = rest.indexOf("/");
+    children.add(slash === -1 ? file : `${prefix}${rest.slice(0, slash)}/`);
+  }
+  return [...children].sort();
+}
+
+function splitLines(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 1 && lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function countNonEmptyLines(text: string): number {
+  return text.split("\n").filter((line) => line.trim() !== "").length;
+}
+
+/**
+ * Lines `start`..`end` (or to the end), as many as fit in `budgetTokens`. At least one line is
+ * always returned; a single line longer than the budget is cut and says so in `partialLine`.
+ */
+export function pageLines(lines: readonly string[], start: number, end: number | undefined, budgetTokens: number): TextPage {
+  const totalLines = lines.length;
+  if (totalLines === 0 || (totalLines === 1 && lines[0] === "")) {
+    return { startLine: 1, endLine: 0, totalLines: 0, content: "" };
+  }
+  if (start > totalLines) {
+    throw new PolishError("INVALID_ARGUMENT", `startLine ${String(start)} is past the end (totalLines ${String(totalLines)})`);
+  }
+  const last = Math.min(end ?? totalLines, totalLines);
+  if (last < start) throw new PolishError("INVALID_ARGUMENT", `endLine ${String(last)} is before startLine ${String(start)}`);
+  const budgetChars = budgetTokens * 4;
+  let used = 0;
+  let endLine = start - 1;
+  for (let line = start; line <= last; line += 1) {
+    // Measured as it will travel: inside a JSON string, where a newline or a quote costs two.
+    const cost = JSON.stringify(lines[line - 1] ?? "").length;
+    if (endLine >= start && used + cost > budgetChars) break;
+    used += cost;
+    endLine = line;
+  }
+  const first = lines[start - 1] ?? "";
+  const partial = endLine === start && JSON.stringify(first).length > budgetChars;
+  const shownChars = Math.floor(budgetChars / 2);
+  const content = partial ? first.slice(0, shownChars) : lines.slice(start - 1, endLine).join("\n");
+  return {
+    startLine: start,
+    endLine,
+    totalLines,
+    ...(endLine < totalLines ? { nextStartLine: endLine + 1 } : {}),
+    content,
+    ...(partial ? { partialLine: { line: start, shownChars, totalChars: first.length } } : {}),
   };
-  visit(path);
-  return out.sort();
 }
 
 async function runIntel(intel: RepositoryIntelligence, args: Record<string, unknown>): Promise<unknown> {

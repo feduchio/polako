@@ -1,15 +1,14 @@
-import type { ArtifactRef, ModelRef } from "../domain/common.js";
+import type { ModelRef } from "../domain/common.js";
 import type { ChatMessage } from "../broker/types.js";
 import { isBudgetError } from "../broker/quota.js";
 import { estimateTokens } from "../context/types.js";
 import { BasicIntel } from "../intel/basic.js";
 import type { Task } from "../domain/task.js";
 import { PolishError, errorToString } from "../shared/errors.js";
-import { compressOutput, renderCompressed } from "../sandbox/outputCompressor.js";
-import type { ArtifactStore } from "../store/artifacts.js";
 import { buildWireWindow, loopDigestCap } from "./loopWindow.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import {
+  type AgentTools,
   createAgentTools,
   createLoopEvidence,
   hasLoopEvidence,
@@ -101,6 +100,7 @@ export class AgentRunner implements CandidateWorker {
       loopEvidence,
       ...(this.deps.requestContext === undefined ? {} : { requestContext: this.deps.requestContext }),
       redact: this.redact,
+      resultTokens: toolResultTokenBudget(this.deps.contextWindow),
     });
 
     let totalTokens = 0;
@@ -161,7 +161,7 @@ export class AgentRunner implements CandidateWorker {
 
       for (const toolCall of calls) {
         const result = await this.executeTool(
-          (name, args, signal) => tools.execute(name, args, signal),
+          tools,
           toolCall.id,
           toolCall.name,
           toolCall.arguments,
@@ -255,7 +255,7 @@ export class AgentRunner implements CandidateWorker {
   }
 
   private async executeTool(
-    execute: (name: string, args: unknown, signal?: AbortSignal) => Promise<unknown>,
+    tools: AgentTools,
     toolCallId: string,
     name: string,
     encodedArgs: string,
@@ -279,15 +279,9 @@ export class AgentRunner implements CandidateWorker {
           finish,
         };
       }
-      const output = await execute(name, args, signal);
+      const output = await tools.execute(name, args, signal);
       const scrubbed = scrubUnknown(output, this.redact);
-      const presented = name === "run_command" ? presentCommandOutput(scrubbed) : scrubbed;
-      const bounded = boundToolResult(
-        presented,
-        toolResultTokenCap(this.deps.maxTokens),
-        this.deps.artifacts,
-        name,
-      );
+      const bounded = boundToolResult(scrubbed, toolResultTokenBudget(this.deps.contextWindow), (text, label) => tools.page(text, label), name);
       return {
         event: { toolCallId, name, ok: true, output: bounded.output },
         message: bounded.message,
@@ -491,66 +485,30 @@ function toWorkerOutcome(result: AgentLoopResult): WorkerOutcome {
   };
 }
 
+/** Share of the worker model's context one tool result may fill; longer output is paged. */
+const TOOL_RESULT_CONTEXT_SHARE = 1 / 16;
+/** Assumed when the model's context window is not known. */
+const DEFAULT_CONTEXT_WINDOW = 32_000;
+
 /** How many tokens one tool result may occupy in the message the model actually sees. */
-export function toolResultTokenCap(maxTaskTokens: number): number {
-  return Math.min(Math.max(Math.floor(maxTaskTokens / 8), 500), 4_000);
+export function toolResultTokenBudget(contextWindow: number | undefined): number {
+  return Math.max(Math.floor((contextWindow ?? DEFAULT_CONTEXT_WINDOW) * TOOL_RESULT_CONTEXT_SHARE), 1_000);
 }
 
-function presentCommandOutput(output: unknown): unknown {
-  if (!isPlainRecord(output)) return output;
-  const stdout = typeof output["stdout"] === "string" ? output["stdout"] : "";
-  const stderr = typeof output["stderr"] === "string" ? output["stderr"] : "";
-  const text = [stdout, stderr].filter((part) => part !== "").join("\n");
-  if (estimateTokens(text) <= 400) return output;
-  return {
-    ...output,
-    stdout: renderCompressed(compressOutput(text)),
-    stderr: "",
-    compressed: true,
-  };
-}
-
+/**
+ * The tools page their own text. This catches what they do not — a large structured answer from
+ * `repo_intel` or `request_context` — and pages its JSON the same way instead of summarising it.
+ */
 function boundToolResult(
   output: unknown,
-  capTokens: number,
-  artifacts: ArtifactStore,
+  budgetTokens: number,
+  page: (text: string, label: string) => unknown,
   label: string,
 ): { output: unknown; message: string } {
   const full = JSON.stringify({ ok: true, output });
-  if (estimateTokens(full) <= capTokens) return { output, message: full };
-  const outputRef = artifacts.put(full, "agent_tool_output", label);
-  const summary = summarizeOversized(output, outputRef);
-  return {
-    output: summary,
-    message: JSON.stringify({ ok: true, truncated: true, outputRef, output: summary }),
-  };
-}
-
-function summarizeOversized(output: unknown, outputRef: ArtifactRef): Record<string, unknown> {
-  const summary: Record<string, unknown> = { truncated: true, outputRef };
-  if (!isPlainRecord(output)) {
-    summary["preview"] = JSON.stringify(output).slice(0, 500);
-    return summary;
-  }
-  if (typeof output["path"] === "string") summary["path"] = output["path"];
-  if (typeof output["exitCode"] === "number") summary["exitCode"] = output["exitCode"];
-  if (Array.isArray(output["entries"])) summary["entryCount"] = output["entries"].length;
-  if (typeof output["matches"] === "string") {
-    const lines = output["matches"].split("\n").filter((line) => line.trim() !== "");
-    summary["matchCount"] = lines.length;
-    summary["matches"] = lines.slice(0, 20).join("\n").slice(0, 500);
-  }
-  if (typeof output["content"] === "string") {
-    summary["content"] = output["content"].slice(0, 500);
-    if (typeof output["startLine"] === "number") summary["startLine"] = output["startLine"];
-    if (typeof output["endLine"] === "number") summary["endLine"] = output["endLine"];
-  }
-  if (typeof output["stdout"] === "string") summary["stdout"] = output["stdout"].slice(0, 500);
-  return summary;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (estimateTokens(full) <= budgetTokens) return { output, message: full };
+  const paged = { paged: true, ...(page(JSON.stringify(output, null, 2), label) as Record<string, unknown>) };
+  return { output: paged, message: JSON.stringify({ ok: true, output: paged }) };
 }
 
 function validateBudgets(deps: AgentRunnerDeps): void {

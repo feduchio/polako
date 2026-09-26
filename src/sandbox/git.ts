@@ -55,6 +55,13 @@ export class Git {
     return this.excluded.size === 0 ? [] : ["--", ".", ...this.excludedPaths().map((path) => `:(exclude)${path}`)];
   }
 
+  /** Tracked or addable files under `path`: not ignored, not excluded. */
+  async listFiles(path = "."): Promise<string[]> {
+    const spec = this.excluded.size === 0 ? ["--", path] : ["--", path, ...this.excludedPaths().map((p) => `:(exclude)${p}`)];
+    const text = (await this.run(["ls-files", "-z", "--cached", "--others", "--exclude-standard", ...spec])).stdout;
+    return [...new Set(text.split("\0").filter(Boolean))];
+  }
+
   /** Untracked, not ignored, and not excluded. */
   async untrackedFiles(): Promise<string[]> {
     const text = await this.out(["ls-files", "--others", "--exclude-standard", ...this.pathspec()]);

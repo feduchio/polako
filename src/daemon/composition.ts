@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { AgentRunner, toolResultTokenCap } from "../agents/runner.js";
+import { AgentRunner, toolResultTokenBudget } from "../agents/runner.js";
 import { EmpiricalProgressTracker, type ProgressModel } from "../agents/progressTracker.js";
 import { AGENT_TOOL_NAMES } from "../agents/types.js";
 import { composeWorkerInstruction, workerPackCap } from "../context/workerInstruction.js";
@@ -851,6 +851,10 @@ function isModelRef(value: unknown): value is ModelRef {
   return typeof record["provider"] === "string" && typeof record["model"] === "string";
 }
 
+function contextWindowOf(contextWindow: number | undefined): { contextWindow?: number } {
+  return contextWindow === undefined ? {} : { contextWindow };
+}
+
 export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
   const ranked = deps.router.select({ role: "worker", count: deps.config.candidates.normal, requireTools: true });
   const profile = resolveDiscoveredProfile(ctx);
@@ -875,6 +879,7 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
       commandPolicy: commandPolicyFor(ctx, profile),
       maxTurns: deps.config.agent.maxTurns,
       maxTokens,
+      ...contextWindowOf(ranked[index % Math.max(ranked.length, 1)]?.entry.info.capabilities.contextWindow),
       ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
       // The one seam between a task and what a production worker is told. Item 18 rebinds this
       // rather than unpicking a concatenation.
@@ -979,7 +984,7 @@ function selectProgressModels(deps: ProductionDeps): ProgressModel[] {
 }
 
 export interface RunMechanism {
-  name: "repetition_breaker" | "tool_output_cap" | "progress_tracker" | "review_quorum" | "debate_diversity" | "canary";
+  name: "repetition_breaker" | "tool_output_paging" | "progress_tracker" | "review_quorum" | "debate_diversity" | "canary";
   on: boolean;
   reason?: string;
 }
@@ -995,10 +1000,10 @@ export function describeRunMechanisms(deps: ProductionDeps): RunMechanism[] {
     : families === 2
       ? undefined
       : `insufficient_families: ${String(families)}`;
-  const cap = toolResultTokenCap(deps.config.budget.maxTaskTokens ?? 32_000);
+  const worker = deps.router.select({ role: "worker", count: 1, requireTools: true })[0]?.entry.info.capabilities.contextWindow;
   return [
     { name: "repetition_breaker", on: true },
-    { name: "tool_output_cap", on: true, reason: `cap_tokens: ${String(cap)}` },
+    { name: "tool_output_paging", on: true, reason: `page_tokens: ${String(toolResultTokenBudget(worker))}` },
     {
       name: "progress_tracker",
       on: progressReason === undefined,

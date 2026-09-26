@@ -46,6 +46,7 @@ export const AGENT_TOOL_NAMES = [
   "apply_patch",
   "run_command",
   "request_context",
+  "read_output",
   "finish",
 ] as const;
 
@@ -131,6 +132,8 @@ export interface AgentRunnerDeps {
   commandPolicy: CommandPolicy;
   maxTurns: number;
   maxTokens: number;
+  /** The worker model's context window; one tool result may fill a fixed share of it. */
+  contextWindow?: number;
   systemPrompt?: string;
   /** Returns the worker's instruction and the hash of the protocol bundle it was composed
    *  from. A return channel rather than a closure: a runner is reusable across tasks, and a

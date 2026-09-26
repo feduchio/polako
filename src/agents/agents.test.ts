@@ -2,12 +2,12 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ToolCall } from "../broker/types.js";
+import type { CompletionRequest, ToolCall } from "../broker/types.js";
 import { SecretStore } from "../broker/secrets.js";
 import { defaultConfig } from "../domain/config.js";
 import type { Task } from "../domain/task.js";
 import { BasicIntel } from "../intel/basic.js";
-import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
+import { FAKE_CAPABILITIES, reply, ScriptedProvider } from "../providers/scripted.js";
 import { CommandPolicy } from "../sandbox/allowlist.js";
 import { Git } from "../sandbox/git.js";
 import type { ProcessResult } from "../sandbox/process.js";
@@ -16,8 +16,9 @@ import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import { openStore, type Store } from "../store/index.js";
 import { estimateTokens } from "../context/types.js";
-import { AgentRunner, toolResultTokenCap } from "./runner.js";
+import { AgentRunner, toolResultTokenBudget } from "./runner.js";
 import type { AgentRunnerDeps } from "./types.js";
+import { pageLines } from "./tools.js";
 import { EmpiricalProgressTracker } from "./progressTracker.js";
 import { defaultProtocolsRoot, ProtocolRegistry } from "../protocols/loader.js";
 import { progressSystemPrompt } from "../context/progressInstruction.js";
@@ -57,7 +58,7 @@ describe("AgentRunner", () => {
 
     expect(result.status).toBe("completed");
     expect(provider.calls[0]?.tools?.map((spec) => spec.name)).toEqual([
-      "read", "list", "search", "repo_intel", "write", "apply_patch", "run_command", "request_context", "finish",
+      "read", "list", "search", "repo_intel", "write", "apply_patch", "run_command", "request_context", "read_output", "finish",
     ]);
     expect(readFileSync(join(handle.path, "src/math.ts"), "utf8")).toContain("a + b + 0");
     expect(result.transcriptRef).toBeDefined();
@@ -124,11 +125,11 @@ describe("AgentRunner", () => {
     await handle.destroy();
   });
 
-  it("does not list node_modules and keeps a huge listing under the token cap", async () => {
+  it("pages a huge listing and read_output returns the rest without loss", async () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
     cleanup.push(fixture.root);
-    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 4, maxTokens: 8_000 });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 200_000 });
     const handle = await fixture.sandbox.create({
       id: id("cand"),
       baseCommit: fixture.base,
@@ -136,27 +137,51 @@ describe("AgentRunner", () => {
     });
     mkdirSync(join(handle.path, "node_modules", "left-pad"), { recursive: true });
     writeFileSync(join(handle.path, "node_modules", "left-pad", "index.js"), "module.exports = 1;\n");
+    mkdirSync(join(handle.path, "dist"));
+    writeFileSync(join(handle.path, "dist", "bundle.js"), "built\n");
+    writeFileSync(join(handle.path, ".gitignore"), "ignored-out/\n");
+    mkdirSync(join(handle.path, "ignored-out"));
+    writeFileSync(join(handle.path, "ignored-out", "x.txt"), "x\n");
     mkdirSync(join(handle.path, "bulk"));
     for (let i = 0; i < 1_500; i += 1) {
       writeFileSync(join(handle.path, "bulk", `file-${String(i).padStart(4, "0")}.txt`), "x\n");
     }
-    provider.script("worker", [
+    const script = [
       replyWith(tool("list", { path: "node_modules", recursive: true }, "list-deps")),
       replyWith(tool("list", { path: ".", recursive: true }, "list")),
-      replyWith(tool("finish", { summary: "listed" }, "finish")),
-    ]);
+    ];
+    provider.script("worker", script);
+    const pages: { content: string; nextStartLine?: number; outputRef?: string; endLine: number; totalLines: number }[] = [];
+    provider.script("worker", Array.from({ length: 6 }, (_, index) => ({
+      kind: "fn" as const,
+      fn: (request: CompletionRequest) => {
+        const last = JSON.parse(request.messages.at(-1)?.content ?? "{}") as { output?: typeof pages[number] };
+        if (last.output !== undefined) pages.push(last.output);
+        const next = last.output?.nextStartLine;
+        const call = next === undefined
+          ? tool("finish", { summary: "listed" }, `finish-${String(index)}`)
+          : tool("read_output", { ref: pages[0]?.outputRef ?? "", startLine: next }, `more-${String(index)}`);
+        return reply("", 1, 1, null, [call]);
+      },
+    })));
 
-    await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    await new AgentRunner(deps).run({ ...codingTask(fixture.runId, fixture.base), touchesProductCode: false }, handle);
 
     const skipped = provider.calls[1]?.messages.find((message) => message.role === "tool")?.content ?? "";
     expect(skipped).toContain('"skipped":true');
-    expect(skipped).not.toContain("left-pad");
-    const toolMessage = provider.calls[2]?.messages.find((message) => message.role === "tool")?.content ?? "";
-    expect(toolMessage).not.toContain("left-pad");
-    expect(toolMessage).not.toContain("node_modules");
-    expect(estimateTokens(toolMessage)).toBeLessThanOrEqual(toolResultTokenCap(8_000));
-    expect(toolMessage).toContain("truncated");
-    expect(toolMessage).toContain("entryCount");
+    const budget = toolResultTokenBudget(undefined);
+    for (const call of provider.calls.slice(2)) {
+      const message = call.messages.at(-1)?.content ?? "";
+      expect(estimateTokens(message)).toBeLessThanOrEqual(budget);
+    }
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.at(-1)?.nextStartLine).toBeUndefined();
+    const listed = pages.map((page) => page.content).join("\n").split("\n");
+    expect(listed).toHaveLength(pages[0]!.totalLines);
+    expect(listed.filter((entry) => entry.startsWith("bulk/file-"))).toHaveLength(1_500);
+    expect(listed).toContain("dist/bundle.js");
+    expect(listed).toContain("src/math.ts");
+    expect(listed.some((entry) => entry.includes("node_modules") || entry.includes("ignored-out/x.txt"))).toBe(false);
     store.close();
     await handle.destroy();
   });
@@ -214,33 +239,87 @@ describe("AgentRunner", () => {
     await handle.destroy();
   });
 
-  it("windows a read that names no range, and compresses a long command transcript", async () => {
+  it("returns a file whole when it fits and pages it honestly when it does not", async () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
     cleanup.push(fixture.root);
-    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 4, maxTokens: 32_000 });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 40, maxTokens: 2_000_000, contextWindow: 32_000 });
     const handle = await fixture.sandbox.create({
       id: id("cand"),
       baseCommit: fixture.base,
       policy: fixture.policy,
     });
-    writeFileSync(join(handle.path, "src/long.ts"), `${Array.from({ length: 500 }, (_, i) => `export const line${String(i)} = ${String(i)};`).join("\n")}\n`);
-    const noise = `${"noise line\n".repeat(180)}UNIQUE-MIDDLE-LINE\n${"tail line\n".repeat(40)}`;
+    const small = Array.from({ length: 200 }, (_, i) => `const s${String(i)} = ${String(i)};`);
+    const large = Array.from({ length: 3_000 }, (_, i) => `export const line${String(i)} = ${String(i)};`);
+    writeFileSync(join(handle.path, "src/small.ts"), `${small.join("\n")}\n`);
+    writeFileSync(join(handle.path, "src/long.ts"), `${large.join("\n")}\n`);
+    const noise = `${"noise line\n".repeat(1_800)}UNIQUE-MIDDLE-LINE\n${"tail line\n".repeat(400)}`;
     const sandbox = trackingSandbox(handle, () => processResult(noise));
+    const results: Record<string, unknown>[] = [];
+    let longPages = 0;
     provider.script("worker", [
-      replyWith(tool("read", { path: "src/long.ts" }, "read")),
-      replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "cmd")),
-      replyWith(tool("finish", { summary: "read" }, "finish")),
+      replyWith(tool("read", { path: "src/small.ts" }, "small")),
+      ...Array.from({ length: 30 }, (_, index) => ({
+        kind: "fn" as const,
+        fn: (request: CompletionRequest) => {
+          const last = JSON.parse(request.messages.at(-1)?.content ?? "{}") as { output?: Record<string, unknown> };
+          if (last.output !== undefined) results.push(last.output);
+          const output = last.output ?? {};
+          let call: ToolCall;
+          if (output["path"] === "src/small.ts") {
+            call = tool("read", { path: "src/long.ts" }, `long-${String(index)}`);
+          } else if (output["path"] === "src/long.ts" && typeof output["nextStartLine"] === "number") {
+            longPages += 1;
+            call = tool("read", { path: "src/long.ts", startLine: output["nextStartLine"] }, `long-${String(index)}`);
+          } else if (output["path"] === "src/long.ts") {
+            longPages += 1;
+            call = tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "cmd");
+          } else if (typeof output["outputRef"] === "string" && typeof output["nextStartLine"] === "number") {
+            call = tool("read_output", { ref: output["outputRef"], startLine: 1_790, endLine: 1_810 }, "window");
+          } else {
+            call = tool("finish", { summary: "read" }, `finish-${String(index)}`);
+          }
+          return reply("", 1, 1, null, [call]);
+        },
+      })),
     ]);
 
     await new AgentRunner(deps).run({ ...codingTask(fixture.runId, fixture.base), touchesProductCode: false }, sandbox);
-    const readMessage = provider.calls[1]?.messages.find((message) => message.role === "tool")?.content ?? "";
-    expect(readMessage).toContain('"endLine":400');
-    expect(readMessage).toContain('"truncated":true');
-    expect(readMessage).not.toContain("line499");
-    const commandMessage = provider.calls[2]?.messages.find((message) => message.role === "tool")?.content ?? "";
-    expect(commandMessage).toContain("compressed");
-    expect(commandMessage).not.toContain("UNIQUE-MIDDLE-LINE");
+
+    const [whole, ...rest] = results;
+    expect(whole).toMatchObject({ path: "src/small.ts", startLine: 1, endLine: 200, totalLines: 200 });
+    expect(whole?.["nextStartLine"]).toBeUndefined();
+    expect(whole?.["content"]).toBe(small.join("\n"));
+    const longResults = rest.filter((result) => result["path"] === "src/long.ts");
+    expect(longPages).toBe(longResults.length);
+    expect(longResults.length).toBeGreaterThan(1);
+    expect(longResults.map((result) => result["content"]).join("\n")).toBe(large.join("\n"));
+    for (const [index, result] of longResults.entries()) {
+      expect(result["totalLines"]).toBe(3_000);
+      if (index > 0) expect(result["startLine"]).toBe(Number(longResults[index - 1]?.["endLine"]) + 1);
+    }
+    const command = rest.find((result) => Array.isArray(result["argv"]));
+    expect(command).toMatchObject({ exitCode: 0, startLine: 1, totalLines: 2_201 });
+    expect(command?.["content"]).not.toContain("UNIQUE-MIDDLE-LINE");
+    const window = rest.find((result) => result["startLine"] === 1_790);
+    expect(window).toMatchObject({ endLine: 1_810, nextStartLine: 1_811 });
+    expect(window?.["content"]).toContain("UNIQUE-MIDDLE-LINE");
+    store.close();
+    await handle.destroy();
+  });
+
+  it("refuses read_output for a ref this loop did not produce", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 2, maxTokens: 8_000 });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+    const foreign = store.artifacts.put("secret elsewhere", "agent_output_text", "other run");
+    provider.script("worker", [replyWith(tool("read_output", { ref: foreign.sha256 }, "steal"))]);
+    await new AgentRunner(deps).run({ ...codingTask(fixture.runId, fixture.base), touchesProductCode: false }, handle);
+    const reply = provider.calls[1]?.messages.at(-1)?.content ?? "";
+    expect(reply).toContain("no paged output");
+    expect(reply).not.toContain("secret elsewhere");
     store.close();
     await handle.destroy();
   });
@@ -874,3 +953,24 @@ async function repositoryFixture(): Promise<{
     policy,
   };
 }
+
+describe("pageLines", () => {
+  const lines = Array.from({ length: 10 }, (_, i) => `line ${String(i + 1)}`);
+
+  it("never drops a line without saying where to continue", () => {
+    expect(pageLines(lines, 1, undefined, 1_000)).toMatchObject({ startLine: 1, endLine: 10, totalLines: 10 });
+    expect(pageLines(lines, 1, undefined, 1_000).nextStartLine).toBeUndefined();
+    const first = pageLines(lines, 1, undefined, 5);
+    expect(first).toMatchObject({ startLine: 1, endLine: 2, nextStartLine: 3 });
+    expect(pageLines(lines, 3, 4, 1_000)).toMatchObject({ startLine: 3, endLine: 4, nextStartLine: 5, content: "line 3\nline 4" });
+    expect(pageLines([], 1, undefined, 10)).toMatchObject({ endLine: 0, totalLines: 0, content: "" });
+    expect(() => pageLines(lines, 11, undefined, 10)).toThrow(/past the end/);
+    expect(() => pageLines(lines, 5, 3, 10)).toThrow(/before startLine/);
+  });
+
+  it("cuts a single line longer than a page and reports how much is shown", () => {
+    const page = pageLines(["x".repeat(100), "y"], 1, undefined, 10);
+    expect(page).toMatchObject({ startLine: 1, endLine: 1, nextStartLine: 2, partialLine: { line: 1, shownChars: 20, totalChars: 100 } });
+    expect(page.content).toBe("x".repeat(20));
+  });
+});

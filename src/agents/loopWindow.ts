@@ -303,6 +303,15 @@ function pathOf(output: unknown, args: Record<string, unknown>): string {
 }
 
 function outputOf(output: unknown): string {
+  const content = stringField(output, "content");
+  if (content !== null) {
+    const marker = content.indexOf("[stderr]\n");
+    const shown = marker === -1 ? content : content.slice(marker + "[stderr]\n".length);
+    const more = numberField(output, "nextStartLine");
+    const total = numberField(output, "totalLines");
+    const note = more === null || total === null ? "" : ` (first ${String(more - 1)} of ${String(total)} lines)`;
+    return shown.trim() === "" ? "(no output)" : `${shown}${note}`;
+  }
   const stderr = stringField(output, "stderr") ?? "";
   const stdout = stringField(output, "stdout") ?? "";
   const combined = stderr.trim() === "" ? stdout : stderr;
