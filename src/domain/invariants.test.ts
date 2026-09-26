@@ -21,7 +21,9 @@ import {
   TaskStrictSchema,
   createInvestigationTask,
   createTaskFromRequirement,
+  createSplitSubtask,
   createTaskFromValidFinding,
+  dependenciesSettled,
   resolveWorkClassProvenance,
   type TaskDraft,
 } from "./task.js";
@@ -177,6 +179,27 @@ describe("task origin invariant", () => {
     expect(FindingValidationStrictSchema.safeParse(validation(f, { evidenceRefs: [] })).success).toBe(false);
     expect(FindingValidationStrictSchema.safeParse(validation(f, { verdict: "REJECTED", evidenceRefs: [] })).success).toBe(true);
     expect(() => createTaskFromValidFinding(f, validation(f, { evidenceRefs: [] }), draft())).toThrow(/evidence/);
+  });
+
+  it("a subtask exists only as a part of a coding task in NEEDS_SPLIT, and keeps its origin", () => {
+    const f = finding();
+    const parent = { ...createTaskFromValidFinding(f, validation(f), draft()), state: "NEEDS_SPLIT" as const };
+    const part = createSplitSubtask(parent, { id: id("task"), title: "Part", description: "WHAT: part", acceptance: ["part works"], complexity: "normal", now: NOW });
+    expect(part).toMatchObject({ origin: parent.origin, kind: parent.kind, splitFrom: parent.id, touchesProductCode: true, state: "PENDING" });
+    const partDraft = { id: id("task"), title: "Part", description: "WHAT: part", acceptance: ["part works"], complexity: "normal" as const, now: NOW };
+    expect(() => createSplitSubtask({ ...parent, state: "RUNNING" }, partDraft)).toThrow(/NEEDS_SPLIT/);
+    const investigation = { ...createInvestigationTask(finding({ status: "UNCERTAIN" }), 2, draft()), state: "NEEDS_SPLIT" as const };
+    expect(() => createSplitSubtask(investigation, partDraft)).toThrow(/coding task/);
+  });
+
+  it("a dependency on a split task is settled only when every part is", () => {
+    const parent = { ...createTaskFromRequirement(id("mint"), "R1", draft("feature")), state: "SPLIT" as const };
+    const one = { ...createTaskFromRequirement(id("mint"), "R1", draft("feature")), splitFrom: parent.id, state: "INTEGRATED" as const };
+    const two = { ...createTaskFromRequirement(id("mint"), "R1", draft("feature")), splitFrom: parent.id, state: "RUNNING" as const };
+    const dependent = { ...createTaskFromRequirement(id("mint"), "R1", draft("feature")), dependsOn: [parent.id] };
+    expect(dependenciesSettled(dependent, [parent, one, two, dependent])).toBe(false);
+    expect(dependenciesSettled(dependent, [parent, one, { ...two, state: "SATISFIED" as const }, dependent])).toBe(true);
+    expect(dependenciesSettled(dependent, [parent, dependent])).toBe(false);
   });
 });
 

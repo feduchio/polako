@@ -7,7 +7,7 @@ import { id } from "../shared/ids.js";
 import { SupervisorCouncil, type CouncilEventSink, type CouncilRoleConfigs } from "../council/index.js";
 import { emitNeedsHumanReport } from "../report/emit.js";
 import type { TerminalReason } from "../domain/run.js";
-import { TASK_TABLE, type Task } from "../domain/task.js";
+import { dependenciesSettled, TASK_TABLE, type Task } from "../domain/task.js";
 import type { TaskDag } from "../council/types.js";
 import type { IntakeResult } from "../council/types.js";
 import type { PhaseContext, PhaseDriver, PhaseDriverResult } from "./types.js";
@@ -192,6 +192,7 @@ export function createPlanningDriver(options: CouncilDriverOptions): PhaseDriver
     const existing = ctx.store.repos.tasks.listByRun(ctx.run.id);
     if (existing.length >= 1) {
       restoreIntegrationFailedForRetry(ctx, existing);
+      await splitRequestedTasks(ctx, options, existing);
       return nextPhaseForPlanningReentry(ctx);
     }
 
@@ -295,8 +296,7 @@ function isTerminalTask(task: Task): boolean {
 }
 
 function planningDependenciesMet(ctx: PhaseContext, task: Task): boolean {
-  if (task.dependsOn.length === 0) return true;
-  return task.dependsOn.every((dependencyId) => ctx.store.repos.tasks.get(dependencyId)?.state === "INTEGRATED");
+  return dependenciesSettled(task, ctx.store.repos.tasks.listByRun(ctx.run.id));
 }
 
 function isExhaustedCodingTask(task: Task, maxAttempts: number): boolean {
@@ -306,11 +306,66 @@ function isExhaustedCodingTask(task: Task, maxAttempts: number): boolean {
   );
 }
 
+/**
+ * A task whose worker asked for a split goes to the council with the worker's parts. Approved, it
+ * becomes SPLIT and its subtasks join the plan; refused, it is retried whole, or blocked once its
+ * attempts are spent.
+ */
+async function splitRequestedTasks(ctx: PhaseContext, options: CouncilDriverOptions, tasks: readonly Task[]): Promise<void> {
+  const requested = tasks.filter((task) => task.state === "NEEDS_SPLIT");
+  if (requested.length === 0) return;
+  const council = createCouncil(ctx, options);
+  for (const task of requested) {
+    const request = ctx.store.repos.candidates
+      .listByTask(task.id)
+      .find((candidate) => candidate.state === "NEEDS_SPLIT" && candidate.attempt === task.attempts && candidate.splitRequest !== undefined)
+      ?.splitRequest;
+    let dag: TaskDag | null = null;
+    if (request !== undefined) {
+      try {
+        dag = await council.split(task, request);
+      } catch (error) {
+        recordCouncilUnavailable(ctx, error);
+        throw error;
+      }
+    }
+    const subtasks = dag?.tasks ?? [];
+    const causedBy = dag?.decision.events.map((event) => event.id) ?? [];
+    ctx.store.transaction(() => {
+      const current = ctx.store.repos.tasks.get(task.id);
+      if (current?.state !== "NEEDS_SPLIT") return;
+      if (subtasks.length >= 2) {
+        const base = ctx.run.currentCheckpointHash ?? current.baseCheckpointHash;
+        ctx.store.events.append(subtasks.map((subtask) => ({
+          id: id("evt", ctx.clock.now()),
+          runId: ctx.run.id,
+          ts: ctx.clock.now(),
+          type: "task.created" as const,
+          payload: { task: { ...subtask, baseCheckpointHash: base } },
+          causedBy,
+          actor: { kind: "supervisor" as const, role: "council" as const },
+          artifacts: [],
+        })));
+        transitionTask(ctx.store, ctx.clock, ctx.run.id, { ...current, state: "SPLIT", updatedAt: ctx.clock.now() }, causedBy);
+        return;
+      }
+      const state = current.attempts < ctx.config.retry.maxAttempts ? "READY" : "BLOCKED";
+      transitionTask(ctx.store, ctx.clock, ctx.run.id, { ...current, state, updatedAt: ctx.clock.now() }, causedBy);
+    });
+  }
+}
+
 function restoreIntegrationFailedForRetry(ctx: PhaseContext, tasks: readonly Task[]): void {
   const maxAttempts = ctx.config.retry.maxAttempts;
   for (const task of tasks) {
     if (!isCodingTask(task) || task.state !== "INTEGRATION_FAILED" || task.attempts >= maxAttempts) continue;
-    transitionTask(ctx.store, ctx.clock, ctx.run.id, { ...task, state: "READY", updatedAt: ctx.clock.now() });
+    transitionTask(ctx.store, ctx.clock, ctx.run.id, {
+      ...task,
+      state: "READY",
+      baseCheckpointHash: ctx.run.currentCheckpointHash ?? task.baseCheckpointHash,
+      selectedCandidateId: null,
+      updatedAt: ctx.clock.now(),
+    });
   }
 }
 

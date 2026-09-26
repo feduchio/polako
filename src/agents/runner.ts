@@ -28,12 +28,14 @@ import type {
   WorkerOutcome,
   WorkerNoChange,
   WorkerReproduction,
+  WorkerSplitRequest,
 } from "./types.js";
 
 interface FinishArgs {
   summary: string;
   reproduction?: WorkerReproduction;
   noChange?: WorkerNoChange;
+  split?: WorkerSplitRequest;
 }
 
 /**
@@ -55,6 +57,39 @@ function validateNoChange(value: unknown, diff: string, loopEvidence: LoopEviden
     );
   }
   return { reason };
+}
+
+/** Parts the council can plan from: two or more, each with a title and something to check. */
+function validateSplit(value: unknown, task: Task): WorkerSplitRequest {
+  if (task.kind === "investigation" || !task.touchesProductCode) {
+    throw new PolishError("INVALID_ARGUMENT", "request_split rejected: only a coding task can be split");
+  }
+  const args = record(value, "request_split arguments");
+  const reason = args["reason"];
+  if (typeof reason !== "string" || reason.trim() === "") {
+    throw new PolishError("INVALID_ARGUMENT", "request_split rejected: reason must be a non-empty string");
+  }
+  const rawParts = args["parts"];
+  if (!Array.isArray(rawParts) || rawParts.length < 2) {
+    throw new PolishError("INVALID_ARGUMENT", "request_split rejected: propose at least two parts");
+  }
+  const parts = rawParts.map((raw, index) => {
+    const part = record(raw, `request_split parts[${String(index)}]`);
+    const title = part["title"];
+    const acceptance = part["acceptance"];
+    const files: unknown = part["files"] ?? [];
+    if (typeof title !== "string" || title.trim() === "") {
+      throw new PolishError("INVALID_ARGUMENT", `request_split rejected: parts[${String(index)}].title must be a non-empty string`);
+    }
+    if (!Array.isArray(acceptance) || acceptance.length === 0 || !acceptance.every((item) => typeof item === "string" && item.trim() !== "")) {
+      throw new PolishError("INVALID_ARGUMENT", `request_split rejected: parts[${String(index)}].acceptance must be a non-empty array of non-empty strings`);
+    }
+    if (!Array.isArray(files) || !files.every((item) => typeof item === "string")) {
+      throw new PolishError("INVALID_ARGUMENT", `request_split rejected: parts[${String(index)}].files must be an array of strings`);
+    }
+    return { title, acceptance: acceptance as string[], files };
+  });
+  return { reason, parts };
 }
 import { progressStateFingerprint, shouldAbandonProgress } from "./progressTracker.js";
 import { sha256Hex } from "../shared/hash.js";
@@ -108,6 +143,7 @@ export class AgentRunner implements CandidateWorker {
     let output: string | null = null;
     let reproduction: WorkerReproduction | null = null;
     let noChange: WorkerNoChange | null = null;
+    let split: WorkerSplitRequest | null = null;
     let acceptedEvidence: LoopEvidence | null = null;
     const repeats = new Map<string, { count: number; diffHash: string }>();
     const progressTracker = this.deps.createProgressTracker?.(task) ?? null;
@@ -177,6 +213,7 @@ export class AgentRunner implements CandidateWorker {
           output = result.finish.summary;
           reproduction = result.finish.reproduction ?? null;
           noChange = result.finish.noChange ?? null;
+          split = result.finish.split ?? null;
           status = "FINISHED";
           break;
         }
@@ -248,6 +285,7 @@ export class AgentRunner implements CandidateWorker {
       output,
       reproduction,
       noChange,
+      split,
       startedAt,
       progress,
       protocolHash: composed?.protocolHash ?? null,
@@ -270,6 +308,14 @@ export class AgentRunner implements CandidateWorker {
   }> {
     try {
       const args: unknown = JSON.parse(encodedArgs);
+      if (name === "request_split") {
+        const split = validateSplit(args, task);
+        return {
+          event: { toolCallId, name, ok: true, output: { accepted: true } },
+          message: this.redact(JSON.stringify({ ok: true, accepted: true })),
+          finish: { summary: split.reason, split },
+        };
+      }
       if (name === "finish") {
         const finish = await this.validateFinish(args, task, worktree, loopEvidence);
         const message = this.redact(JSON.stringify({ ok: true, accepted: true }));
@@ -371,6 +417,7 @@ export class AgentRunner implements CandidateWorker {
     output: string | null;
     reproduction: WorkerReproduction | null;
     noChange: WorkerNoChange | null;
+    split: WorkerSplitRequest | null;
     startedAt: number;
     protocolHash: string | null;
     progress: AgentProgressRecord[];
@@ -401,6 +448,7 @@ export class AgentRunner implements CandidateWorker {
       output: input.output,
       reproduction: input.reproduction,
       noChange: input.noChange,
+      split: input.split,
       loopEvidence: input.loopEvidence,
       turns: input.turns.length,
       totalTokens: input.totalTokens,
@@ -424,7 +472,7 @@ export class AgentRunner implements CandidateWorker {
     // `read` is how a worker looks at a file before editing it. Three reads of one file are the
     // progress tracker's case (scored at turns 8 and 12), not this one. The loops that burned a
     // budget were search and list.
-    if (name === "read" || name === "write" || name === "apply_patch" || name === "finish") return null;
+    if (name === "read" || name === "write" || name === "apply_patch" || name === "finish" || name === "request_split") return null;
     const key = `${name}\n${encodedArgs}\n${sha256Hex(message)}`;
     const prior = repeats.get(key);
     const count = (prior?.count ?? 0) + 1;
@@ -475,6 +523,7 @@ function toWorkerOutcome(result: AgentLoopResult): WorkerOutcome {
       transcriptRef: result.transcriptRef,
       ...(result.reproduction === null ? {} : { reproduction: result.reproduction }),
       ...(result.noChange === null ? {} : { noChange: result.noChange }),
+      ...(result.split === null ? {} : { split: result.split }),
     };
   }
   return {

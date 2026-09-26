@@ -58,7 +58,7 @@ describe("AgentRunner", () => {
 
     expect(result.status).toBe("completed");
     expect(provider.calls[0]?.tools?.map((spec) => spec.name)).toEqual([
-      "read", "list", "search", "repo_intel", "write", "apply_patch", "run_command", "request_context", "read_output", "finish",
+      "read", "list", "search", "repo_intel", "write", "apply_patch", "run_command", "request_context", "read_output", "request_split", "finish",
     ]);
     expect(readFileSync(join(handle.path, "src/math.ts"), "utf8")).toContain("a + b + 0");
     expect(result.transcriptRef).toBeDefined();
@@ -612,6 +612,41 @@ describe("AgentRunner", () => {
     await cleanHandle.destroy();
     store.close();
     cleanStore.close();
+  });
+
+  it("request_split ends the loop with parts the council can plan from, and refuses parts it cannot", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 10_000 });
+    const parts = [
+      { title: "Parser", acceptance: ["parser tests pass"], files: ["src/parse.ts"] },
+      { title: "Printer", acceptance: ["printer tests pass"], files: ["src/print.ts"] },
+    ];
+    provider.script("worker", [
+      replyWith(tool("request_split", { reason: "two modules", parts: parts.slice(0, 1) }, "one-part")),
+      replyWith(tool("request_split", { reason: "two modules", parts: [parts[0], { title: "Printer", acceptance: [] }] }, "no-acceptance")),
+      replyWith(tool("request_split", { reason: " ", parts }, "no-reason")),
+      replyWith(tool("request_split", { reason: "two modules", parts }, "ok")),
+    ]);
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, branch: "polish/test/split", policy: fixture.policy });
+    const outcome = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    const replies = provider.calls.map((call) => call.messages.at(-1)?.content ?? "");
+    expect(replies[1]).toContain("propose at least two parts");
+    expect(replies[2]).toContain("parts[1].acceptance must be a non-empty array");
+    expect(replies[3]).toContain("reason must be a non-empty string");
+    expect(outcome).toMatchObject({ status: "completed", split: { reason: "two modules", parts } });
+    await handle.destroy();
+
+    const investigation = harness(store, fixture.policy, { maxTurns: 2, maxTokens: 10_000 });
+    investigation.provider.script("worker", [replyWith(tool("request_split", { reason: "big", parts }, "split"))]);
+    const invHandle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, branch: "polish/test/split-inv", policy: fixture.policy });
+    const task: Task = { ...codingTask(fixture.runId, fixture.base), kind: "investigation", touchesProductCode: false, origin: { kind: "investigation", findingId: "fnd_1", round: 1 } };
+    const refused = await new AgentRunner(investigation.deps).run(task, invHandle);
+    expect(refused.status).not.toBe("completed");
+    expect(investigation.provider.calls.at(-1)?.messages.at(-1)?.content ?? "").toContain("only a coding task can be split");
+    await invHandle.destroy();
+    store.close();
   });
 
   it("an investigation finishes with a reproduction command and may only add files", async () => {

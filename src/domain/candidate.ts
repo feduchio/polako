@@ -15,6 +15,8 @@ export const CandidateStateSchema = z.enum([
   "LOSER",
   "DISCARDED",
   "INTERRUPTED",
+  /** The worker asked for its task to be split instead of changing code. Terminal for the candidate. */
+  "NEEDS_SPLIT",
 ]);
 export type CandidateState = z.infer<typeof CandidateStateSchema>;
 
@@ -48,6 +50,16 @@ export const GateReportSchema = z.object({
 });
 export type GateReport = z.infer<typeof GateReportSchema>;
 
+export const SplitRequestSchema = z.object({
+  reason: z.string().min(1),
+  parts: z.array(z.object({
+    title: z.string().min(1),
+    acceptance: z.array(z.string().min(1)).min(1),
+    files: z.array(z.string()),
+  })).min(2),
+});
+export type SplitRequest = z.infer<typeof SplitRequestSchema>;
+
 export const CandidateSchema = z.object({
   id: IdSchema,
   runId: IdSchema,
@@ -65,6 +77,8 @@ export const CandidateSchema = z.object({
   error: z.string().nullable().default(null),
   transcriptRef: ArtifactRefSchema.nullable(),
   diffRef: ArtifactRefSchema.nullable(),
+  /** The parts a NEEDS_SPLIT candidate proposed; the council plans from them. */
+  splitRequest: SplitRequestSchema.optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });

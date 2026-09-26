@@ -9,7 +9,9 @@ import {
   type MissionInterpretation,
   type Requirement,
 } from "../domain/mission.js";
+import type { SplitRequest } from "../domain/candidate.js";
 import {
+  createSplitSubtask,
   createTaskFromRequirement,
   workClassDraftFields,
   type Task,
@@ -256,6 +258,103 @@ export class SupervisorCouncil {
       tasks,
       roots: tasks.filter((task) => task.dependsOn.length === 0).map((task) => task.id),
       droppedRequirementRefs: dropped,
+      decision,
+    };
+  }
+
+  /**
+   * Re-plan one task a worker could not do in one change. The worker's parts are a proposal like
+   * any other: the planner may keep, merge or re-cut them, and the scope guardian and judge vote.
+   * Every acceptance criterion of the parent survives into some subtask; one the planner left out
+   * goes to the last subtask, which then waits for the others so it is checked on all of them.
+   */
+  async split(parent: Task, request: SplitRequest): Promise<TaskDag> {
+    const runId = parent.runId;
+    const context = {
+      task: {
+        id: parent.id,
+        title: parent.title,
+        description: parent.description,
+        kind: parent.kind,
+        acceptance: parent.acceptance,
+        complexity: parent.complexity,
+      },
+      splitRequest: request,
+    };
+    const labeled = [
+      { role: "planner" as const, promise: this.planner.analyze({ runId, purpose: "council_split_planner", payload: context }) },
+      { role: "scope_guardian" as const, promise: this.scopeGuardian.analyze({ runId, purpose: "council_split_scope", payload: context }) },
+      { role: "judge" as const, promise: this.judge.analyze({ runId, purpose: "council_split_judge", payload: context }) },
+    ];
+    const [plannerCall, scopeCall, judgeCall] = await settleCouncilRoles(labeled);
+    if (plannerCall === undefined || scopeCall === undefined || judgeCall === undefined) {
+      throw new PolishError("INVARIANT_VIOLATION", "council split lost a sibling role result");
+    }
+    const opinions = [plannerCall.opinion, scopeCall.opinion, judgeCall.opinion];
+    const causedBy = [plannerCall, scopeCall, judgeCall].flatMap((call) => (call.modelEventId === undefined ? [] : [call.modelEventId]));
+    const refuse = (reason: string): TaskDag => ({
+      tasks: [],
+      roots: [],
+      droppedRequirementRefs: [],
+      decision: this.recordDecision(runId, "split", "NEEDS_HUMAN", opinions, causedBy, { parentTaskId: parent.id, reason }),
+    });
+    if (aggregateCouncilDecision(opinions) === "NEEDS_HUMAN") return refuse(firstConcern(opinions) ?? "council did not approve the split");
+
+    const proposed = extractProposal(plannerCall.proposal, "tasks");
+    const drafts = (Array.isArray(proposed) ? proposed.filter(isRecord) : request.parts.map((part): Record<string, unknown> => ({ ...part })))
+      .map((draft) => ({
+        title: stringValue(draft["title"], ""),
+        description: stringValue(draft["description"], ""),
+        acceptance: stringArray(draft["acceptance"]),
+        files: stringArray(draft["files"]),
+        complexity: complexity(draft["complexity"]),
+        dependsOn: Array.isArray(draft["dependsOn"]) ? draft["dependsOn"] as unknown[] : [],
+      }))
+      .filter((draft) => draft.title !== "" && draft.acceptance.length > 0);
+    if (drafts.length < 2) return refuse("a split needs at least two subtasks with a title and acceptance");
+
+    const taskIds = drafts.map(() => id("task", this.now()));
+    const resolveDependency = (value: unknown): string | undefined => {
+      if (typeof value === "number" && Number.isInteger(value)) return taskIds[value];
+      if (typeof value === "string") {
+        const byTitle = drafts.findIndex((draft) => draft.title === value);
+        return byTitle === -1 ? undefined : taskIds[byTitle];
+      }
+      return undefined;
+    };
+    const covered = new Set(drafts.flatMap((draft) => draft.acceptance));
+    const uncovered = parent.acceptance.filter((criterion) => !covered.has(criterion));
+    const lastIndex = drafts.length - 1;
+    const tasks = drafts.map((draft, index) => {
+      const taskId = taskIds[index];
+      if (taskId === undefined) throw new PolishError("INVARIANT_VIOLATION", "task id allocation failed");
+      const own = draft.dependsOn.map(resolveDependency).filter((dep): dep is string => dep !== undefined && dep !== taskId);
+      const siblings = index === lastIndex && uncovered.length > 0 ? taskIds.slice(0, lastIndex) : [];
+      return createSplitSubtask(parent, {
+        id: taskId,
+        title: draft.title,
+        description: [
+          `WHAT: ${draft.description === "" ? draft.title : draft.description}`,
+          `WHY: part of task "${parent.title}" (${parent.id}), split because: ${request.reason}`,
+          `FILES: ${draft.files.length > 0 ? draft.files.join(", ") : "not named"}`,
+          `PARENT TASK:\n${parent.description}`,
+        ].join("\n"),
+        acceptance: index === lastIndex ? [...draft.acceptance, ...uncovered] : draft.acceptance,
+        complexity: draft.complexity,
+        dependsOn: [...new Set([...parent.dependsOn, ...own, ...siblings])],
+        now: this.now(),
+      });
+    });
+    assertDag(tasks.map((task) => ({ ...task, dependsOn: task.dependsOn.filter((dep) => taskIds.includes(dep)) })));
+    const decision = this.recordDecision(runId, "split", "APPROVED", opinions, causedBy, {
+      parentTaskId: parent.id,
+      taskIds,
+      carriedAcceptance: uncovered,
+    });
+    return {
+      tasks,
+      roots: tasks.filter((task) => task.dependsOn.every((dep) => !taskIds.includes(dep))).map((task) => task.id),
+      droppedRequirementRefs: [],
       decision,
     };
   }

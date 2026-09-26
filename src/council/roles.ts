@@ -100,6 +100,12 @@ export function systemPrompt(role: CouncilRole): string {
       : role === "scope_guardian"
         ? ' During decomposition, classify simplify/refactor work with proposal.classifications as [{"requirementRef":"R1","workClass":"functional|style_only","classifiedBy":"scope_guardian","sourceRef":"R1"}] or proposal.workClasses keyed by requirement ref. style_only is legal only for simplify/refactor whose sourceRef is that requirement. Never infer workClass from title or description keywords.'
         : "";
+  const split =
+    role === "planner"
+      ? ' When the payload has splitRequest, a worker found payload.task too large for one change: re-plan it as proposal.tasks, [{"title":"...","description":"...","acceptance":["..."],"files":["..."],"dependsOn":[0],"complexity":"normal"}] with at least two entries, dependsOn naming earlier entries by index, and every criterion of payload.task.acceptance covered by some entry.'
+      : role === "scope_guardian"
+        ? " When the payload has splitRequest, check that no proposed part reaches outside payload.task; vote needs_human if one does."
+        : " When the payload has splitRequest, judge whether the parts together still deliver payload.task; vote needs_human if they do not.";
   const focus =
     role === "planner"
       ? `Extract concrete goals and requirements. proposal.requirements must be a non-empty array of objects {"ref":"R1","statement":"...","acceptance":["observable criterion"]}; never a string array, never acceptanceCriteria. profileHints are informational. ${evidence} Do not invent a blocking ambiguity solely because packageManager is null or framework is unknown when execution.checks and baselineEvidence exist. Intake does not require a code diff.${workClass}`
@@ -107,7 +113,7 @@ export function systemPrompt(role: CouncilRole): string {
         ? `Protect explicit constraints and non-goals. Identify ambiguity that blocks safe execution of the mission itself. profileHints (framework, packageManager) are informational labels, not blocking uncertainty. ${evidence} During decomposition return dropRefs for out-of-scope requirements.${workClass}`
         : `Independently adjudicate whether the mission plus baselineEvidence is sufficient to interpret a bounded coding task. At intake there is no code proposal or diff (roles run in parallel); do not vote needs_human for a missing code proposal, a CAS hash, or missing inlined source. profileHints are informational. ${evidence} During decomposition you may restore dropped refs via restoreRefs.`;
   return (
-    `You are the supervisor council ${role}. ${focus} Return JSON only: ` +
+    `You are the supervisor council ${role}. ${focus}${split} Return JSON only: ` +
     '{"decision":"approve|revise|needs_human","rationale":"...","concerns":["..."],"proposal":{...}}.'
   );
 }

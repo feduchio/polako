@@ -78,6 +78,8 @@ export type CandidateResultStatus =
   | "no_changes"
   /** No diff, the worker claimed its acceptance already holds, and the engine's gates on the base agreed. */
   | "no_change_verified"
+  /** The worker asked for the task to be split; nothing is committed and nothing is gated. */
+  | "needs_split"
   | "error";
 
 export interface CandidateResult {
@@ -181,6 +183,18 @@ async function runOneCandidate<TTask>(
         status: workerOutcome.status === "interrupted" ? "interrupted" : "worker_failed",
         workerOutcome,
         error: workerOutcome.error ?? null,
+      });
+    }
+    if (workerOutcome.split !== undefined) {
+      return result({
+        candidateId,
+        index,
+        model,
+        branch,
+        baseCheckpoint: input.baseCheckpoint,
+        status: "needs_split",
+        workerOutcome,
+        error: `needs_split: ${workerOutcome.split.reason}`,
       });
     }
 

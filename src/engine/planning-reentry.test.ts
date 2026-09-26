@@ -93,6 +93,43 @@ describe("planning re-entry", () => {
     expect(store.repos.runs.get(runId)?.phase).toBe("EXECUTING");
   });
 
+  it("a split request becomes council-planned subtasks that keep the parent's origin and every acceptance criterion", async () => {
+    provider = splitCouncilProvider("approve");
+    engine.registerPhase("PLANNING", createPlanningDriver({ roles: councilRoles(provider) }));
+    const { runId, taskId } = seedPlannedRun(store, clock, { phase: "PLANNING", tasks: [{ state: "NEEDS_SPLIT", attempts: 1 }] });
+    seedSplitCandidate(store, clock, runId, taskId);
+    await engine.tickRun(runId);
+
+    expect(decomposeCalls(provider)).toBe(0);
+    expect(provider.calls.filter((call) => call.metadata.purpose.startsWith("council_split_"))).toHaveLength(3);
+    const plannerPayload = provider.calls.find((call) => call.metadata.purpose === "council_split_planner")?.messages.at(-1)?.content ?? "";
+    expect(plannerPayload).toContain("parser and printer are separate");
+    const parent = store.repos.tasks.get(taskId)!;
+    expect(parent.state).toBe("SPLIT");
+    const parts = store.repos.tasks.listByRun(runId).filter((task) => task.splitFrom === taskId);
+    expect(parts.map((part) => part.title)).toEqual(["Parser", "Printer"]);
+    for (const part of parts) {
+      expect(part.origin).toEqual(parent.origin);
+      expect(part.kind).toBe(parent.kind);
+      expect(part.state).toBe("PENDING");
+    }
+    expect(parts[0]!.acceptance).toEqual(["parser tests pass"]);
+    expect(parts[1]!.acceptance).toEqual(["printer tests pass", "Login works"]);
+    expect(parts[1]!.dependsOn).toEqual([parts[0]!.id]);
+    expect(store.repos.runs.get(runId)?.phase).toBe("EXECUTING");
+  });
+
+  it("a split the council refuses is retried whole, with no new tasks", async () => {
+    provider = splitCouncilProvider("needs_human");
+    engine.registerPhase("PLANNING", createPlanningDriver({ roles: councilRoles(provider) }));
+    const { runId, taskId } = seedPlannedRun(store, clock, { phase: "PLANNING", tasks: [{ state: "NEEDS_SPLIT", attempts: 1 }] });
+    seedSplitCandidate(store, clock, runId, taskId);
+    await engine.tickRun(runId);
+    expect(store.repos.tasks.get(taskId)?.state).toBe("READY");
+    expect(store.repos.tasks.listByRun(runId)).toHaveLength(1);
+    expect(store.repos.runs.get(runId)?.phase).toBe("EXECUTING");
+  });
+
   it("GATING retry re-enters PLANNING without decompose or a new task.created", async () => {
     engine.registerPhase("GATING", createGatingDriver(unusedCandidateOptions()));
     const { runId, taskId } = seedPlannedRun(store, clock, {
@@ -376,6 +413,67 @@ function scriptedCouncilProvider(opts: { dropAll?: boolean } = {}): ScriptedProv
     },
   ]);
   return provider;
+}
+
+function splitCouncilProvider(judge: "approve" | "needs_human"): ScriptedProvider {
+  const provider = new ScriptedProvider("council", [
+    { name: "planner", capabilities: FAKE_CAPABILITIES.strong },
+    { name: "scope", capabilities: FAKE_CAPABILITIES.strong },
+    { name: "judge", capabilities: FAKE_CAPABILITIES.strong },
+  ]);
+  provider.script("planner", [{
+    kind: "reply",
+    content: JSON.stringify({
+      decision: "approve",
+      rationale: "Two parts.",
+      concerns: [],
+      proposal: {
+        tasks: [
+          { title: "Parser", acceptance: ["parser tests pass"], files: ["src/parse.ts"], dependsOn: [] },
+          { title: "Printer", acceptance: ["printer tests pass"], files: ["src/print.ts"], dependsOn: [0] },
+        ],
+      },
+    }),
+  }]);
+  provider.script("scope", [{ kind: "reply", content: JSON.stringify({ decision: "approve", rationale: "In scope.", concerns: [] }) }]);
+  provider.script("judge", [{
+    kind: "reply",
+    content: JSON.stringify({
+      decision: judge,
+      rationale: judge === "approve" ? "Covers the task." : "The parts drop the login behaviour.",
+      concerns: judge === "approve" ? [] : ["The parts drop the login behaviour."],
+    }),
+  }]);
+  return provider;
+}
+
+function seedSplitCandidate(store: Store, clock: FakeClock, runId: string, taskId: string): void {
+  const candidate = {
+    id: id("cand", clock.now()),
+    runId,
+    taskId,
+    attempt: 1,
+    model: { provider: "scripted", model: "worker" },
+    baseCheckpointHash: HASH,
+    branch: "polish/test/split",
+    worktreePath: null,
+    headCommit: null,
+    state: "NEEDS_SPLIT",
+    gateReport: null,
+    error: "needs_split: parser and printer are separate",
+    transcriptRef: null,
+    diffRef: null,
+    splitRequest: {
+      reason: "parser and printer are separate",
+      parts: [
+        { title: "Parser", acceptance: ["parser tests pass"], files: ["src/parse.ts"] },
+        { title: "Printer", acceptance: ["printer tests pass"], files: ["src/print.ts"] },
+      ],
+    },
+    createdAt: clock.now(),
+    updatedAt: clock.now(),
+  };
+  store.events.append([event(runId, clock, "candidate.created", { candidate })]);
 }
 
 function unusedCandidateOptions(): CandidateDriverOptions {

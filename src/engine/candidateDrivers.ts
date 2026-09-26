@@ -49,7 +49,7 @@ import {
   runnableTestPathPriority,
 } from "../convergence/pathology/changeClassification.js";
 import { ProtectedChangeWaiverService } from "../store/protectedChangeWaivers.js";
-import { isTerminalTaskState, type Task } from "../domain/task.js";
+import { dependenciesSettled, isTerminalTaskState, type Task } from "../domain/task.js";
 import { incompleteCodingWorkTerminal } from "../convergence/antiFakeDone.js";
 import {
   runCandidatesParallel,
@@ -102,11 +102,16 @@ export function seedWinnerForTests(ctx: PhaseContext, taskId: string, candidateI
   appendTaskEvent(ctx, selected);
 }
 
-/** Production EXECUTING driver: parallel isolated worktrees from the task base checkpoint. */
+/**
+ * Production EXECUTING driver. Runs up to `execution.maxParallelTasks` coding tasks at once, each
+ * with its candidates in isolated worktrees from that task's base checkpoint. A task already
+ * gated is finished first: integration is serial, and new work waits for the queue to drain.
+ */
 export function createExecutingDriver(options: CandidateDriverOptions): PhaseDriver {
   return async (ctx) => {
-    const task = activeCodingTask(ctx);
-    if (task === null) {
+    if (gatedTask(ctx) !== null) return { status: "complete", nextPhase: "GATING" };
+    const selected = activeCodingTasks(ctx, ctx.config.execution.maxParallelTasks);
+    if (selected.length === 0) {
       const investigation = activeInvestigationTask(ctx);
       if (investigation === null) return { status: "waiting" };
       return runInvestigationTask(ctx, investigation, {
@@ -116,76 +121,92 @@ export function createExecutingDriver(options: CandidateDriverOptions): PhaseDri
         gates: await resolveGates(ctx, options, investigation),
       });
     }
-    const existing = ctx.store.repos.candidates.listByTask(task.id);
-    if (existing.some((candidate) => candidate.state === "IMPLEMENTED")) {
-      return { status: "complete", nextPhase: "GATING" };
-    }
-    const inflight = existing.filter((candidate) => candidate.state === "INTERRUPTED");
-    if (inflight.length > 0) return { status: "waiting" };
-
-    const running = task.state === "READY"
-      ? patchTask(ctx, { ...task, state: "RUNNING", attempts: task.attempts + 1, updatedAt: ctx.clock.now() })
-      : task;
-    if (running.state !== "RUNNING") return { status: "waiting" };
-
-    const baseCheckpoint = running.baseCheckpointHash;
-    const n = candidateCount(ctx.config, running.complexity);
-    const sandbox = await resolveValue(options.sandbox, ctx);
-    const policy = await resolveValue(options.policy, ctx);
-    const workerFactory = options.workerFactory(ctx);
-    const gates = await resolveGates(ctx, options, running);
-    const corpus = await resolveCorpus(ctx, options);
-    const results = await runCandidatesParallel({
-      runId: ctx.run.id,
-      task: running,
-      baseCheckpoint,
-      n,
-      workerFactory,
-      sandbox,
-      policy,
-      skipGates: true,
-      gates,
-      onWorkerStart: ({ candidateId, index, model }) => {
-        ctx.store.events.append([
-          {
-            id: id("evt", ctx.clock.now()),
-            runId: ctx.run.id,
-            ts: ctx.clock.now(),
-            type: "worker.started",
-            payload: { candidateId, index, taskId: running.id, model },
-            causedBy: [],
-            actor: { kind: "worker", model },
-            artifacts: [],
-          },
-        ]);
-      },
-      ...(corpus === undefined ? {} : { corpus }),
-      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
-    });
+    const outcomes = await Promise.all(selected.map((task) => executeCodingTask(ctx, options, task)));
     if (ctx.signal?.aborted) return { status: "waiting" };
-
-    const candidates = results.map((result) => toCandidate(ctx, running, result));
-    appendCandidateEvents(ctx, candidates, "candidate.created");
-    for (const candidate of candidates) {
-      appendCandidateEvents(ctx, [candidate], "candidate.state_changed");
-    }
-    if (results.some((result) => result.status === "no_change_verified")) {
-      const superseded = candidates
-        .filter((candidate) => candidate.state === "IMPLEMENTED")
-        .map((candidate): Candidate => ({
-          ...candidate,
-          state: "DISCARDED",
-          error: "superseded: the engine's gates showed the task's acceptance already holds on its base",
-          updatedAt: ctx.clock.now(),
-        }));
-      if (superseded.length > 0) appendCandidateEvents(ctx, superseded, "candidate.state_changed");
-      recordBaseCheckpoint(ctx, running, results.find((result) => result.status === "no_change_verified")?.gateResult ?? null);
-      appendTaskEvent(ctx, { ...running, state: "SATISFIED", updatedAt: ctx.clock.now() });
-      return { status: "complete", nextPhase: "PLANNING" };
-    }
-    appendTaskEvent(ctx, { ...running, state: "GATED", updatedAt: ctx.clock.now() });
-    return { status: "complete", nextPhase: "GATING" };
+    if (outcomes.includes("gated")) return { status: "complete", nextPhase: "GATING" };
+    if (outcomes.every((outcome) => outcome === "waiting")) return { status: "waiting" };
+    return { status: "complete", nextPhase: "PLANNING" };
   };
+}
+
+type TaskExecutionOutcome = "gated" | "satisfied" | "needs_split" | "waiting";
+
+async function executeCodingTask(ctx: PhaseContext, options: CandidateDriverOptions, task: Task): Promise<TaskExecutionOutcome> {
+  const existing = ctx.store.repos.candidates.listByTask(task.id);
+  if (task.state === "RUNNING" && existing.some((candidate) => candidate.state === "IMPLEMENTED" && candidate.attempt === task.attempts)) {
+    appendTaskEvent(ctx, { ...task, state: "GATED", updatedAt: ctx.clock.now() });
+    return "gated";
+  }
+  if (existing.some((candidate) => candidate.state === "INTERRUPTED")) return "waiting";
+
+  const running = task.state === "READY"
+    ? patchTask(ctx, { ...task, state: "RUNNING", attempts: task.attempts + 1, updatedAt: ctx.clock.now() })
+    : task;
+  if (running.state !== "RUNNING") return "waiting";
+
+  const baseCheckpoint = running.baseCheckpointHash;
+  const n = candidateCount(ctx.config, running.complexity);
+  const sandbox = await resolveValue(options.sandbox, ctx);
+  const policy = await resolveValue(options.policy, ctx);
+  const workerFactory = options.workerFactory(ctx);
+  const gates = await resolveGates(ctx, options, running);
+  const corpus = await resolveCorpus(ctx, options);
+  const results = await runCandidatesParallel({
+    runId: ctx.run.id,
+    task: running,
+    baseCheckpoint,
+    n,
+    workerFactory,
+    sandbox,
+    policy,
+    skipGates: true,
+    gates,
+    onWorkerStart: ({ candidateId, index, model }) => {
+      ctx.store.events.append([
+        {
+          id: id("evt", ctx.clock.now()),
+          runId: ctx.run.id,
+          ts: ctx.clock.now(),
+          type: "worker.started",
+          payload: { candidateId, index, taskId: running.id, model },
+          causedBy: [],
+          actor: { kind: "worker", model },
+          artifacts: [],
+        },
+      ]);
+    },
+    ...(corpus === undefined ? {} : { corpus }),
+    ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+  });
+  if (ctx.signal?.aborted) return "waiting";
+
+  const candidates = results.map((result) => toCandidate(ctx, running, result));
+  appendCandidateEvents(ctx, candidates, "candidate.created");
+  for (const candidate of candidates) {
+    appendCandidateEvents(ctx, [candidate], "candidate.state_changed");
+  }
+  if (results.some((result) => result.status === "no_change_verified")) {
+    const superseded = candidates
+      .filter((candidate) => candidate.state === "IMPLEMENTED")
+      .map((candidate): Candidate => ({
+        ...candidate,
+        state: "DISCARDED",
+        error: "superseded: the engine's gates showed the task's acceptance already holds on its base",
+        updatedAt: ctx.clock.now(),
+      }));
+    if (superseded.length > 0) appendCandidateEvents(ctx, superseded, "candidate.state_changed");
+    recordBaseCheckpoint(ctx, running, results.find((result) => result.status === "no_change_verified")?.gateResult ?? null);
+    appendTaskEvent(ctx, { ...running, state: "SATISFIED", updatedAt: ctx.clock.now() });
+    return "satisfied";
+  }
+  // Work that was done outranks a request not to do it: the split request stays on record, and
+  // the implemented candidates go to the gates.
+  if (!candidates.some((candidate) => candidate.state === "IMPLEMENTED") && candidates.some((candidate) => candidate.state === "NEEDS_SPLIT")) {
+    appendTaskEvent(ctx, { ...running, state: "NEEDS_SPLIT", updatedAt: ctx.clock.now() });
+    return "needs_split";
+  }
+  appendTaskEvent(ctx, { ...running, state: "GATED", updatedAt: ctx.clock.now() });
+  return "gated";
 }
 
 /** Production GATING driver: independent gates on clean evaluation checkouts. */
@@ -477,7 +498,9 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       });
       const retry = failed.attempts < ctx.config.retry.maxAttempts;
       if (retry) {
-        patchTask(ctx, { ...failed, state: "READY", updatedAt: ctx.clock.now() });
+        // From the head it failed to land on: another task may have moved it, and a retry from the
+        // old base would reproduce the same conflict.
+        patchTask(ctx, { ...failed, state: "READY", baseCheckpointHash: result.previousHead, selectedCandidateId: null, updatedAt: ctx.clock.now() });
         return { status: "complete", nextPhase: "PLANNING" };
       }
       return { status: "complete", nextPhase: "FAILED" };
@@ -633,13 +656,13 @@ function rebaseUnstartedTasks(ctx: PhaseContext, integratedTaskId: string, check
   }
 }
 
-function activeCodingTask(ctx: PhaseContext): Task | null {
-  const tasks = ctx.store.repos.tasks
-    .listByRun(ctx.run.id)
-    .filter((task) => task.touchesProductCode && !terminalTask(task));
-  const running = tasks.find((task) => task.state === "RUNNING");
-  if (running !== undefined) return running;
-  return tasks.find((task) => task.state === "READY" && dependenciesMet(ctx, task)) ?? null;
+/** Tasks already running first, so a resumed run finishes what it started, then ready ones. */
+function activeCodingTasks(ctx: PhaseContext, limit: number): Task[] {
+  const all = ctx.store.repos.tasks.listByRun(ctx.run.id);
+  const tasks = all.filter((task) => task.touchesProductCode && !terminalTask(task));
+  const running = tasks.filter((task) => task.state === "RUNNING");
+  const ready = tasks.filter((task) => task.state === "READY" && dependenciesSettled(task, all));
+  return [...running, ...ready].slice(0, limit);
 }
 
 function gatedTask(ctx: PhaseContext): Task | null {
@@ -658,11 +681,6 @@ function integrationTask(ctx: PhaseContext): Task | null {
 
 function terminalTask(task: Task): boolean {
   return isTerminalTaskState(task.state);
-}
-
-function dependenciesMet(ctx: PhaseContext, task: Task): boolean {
-  if (task.dependsOn.length === 0) return true;
-  return task.dependsOn.every((dependencyId) => ctx.store.repos.tasks.get(dependencyId)?.state === "INTEGRATED");
 }
 
 function candidateCount(config: PolishConfig, complexity: Task["complexity"]): number {
@@ -841,6 +859,9 @@ function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult): Ca
     worktreePath: null,
     headCommit: result.headCommit,
     state: result.status === "no_changes" ? "FAILED_GATES" : state,
+    ...(result.status === "needs_split" && result.workerOutcome?.status === "completed" && result.workerOutcome.split !== undefined
+      ? { splitRequest: result.workerOutcome.split }
+      : {}),
     gateReport,
     error: result.status === "no_change_verified"
       ? `${NO_CHANGE_VERIFIED}: ${result.workerOutcome?.status === "completed" ? result.workerOutcome.noChange?.reason ?? "" : ""}`
@@ -866,6 +887,8 @@ function resultStatusToCandidateState(result: CandidateResult): CandidateState {
       return "FAILED_GATES";
     case "interrupted":
       return "INTERRUPTED";
+    case "needs_split":
+      return "NEEDS_SPLIT";
     case "worker_failed":
     case "error":
     case "no_change_verified":

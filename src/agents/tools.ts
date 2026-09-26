@@ -74,6 +74,24 @@ export const AGENT_TOOL_DEFINITIONS: ToolSpec[] = [
   { name: "request_context", description: "Request additional task or repository context.", parameters: objectSchema({ query: { type: "string" } }, ["query"]) },
   { name: "read_output", description: "Read more of a paged tool output by its outputRef.", parameters: objectSchema({ ref: { type: "string" }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, ["ref"]) },
   {
+    name: "request_split",
+    description:
+      "End this attempt without finishing: the task is too large for one change. Propose at least two parts, each with a title, " +
+      "acceptance criteria and the files it touches. Your edits are discarded; the council re-plans the task from your parts.",
+    parameters: objectSchema({
+      reason: { type: "string" },
+      parts: {
+        type: "array",
+        minItems: 2,
+        items: objectSchema({
+          title: { type: "string" },
+          acceptance: { type: "array", items: { type: "string" }, minItems: 1 },
+          files: { type: "array", items: { type: "string" } },
+        }, ["title", "acceptance"]),
+      },
+    }, ["reason", "parts"]),
+  },
+  {
     name: "finish",
     description:
       "Finish with a summary after producing fresh loop evidence. An investigation finishes with reproduction.argv: " +
@@ -217,6 +235,7 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
           const lines = splitLines(deps.artifacts.getText(ref));
           return { outputRef: ref, ...pageLines(lines, optionalInteger(args, "startLine") ?? 1, optionalInteger(args, "endLine"), budget) };
         }
+        case "request_split":
         case "finish":
           return args;
       }

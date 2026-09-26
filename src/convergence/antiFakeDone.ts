@@ -35,12 +35,18 @@ export function isCodingTask(task: Task): boolean {
   return task.touchesProductCode && task.kind !== "investigation";
 }
 
-export function isAcceptableTerminalForDone(task: Task): boolean {
+export function isAcceptableTerminalForDone(task: Task, tasks: readonly Task[] = []): boolean {
+  if (task.state === "SPLIT") return tasks.some((part) => part.splitFrom === task.id);
   return ACCEPTABLE_TERMINALS_FOR_DONE.has(task.state);
 }
 
-export function isIncompleteCodingTask(task: Task): boolean {
-  return isCodingTask(task) && !isAcceptableTerminalForDone(task);
+/** Coding work that was actually attempted as one change: a split task's work is its subtasks'. */
+function isOwnCodingWork(task: Task): boolean {
+  return isCodingTask(task) && task.state !== "SPLIT";
+}
+
+export function isIncompleteCodingTask(task: Task, tasks: readonly Task[] = []): boolean {
+  return isCodingTask(task) && !isAcceptableTerminalForDone(task, tasks);
 }
 
 export function isExhaustedCodingTask(task: Task, maxAttempts: number): boolean {
@@ -50,12 +56,12 @@ export function isExhaustedCodingTask(task: Task, maxAttempts: number): boolean 
   );
 }
 
-export function isContinuableCodingWork(task: Task, maxAttempts: number): boolean {
-  return isIncompleteCodingTask(task) && !isExhaustedCodingTask(task, maxAttempts);
+export function isContinuableCodingWork(task: Task, maxAttempts: number, tasks: readonly Task[] = []): boolean {
+  return isIncompleteCodingTask(task, tasks) && !isExhaustedCodingTask(task, maxAttempts);
 }
 
 export function hasContinuableCodingWork(tasks: readonly Task[], maxAttempts: number): boolean {
-  return tasks.some((task) => isContinuableCodingWork(task, maxAttempts));
+  return tasks.some((task) => isContinuableCodingWork(task, maxAttempts, tasks));
 }
 
 /**
@@ -66,9 +72,9 @@ export function incompleteCodingWorkTerminal(
   tasks: readonly Task[],
   maxAttempts: number,
 ): "PLANNING" | "FAILED" | null {
-  const incompletes = tasks.filter(isIncompleteCodingTask);
+  const incompletes = tasks.filter((task) => isIncompleteCodingTask(task, tasks));
   if (incompletes.length === 0) return null;
-  return incompletes.some((task) => isContinuableCodingWork(task, maxAttempts)) ? "PLANNING" : "FAILED";
+  return incompletes.some((task) => isContinuableCodingWork(task, maxAttempts, tasks)) ? "PLANNING" : "FAILED";
 }
 
 const CANDIDATE_WORKER_STATES = new Set<Candidate["state"]>([
@@ -87,7 +93,7 @@ const CANDIDATE_WORKER_STATES = new Set<Candidate["state"]>([
 export function assertCodeChangeMissionMayComplete(evidence: MissionCompletionEvidence): MissionMayCompleteResult {
   if (!missionRequiresCodeChange(evidence.tasks)) return { ok: true };
 
-  const codingTasks = evidence.tasks.filter(isCodingTask);
+  const codingTasks = evidence.tasks.filter(isOwnCodingWork);
   if (codingTasks.length === 0) {
     return fail("change-required mission has no planned coding tasks");
   }
@@ -160,7 +166,7 @@ export function assertCodeChangeMissionMayComplete(evidence: MissionCompletionEv
 
 /** Every coding task ended SATISFIED: its acceptance was shown to hold on its base, with no diff. */
 export function missionSatisfiedWithoutChange(tasks: readonly Task[]): boolean {
-  const coding = tasks.filter(isCodingTask);
+  const coding = tasks.filter(isOwnCodingWork);
   return coding.length > 0 && coding.every((task) => task.state === "SATISFIED");
 }
 

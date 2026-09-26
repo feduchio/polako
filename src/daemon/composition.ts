@@ -31,7 +31,7 @@ import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
 import { modelRefKey, SYSTEM_ACTOR, type ModelRef } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
 import type { RunPhase, TerminalReason } from "../domain/run.js";
-import type { Task } from "../domain/task.js";
+import { dependenciesSettled, type Task } from "../domain/task.js";
 import {
   createComparingDriver,
   createConvergenceDriver,
@@ -356,7 +356,7 @@ export function createSimplifyingDriver(): PhaseDriver {
 export function promoteEligibleTasksToReady(ctx: PhaseContext): void {
   const tasks = ctx.store.repos.tasks.listByRun(ctx.run.id);
   for (const task of tasks) {
-    if (task.state !== "PENDING" || !dependenciesMet(tasks, task)) continue;
+    if (task.state !== "PENDING" || !dependenciesSettled(task, tasks)) continue;
     transitionTask(ctx.store, ctx.clock, ctx.run.id, { ...task, state: "READY", updatedAt: ctx.clock.now() });
   }
 }
@@ -1180,11 +1180,6 @@ function readPackageScripts(projectPath: string): Record<string, string> {
   } catch {
     return {};
   }
-}
-
-function dependenciesMet(tasks: readonly Task[], task: Task): boolean {
-  if (task.dependsOn.length === 0) return true;
-  return task.dependsOn.every((dependencyId) => tasks.find((item) => item.id === dependencyId)?.state === "INTEGRATED");
 }
 
 function patchRun(ctx: PhaseContext, patch: Partial<typeof ctx.run>): void {

@@ -64,17 +64,21 @@ export const TaskStateSchema = z.enum([
    * holds on its base.
    */
   "SATISFIED",
+  /** A worker asked for the task to be split; PLANNING asks the council for subtasks. */
+  "NEEDS_SPLIT",
+  /** Replaced by subtasks (`splitFrom` on each). Done only when they are. */
+  "SPLIT",
 ]);
 export type TaskState = z.infer<typeof TaskStateSchema>;
 
 export const TASK_TABLE: TransitionTable<TaskState> = {
   initial: "PENDING",
   states: TaskStateSchema.options,
-  terminal: ["INTEGRATED", "REJECTED", "CANCELLED", "SATISFIED"],
+  terminal: ["INTEGRATED", "REJECTED", "CANCELLED", "SATISFIED", "SPLIT"],
   edges: {
     PENDING: ["READY", "CANCELLED"],
     READY: ["RUNNING", "CANCELLED"],
-    RUNNING: ["GATED", "READY", "BLOCKED", "CANCELLED", "SATISFIED"],
+    RUNNING: ["GATED", "READY", "BLOCKED", "CANCELLED", "SATISFIED", "NEEDS_SPLIT"],
     GATED: ["SELECTED", "READY", "BLOCKED", "CANCELLED"],
     SELECTED: ["INTEGRATING", "CANCELLED"],
     INTEGRATING: ["INTEGRATED", "INTEGRATION_FAILED"],
@@ -84,6 +88,8 @@ export const TASK_TABLE: TransitionTable<TaskState> = {
     REJECTED: [],
     CANCELLED: [],
     SATISFIED: [],
+    NEEDS_SPLIT: ["SPLIT", "READY", "BLOCKED", "CANCELLED"],
+    SPLIT: [],
   },
 };
 
@@ -117,6 +123,8 @@ export const TaskSchema = z.object({
   classifiedBy: z.string().min(1).optional(),
   sourceRef: z.string().min(1).optional(),
   classificationEventId: IdSchema.optional(),
+  /** The task this one was split from; it carries the parent's origin. */
+  splitFrom: IdSchema.optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 
@@ -297,6 +305,33 @@ export function createInvestigationTask(
   });
 }
 
+/**
+ * A part of a task the council split. It keeps the parent's origin and kind, so a subtask can
+ * only exist where its parent could: it is the same work, planned in smaller pieces.
+ */
+export function createSplitSubtask(
+  parent: Task,
+  draft: Omit<TaskDraft, "kind" | "runId" | "baseCheckpointHash"> & { baseCheckpointHash?: string },
+): Task {
+  if (parent.state !== "NEEDS_SPLIT") {
+    throw new PolishError("INVARIANT_VIOLATION", "only a task in NEEDS_SPLIT can be split", { taskId: parent.id, state: parent.state });
+  }
+  if (parent.kind === "investigation" || !parent.touchesProductCode) {
+    throw new PolishError("INVARIANT_VIOLATION", "only a coding task can be split", { taskId: parent.id });
+  }
+  return TaskStrictSchema.parse({
+    ...baseTask({ ...draft, kind: parent.kind, runId: parent.runId, baseCheckpointHash: draft.baseCheckpointHash ?? parent.baseCheckpointHash }),
+    kind: parent.kind,
+    origin: parent.origin,
+    touchesProductCode: true,
+    splitFrom: parent.id,
+    ...(parent.workClass === undefined ? {} : { workClass: parent.workClass }),
+    ...(parent.classifiedBy === undefined ? {} : { classifiedBy: parent.classifiedBy }),
+    ...(parent.sourceRef === undefined ? {} : { sourceRef: parent.sourceRef }),
+    ...(parent.classificationEventId === undefined ? {} : { classificationEventId: parent.classificationEventId }),
+  });
+}
+
 function baseTask(draft: TaskDraft): Omit<Task, "kind" | "origin" | "touchesProductCode"> {
   return {
     id: draft.id,
@@ -313,6 +348,25 @@ function baseTask(draft: TaskDraft): Omit<Task, "kind" | "origin" | "touchesProd
     createdAt: draft.now,
     updatedAt: draft.now,
   };
+}
+
+/**
+ * A dependency is settled when its work is done on the run: integrated, shown to already hold, or
+ * split into subtasks that are all settled themselves.
+ */
+export function dependencySettled(dependencyId: string, tasks: readonly Task[], seen = new Set<string>()): boolean {
+  if (seen.has(dependencyId)) return false;
+  seen.add(dependencyId);
+  const dependency = tasks.find((task) => task.id === dependencyId);
+  if (dependency === undefined) return false;
+  if (dependency.state === "INTEGRATED" || dependency.state === "SATISFIED") return true;
+  if (dependency.state !== "SPLIT") return false;
+  const parts = tasks.filter((task) => task.splitFrom === dependencyId);
+  return parts.length > 0 && parts.every((part) => dependencySettled(part.id, tasks, seen));
+}
+
+export function dependenciesSettled(task: Task, tasks: readonly Task[]): boolean {
+  return task.dependsOn.every((dependencyId) => dependencySettled(dependencyId, tasks));
 }
 
 export function isStale(task: Task, runHeadHash: string): boolean {

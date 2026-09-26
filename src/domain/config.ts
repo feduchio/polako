@@ -21,6 +21,15 @@ export const LaneLimitsSchema = z.object({
 });
 export type LaneLimits = z.infer<typeof LaneLimitsSchema>;
 
+export const ExecutionStrategySchema = z.object({
+  /**
+   * Coding tasks whose dependencies are settled that EXECUTING runs at once. Integration stays
+   * serial; a task whose change no longer applies on the moved head retries from the new head.
+   */
+  maxParallelTasks: z.number().int().min(1).default(2),
+});
+export type ExecutionStrategy = z.infer<typeof ExecutionStrategySchema>;
+
 export const RetryPolicySchema = z.object({
   /** attempts 1..freshWorkerAttempts use a fresh worker with progressively more failure context */
   freshWorkerAttempts: z.number().int().min(1).default(3),
@@ -320,6 +329,7 @@ export const PolishConfigSchema = z.object({
   routing: RoutingConfigSchema.prefault({}),
   audition: AuditionConfigSchema.prefault({}),
   retry: RetryPolicySchema.prefault({}),
+  execution: ExecutionStrategySchema.prefault({}),
   candidates: CandidateStrategySchema.prefault({}),
   review: ReviewStrategySchema.prefault({}),
   convergence: ConvergenceStrategySchema.prefault({}),

@@ -15,6 +15,8 @@ export type WorkerOutcome =
       reproduction?: WorkerReproduction;
       /** A coding task's claim that its acceptance already holds; the engine's gates decide. */
       noChange?: WorkerNoChange;
+      /** A coding task's claim that it is too large for one candidate; the council decides the split. */
+      split?: WorkerSplitRequest;
     }
   | {
       status: "failed" | "interrupted";
@@ -47,6 +49,7 @@ export const AGENT_TOOL_NAMES = [
   "run_command",
   "request_context",
   "read_output",
+  "request_split",
   "finish",
 ] as const;
 
@@ -158,11 +161,23 @@ export interface WorkerNoChange {
   reason: string;
 }
 
+export interface WorkerSplitPart {
+  title: string;
+  acceptance: string[];
+  files: string[];
+}
+
+export interface WorkerSplitRequest {
+  reason: string;
+  parts: WorkerSplitPart[];
+}
+
 export interface AgentLoopResult {
   status: AgentRunStatus;
   output: string | null;
   reproduction: WorkerReproduction | null;
   noChange: WorkerNoChange | null;
+  split: WorkerSplitRequest | null;
   loopEvidence: LoopEvidence | null;
   turns: number;
   totalTokens: number;

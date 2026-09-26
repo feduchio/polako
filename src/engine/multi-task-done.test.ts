@@ -259,6 +259,7 @@ describe("B-selfhost-3 multi-task DONE", () => {
       const clock = new FakeClock(NOW);
       const config = defaultConfig();
       config.verifier.backend = "ts";
+      config.execution.maxParallelTasks = 1;
       const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
       const provider = dropAllCouncil();
       const options = passDriverOptions(fixture);
@@ -324,6 +325,144 @@ describe("B-selfhost-3 multi-task DONE", () => {
       expect(store.repos.runs.get(runId)?.phase).toBe("DONE");
       store.close();
     });
+  });
+});
+
+describe("parallel coding tasks", () => {
+  function parallelEngine(fixture: Awaited<ReturnType<typeof repositoryFixture>>, options: CandidateDriverOptions) {
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const clock = new FakeClock(NOW);
+    const config = defaultConfig();
+    config.verifier.backend = "ts";
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const provider = dropAllCouncil();
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of ["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "REVIEWING", "VALIDATING"] as const) {
+      engine.registerPhase(phase, stubDriverFor(phase));
+    }
+    engine.registerPhase("PLANNING", withPromotion(createPlanningDriver({ roles: councilRoles(provider) })));
+    engine.registerPhase("EXECUTING", createExecutingDriver(options));
+    engine.registerPhase("GATING", createGatingDriver(options));
+    engine.registerPhase("COMPARING", createComparingDriver());
+    engine.registerPhase("INTEGRATING", createIntegratingDriver(options));
+    return { store, clock, engine };
+  }
+
+  async function tickUntil(engine: RunEngine, store: Store, runId: string, phase: string, limit = 20): Promise<string[]> {
+    const seen: string[] = [];
+    for (let tick = 0; tick < limit; tick++) {
+      await engine.tickRun(runId);
+      const current = store.repos.runs.get(runId)?.phase ?? "";
+      seen.push(current);
+      if (current === phase) return seen;
+    }
+    throw new Error(`run never reached ${phase}: ${seen.join(" → ")}`);
+  }
+
+  /** A worker that holds until `width` workers are running at once, so overlap is proved, not assumed. */
+  function overlappingOptions(fixture: Awaited<ReturnType<typeof repositoryFixture>>, file: (task: Task) => string) {
+    let running = 0;
+    let peak = 0;
+    const tasksSeen = new Set<string>();
+    const options: CandidateDriverOptions = {
+      ...passDriverOptions(fixture),
+      workerFactory: () => () =>
+        new ScriptedCandidateWorker(async (task, worktree) => {
+          running += 1;
+          peak = Math.max(peak, running);
+          tasksSeen.add(task.id);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          writeFileSync(join(worktree.path, file(task)), `${task.id}\n`);
+          running -= 1;
+          return { status: "completed" };
+        }),
+    };
+    return { options, peak: () => peak, tasksSeen };
+  }
+
+  it("runs two independent tasks at once and integrates both, one after the other, without a retry", async () => {
+    const fixture = await repositoryFixture();
+    const probe = overlappingOptions(fixture, (task) => `${task.id}.txt`);
+    const { store, clock, engine } = parallelEngine(fixture, probe.options);
+    const { runId, taskA, taskB } = seedTwoReadyTasks(store, clock, fixture);
+
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("GATING");
+    expect(store.repos.tasks.get(taskA)?.state).toBe("GATED");
+    expect(store.repos.tasks.get(taskB)?.state).toBe("GATED");
+    expect(probe.tasksSeen).toEqual(new Set([taskA, taskB]));
+    const perTask = defaultConfig().candidates[store.repos.tasks.get(taskA)!.complexity];
+    expect(probe.peak()).toBeGreaterThan(perTask);
+
+    await tickUntil(engine, store, runId, "REVIEWING");
+    expect(store.repos.tasks.get(taskA)).toMatchObject({ state: "INTEGRATED", attempts: 1 });
+    expect(store.repos.tasks.get(taskB)).toMatchObject({ state: "INTEGRATED", attempts: 1 });
+    const finished = store.events.list(runId, { types: ["integration.finished"] }).map((event) => event.payload["status"]);
+    expect(finished).toEqual(["pass", "pass"]);
+    const tree = await new Git(fixture.repoDir).out(["ls-tree", "--name-only", "run"]);
+    expect(tree.split("\n")).toEqual(expect.arrayContaining([`${taskA}.txt`, `${taskB}.txt`]));
+    store.close();
+  });
+
+  it("a task whose every candidate asked for a split goes to NEEDS_SPLIT; one implemented candidate sends it to the gates instead", async () => {
+    const fixture = await repositoryFixture();
+    const split = {
+      reason: "two modules",
+      parts: [
+        { title: "One", acceptance: ["one works"], files: ["one.txt"] },
+        { title: "Two", acceptance: ["two works"], files: ["two.txt"] },
+      ],
+    };
+    let implementFor: string | null = null;
+    const options: CandidateDriverOptions = {
+      ...passDriverOptions(fixture),
+      workerFactory: () => (index) =>
+        new ScriptedCandidateWorker((task, worktree) => {
+          if (task.id === implementFor && index === 0) {
+            writeFileSync(join(worktree.path, "outcome.txt"), task.id);
+            return { status: "completed" };
+          }
+          return { status: "completed", split };
+        }),
+    };
+    const { store, clock, engine } = parallelEngine(fixture, options);
+    const { runId, taskA, taskB } = seedTwoReadyTasks(store, clock, fixture);
+    implementFor = taskB;
+    await engine.tickRun(runId);
+
+    expect(store.repos.tasks.get(taskA)?.state).toBe("NEEDS_SPLIT");
+    const asked = store.repos.candidates.listByTask(taskA);
+    expect(asked.length).toBeGreaterThan(0);
+    for (const candidate of asked) {
+      expect(candidate).toMatchObject({ state: "NEEDS_SPLIT", headCommit: null, splitRequest: split, error: "needs_split: two modules" });
+    }
+    expect(store.repos.tasks.get(taskB)?.state).toBe("GATED");
+    expect(store.repos.candidates.listByTask(taskB).map((candidate) => candidate.state)).toContain("IMPLEMENTED");
+    expect(store.repos.runs.get(runId)?.phase).toBe("GATING");
+    store.close();
+  });
+
+  it("retries the task whose change conflicts with the first integration from the moved head", async () => {
+    const fixture = await repositoryFixture();
+    const probe = overlappingOptions(fixture, () => "outcome.txt");
+    const { store, clock, engine } = parallelEngine(fixture, probe.options);
+    const { runId, taskA, taskB } = seedTwoReadyTasks(store, clock, fixture);
+
+    await engine.tickRun(runId);
+    expect(store.repos.tasks.get(taskA)?.state).toBe("GATED");
+    expect(store.repos.tasks.get(taskB)?.state).toBe("GATED");
+
+    await tickUntil(engine, store, runId, "REVIEWING", 30);
+    const finished = store.events.list(runId, { types: ["integration.finished"] }).map((event) => [event.payload["taskId"], event.payload["status"]]);
+    expect(finished).toEqual([[taskA, "pass"], [taskB, "conflict"], [taskB, "pass"]]);
+    const a = store.repos.tasks.get(taskA)!;
+    const b = store.repos.tasks.get(taskB)!;
+    expect(a).toMatchObject({ state: "INTEGRATED", attempts: 1 });
+    expect(b).toMatchObject({ state: "INTEGRATED", attempts: 2 });
+    const retried = store.repos.candidates.listByTask(taskB).filter((candidate) => candidate.attempt === 2);
+    expect(retried.length).toBeGreaterThan(0);
+    expect(new Set(retried.map((candidate) => candidate.baseCheckpointHash))).toEqual(new Set([a.baseCheckpointHash]));
+    store.close();
   });
 });
 

@@ -502,6 +502,14 @@ describe("anti-fake-DONE", () => {
 
     const mixed = { ...evidence, tasks: [task, { ...evidence.tasks[0]!, id: id("task", NOW + 3) }] };
     expect(missionSatisfiedWithoutChange(mixed.tasks)).toBe(false);
+
+    const parent = { ...task, id: id("task", NOW + 4), state: "SPLIT" as const };
+    const part = { ...task, splitFrom: parent.id };
+    expect(missionSatisfiedWithoutChange([parent, part])).toBe(true);
+    expect(assertCodeChangeMissionMayComplete({ ...noChange, tasks: [parent, part] })).toEqual({ ok: true });
+    expect(assertCodeChangeMissionMayComplete({ ...noChange, tasks: [parent] })).toMatchObject({ ok: false });
+    expect(assertCodeChangeMissionMayComplete({ ...noChange, tasks: [parent, { ...part, state: "READY" as const }] }))
+      .toMatchObject({ ok: false, reason: "incomplete coding tasks remain" });
   });
 
   it("rejects change-required missions with zero workers, candidates, gates, and reviews", () => {
