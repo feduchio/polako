@@ -1,7 +1,7 @@
 import { withConfiguredReasoning } from "../broker/responseSchemas.js";
 import type { CompletionResponse } from "../broker/types.js";
 import { outputContractError } from "./interpretationSchema.js";
-import type { CouncilRole, CouncilRoleConfig, RoleOpinion } from "./types.js";
+import type { CouncilCompletionClient, CouncilRole, CouncilRoleConfig, RoleOpinion } from "./types.js";
 import { RoleOpinionSchema } from "./types.js";
 
 export interface RoleCallContext {
@@ -35,38 +35,58 @@ export class CouncilRoleAgent {
     }, this.config.disableReasoning === true);
     const raw = await this.config.client.complete(request);
     const response = isBrokerResponse(raw) ? raw.response : raw;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(stripFence(response.message.content));
-    } catch (error) {
-      throw outputContractError(`${this.role} returned invalid JSON`, {
-        role: this.role,
-        purpose: context.purpose,
-        issues: [{ path: "$", message: error instanceof Error ? error.message : "invalid JSON" }],
-      });
-    }
-    const opinionValue = isRecord(parsed) && isRecord(parsed["opinion"]) ? parsed["opinion"] : parsed;
-    const opinionParsed = RoleOpinionSchema.safeParse({
-      ...(isRecord(opinionValue) ? opinionValue : {}),
-      role: this.role,
-    });
-    if (!opinionParsed.success) {
-      throw outputContractError(`${this.role} returned invalid opinion JSON`, {
-        role: this.role,
-        purpose: context.purpose,
-        issues: opinionParsed.error.issues.map((issue) => ({
-          path: `$${issue.path.map((part) => (typeof part === "number" ? `[${part}]` : `.${String(part)}`)).join("")}`,
-          message: issue.message,
-        })),
-      });
-    }
-    const opinion = opinionParsed.data;
+    const { opinion, parsed } = parseRoleOpinion(this.role, context.purpose, response.message.content);
     return {
       opinion,
       proposal: isRecord(parsed) && "proposal" in parsed ? parsed["proposal"] : parsed,
       ...(isBrokerResponse(raw) ? { modelEventId: raw.eventId } : {}),
     };
   }
+}
+
+/**
+ * Checks the opinion inside the model chain, so a model that answers with something other than
+ * an opinion is that model's output-contract failure and the next model is tried, rather than
+ * the whole run pausing on the first model's malformed answer.
+ */
+export function createOpinionCheckingClient(inner: CouncilCompletionClient, role: CouncilRole): CouncilCompletionClient {
+  return {
+    async complete(request) {
+      const raw = await inner.complete(request);
+      const response = isBrokerResponse(raw) ? raw.response : raw;
+      parseRoleOpinion(role, request.metadata.purpose, response.message.content);
+      return raw;
+    },
+  };
+}
+
+function parseRoleOpinion(role: CouncilRole, purpose: string, content: string): { opinion: RoleOpinion; parsed: unknown } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripFence(content));
+  } catch (error) {
+    throw outputContractError(`${role} returned invalid JSON`, {
+      role,
+      purpose,
+      issues: [{ path: "$", message: error instanceof Error ? error.message : "invalid JSON" }],
+    });
+  }
+  const opinionValue = isRecord(parsed) && isRecord(parsed["opinion"]) ? parsed["opinion"] : parsed;
+  const opinionParsed = RoleOpinionSchema.safeParse({
+    ...(isRecord(opinionValue) ? opinionValue : {}),
+    role,
+  });
+  if (!opinionParsed.success) {
+    throw outputContractError(`${role} returned invalid opinion JSON`, {
+      role,
+      purpose,
+      issues: opinionParsed.error.issues.map((issue) => ({
+        path: `$${issue.path.map((part) => (typeof part === "number" ? `[${part}]` : `.${String(part)}`)).join("")}`,
+        message: issue.message,
+      })),
+    });
+  }
+  return { opinion: opinionParsed.data, parsed };
 }
 
 export class Planner extends CouncilRoleAgent {
