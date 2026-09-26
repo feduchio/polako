@@ -42,13 +42,16 @@ interface FinishArgs {
  * "Nothing to change" is a claim like any other. The worker has to have watched a check pass on
  * the code as it stands, and must not have changed that code; the engine still re-runs the gates.
  */
-function validateNoChange(value: unknown, diff: string, loopEvidence: LoopEvidence): WorkerNoChange {
+function validateNoChange(value: unknown, diff: string, loopEvidence: LoopEvidence, diffTokens: number): WorkerNoChange {
   const reason = record(value, "finish noChange")["reason"];
   if (typeof reason !== "string" || reason.trim() === "") {
     throw new PolishError("INVALID_ARGUMENT", "finish rejected: noChange.reason must be a non-empty string");
   }
   if (diff.trim() !== "") {
-    throw new PolishError("INVALID_ARGUMENT", "finish rejected: noChange with a non-empty diff; revert the edits or finish without noChange");
+    throw new PolishError(
+      "INVALID_ARGUMENT",
+      "finish rejected: noChange with a non-empty diff; revert the edits or finish without noChange. " + describeDiff(diff, diffTokens),
+    );
   }
   if (loopEvidence.passedCommands.length === 0) {
     throw new PolishError(
@@ -57,6 +60,17 @@ function validateNoChange(value: unknown, diff: string, loopEvidence: LoopEviden
     );
   }
   return { reason };
+}
+
+/**
+ * The worker cannot see the base, so "revert" alone does not tell it what to put back. In
+ * run_01m3drb07720355x3z1s63 a worker had rewritten a file without its final newline, "reverted" it
+ * twice to the same bytes, and finished with a one-byte change instead of noChange.
+ */
+function describeDiff(diff: string, diffTokens: number): string {
+  if (estimateTokens(diff) <= diffTokens) return `The worktree differs from the base checkpoint by:\n${diff}`;
+  const paths = [...diff.matchAll(/^diff --git a\/(.+?) b\//gm)].map((match) => match[1]);
+  return `The worktree differs from the base checkpoint in: ${paths.join(", ")}`;
 }
 
 /** Parts the council can plan from: two or more, each with a title and something to check. */
@@ -367,7 +381,7 @@ export class AgentRunner implements CandidateWorker {
     if (task.touchesProductCode) {
       const diff = await worktree.git.diffAgainst(worktree.baseCommit);
       if (args["noChange"] !== undefined) {
-        return { summary, noChange: validateNoChange(args["noChange"], diff, loopEvidence) };
+        return { summary, noChange: validateNoChange(args["noChange"], diff, loopEvidence, toolResultTokenBudget(this.deps.contextWindow)) };
       }
       if (diff.trim() === "") {
         throw new PolishError(

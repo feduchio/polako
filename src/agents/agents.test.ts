@@ -155,6 +155,26 @@ describe("AgentRunner", () => {
     store.close();
   });
 
+  it("names the changed paths instead of the diff when the diff would not fit a tool result", async () => {
+    const fixture = await repositoryFixture();
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    cleanup.push(fixture.root);
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 4, maxTokens: 64_000, contextWindow: 3 });
+    const handle = await fixture.sandbox.create({ id: id("cand"), baseCommit: fixture.base, policy: fixture.policy });
+    const bulk = Array.from({ length: 2_000 }, (_, index) => `line-${String(index)}`).join("\n");
+    provider.script("worker", [
+      replyWith(tool("write", { path: "bulk.txt", content: `${bulk}\n` }, "bulk")),
+      replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "check")),
+      replyWith(tool("finish", { summary: "fine", noChange: { reason: "add already sums" } }, "finish")),
+    ]);
+    await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    const rejection = provider.calls[3]?.messages.at(-1)?.content ?? "";
+    expect(rejection).toContain("differs from the base checkpoint in: bulk.txt");
+    expect(rejection).not.toContain("line-1999");
+    await handle.destroy();
+    store.close();
+  });
+
   it("stops a rejected finish sent again and again on an unchanged tree", async () => {
     const fixture = await repositoryFixture();
     const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
@@ -669,6 +689,8 @@ describe("AgentRunner", () => {
     const replies = provider.calls.map((call) => call.messages.at(-1)?.content ?? "");
     expect(replies[2]).toContain("noChange needs an acceptance check run with run_command");
     expect(replies[5]).toContain("noChange with a non-empty diff");
+    expect(replies[5]).toContain("+++ b/notes.txt");
+    expect(replies[5]).toContain("+scratch");
     expect(outcome.status).not.toBe("completed");
     await handle.destroy();
 
