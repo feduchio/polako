@@ -65,7 +65,7 @@ describe("buildLoopDigest", () => {
   it("says an empty search found nothing, and counts the repeat", () => {
     const digest = buildLoopDigest(
       [1, 2, 3, 4].map((n) => turn(n, [
-        ok("search", { query: "commit duration" }, { exitCode: 0, matches: "" }),
+        ok("search", { query: "commit duration" }, { exitCode: 0, matchCount: 0, startLine: 1, endLine: 1, totalLines: 1, content: "" }),
       ])),
       400,
     );

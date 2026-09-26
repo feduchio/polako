@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildProductionDeps, installProductionDrivers } from "../daemon/composition.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
+import type { ReviewAxis } from "../domain/finding.js";
+import type { ReviewExecution } from "../domain/review.js";
 import { defaultConfig } from "../domain/config.js";
 import { FAKE_CAPABILITIES, ScriptedProvider } from "../providers/scripted.js";
 import { Git } from "../sandbox/git.js";
@@ -70,14 +72,46 @@ describe("production REVIEWING cost-eligible routing", () => {
     expect(store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash)).toHaveLength(0);
   });
 
-  async function productionReviewing(freeFamilies: readonly string[]) {
+  it("retries a rate-limited reviewer after the cooldown when its family is the one the round lacks", async () => {
+    const { provider, config, engine } = await productionReviewing(["free-a", "free-b", "free-c"]);
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await seedExecution(store, clock, runId, checkpointHash, "correctness", "free-a", null);
+    await seedExecution(store, clock, runId, checkpointHash, "regression", "free-b", null);
+    await seedExecution(store, clock, runId, checkpointHash, "adversarial", "free-c", "rate limited: 429 upstream");
+
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("REVIEWING");
+    expect(provider.calls).toHaveLength(0);
+
+    await clock.advance(config.review.rateLimitCooldownMs);
+    await engine.tickRun(runId);
+    expect(provider.calls.map((call) => call.model.model)).toEqual(["free-c"]);
+    expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
+  });
+
+  it("does not wait on a rate-limited reviewer whose family already answered this round", async () => {
+    const { provider, engine } = await productionReviewing(["free-a", "free-b", { name: "free-b-alt", family: "free-b" }]);
+    const { runId, checkpointHash } = seedReviewingRun(store, clock, fixture);
+    await seedExecution(store, clock, runId, checkpointHash, "correctness", "free-a", null);
+    await seedExecution(store, clock, runId, checkpointHash, "regression", "free-b", "rate limited: 429 upstream");
+    await seedExecution(store, clock, runId, checkpointHash, "regression", "free-b-alt", null);
+
+    await engine.tickRun(runId);
+    const run = store.repos.runs.get(runId);
+    expect(run?.phase).toBe("NEEDS_HUMAN");
+    expect(run?.terminalReason?.summary).toContain("insufficient_families: 2 of 3");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  async function productionReviewing(freeModels: readonly (string | { name: string; family: string })[]) {
+    const free = freeModels.map((model) => (typeof model === "string" ? { name: model, family: model } : model));
     const provider = new ScriptedProvider("openrouter", [
       {
         name: "paid-frontier",
         capabilities: { ...FAKE_CAPABILITIES.frontier, family: "paid", supportsJson: true, inputCostPerM: 3, outputCostPerM: 15 },
       },
-      ...freeFamilies.map((family) => ({
-        name: family,
+      ...free.map(({ name, family }) => ({
+        name,
         capabilities: {
           ...FAKE_CAPABILITIES.fast,
           family,
@@ -111,7 +145,7 @@ describe("production REVIEWING cost-eligible routing", () => {
     provider.script("paid-frontier", [banned("paid-frontier")]);
     provider.script("unknown-price", [banned("unknown-price")]);
     provider.script("free-unprobed", [banned("free-unprobed")]);
-    for (const family of freeFamilies) provider.script(family, [{ kind: "reply", content: "[]" }]);
+    for (const { name } of free) provider.script(name, [{ kind: "reply", content: "[]" }]);
 
     const config = defaultConfig();
     expect(config.routing.costEligibility).toBe("free_only");
@@ -122,8 +156,8 @@ describe("production REVIEWING cost-eligible routing", () => {
     const deps = buildProductionDeps({ store, clock, config, home, providers: [provider] });
     await deps.catalog.discover();
     const observations = new ModelObservationRepository(store);
-    for (const family of freeFamilies) {
-      observations.recordStrictProbe({ provider: "openrouter", model: family }, {
+    for (const { name } of free) {
+      observations.recordStrictProbe({ provider: "openrouter", model: name }, {
         schema: "review",
         schemaHash: hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA),
         supported: true,
@@ -135,6 +169,34 @@ describe("production REVIEWING cost-eligible routing", () => {
     return { provider, config, engine };
   }
 });
+
+async function seedExecution(
+  store: Store,
+  clock: FakeClock,
+  runId: string,
+  checkpointHash: string,
+  axis: ReviewAxis,
+  model: string,
+  error: string | null,
+): Promise<void> {
+  const execution: ReviewExecution = {
+    id: id("rvex", clock.now()),
+    runId,
+    checkpointHash,
+    roundIndex: 1,
+    axis,
+    requestedModel: { provider: "openrouter", model },
+    completed: error === null,
+    findings: [],
+    startedAt: clock.now(),
+    finishedAt: clock.now(),
+    ...(error === null ? {} : { error }),
+  };
+  store.events.append([
+    { id: id("evt", clock.now()), runId, ts: clock.now(), type: "review.finished", payload: { execution }, causedBy: [], actor: { kind: "system" }, artifacts: [] },
+  ]);
+  await clock.advance(1);
+}
 
 async function repositoryFixture(): Promise<{ root: string; repoDir: string; base: string; integrated: string }> {
   const root = mkdtempSync(join(tmpdir(), "polish-review-routing-"));

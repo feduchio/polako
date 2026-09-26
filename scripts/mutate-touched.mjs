@@ -97,7 +97,7 @@ console.log(`${sample.length} of ${touched.length} conditions (${skipped} skippe
 /** Tests that import the file, directly or not; a condition no test reaches survives here. */
 function runRelated(cwd, file) {
   try {
-    execFileSync("pnpm", ["exec", "vitest", "related", file, "--run", "--maxWorkers=50%", "--passWithNoTests"], { cwd, stdio: "ignore" });
+    execFileSync("pnpm", ["exec", "vitest", "related", file, "--run", "--bail=1", "--maxWorkers=50%", "--passWithNoTests"], { cwd, stdio: "ignore" });
     return 0;
   } catch (error) {
     return error.status ?? 1;

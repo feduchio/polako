@@ -151,6 +151,7 @@ describe("AgentRunner", () => {
     expect(listed).toContain("src/math.ts");
     expect(listed).not.toContain("left-pad");
     expect(listed).not.toContain('"truncated":true');
+    expect(listed).not.toContain('"outputRef"');
     store.close();
     await handle.destroy();
   });

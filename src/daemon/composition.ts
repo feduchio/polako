@@ -406,6 +406,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
     createReviewingDriver({
       resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
       authorFamilies: (ctx) => authorFamilies(deps, ctx),
+      familyOf: (model) => familyOfModel(deps, model),
       strictProbeEpochComplete: (ctx) => strictProbeEpochComplete(deps, ctx),
       sandbox: sandboxFor,
       protocols: deps.protocols,
@@ -422,6 +423,7 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
         // round rather than whichever ones routing would pick at this moment.
         resolveReviewers: (ctx) => selectReviewProviders(deps, ctx),
         authorFamilies: (ctx) => authorFamilies(deps, ctx),
+        familyOf: (model) => familyOfModel(deps, model),
         protocols: deps.protocols,
       }),
     ),

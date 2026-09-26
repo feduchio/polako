@@ -59,6 +59,13 @@ export const ReviewStrategySchema = z.object({
    */
   maxAxisAttemptsPerRound: z.number().int().min(1).default(6),
   /**
+   * How long a reviewer that answered 429 on this checkpoint stays out of the pool. The exclusion
+   * used to end only when that model completed a review, which it could not do while excluded, so
+   * a round whose one remaining family was rate-limited waited forever. Its retries after the
+   * cooldown count toward `maxAxisAttemptsPerRound`.
+   */
+  rateLimitCooldownMs: z.number().int().min(0).default(60_000),
+  /**
    * Skip the `adversarial` axis in a round where every already-completed axis returned no findings.
    * `adversarial` is 64.4% of every token this tool has spent (`docs/ledger/g1-baseline.md`), and it
    * runs last, so the earlier axes' verdicts are known when it is reached.

@@ -82,6 +82,11 @@ export interface ReviewDriverOptions {
    * checking its own work, so it neither answers an axis nor counts toward a clean round.
    */
   authorFamilies?: (ctx: PhaseContext) => ReadonlySet<string>;
+  /**
+   * Family of any model, including one routing currently leaves out of the pool: a rate-limited
+   * reviewer's family decides whether waiting for it can fill the round. Defaults to the id prefix.
+   */
+  familyOf?: (model: ModelRef) => string;
   /** Injected once; `ProtocolRegistry.load` is synchronous IO over every protocol directory. */
   protocols?: ProtocolRegistry;
 }
@@ -106,6 +111,7 @@ export interface ValidatingDriverOptions {
    * checking its own work, so it neither answers an axis nor counts toward a clean round.
    */
   authorFamilies?: (ctx: PhaseContext) => ReadonlySet<string>;
+  familyOf?: (model: ModelRef) => string;
   protocols?: ProtocolRegistry;
   /** Three distinct cost-eligible models, or null to skip debate (no invented verdict). */
   resolveDebateRoles?: (ctx: PhaseContext) => DebateRoles | null | Promise<DebateRoles | null>;
@@ -178,7 +184,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
             },
       };
     }
-    const familyOf = reviewerFamilyLookup(reviewers);
+    const familyOf = reviewerFamilyLookup(reviewers, options.familyOf);
     const authors = options.authorFamilies?.(ctx) ?? new Set<string>();
     // Author families start covered: the walk passes over them exactly as over a family that answered.
     const coveredFamilies = new Set([...authors, ...familiesThatAnswered(roundExecutions, familyOf)]);
@@ -186,7 +192,10 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
       const missing = missingAxes(axes, roundExecutions, required).length;
       const fresh = new Set(reviewers.map((reviewer) => familyOf(reviewer.model)).filter((family) => !coveredFamilies.has(family)));
       if (fresh.size < missing) {
-        if (transientlyExcludedReviewModels(ctx).length > 0) return { status: "waiting" };
+        // Waiting helps only when a rate-limited model would bring a family the round still lacks.
+        if (transientlyExcludedReviewModels(ctx).some((model) => !coveredFamilies.has(familyOf(model)))) {
+          return { status: "waiting" };
+        }
         const answered = [...coveredFamilies].filter((family) => !authors.has(family));
         const terminalReason = insufficientFamiliesReason(answered.length + fresh.size, required, [...answered, ...fresh], authors);
         emitNeedsHumanReport(ctx, terminalReason);
@@ -869,7 +878,7 @@ async function verifyReviewersOrExplain(
   const reviewers = await options.resolveReviewers(ctx);
   // REVIEWING already refuses a second axis to a family; this is the check at the one place a round
   // becomes clean, so a round recorded before that rule, or assembled by any other path, cannot pass.
-  const familyOf = reviewerFamilyLookup(reviewers);
+  const familyOf = reviewerFamilyLookup(reviewers, options.familyOf);
   if (familyOf !== null) {
     const authors = options.authorFamilies?.(ctx) ?? new Set<string>();
     const families = [...familiesThatAnswered(producing, familyOf)].filter((family) => !authors.has(family));
@@ -1013,6 +1022,8 @@ function excludedReviewModels(ctx: PhaseContext): { model: ModelRef; error: stri
     // the next tick rotate for a reason that rotation cannot address.
     if (isAccountScopedLimitMessage(execution.error)) continue;
     if (!isStickyReviewSkip(undefined, execution.error)) continue;
+    const failedAt = execution.finishedAt ?? execution.startedAt;
+    if (isRateLimitMessage(execution.error) && ctx.clock.now() - failedAt >= ctx.config.review.rateLimitCooldownMs) continue;
     const key = modelRefKey(execution.requestedModel);
     if (completedKeys.has(key)) continue;
     excluded.push({ model: execution.requestedModel, error: execution.error });
@@ -1487,10 +1498,13 @@ type ReviewerFamilyLookup = (model: ModelRef) => string;
  * Family of a review model, or null when the reviewers carry no families (hand-built test
  * reviewers). A model that answered earlier but is no longer selectable is named by its id prefix.
  */
-function reviewerFamilyLookup(reviewers: readonly ReviewProvider[]): ReviewerFamilyLookup | null {
+function reviewerFamilyLookup(
+  reviewers: readonly ReviewProvider[],
+  fallback: (model: ModelRef) => string = (model) => inferFamily(model.model),
+): ReviewerFamilyLookup | null {
   if (reviewers.length === 0 || reviewers.some((reviewer) => reviewer.family === undefined)) return null;
   const byKey = new Map(reviewers.map((reviewer) => [modelRefKey(reviewer.model), reviewer.family ?? ""]));
-  return (model) => byKey.get(modelRefKey(model)) ?? inferFamily(model.model);
+  return (model) => byKey.get(modelRefKey(model)) ?? fallback(model);
 }
 
 /** Families that produced a completed, non-skipped execution in the given executions. */

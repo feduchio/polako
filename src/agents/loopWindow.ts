@@ -207,27 +207,18 @@ function collectEntries(history: readonly AgentTurn[]): DigestEntry[] {
 }
 
 /**
- * Which argument names the call. `read` and `list` are a path, `search` and `request_context` a
- * query, `repo_intel` its action: without these a worker cannot tell that it already searched for
- * a symbol and found nothing, and searches again.
- */
-/**
  * What the call returned, in a form that fits one digest line. A search that found nothing has to
  * say so: the previous digest recorded the query and dropped the empty result, and the worker
  * searched again.
  */
 function boundedResult(name: string, output: unknown): string {
   if (name === "search") {
-    const declared = numberField(output, "matchCount");
-    const matches = stringField(output, "matches");
-    const count = declared ?? countMatchLines(matches);
-    return `(${String(count)} matches)`;
+    const count = numberField(output, "matchCount");
+    return count === null ? "" : `(${String(count)} matches)`;
   }
   if (name === "list") {
-    const declared = numberField(output, "entryCount");
-    const entries = field(output, "entries");
-    const count = declared ?? (Array.isArray(entries) ? entries.length : 0);
-    return `(${String(count)} entries)`;
+    const count = numberField(output, "entryCount");
+    return count === null ? "" : `(${String(count)} entries)`;
   }
   if (name === "read") {
     const start = numberField(output, "startLine");
@@ -241,18 +232,11 @@ function boundedResult(name: string, output: unknown): string {
   return "";
 }
 
-function countMatchLines(matches: string | null): number {
-  if (matches === null) return 0;
-  const trimmed = matches.trim();
-  if (trimmed === "" || trimmed === "[]") return 0;
-  return trimmed.split("\n").filter((line) => line.trim() !== "").length;
-}
-
-function field(source: unknown, key: string): unknown {
-  if (typeof source !== "object" || source === null) return undefined;
-  return (source as Record<string, unknown>)[key];
-}
-
+/**
+ * Which argument names the call. `read` and `list` are a path, `search` and `request_context` a
+ * query, `repo_intel` its action: without these a worker cannot tell that it already searched for
+ * a symbol and found nothing, and searches again.
+ */
 function identifyingArgument(name: string, output: unknown, args: Record<string, unknown>): string {
   switch (name) {
     case "read":
