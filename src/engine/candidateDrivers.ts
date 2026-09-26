@@ -752,7 +752,7 @@ function handleZeroSurvivors(
         : refused.length > 0
           ? "providers_unavailable"
           : "no_candidate_finished",
-      summary: `task ${task.id} produced no survivor on attempt ${String(attempts)} of ${String(candidates.length)} candidates: ` +
+      summary: `task ${task.id} produced no survivor on attempt ${String(attempts)}; of its ${String(candidates.length)} candidate(s), ` +
         `${String(judged.length)} reached a gate and failed, ${String(refused.length)} were refused by the provider, ` +
         `${String(other)} ended otherwise` +
         (firstLine(candidates.find((candidate) => candidate.error !== null)?.error) === ""
