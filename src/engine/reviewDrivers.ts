@@ -346,6 +346,7 @@ export function createValidatingDriver(options: ValidatingDriverOptions = {}): P
 
     if (hasPendingFindingWork(ctx, hash)) return { status: "complete", nextPhase: "PLANNING" };
     const unverified = await verifyReviewersOrExplain(ctx, hash, options);
+    if (unverified === "rotated") return { status: "complete", nextPhase: "CONVERGENCE_CHECK" };
     if (unverified !== null) {
       emitNeedsHumanReport(ctx, unverified);
       return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: unverified };
@@ -845,15 +846,17 @@ function acceptanceLines(finding: Finding): string[] {
  * R2. A clean round is not clean until the reviewers that produced it have found a defect that was
  * put there for them to find.
  *
- * Returns the terminal reason when they have not, and `null` when there is nothing to verify or
- * every model is verified. Each model is canaried once per run: the question is whether this
- * reviewer, on this transport, can report anything at all, and that does not change between rounds.
+ * Returns `null` when there is nothing to verify or every model is verified. When one fails, its
+ * round is discarded and, while `review.maxCanaryRotations` allows, `"rotated"` sends the run to a
+ * fresh round without the failed models; after that it is the terminal reason. Each model is
+ * canaried once per run: the question is whether this reviewer, on this transport, can report
+ * anything at all, and that does not change between rounds.
  */
 async function verifyReviewersOrExplain(
   ctx: PhaseContext,
   checkpointHash: string,
   options: ValidatingDriverOptions,
-): Promise<TerminalReason | null> {
+): Promise<TerminalReason | "rotated" | null> {
   if (options.resolveReviewers === undefined) return null;
   const required = ctx.config.review.reviewersPerRound;
   const reviewExecutions = ctx.store.repos.reviewExecutions.listByRun(ctx.run.id);
@@ -862,6 +865,7 @@ async function verifyReviewersOrExplain(
     reviewExecutions,
     checkpointHash,
     required,
+    canaryDisqualifiedRounds(ctx, checkpointHash, reviewExecutions),
   );
   // Nothing would be recorded clean, so there is nothing to have earned.
   if (reviewRoundIndex === null) return null;
@@ -919,9 +923,24 @@ async function verifyReviewersOrExplain(
   const failed = [...produced.values()].filter((model) => verdicts.get(modelRefKey(model)) !== true);
   if (failed.length === 0) return null;
   const names = failed.map((model) => `${model.provider}:${model.model}`).join(", ");
+  const rotations = ctx.store.events.list(ctx.run.id, { types: [REVIEWERS_ROTATED] }).length;
+  if (rotations < ctx.config.review.maxCanaryRotations) {
+    ctx.store.events.append([{
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: REVIEWERS_ROTATED,
+      payload: { checkpointHash, reviewRoundIndex, failed, rotation: rotations + 1, maxRotations: ctx.config.review.maxCanaryRotations },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [],
+    }]);
+    return "rotated";
+  }
   return {
     code: "review_unverifiable",
-    summary: `review unverifiable: ${names} reported nothing on a diff with a seeded off-by-one, so its clean verdict on this checkpoint is not evidence`,
+    summary: `review unverifiable: ${names} reported nothing on a diff with a seeded off-by-one, so its clean verdict on this checkpoint is not evidence` +
+      (rotations > 0 ? `; ${String(rotations)} reviewer rotation(s) after canary failures already used` : ""),
     question: "The reviewers that produced this clean round could not find a planted defect. How should the run proceed?",
     options: ["Replace the reviewer models and review again", "Stop the run"],
   };
@@ -956,6 +975,7 @@ function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): 
     reviewExecutions,
     checkpointHash,
     required,
+    canaryDisqualifiedRounds(ctx, checkpointHash, reviewExecutions),
   );
   if (reviewRoundIndex === null) return;
 
@@ -971,6 +991,31 @@ function recordCleanRoundIfEligible(ctx: PhaseContext, checkpointHash: string): 
     now: ctx.clock.now(),
   });
   ctx.store.events.append([event]);
+}
+
+const REVIEWERS_ROTATED = "review.reviewers_rotated";
+
+/** Models this run's seeded-defect canary failed: they stay out of review for the rest of the run. */
+export function canaryFailedReviewModels(ctx: PhaseContext): ModelRef[] {
+  const failed = new Map<string, ModelRef>();
+  for (const event of ctx.store.events.list(ctx.run.id, { types: [CANARY_EVENT_TYPE] })) {
+    const model = event.payload["model"] as ModelRef;
+    if (event.payload["verified"] === true) failed.delete(modelRefKey(model));
+    else failed.set(modelRefKey(model), model);
+  }
+  return [...failed.values()];
+}
+
+/** Review rounds on the checkpoint that a canary-failed model helped produce. */
+function canaryDisqualifiedRounds(ctx: PhaseContext, checkpointHash: string, executions: readonly ReviewExecution[]): Set<number> {
+  const failed = new Set(canaryFailedReviewModels(ctx).map(modelRefKey));
+  const rounds = new Set<number>();
+  if (failed.size === 0) return rounds;
+  for (const execution of executions) {
+    if (execution.checkpointHash !== checkpointHash || !execution.completed || isSkippedExecution(execution)) continue;
+    if (failed.has(modelRefKey(execution.requestedModel))) rounds.add(execution.roundIndex);
+  }
+  return rounds;
 }
 
 /** Models whose latest review on this checkpoint is a sticky failure (429, 400, schema). */

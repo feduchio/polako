@@ -66,6 +66,12 @@ export const ReviewStrategySchema = z.object({
    */
   rateLimitCooldownMs: z.number().int().min(0).default(60_000),
   /**
+   * Fresh review rounds on the same checkpoint after the reviewers behind a clean round fail the
+   * seeded-defect canary. The failed models stay out of review for the rest of the run, and their
+   * round never counts; once these are used up the run asks a human to replace the reviewers.
+   */
+  maxCanaryRotations: z.number().int().min(0).default(2),
+  /**
    * Skip the `adversarial` axis in a round where every already-completed axis returned no findings.
    * `adversarial` is 64.4% of every token this tool has spent (`docs/ledger/g1-baseline.md`), and it
    * runs last, so the earlier axes' verdicts are known when it is reached.

@@ -43,6 +43,7 @@ import {
   createInterpretingMissionDriver,
   createPlanningDriver,
   createReviewingDriver,
+  canaryFailedReviewModels,
   recentlyRateLimitedReviewModels,
   createValidatingDriver,
   type DebateCompletionRequest,
@@ -450,7 +451,7 @@ function expectedReviewerQuality(row: Ranked): number {
 export function resolveEnsembleAlternatives(deps: ProductionDeps, ctx?: PhaseContext): EnsembleOption[] {
   const size = deps.config.review.reviewersPerRound;
   const minQuality = deps.config.review.minQualityForRotation;
-  const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
+  const exclude = ctx === undefined ? [] : [...recentlyRateLimitedReviewModels(ctx), ...canaryFailedReviewModels(ctx)];
   const ranked = deps.router.select({
     role: "reviewer",
     count: Math.max(size * 2, 8),
@@ -701,7 +702,7 @@ export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseCon
     });
     new ModelObservationRepository(deps.store).restoreCatalog(deps.catalog);
   }
-  const exclude = ctx === undefined ? [] : recentlyRateLimitedReviewModels(ctx);
+  const exclude = ctx === undefined ? [] : [...recentlyRateLimitedReviewModels(ctx), ...canaryFailedReviewModels(ctx)];
   const ranked = deps.router.select({
     role: "reviewer",
     count: Math.max(deps.config.review.reviewersPerRound, 8),

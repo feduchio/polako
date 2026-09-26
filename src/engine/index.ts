@@ -39,6 +39,7 @@ export {
 export {
   createReviewingDriver,
   createValidatingDriver,
+  canaryFailedReviewModels,
   recentlyRateLimitedReviewModels,
   type DebateCompletionRequest,
   type ReviewDriverOptions,

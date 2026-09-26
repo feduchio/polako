@@ -21,6 +21,7 @@ export const KNOWN_EVENT_TYPES = [
   "planning.decompose_discarded",
   /** A reviewer's verdict on the seeded defect. R2. */
   "review.canary_recorded",
+  "review.reviewers_rotated",
   /** A review axis used up its attempts. Emitted by the reviewing driver; previously unregistered. */
   "review.axis_exhausted",
   /** The engine re-ran an investigation's reproduction; its exit code, not the worker, decides. */

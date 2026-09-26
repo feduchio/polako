@@ -52,15 +52,20 @@ function consumedReviewRoundIndexes(cleanRounds: readonly CleanRound[], checkpoi
   return consumed;
 }
 
-/** First completed review round on this checkpoint that no CleanRound already binds. */
+/**
+ * First completed review round on this checkpoint that no CleanRound already binds, passing over
+ * `disqualified` rounds (produced by a reviewer that failed the canary), which can never bind one.
+ */
 export function nextUnconsumedCompletedReviewRound(
   cleanRounds: readonly CleanRound[],
   executions: readonly ReviewExecution[],
   checkpointHash: string,
   required: number,
+  disqualified: ReadonlySet<number> = new Set(),
 ): number | null {
   const consumed = consumedReviewRoundIndexes(cleanRounds, checkpointHash);
-  return completedReviewRoundIndexes(executions, checkpointHash, required).find((roundIndex) => !consumed.has(roundIndex)) ?? null;
+  return completedReviewRoundIndexes(executions, checkpointHash, required)
+    .find((roundIndex) => !consumed.has(roundIndex) && !disqualified.has(roundIndex)) ?? null;
 }
 
 function completedProofExecutions(

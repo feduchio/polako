@@ -535,6 +535,9 @@ describe("R2 reviewer canary", () => {
     });
   };
 
+  /** No rotations by default: these tests pin what a failed canary means, not what follows it. */
+  const noRotations = (): PolishConfig => ({ ...defaultConfig(), review: { ...defaultConfig().review, maxCanaryRotations: 0 } });
+
   const validatingEngine = (canaryReply: string | ProviderError): { engine: RunEngine; provider: ScriptedProvider } => {
     const provider = new ScriptedProvider("reviews", [{ name: "m0", capabilities: FAKE_CAPABILITIES.strong }]);
     provider.script("m0", [
@@ -542,7 +545,7 @@ describe("R2 reviewer canary", () => {
         ? { kind: "error", error: canaryReply }
         : { kind: "reply", content: canaryReply },
     ]);
-    const config = defaultConfig();
+    const config = noRotations();
     const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
     const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
     for (const phase of NON_VALIDATING_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
@@ -622,7 +625,7 @@ describe("R2 reviewer canary", () => {
     provider.script("m0", [{ kind: "reply", content: reviewJson("correctness", "src/cache.ts", 8) }]);
     provider.script("m1", [{ kind: "reply", content: reviewJson("correctness", "src/cache.ts", 8) }]);
     provider.script("m2", [{ kind: "reply", content: emptyReview() }]);
-    const config = defaultConfig();
+    const config = noRotations();
     const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
     const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
     for (const phase of NON_VALIDATING_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
@@ -670,6 +673,75 @@ describe("R2 reviewer canary", () => {
     });
     await engine.tickRun(runId);
     expect(provider.calls).toHaveLength(1);
+  });
+
+  /**
+   * m0 produced round 1; each later REVIEWING hands the next round to the next model in `replies`,
+   * which is also each model's canary answer.
+   */
+  const rotatingEngine = (replies: Record<string, string>, maxCanaryRotations: number): { engine: RunEngine; provider: ScriptedProvider } => {
+    const names = Object.keys(replies);
+    const provider = new ScriptedProvider("reviews", names.map((name) => ({ name, capabilities: FAKE_CAPABILITIES.strong })));
+    for (const name of names) provider.script(name, [{ kind: "reply", content: replies[name]! }]);
+    const config: PolishConfig = { ...defaultConfig(), review: { ...defaultConfig().review, maxCanaryRotations } };
+    const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });
+    const engine = new RunEngine({ store, clock, scheduler: sched, config, assertProjectClean: () => undefined }, false);
+    for (const phase of NON_VALIDATING_PHASES) engine.registerPhase(phase, stubDriverFor(phase));
+    engine.registerPhase("CONVERGENCE_CHECK", () => ({ status: "complete", nextPhase: "REVIEWING" }));
+    let next = 1;
+    engine.registerPhase("REVIEWING", (ctx) => {
+      const model = names[next];
+      if (model === undefined) return { status: "waiting" };
+      const roundIndex = next + 1;
+      next += 1;
+      seedRound(ctx.run.id, roundIndex, model);
+      return { status: "complete", nextPhase: "VALIDATING" };
+    });
+    engine.registerPhase("VALIDATING", createValidatingDriver({
+      resolveReviewers: () => names.map((name) => ({ provider, model: { provider: "reviews", model: name } })),
+    }));
+    return { engine, provider };
+  };
+
+  const seedRound = (runId: string, roundIndex: number, model: string): void => {
+    (["correctness", "regression", "adversarial"] as const).forEach((axis, index) => {
+      appendExecution(store, clock, runId, {
+        roundIndex,
+        axis,
+        requestedModel: { provider: "reviews", model },
+        completed: true,
+        hash: fixture.integrated,
+        at: clock.now() + roundIndex * 10 + index,
+      });
+    });
+  };
+
+  it("discards a round whose reviewer failed the canary and records the clean round of a fresh one", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    seedCleanRound(runId);
+    const { engine, provider } = rotatingEngine({ m0: emptyReview(), m1: reviewJson("correctness", "src/cache.ts", 8) }, 1);
+    for (let tick = 0; tick < 4; tick += 1) await engine.tickRun(runId);
+
+    const rotated = store.events.list(runId, { types: ["review.reviewers_rotated"] });
+    expect(rotated.map((event) => event.payload["failed"])).toEqual([[{ provider: "reviews", model: "m0" }]]);
+    const clean = store.repos.cleanRounds.listByRun(runId);
+    expect(clean.map((round) => [round.reviewRoundIndex, round.ensemble.map((model) => model.model)])).toEqual([[2, ["m1", "m1", "m1"]]]);
+    expect(provider.calls.map((call) => call.model.model)).toEqual(["m0", "m1"]);
+    expect(store.repos.runs.get(runId)?.phase).not.toBe("NEEDS_HUMAN");
+  });
+
+  it("asks a human once the canary rotations are used up", async () => {
+    const { runId } = seedValidatingRun(store, clock, fixture);
+    seedCleanRound(runId);
+    const { engine } = rotatingEngine({ m0: emptyReview(), m1: emptyReview(), m2: reviewJson("correctness", "src/cache.ts", 8) }, 1);
+    for (let tick = 0; tick < 6; tick += 1) await engine.tickRun(runId);
+
+    const run = store.repos.runs.get(runId)!;
+    expect(run.phase).toBe("NEEDS_HUMAN");
+    expect(run.terminalReason?.code).toBe("review_unverifiable");
+    expect(run.terminalReason?.summary).toContain("reviews:m1");
+    expect(run.terminalReason?.summary).toContain("1 reviewer rotation(s)");
+    expect(store.repos.cleanRounds.listByRun(runId)).toHaveLength(0);
   });
 
   // Nothing would be recorded clean, so there is nothing to have earned and nothing to spend.
