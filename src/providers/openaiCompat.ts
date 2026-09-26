@@ -154,7 +154,12 @@ export class OpenAICompatProvider implements ProviderAdapter {
   private classify(status: number, retryAfter: string | null, body: string): ProviderError {
     const snippet = body.slice(0, 500);
     const retryAfterMs = retryAfter ? (Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : null) : null;
-    if (status === 401 || status === 403) return new ProviderError(this.id, "auth", `auth failed (${status}): ${snippet}`, { status });
+    // A 403 about one model ("only available on agentic harnesses") is that model refusing, not
+    // the key: read as auth, it switched the whole provider off for the daemon's lifetime.
+    if (status === 401 || (status === 403 && /\b(?:api[ -]?key|credits?|account|unauthori[sz]ed|forbidden key)\b/i.test(body))) {
+      return new ProviderError(this.id, "auth", `auth failed (${status}): ${snippet}`, { status });
+    }
+    if (status === 403) return new ProviderError(this.id, "not_found", `model refused (403): ${snippet}`, { status });
     if (status === 404) return new ProviderError(this.id, "not_found", `not found: ${snippet}`, { status });
     if (status === 429) {
       return new ProviderError(this.id, "rate_limit", `rate limited: ${snippet}`, {

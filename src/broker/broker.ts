@@ -214,7 +214,7 @@ export class ModelBroker {
         const retryable = err instanceof ProviderError ? err.retryable : false;
         if (!retryable || attempt >= retry.maxAttempts) {
           this.recordEvent(tagged, null, attempt, outcomes, errorToString(err), budget.snapshot(tagged.metadata.runId).runUsd, callId);
-          if (err instanceof ProviderError && err.kind === "auth") catalog.setProviderAvailable(adapter.id, false);
+          if (err instanceof ProviderError && err.kind === "auth" && err.status === 401) catalog.setProviderAvailable(adapter.id, false);
           throw err;
         }
         const delayMs =

@@ -299,11 +299,17 @@ describe("ModelBroker", () => {
     expect(store.events.list(runId, { types: ["model.retry_scheduled"] }).length).toBeGreaterThanOrEqual(2);
   });
 
-  it("does not retry non-retryable errors and marks the provider unavailable on auth failure", async () => {
-    provider.script("big", [{ kind: "error", error: new ProviderError("p1", "auth", "bad key") }]);
+  it("does not retry non-retryable errors and marks the provider unavailable on a 401", async () => {
+    provider.script("big", [{ kind: "error", error: new ProviderError("p1", "auth", "bad key", { status: 401 }) }]);
     await expect(broker.complete(req(runId, "big"))).rejects.toThrow(/bad key/);
     expect(provider.calls).toHaveLength(1);
     expect(catalog.get({ provider: "p1", model: "big" })?.available).toBe(false);
+  });
+
+  it("leaves the provider available when one model refuses with a 403", async () => {
+    provider.script("big", [{ kind: "error", error: new ProviderError("p1", "not_found", "model refused (403): only available on agentic harnesses", { status: 403 }) }]);
+    await expect(broker.complete(req(runId, "big"))).rejects.toThrow(/model refused/);
+    expect(catalog.get({ provider: "p1", model: "mid" })?.available).toBe(true);
   });
 
   it("refuses calls once the run budget is exhausted", async () => {
@@ -769,6 +775,27 @@ describe("OpenAICompatProvider", () => {
     }
     expect(kinds).toEqual(["rate_limit", "auth", "server", "bad_request", "not_found"]);
     expect(retryAfter[0]).toBe(7000);
+  });
+
+  it("reads a 403 about one model as that model refusing, and one about the key as auth", async () => {
+    const bodies = [
+      { error: { message: "thinkingmachines/inkling-small:free is only available on agentic harnesses. Try plugging it into a coding agent", code: 403 } },
+      { error: { message: "Your API key is not allowed to use this endpoint", code: 403 } },
+    ];
+    let i = 0;
+    const p = new OpenAICompatProvider({
+      id: "openrouter", kind: "openrouter", baseUrl: "https://example.test", apiKey: "k",
+      fetch: fakeFetch(() => ({ status: 403, body: bodies[i++]! })),
+    });
+    const kinds: string[] = [];
+    for (const _body of bodies) {
+      try {
+        await p.complete(req("run_e", "m", "openrouter"));
+      } catch (e) {
+        kinds.push((e as ProviderError).kind);
+      }
+    }
+    expect(kinds).toEqual(["not_found", "auth"]);
   });
 
   it("rejects a pre-aborted signal without calling fetch", async () => {
