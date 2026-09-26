@@ -169,6 +169,20 @@ export function createExecutingDriver(options: CandidateDriverOptions): PhaseDri
     for (const candidate of candidates) {
       appendCandidateEvents(ctx, [candidate], "candidate.state_changed");
     }
+    if (results.some((result) => result.status === "no_change_verified")) {
+      const superseded = candidates
+        .filter((candidate) => candidate.state === "IMPLEMENTED")
+        .map((candidate): Candidate => ({
+          ...candidate,
+          state: "DISCARDED",
+          error: "superseded: the engine's gates showed the task's acceptance already holds on its base",
+          updatedAt: ctx.clock.now(),
+        }));
+      if (superseded.length > 0) appendCandidateEvents(ctx, superseded, "candidate.state_changed");
+      recordBaseCheckpoint(ctx, running, results.find((result) => result.status === "no_change_verified")?.gateResult ?? null);
+      appendTaskEvent(ctx, { ...running, state: "SATISFIED", updatedAt: ctx.clock.now() });
+      return { status: "complete", nextPhase: "PLANNING" };
+    }
     appendTaskEvent(ctx, { ...running, state: "GATED", updatedAt: ctx.clock.now() });
     return { status: "complete", nextPhase: "GATING" };
   };
@@ -809,11 +823,13 @@ function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult): Ca
   const now = ctx.clock.now();
   const state = resultStatusToCandidateState(result);
   const gateReport =
-    result.status === "no_changes"
-      ? noChangesGateReport(result, now)
-      : result.status === "implemented"
-        ? implementedDiffReport(result, now)
-        : null;
+    result.status === "no_change_verified" && result.gateResult !== null
+      ? toGateReport(result.baseCheckpoint, result.gateResult, now, result.diffSummary)
+      : result.status === "no_changes"
+        ? noChangesGateReport(result, now)
+        : result.status === "implemented"
+          ? implementedDiffReport(result, now)
+          : null;
   return {
     id: result.id,
     runId: ctx.run.id,
@@ -826,13 +842,18 @@ function toCandidate(ctx: PhaseContext, task: Task, result: CandidateResult): Ca
     headCommit: result.headCommit,
     state: result.status === "no_changes" ? "FAILED_GATES" : state,
     gateReport,
-    error: result.error,
+    error: result.status === "no_change_verified"
+      ? `${NO_CHANGE_VERIFIED}: ${result.workerOutcome?.status === "completed" ? result.workerOutcome.noChange?.reason ?? "" : ""}`
+      : result.error,
     transcriptRef: result.workerOutcome?.transcriptRef ?? null,
     diffRef: null,
     createdAt: now,
     updatedAt: now,
   };
 }
+
+/** Error prefix of the candidate whose no-change claim the engine's gates on the base upheld. */
+export const NO_CHANGE_VERIFIED = "no_change_verified";
 
 function resultStatusToCandidateState(result: CandidateResult): CandidateState {
   switch (result.status) {
@@ -847,6 +868,7 @@ function resultStatusToCandidateState(result: CandidateResult): CandidateState {
       return "INTERRUPTED";
     case "worker_failed":
     case "error":
+    case "no_change_verified":
       return "DISCARDED";
     default:
       return "DISCARDED";
@@ -925,11 +947,21 @@ function implementedDiffReport(result: CandidateResult, createdAt: number): Gate
 }
 
 function noChangesGateReport(result: CandidateResult, createdAt: number): GateReport {
+  const noChanges = {
+    reason: "no_changes" as const,
+    detail: result.error === null
+      ? "candidate produced no diff vs base checkpoint"
+      : `candidate claimed no change was needed, and ${result.error}`,
+  };
+  if (result.gateResult !== null) {
+    const report = toGateReport(result.baseCheckpoint, result.gateResult, createdAt, result.diffSummary);
+    return { ...report, failures: [noChanges, ...report.failures], passed: false };
+  }
   return {
     gatedCommit: result.baseCheckpoint,
     checks: [],
     injectedAcceptance: [],
-    failures: [{ reason: "no_changes", detail: "candidate produced no diff vs base checkpoint" }],
+    failures: [noChanges],
     passed: false,
     diffStat: result.diffSummary,
     createdAt,
@@ -971,6 +1003,27 @@ function createCheckpoint(
     evidence: evidenceFromGate(gateResult),
     createdAt: ctx.clock.now(),
   };
+}
+
+/**
+ * A satisfied task's base gets a checkpoint when it has none, so review has something to bind its
+ * rounds to. It is the unchanged base with the engine's own gate evidence, never a new commit.
+ */
+function recordBaseCheckpoint(ctx: PhaseContext, task: Task, gateResult: GateResult | null): void {
+  const hash = task.baseCheckpointHash;
+  if (gateResult === null || ctx.store.repos.checkpoints.byCommit(ctx.run.id, hash) !== null) return;
+  const latest = ctx.store.repos.checkpoints.latest(ctx.run.id);
+  appendCheckpoint(ctx, {
+    id: id("cp", ctx.clock.now()),
+    runId: ctx.run.id,
+    seq: (latest?.seq ?? -1) + 1,
+    commitHash: hash,
+    parentId: latest?.id ?? null,
+    source: "baseline",
+    taskId: task.id,
+    evidence: evidenceFromGate(gateResult),
+    createdAt: ctx.clock.now(),
+  }, { taskId: task.id, parentHash: hash, headHash: hash, paths: [], classification: "unknown" });
 }
 
 interface RuntimeValidationCapture {

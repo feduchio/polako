@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { ProviderError } from "../broker/types.js";
 import { reply } from "../providers/scripted.js";
+import { Git } from "../sandbox/git.js";
 import {
   FIXED_ADD,
   accountLimit,
@@ -48,20 +49,44 @@ describe("run scenarios", () => {
     const user = review?.messages.find((message) => message.role === "user")?.content ?? "";
     expect(user.startsWith("TRUSTED CONTEXT")).toBe(true);
     expect(user).toContain("The exported add function agrees with its test");
+    const tree = await new Git(env.repoDir).out(["ls-tree", "-r", "--name-only", run.runBranch]);
+    expect(tree.split("\n")).toContain("src/add.mjs");
+    expect(tree).not.toMatch(/^node_modules\//m);
   });
 
-  it("does not call a no-change finish DONE", async () => {
+  it("ends DONE with no_change_required when the engine's gates prove nothing needed changing", async () => {
     env = await startScenario("nothing-to-do");
     scriptPipeline(env.provider, toolSteps([
-      { name: "finish", arguments: { summary: "nothing to change" } },
+      { name: "run_command", arguments: { argv: ["npm", "run", "test"] } },
+      { name: "finish", arguments: { summary: "the test already passes", noChange: { reason: "add already sums; npm test passes" } } },
     ]), emptyReview());
     const runId = await begin(env, "Leave the code unchanged. The tests already pass.");
     const { run, ticks } = await drive(env, runId, 80);
     expect(ticks).toBeLessThan(80);
+    expect(run.phase).toBe("DONE");
+    expect(run.terminalReason?.code).toBe("no_change_required");
+    expect(run.currentCheckpointHash).toBe(env.service.store.repos.baselines.listByRun(runId)[0]?.commitHash);
+    expect(env.service.store.repos.tasks.listByRun(runId).map((task) => task.state)).toEqual(["SATISFIED"]);
+    const candidate = env.service.store.repos.candidates.listByRun(runId)[0];
+    expect(candidate?.gateReport?.passed).toBe(true);
+    expect(candidate?.error).toMatch(/^no_change_verified: /);
+    expect(workerTokens(env, runId)).toBeLessThan(96_000);
+  });
+
+  it("does not call a no-change finish DONE when the unchanged code fails its checks", async () => {
+    env = await startScenario("deps-ts");
+    scriptPipeline(env.provider, toolSteps([
+      { name: "run_command", arguments: { argv: ["npm", "ci"] } },
+      { name: "finish", arguments: { summary: "looks fine", noChange: { reason: "add is correct" } } },
+    ]), emptyReview());
+    const runId = await begin(env, "Make add return the sum of its arguments.");
+    const { run, ticks } = await drive(env, runId, 80);
+    expect(ticks).toBeLessThan(80);
     expect(run.phase).not.toBe("DONE");
     expect(run.terminalReason).not.toBeNull();
-    expect(workerTokens(env, runId)).toBeLessThan(96_000);
-    expect(env.service.store.events.list(runId, { types: ["run.mechanisms"] }).length).toBeGreaterThan(0);
+    expect(env.service.store.repos.tasks.listByRun(runId).some((task) => task.state === "SATISFIED")).toBe(false);
+    const refused = env.service.store.repos.candidates.listByRun(runId)[0];
+    expect(refused?.gateReport?.failures[0]?.detail).toMatch(/claimed no change was needed, and checks do not pass on the unchanged base/);
   });
 
   it("stalls a replayed empty search before the budget is spent", async () => {

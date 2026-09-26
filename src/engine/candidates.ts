@@ -76,6 +76,8 @@ export type CandidateResultStatus =
   | "worker_failed"
   | "interrupted"
   | "no_changes"
+  /** No diff, the worker claimed its acceptance already holds, and the engine's gates on the base agreed. */
+  | "no_change_verified"
   | "error";
 
 export interface CandidateResult {
@@ -185,15 +187,46 @@ async function runOneCandidate<TTask>(
     const committed = await candidate.commitAll(`polish: candidate ${candidateId}`);
     headCommit = committed ?? await candidate.headCommit();
     if (headCommit === input.baseCheckpoint) {
-      return result({
-        candidateId,
+      if (workerOutcome.noChange === undefined) {
+        return result({
+          candidateId,
+          index,
+          model,
+          branch,
+          baseCheckpoint: input.baseCheckpoint,
+          status: "no_changes",
+          workerOutcome,
+        });
+      }
+      gate = await input.sandbox.create({
+        id: `${candidateId}-gate`,
+        baseCommit: input.baseCheckpoint,
+        policy: input.policy,
+        ...(input.projectEnv === undefined ? {} : { projectEnv: input.projectEnv }),
+      });
+      const gateResult = await runGates({
+        runId: input.runId,
+        commitHash: input.baseCheckpoint,
+        sandbox: gate,
+        gates: input.gates,
+        ...(input.corpus === undefined ? {} : { corpus: input.corpus }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+      const verdict = noChangeVerdict(gateResult, input.gates.profile);
+      return {
+        id: candidateId,
         index,
         model,
         branch,
         baseCheckpoint: input.baseCheckpoint,
-        status: "no_changes",
+        headCommit: input.baseCheckpoint,
+        status: verdict === null ? "no_change_verified" : "no_changes",
+        diffSummary,
+        gateResult,
+        evidenceRefs: collectEvidence(workerOutcome, gateResult),
         workerOutcome,
-      });
+        error: verdict,
+      };
     }
 
     diffSummary = await candidate.git.diffStat(input.baseCheckpoint, headCommit);
@@ -260,6 +293,26 @@ async function runOneCandidate<TTask>(
     await destroyQuietly(gate);
     await destroyQuietly(candidate);
   }
+}
+
+/**
+ * Whether gates on the unchanged base prove a no-change claim; null if they do, else why not.
+ *
+ * `passed` alone is not enough: it is judged against the baseline, and a check that failed there
+ * and still fails here is not a regression. For "nothing needed changing" every check has to pass
+ * outright, and there has to be at least one — no checks is no evidence.
+ */
+export function noChangeVerdict(gate: GateResult, profile: ProjectProfile): string | null {
+  if (!gate.passed) return "gates on the unchanged base did not pass";
+  const mandatory = new Set(profile.checks.filter((check) => check.mandatory).map((check) => check.name));
+  const ran = gate.checks.filter((check) => check.status !== "skipped");
+  if (ran.length === 0) return "no check ran on the unchanged base, so nothing shows the acceptance holds";
+  const failing = gate.checks.filter((check) =>
+    check.status === "skipped" ? mandatory.has(check.name) : check.status !== "pass");
+  if (failing.length > 0) {
+    return `checks do not pass on the unchanged base: ${failing.map((check) => `${check.name}=${check.status}`).join(", ")}`;
+  }
+  return null;
 }
 
 /**

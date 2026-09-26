@@ -29,11 +29,37 @@ export interface ChangedFileStatus {
  * no prompts. Every call is a subprocess so it is trivially loggable by callers.
  */
 export class Git {
+  private readonly excluded = new Set<string>();
+
   constructor(
     readonly cwd: string,
     private readonly timeoutMs = 120_000,
     private readonly maxOutputBytes = 8 * 1024 * 1024,
   ) {}
+
+  /**
+   * Leave these worktree-relative paths out of commits, working-tree diffs and untracked listings.
+   * They are what a dependency install wrote into a checkout, not anyone's work.
+   */
+  exclude(paths: readonly string[]): void {
+    for (const path of paths) {
+      if (path !== "" && !isAbsolute(path) && !path.split(/[\\/]/).includes("..")) this.excluded.add(path);
+    }
+  }
+
+  excludedPaths(): string[] {
+    return [...this.excluded].sort();
+  }
+
+  private pathspec(): string[] {
+    return this.excluded.size === 0 ? [] : ["--", ".", ...this.excludedPaths().map((path) => `:(exclude)${path}`)];
+  }
+
+  /** Untracked, not ignored, and not excluded. */
+  async untrackedFiles(): Promise<string[]> {
+    const text = await this.out(["ls-files", "--others", "--exclude-standard", ...this.pathspec()]);
+    return text.split("\n").map((line) => line.trim()).filter(Boolean);
+  }
 
   static async init(dir: string, initialBranch = "main"): Promise<Git> {
     const git = new Git(dir);
@@ -91,12 +117,12 @@ export class Git {
       return text.split("\n").map((l) => l.slice(3).trim()).filter(Boolean);
     }
     const [diff, untracked] = await Promise.all([
-      this.out(["diff", "--name-only", base]),
-      this.out(["ls-files", "--others", "--exclude-standard"]),
+      this.out(["diff", "--name-only", base, ...this.pathspec()]),
+      this.untrackedFiles(),
     ]);
     const seen = new Set<string>();
     const files: string[] = [];
-    for (const line of [...diff.split("\n"), ...untracked.split("\n")]) {
+    for (const line of [...diff.split("\n"), ...untracked]) {
       const path = line.trim();
       if (!path || seen.has(path)) continue;
       seen.add(path);
@@ -178,11 +204,8 @@ export class Git {
    * Unlike `diff(base, head)` this is not limited to the committed range.
    */
   async diffAgainst(base: string): Promise<string> {
-    const tracked = await this.out(["diff", "--no-color", base]);
-    const untracked = (await this.out(["ls-files", "--others", "--exclude-standard"]))
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const tracked = await this.out(["diff", "--no-color", base, ...this.pathspec()]);
+    const untracked = await this.untrackedFiles();
     if (untracked.length === 0) return tracked;
     const parts: string[] = tracked === "" ? [] : [tracked];
     for (const rel of untracked) {
@@ -209,7 +232,7 @@ export class Git {
 
   /** Stage everything and commit; returns the new commit or null when nothing changed. */
   async commitAll(message: string): Promise<string | null> {
-    await this.run(["add", "-A"]);
+    await this.run(["add", "-A", ...this.pathspec()]);
     const staged = await this.run(["diff", "--cached", "--quiet"], { allowFailure: true });
     if (staged.exitCode === 0) return null;
     await this.run(["commit", "-q", "--no-verify", "-m", message]);

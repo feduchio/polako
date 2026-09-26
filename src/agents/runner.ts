@@ -27,12 +27,35 @@ import type {
   CandidateWorker,
   LoopEvidence,
   WorkerOutcome,
+  WorkerNoChange,
   WorkerReproduction,
 } from "./types.js";
 
 interface FinishArgs {
   summary: string;
   reproduction?: WorkerReproduction;
+  noChange?: WorkerNoChange;
+}
+
+/**
+ * "Nothing to change" is a claim like any other. The worker has to have watched a check pass on
+ * the code as it stands, and must not have changed that code; the engine still re-runs the gates.
+ */
+function validateNoChange(value: unknown, diff: string, loopEvidence: LoopEvidence): WorkerNoChange {
+  const reason = record(value, "finish noChange")["reason"];
+  if (typeof reason !== "string" || reason.trim() === "") {
+    throw new PolishError("INVALID_ARGUMENT", "finish rejected: noChange.reason must be a non-empty string");
+  }
+  if (diff.trim() !== "") {
+    throw new PolishError("INVALID_ARGUMENT", "finish rejected: noChange with a non-empty diff; revert the edits or finish without noChange");
+  }
+  if (loopEvidence.passedCommands.length === 0) {
+    throw new PolishError(
+      "INVALID_ARGUMENT",
+      "finish rejected: noChange needs an acceptance check run with run_command in this loop that exited 0",
+    );
+  }
+  return { reason };
 }
 import { progressStateFingerprint, shouldAbandonProgress } from "./progressTracker.js";
 import { sha256Hex } from "../shared/hash.js";
@@ -84,6 +107,7 @@ export class AgentRunner implements CandidateWorker {
     let status: AgentRunStatus = "STOPPED";
     let output: string | null = null;
     let reproduction: WorkerReproduction | null = null;
+    let noChange: WorkerNoChange | null = null;
     let acceptedEvidence: LoopEvidence | null = null;
     const repeats = new Map<string, { count: number; diffHash: string }>();
     const progressTracker = this.deps.createProgressTracker?.(task) ?? null;
@@ -152,6 +176,7 @@ export class AgentRunner implements CandidateWorker {
           acceptedEvidence = loopEvidence;
           output = result.finish.summary;
           reproduction = result.finish.reproduction ?? null;
+          noChange = result.finish.noChange ?? null;
           status = "FINISHED";
           break;
         }
@@ -222,6 +247,7 @@ export class AgentRunner implements CandidateWorker {
       loopEvidence: acceptedEvidence,
       output,
       reproduction,
+      noChange,
       startedAt,
       progress,
       protocolHash: composed?.protocolHash ?? null,
@@ -299,10 +325,14 @@ export class AgentRunner implements CandidateWorker {
     }
     if (task.touchesProductCode) {
       const diff = await worktree.git.diffAgainst(worktree.baseCommit);
+      if (args["noChange"] !== undefined) {
+        return { summary, noChange: validateNoChange(args["noChange"], diff, loopEvidence) };
+      }
       if (diff.trim() === "") {
         throw new PolishError(
           "INVALID_ARGUMENT",
-          "finish rejected: coding task requires a non-empty worktree diff vs base checkpoint",
+          "finish rejected: coding task requires a non-empty worktree diff vs base checkpoint, " +
+            "or noChange.reason after a passing acceptance check",
         );
       }
     }
@@ -346,6 +376,7 @@ export class AgentRunner implements CandidateWorker {
     loopEvidence: LoopEvidence | null;
     output: string | null;
     reproduction: WorkerReproduction | null;
+    noChange: WorkerNoChange | null;
     startedAt: number;
     protocolHash: string | null;
     progress: AgentProgressRecord[];
@@ -375,6 +406,7 @@ export class AgentRunner implements CandidateWorker {
       status: input.status,
       output: input.output,
       reproduction: input.reproduction,
+      noChange: input.noChange,
       loopEvidence: input.loopEvidence,
       turns: input.turns.length,
       totalTokens: input.totalTokens,
@@ -448,6 +480,7 @@ function toWorkerOutcome(result: AgentLoopResult): WorkerOutcome {
       evidenceRefs: result.evidenceRefs,
       transcriptRef: result.transcriptRef,
       ...(result.reproduction === null ? {} : { reproduction: result.reproduction }),
+      ...(result.noChange === null ? {} : { noChange: result.noChange }),
     };
   }
   return {

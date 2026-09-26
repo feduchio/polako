@@ -13,6 +13,8 @@ export type WorkerOutcome =
       transcriptRef?: ArtifactRef | null;
       /** An investigation's claim of how to reproduce; the engine runs it, never trusts it. */
       reproduction?: WorkerReproduction;
+      /** A coding task's claim that its acceptance already holds; the engine's gates decide. */
+      noChange?: WorkerNoChange;
     }
   | {
       status: "failed" | "interrupted";
@@ -54,6 +56,8 @@ export interface LoopEvidence {
   writes: string[];
   patches: string[];
   commandOutputRefs: ArtifactRef[];
+  /** argv of every run_command in this loop that exited 0. */
+  passedCommands: string[][];
 }
 
 export interface AgentToolResult {
@@ -147,10 +151,15 @@ export interface WorkerReproduction {
   argv: string[];
 }
 
+export interface WorkerNoChange {
+  reason: string;
+}
+
 export interface AgentLoopResult {
   status: AgentRunStatus;
   output: string | null;
   reproduction: WorkerReproduction | null;
+  noChange: WorkerNoChange | null;
   loopEvidence: LoopEvidence | null;
   turns: number;
   totalTokens: number;

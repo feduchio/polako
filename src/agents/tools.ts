@@ -56,16 +56,19 @@ export const AGENT_TOOL_DEFINITIONS: ToolSpec[] = [
     name: "finish",
     description:
       "Finish with a summary after producing fresh loop evidence. An investigation finishes with reproduction.argv: " +
-      "the command that fails on this checkout if the finding is real and passes if it is not; the engine re-runs it itself.",
+      "the command that fails on this checkout if the finding is real and passes if it is not; the engine re-runs it itself. " +
+      "A coding task whose acceptance already holds finishes with noChange.reason, after run_command showed a passing check; " +
+      "the engine then runs the gates on the unchanged code and decides.",
     parameters: objectSchema({
       summary: { type: "string" },
       reproduction: objectSchema({ argv: { type: "array", items: { type: "string" }, minItems: 1 } }, ["argv"]),
+      noChange: objectSchema({ reason: { type: "string" } }, ["reason"]),
     }, ["summary"]),
   },
 ];
 
 export function createLoopEvidence(): LoopEvidence {
-  return { writes: [], patches: [], commandOutputRefs: [] };
+  return { writes: [], patches: [], commandOutputRefs: [], passedCommands: [] };
 }
 
 export function createAgentTools(deps: AgentToolsDeps): AgentTools {
@@ -160,6 +163,7 @@ export function createAgentTools(deps: AgentToolsDeps): AgentTools {
           };
           const outputRef = deps.artifacts.put(JSON.stringify(logged), "agent_command_output", argv.join(" "));
           deps.loopEvidence.commandOutputRefs.push(outputRef);
+          if (result.exitCode === 0 && !result.timedOut) deps.loopEvidence.passedCommands.push([...argv]);
           return { ...logged, outputRef };
         }
         case "request_context": {

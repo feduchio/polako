@@ -247,6 +247,12 @@ export interface EnsureDependenciesResult {
   repositorySide?: boolean;
   /** The full process result, so a timeout or an abort is distinguishable from an exit code. */
   output?: ProcessResult;
+  /**
+   * Top-level paths the install created that git would otherwise treat as new work — typically
+   * `node_modules` in a repository that does not ignore it. The sandbox's git leaves them out of
+   * commits and diffs from here on.
+   */
+  installedPaths?: string[];
 }
 
 /**
@@ -286,6 +292,7 @@ export async function ensureProjectDependencies(
   const runOpts: { timeoutMs: number; signal?: AbortSignal } = { timeoutMs: options.timeoutMs };
   if (options.signal !== undefined) runOpts.signal = options.signal;
   options.onStart?.({ command: argv, timeoutMs: options.timeoutMs });
+  const untrackedBefore = await topLevelUntracked(sandbox);
   let result: ProcessResult;
   try {
     result = await sandbox.run(argv, runOpts);
@@ -307,9 +314,10 @@ export async function ensureProjectDependencies(
     // this case has to name both possibilities.
     return { attempted: true, ready: false, detail: `install exited ${String(result.exitCode)}`, output: result };
   }
+  const installedPaths = await excludeInstalledPaths(sandbox, untrackedBefore);
   const stillMissing = dependenciesUnavailableFor(sandbox, profile);
   return stillMissing === null
-    ? { attempted: true, ready: true, detail: null, output: result }
+    ? { attempted: true, ready: true, detail: null, output: result, ...(installedPaths.length === 0 ? {} : { installedPaths }) }
     : {
         attempted: true,
         ready: false,
@@ -317,6 +325,27 @@ export async function ensureProjectDependencies(
         detail: "install succeeded but dependencies are still unreachable",
         output: result,
       };
+}
+
+/** Top-level untracked, non-ignored entries; null when the sandbox has no git to ask. */
+async function topLevelUntracked(sandbox: SandboxHandle): Promise<Set<string> | null> {
+  const git = sandbox.git as SandboxHandle["git"] | undefined;
+  if (git === undefined || typeof git.out !== "function") return null;
+  try {
+    const text = await git.out(["ls-files", "--others", "--exclude-standard", "--directory", "--no-empty-directory"]);
+    return new Set(text.split("\n").map((line) => line.trim().split("/")[0] ?? "").filter((entry) => entry !== ""));
+  } catch {
+    return null;
+  }
+}
+
+async function excludeInstalledPaths(sandbox: SandboxHandle, before: Set<string> | null): Promise<string[]> {
+  if (before === null) return [];
+  const after = await topLevelUntracked(sandbox);
+  if (after === null) return [];
+  const installed = [...after].filter((entry) => !before.has(entry)).sort();
+  if (installed.length > 0 && typeof sandbox.git.exclude === "function") sandbox.git.exclude(installed);
+  return installed;
 }
 
 /**

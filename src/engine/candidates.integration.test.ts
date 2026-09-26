@@ -13,6 +13,7 @@ import { WorktreeSandbox } from "../sandbox/worktree.js";
 import { id } from "../shared/ids.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
 import {
+  noChangeVerdict,
   runCandidatesParallel,
   runGates,
   ScriptedCandidateWorker,
@@ -521,3 +522,39 @@ async function unpreparedRepositoryFixture(options: { admitInstall?: boolean } =
     },
   };
 }
+
+describe("noChangeVerdict", () => {
+  const check = (name: string, status: CheckResult["status"]): CheckResult => ({
+    name,
+    kind: "test",
+    status,
+    exitCode: status === "pass" ? 0 : 1,
+    durationMs: 1,
+    summary: null,
+    outputRef: null,
+  });
+  const gate = (checks: CheckResult[], passed = true) => ({
+    checks,
+    silencing: [],
+    acceptanceProblems: [],
+    candidateProtectedPathProblems: [],
+    regression: { newlyFailing: [], newlyPassing: [], degradedChecks: [], improvedChecks: [] },
+    passed,
+  }) as unknown as Parameters<typeof noChangeVerdict>[0];
+  const profile = {
+    checks: [
+      { name: "test", kind: "test", command: ["npm", "run", "test"], mandatory: true },
+      { name: "lint", kind: "lint", command: ["npm", "run", "lint"], mandatory: false },
+    ],
+  } as unknown as ProjectProfile;
+
+  it("needs every check to pass outright, not merely to match the baseline", () => {
+    expect(noChangeVerdict(gate([check("test", "pass")]), profile)).toBeNull();
+    expect(noChangeVerdict(gate([check("test", "pass"), check("lint", "skipped")]), profile)).toBeNull();
+    expect(noChangeVerdict(gate([check("test", "fail")]), profile)).toBe("checks do not pass on the unchanged base: test=fail");
+    expect(noChangeVerdict(gate([check("test", "skipped")]), profile)).toMatch(/no check ran/);
+    expect(noChangeVerdict(gate([check("test", "skipped"), check("lint", "pass")]), profile)).toBe("checks do not pass on the unchanged base: test=skipped");
+    expect(noChangeVerdict(gate([]), profile)).toMatch(/no check ran/);
+    expect(noChangeVerdict(gate([check("test", "pass")], false), profile)).toBe("gates on the unchanged base did not pass");
+  });
+});

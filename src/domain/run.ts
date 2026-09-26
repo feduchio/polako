@@ -135,6 +135,8 @@ export function mustCancelInFlight(control: RunControl): boolean {
 export const TerminalReasonSchema = z.object({
   code: z.enum([
     "converged",
+    /** Converged on the baseline: the engine's own gates showed every coding task's acceptance already held. */
+    "no_change_required",
     "stopped_by_user",
     "killed_by_user",
     "ambiguous_intent",

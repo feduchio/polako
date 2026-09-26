@@ -219,9 +219,8 @@ async function isolatedCheckout(ctx: PhaseContext, deps: InvestigationDeps, find
   return handle;
 }
 
-async function untracked(handle: SandboxHandle): Promise<string[]> {
-  const text = await handle.git.out(["ls-files", "--others", "--exclude-standard"]);
-  return text.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+function untracked(handle: SandboxHandle): Promise<string[]> {
+  return handle.git.untrackedFiles();
 }
 
 function retryOrBlock(ctx: PhaseContext, task: Task, finding: Finding, reason: string): PhaseDriverResult {

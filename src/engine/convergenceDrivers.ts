@@ -8,6 +8,7 @@ import type { Run } from "../domain/run.js";
 import { currentReviewRoundIndex } from "../domain/review.js";
 import {
   assertCodeChangeMissionMayComplete,
+  missionSatisfiedWithoutChange,
   ConvergenceController,
   createRollbackCheckpoint,
   type EnsembleOption,
@@ -79,6 +80,16 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions = {}):
         return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason: unverified };
       }
       emitFinalReport(ctx);
+      if (missionSatisfiedWithoutChange(evidence.tasks)) {
+        return {
+          status: "complete",
+          nextPhase: "DONE",
+          terminalReason: {
+            code: "no_change_required",
+            summary: "No code was changed: the engine's gates on the unchanged base passed for every coding task, and review found nothing.",
+          },
+        };
+      }
       return { status: "complete", nextPhase: "DONE" };
     }
 

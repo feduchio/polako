@@ -103,6 +103,8 @@ export function assertCodeChangeMissionMayComplete(evidence: MissionCompletionEv
     );
   }
 
+  if (missionSatisfiedWithoutChange(evidence.tasks)) return assertNoChangeProven(evidence, codingTasks);
+
   const workerExecutions = evidence.candidates.filter((candidate) => CANDIDATE_WORKER_STATES.has(candidate.state));
   if (workerExecutions.length === 0) {
     return fail("change-required mission has no worker executions");
@@ -153,6 +155,47 @@ export function assertCodeChangeMissionMayComplete(evidence: MissionCompletionEv
     return fail("clean rounds lack completed review proof");
   }
 
+  return { ok: true };
+}
+
+/** Every coding task ended SATISFIED: its acceptance was shown to hold on its base, with no diff. */
+export function missionSatisfiedWithoutChange(tasks: readonly Task[]): boolean {
+  const coding = tasks.filter(isCodingTask);
+  return coding.length > 0 && coding.every((task) => task.state === "SATISFIED");
+}
+
+/**
+ * The one way a change-required mission may end on its baseline: each coding task has a candidate
+ * whose gates, run by the engine on that task's unchanged base, passed; the run never moved off the
+ * baseline; and the unchanged code was still reviewed to the same standard as a diff would be.
+ */
+function assertNoChangeProven(evidence: MissionCompletionEvidence, codingTasks: readonly Task[]): MissionMayCompleteResult {
+  for (const task of codingTasks) {
+    const proof = evidence.candidates.some((candidate) =>
+      candidate.taskId === task.id &&
+      candidate.gateReport?.passed === true &&
+      candidate.gateReport.gatedCommit === task.baseCheckpointHash);
+    if (!proof) return fail(`no-change task ${task.id} has no passing gates on its base`);
+  }
+  if (evidence.checkpoints.some((checkpoint) => checkpoint.source === "integration")) {
+    return fail("no-change mission has integrated code changes");
+  }
+  if (
+    evidence.currentCheckpointHash !== null &&
+    evidence.baselineCommitHash !== null &&
+    evidence.currentCheckpointHash !== evidence.baselineCommitHash
+  ) {
+    return fail("no-change mission moved off its baseline checkpoint");
+  }
+  if (!evidence.reviewExecutions.some((execution) => execution.completed)) {
+    return fail("no-change mission has no actual review executions");
+  }
+  if (
+    evidence.currentCheckpointHash !== null &&
+    !cleanRoundsHaveReviewProof(evidence.cleanRounds, evidence.currentCheckpointHash, evidence.reviewExecutions, evidence.requiredReviewers)
+  ) {
+    return fail("clean rounds lack completed review proof");
+  }
   return { ok: true };
 }
 

@@ -1,5 +1,6 @@
 export {
   assertCodeChangeMissionMayComplete,
+  missionSatisfiedWithoutChange,
   hasContinuableCodingWork,
   incompleteCodingWorkTerminal,
   isAcceptableTerminalForDone,

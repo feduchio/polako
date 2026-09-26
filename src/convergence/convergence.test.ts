@@ -7,6 +7,7 @@ import { id } from "../shared/ids.js";
 import {
   assertCodeChangeMissionMayComplete,
   missionRequiresCodeChange,
+  missionSatisfiedWithoutChange,
   type MissionCompletionEvidence,
 } from "./antiFakeDone.js";
 import { ConvergenceController } from "./controller.js";
@@ -444,6 +445,63 @@ describe("anti-fake-DONE", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toMatch(/baseline/);
+  });
+
+  it("allows ending on the baseline only when every coding task is SATISFIED with gates on its base", () => {
+    const evidence = baseEvidence();
+    const task = { ...evidence.tasks[0]!, state: "SATISFIED" as const };
+    const candidate = evidence.candidates[0]!;
+    const proof = {
+      ...candidate,
+      headCommit: HASH_A,
+      state: "DISCARDED" as const,
+      error: "no_change_verified: already holds",
+      gateReport: { ...candidate.gateReport!, gatedCommit: HASH_A, diffStat: { files: 0, insertions: 0, deletions: 0 } },
+    };
+    const reviewExecutions = [
+      reviewExecution(HASH_A, 1, "correctness", "m1"),
+      reviewExecution(HASH_A, 1, "regression", "m2"),
+      reviewExecution(HASH_A, 1, "adversarial", "m3"),
+    ];
+    const cleanRound = buildCleanRoundFromReview({
+      runId: RUN_ID,
+      checkpointHash: HASH_A,
+      requiredReviewers: 3,
+      reviewExecutions,
+      findings: [],
+      existingCleanRounds: [],
+      reviewRoundIndex: 1,
+      now: NOW,
+    });
+    const noChange = {
+      ...evidence,
+      tasks: [task],
+      candidates: [proof],
+      checkpoints: [checkpoint(0, HASH_A)],
+      reviewExecutions,
+      cleanRounds: [cleanRound],
+      currentCheckpointHash: HASH_A,
+    };
+    expect(missionSatisfiedWithoutChange(noChange.tasks)).toBe(true);
+    expect(assertCodeChangeMissionMayComplete(noChange)).toEqual({ ok: true });
+
+    const gatesFailed = assertCodeChangeMissionMayComplete({
+      ...noChange,
+      candidates: [{ ...proof, gateReport: { ...proof.gateReport, passed: false } }],
+    });
+    expect(gatesFailed).toMatchObject({ ok: false, reason: expect.stringMatching(/has no passing gates on its base/) });
+    const gatedElsewhere = assertCodeChangeMissionMayComplete({
+      ...noChange,
+      candidates: [{ ...proof, gateReport: { ...proof.gateReport, gatedCommit: HASH_B } }],
+    });
+    expect(gatedElsewhere.ok).toBe(false);
+    const unreviewed = assertCodeChangeMissionMayComplete({ ...noChange, reviewExecutions: [], cleanRounds: [] });
+    expect(unreviewed).toMatchObject({ ok: false, reason: expect.stringMatching(/no actual review executions/) });
+    const moved = assertCodeChangeMissionMayComplete({ ...noChange, currentCheckpointHash: HASH_B });
+    expect(moved).toMatchObject({ ok: false, reason: expect.stringMatching(/moved off its baseline/) });
+
+    const mixed = { ...evidence, tasks: [task, { ...evidence.tasks[0]!, id: id("task", NOW + 3) }] };
+    expect(missionSatisfiedWithoutChange(mixed.tasks)).toBe(false);
   });
 
   it("rejects change-required missions with zero workers, candidates, gates, and reviews", () => {

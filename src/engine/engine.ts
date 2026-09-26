@@ -291,7 +291,7 @@ export class RunEngine {
     };
     this.append(runId, "run.phase_changed", { run: next }, SYSTEM_ACTOR);
     if (nextPhase === "DONE") {
-      this.terminate(next, { code: "converged", summary: "required clean rounds reached" });
+      this.terminate(next, resolved ?? { code: "converged", summary: "required clean rounds reached" });
     }
     if (nextPhase === "FAILED" && resolved !== undefined) {
       this.terminate(next, resolved);

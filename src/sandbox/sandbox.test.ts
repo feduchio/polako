@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -271,6 +271,22 @@ describe("WorktreeSandbox", () => {
     expect(await h.changedFiles(base)).toEqual(["planted-protected.test.ts"]);
     expect(await h.git.diffAgainst(base)).toContain("+++ b/planted-protected.test.ts");
     expect(await h.git.diffAgainst(base)).toContain("+untracked plant");
+    await h.destroy();
+  });
+
+  it("leaves excluded install paths out of commits, diffs and untracked listings", async () => {
+    const policy = CommandPolicy.forProject([], null);
+    const h = await sandbox.create({ id: "installed", baseCommit: base, branch: "polish/installed", policy });
+    mkdirSync(join(h.path, "node_modules", "pad"), { recursive: true });
+    writeFileSync(join(h.path, "node_modules", "pad", "index.js"), "module.exports = 1;\n");
+    writeFileSync(join(h.path, "b.txt"), "work\n");
+    h.git.exclude(["node_modules", "../escape", ""]);
+    expect(h.git.excludedPaths()).toEqual(["node_modules"]);
+    expect(await h.changedFiles(base)).toEqual(["b.txt"]);
+    expect(await h.git.untrackedFiles()).toEqual(["b.txt"]);
+    expect(await h.git.diffAgainst(base)).not.toContain("node_modules");
+    const commit = await h.commitAll("work only");
+    expect(await repo.out(["ls-tree", "-r", "--name-only", commit!])).toBe("a.txt\nb.txt");
     await h.destroy();
   });
 

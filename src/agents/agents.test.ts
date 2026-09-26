@@ -487,6 +487,54 @@ describe("AgentRunner", () => {
     store.close();
   });
 
+  it("accepts noChange only without a diff and after a passing run_command", async () => {
+    const fixture = await repositoryFixture();
+    cleanup.push(fixture.root);
+    const store = openStore({ artifactsDir: join(fixture.root, "artifacts") });
+    const { provider, deps } = harness(store, fixture.policy, { maxTurns: 8, maxTokens: 10_000 });
+    const noChange = { reason: "add already sums" };
+    const unchanged = readFileSync(join(fixture.repoDir, "src/math.ts"), "utf8");
+    provider.script("worker", [
+      replyWith(tool("write", { path: "src/math.ts", content: unchanged }, "same-bytes")),
+      replyWith(tool("finish", { summary: "fine", noChange }, "finish-no-command")),
+      replyWith(tool("write", { path: "notes.txt", content: "scratch\n" }, "scratch")),
+      replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "check")),
+      replyWith(tool("finish", { summary: "fine", noChange }, "finish-with-diff")),
+    ]);
+    const handle = await fixture.sandbox.create({
+      id: id("cand"),
+      baseCommit: fixture.base,
+      branch: "polish/test/no-change-finish",
+      policy: fixture.policy,
+    });
+    const outcome = await new AgentRunner(deps).run(codingTask(fixture.runId, fixture.base), handle);
+    const replies = provider.calls.map((call) => call.messages.at(-1)?.content ?? "");
+    expect(replies[2]).toContain("noChange needs an acceptance check run with run_command");
+    expect(replies[5]).toContain("noChange with a non-empty diff");
+    expect(outcome.status).not.toBe("completed");
+    await handle.destroy();
+
+    const clean = await repositoryFixture();
+    cleanup.push(clean.root);
+    const cleanStore = openStore({ artifactsDir: join(clean.root, "artifacts") });
+    const second = harness(cleanStore, clean.policy, { maxTurns: 4, maxTokens: 10_000 });
+    second.provider.script("worker", [
+      replyWith(tool("run_command", { argv: ["node", "-e", "console.log('ok')"] }, "check")),
+      replyWith(tool("finish", { summary: "fine", noChange }, "finish-ok")),
+    ]);
+    const cleanHandle = await clean.sandbox.create({
+      id: id("cand"),
+      baseCommit: clean.base,
+      branch: "polish/test/no-change-ok",
+      policy: clean.policy,
+    });
+    expect(await new AgentRunner(second.deps).run(codingTask(clean.runId, clean.base), cleanHandle))
+      .toMatchObject({ status: "completed", noChange });
+    await cleanHandle.destroy();
+    store.close();
+    cleanStore.close();
+  });
+
   it("an investigation finishes with a reproduction command and may only add files", async () => {
     const fixture = await repositoryFixture();
     cleanup.push(fixture.root);
