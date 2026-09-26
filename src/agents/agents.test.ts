@@ -349,6 +349,7 @@ describe("AgentRunner", () => {
       policy: fixture.policy,
     });
     writeFileSync(join(handle.path, "src/calc.mjs"), "export function add(a, b) {\n  return a + b;\n}\n");
+    writeFileSync(join(handle.path, "src/blob.bin"), Buffer.from("add(\0\x01", "binary"));
     const sandbox = { ...handle, run: () => Promise.reject(new Error("spawn rg ENOENT")) };
     provider.script("worker", [
       replyWith(tool("search", { query: "add\\(", path: "." }, "hit")),
@@ -1186,6 +1187,9 @@ describe("agent tools", () => {
     await tools.execute("write", { path: "src/crlf.mjs", content: "export const a = 1;" });
     await tools.execute("write", { path: "src/bare.mjs", content: "export const a = 2;" });
     await tools.execute("write", { path: "src/new.mjs", content: "export const b = 1;" });
+    writeFileSync(join(handle.path, "src/emptied.mjs"), "export const a = 1;\n");
+    await tools.execute("write", { path: "src/emptied.mjs", content: "" });
+    expect(readFileSync(join(handle.path, "src/emptied.mjs"), "utf8")).toBe("");
     expect(readFileSync(join(handle.path, "src/lf.mjs"), "utf8")).toBe("export const a = 1;\n");
     expect(readFileSync(join(handle.path, "src/crlf.mjs"), "utf8")).toBe("export const a = 1;\r\n");
     expect(readFileSync(join(handle.path, "src/bare.mjs"), "utf8")).toBe("export const a = 2;");
