@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import type { ProjectProfile } from "../project/profile.js";
-import { intakeCouncilPayload } from "./profileHints.js";
+import { baselineVerdict, intakeCouncilPayload } from "./profileHints.js";
 import { createMission } from "../domain/mission.js";
 import { buildBaselineEvidenceView } from "../project/baselineEvidence.js";
 
@@ -80,5 +80,14 @@ describe("intake payload evidence boundary", () => {
       commitHash: BASELINE.commitHash,
     });
     expect(Array.isArray(execution["baselineEvidence"])).toBe(true);
+  });
+});
+
+describe("baselineVerdict", () => {
+  const check = (name: string, status: "pass" | "fail") => ({ name, status }) as BaselineSnapshot["checks"][number];
+  it("says in one sentence whether the base passed", () => {
+    expect(baselineVerdict({ checks: [check("test", "pass")] } as BaselineSnapshot)).toBe("every check passed on the unchanged base: test");
+    expect(baselineVerdict({ checks: [check("test", "fail"), check("lint", "pass")] } as BaselineSnapshot)).toBe("on the unchanged base, test is fail; 1 other check(s) passed");
+    expect(baselineVerdict({ checks: [] } as unknown as BaselineSnapshot)).toBe("no check ran on the base");
   });
 });

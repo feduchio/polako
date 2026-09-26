@@ -881,10 +881,12 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
   const progressModels = selectProgressModels(deps);
   return (index: number) => {
     appendRunMechanisms(deps, ctx);
-    const model = ranked[index % Math.max(ranked.length, 1)]?.entry.info.ref ?? {
-      provider: deps.providers[0]?.id ?? "scripted",
-      model: "default",
-    };
+    // No eligible worker is a state of the providers, said as such; a model named "default" that
+    // no provider serves spent both attempts of the first live trial on a 400.
+    const model = ranked[index % Math.max(ranked.length, 1)]?.entry.info.ref;
+    if (model === undefined) {
+      throw new PolishError("PROVIDERS_UNAVAILABLE", "no worker model is eligible: none of the catalogue's models passes the worker role's requirements and cost policy right now");
+    }
     const client = brokerCouncilClient(deps.broker);
     return new AgentRunner({
       // The one seam between the worker loop and the broker, so `routing.disableReasoning` is
