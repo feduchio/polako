@@ -10,7 +10,7 @@ import type { GateReport, Candidate, CandidateState } from "../domain/candidate.
 import type { GateFailureReason } from "../domain/candidate.js";
 import { emptyFindingCounts, type Checkpoint, type EvidenceVector } from "../domain/checkpoint.js";
 import { SYSTEM_ACTOR, type ArtifactRef } from "../domain/common.js";
-import type { PolishConfig } from "../domain/config.js";
+import { dependencyCacheDir, type PolishConfig } from "../domain/config.js";
 import type { TerminalReason as RunTerminalReason } from "../domain/run.js";
 import type { NewEvent } from "../domain/event.js";
 import type { CheckpointChangeRecord } from "../domain/convergence.js";
@@ -1228,6 +1228,7 @@ export async function resolveGates(ctx: PhaseContext, options: CandidateDriverOp
     prepareDependencies: {
       enabled: ctx.config.sandbox.installDependencies,
       timeoutMs: ctx.config.sandbox.installTimeoutMs,
+      ...cacheDirOption(ctx),
     },
     // Same start/finish forensic path as the baseline install: announced before it runs, and the
     // whole ProcessResult persisted after, as docs/THREAT_MODEL.md requires of any command.
@@ -1427,4 +1428,9 @@ function appendIntegrationEvent(
     artifacts: [],
   }]);
   return eventId;
+}
+
+function cacheDirOption(ctx: PhaseContext): { cacheDir?: string } {
+  const dir = dependencyCacheDir(ctx.config);
+  return dir === null ? {} : { cacheDir: dir };
 }

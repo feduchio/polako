@@ -4,7 +4,7 @@
  * kill them. The host checkout is never modified; mutants run in a /tmp copy that is removed at
  * the end.
  *
- *   node scripts/mutate-touched.mjs [base-ref] [--limit N|all]
+ *   node scripts/mutate-touched.mjs [base-ref] [--limit N|all] [--only path,path…]
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -15,7 +15,10 @@ const root = join(dirname(new URL(import.meta.url).pathname), "..");
 const limitFlag = process.argv.indexOf("--limit");
 const limitValue = limitFlag === -1 ? "8" : process.argv[limitFlag + 1];
 const limit = limitValue === "all" ? Number.POSITIVE_INFINITY : Number(limitValue);
-const args = process.argv.slice(2).filter((arg, index, all) => arg !== "--limit" && all[index - 1] !== "--limit");
+const onlyFlag = process.argv.indexOf("--only");
+const only = onlyFlag === -1 ? null : (process.argv[onlyFlag + 1] ?? "").split(",").filter((path) => path !== "");
+const valueFlags = new Set(["--limit", "--only"]);
+const args = process.argv.slice(2).filter((arg, index, all) => !valueFlags.has(arg) && !valueFlags.has(all[index - 1] ?? ""));
 const base = args[0] ?? "HEAD~1";
 
 const diff = execFileSync("git", ["diff", "-U0", `${base}..HEAD`, "--", "src"], {
@@ -44,6 +47,7 @@ for (const line of diff.split("\n")) {
   // src/e2e is the scenario harness only tests import: flipping its guards changes how a broken
   // test fails, not what the product does.
   if (!file.endsWith(".ts") || file.endsWith(".test.ts") || file.startsWith("src/e2e/")) continue;
+  if (only !== null && !only.includes(file)) continue;
   const match = line.slice(1).match(/if\s*\(([^()]*)\)/);
   if (match === null) continue;
   touched.push({ file, line: lineNumber, condition: match[1], from: match[0] });

@@ -65,7 +65,7 @@ export interface CandidateGates {
    * This field only carries the configured values, so losing it loses the setting, not the step.
    * Finding 54.
    */
-  prepareDependencies?: { enabled: boolean; timeoutMs: number };
+  prepareDependencies?: { enabled: boolean; timeoutMs: number; cacheDir?: string };
   /** Fired before the install command runs, so a crash mid-install still leaves a record. */
   onDependencyInstallStart?: (info: { command: readonly string[]; timeoutMs: number }) => void;
   onDependencyInstall?: (result: EnsureDependenciesResult) => void;
@@ -389,6 +389,7 @@ export async function prepareWorkerCheckout(
       timeoutMs: gates.prepareDependencies?.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS,
       ...(signal === undefined ? {} : { signal }),
       ...(gates.onDependencyInstallStart === undefined ? {} : { onStart: gates.onDependencyInstallStart }),
+      ...(gates.prepareDependencies?.cacheDir === undefined ? {} : { cacheDir: gates.prepareDependencies.cacheDir }),
     });
     gates.onDependencyInstall?.(result);
   } catch (error) {

@@ -256,6 +256,8 @@ export const SandboxConfigSchema = z.object({
    */
   installDependencies: z.boolean().default(DEFAULT_INSTALL_DEPENDENCIES),
   installTimeoutMs: z.number().int().min(1000).default(DEFAULT_INSTALL_TIMEOUT_MS),
+  /** Keep installed dependency trees by lockfile under `<home>/dep-cache` and clone them into checkouts. */
+  dependencyCache: z.boolean().default(true),
   envAllowlist: z.array(z.string()).default(["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "SHELL", "USER"]),
   envDenyPatterns: z
     .array(z.string())
@@ -381,4 +383,9 @@ export function withRuntimeValidationMode(
 /** The per-attempt worker token cap, or null for none. */
 export function attemptTokenCap(budget: { maxAttemptTokens: number | null; maxTaskTokens: number | null }): number | null {
   return budget.maxAttemptTokens ?? budget.maxTaskTokens;
+}
+
+/** Where installed dependency trees are cached, or null: only under a resolved (absolute) home. */
+export function dependencyCacheDir(config: { home: string; sandbox: { dependencyCache: boolean } }): string | null {
+  return config.sandbox.dependencyCache && config.home.startsWith("/") ? `${config.home.replace(/\/$/, "")}/dep-cache` : null;
 }

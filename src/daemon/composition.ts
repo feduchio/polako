@@ -26,7 +26,7 @@ import { createRoleContractClient } from "../council/roles.js";
 import { createStructuredCouncilClient } from "../council/structuredOutput.js";
 import type { CouncilCompletionClient, CouncilEventSink, CouncilRoleConfigs } from "../council/types.js";
 import type { PolishConfig } from "../domain/config.js";
-import { attemptTokenCap, supervisorModelChain } from "../domain/config.js";
+import { attemptTokenCap, dependencyCacheDir, supervisorModelChain } from "../domain/config.js";
 import type { CheckResult } from "../domain/checks.js";
 import { emptyFindingCounts, type Checkpoint } from "../domain/checkpoint.js";
 import { modelRefKey, SYSTEM_ACTOR, type ModelRef } from "../domain/common.js";
@@ -301,6 +301,7 @@ export function createBaseliningDriver(deps: ProductionDeps): PhaseDriver {
           prepareDependencies: {
             enabled: ctx.config.sandbox.installDependencies,
             timeoutMs: ctx.config.sandbox.installTimeoutMs,
+            ...cacheDirOf(ctx.config),
             // Before, not after: a crash or a kill during a ten-minute install must still leave a
             // record it was running, which docs/THREAT_MODEL.md promises of any command.
             onStart: (info) => { recordInstallStart(ctx, info); },
@@ -1363,3 +1364,8 @@ function syntheticCheckpoint(ctx: PhaseContext, hash: string): Checkpoint {
 }
 
 export { syntheticCheckpoint };
+
+function cacheDirOf(config: PolishConfig): { cacheDir?: string } {
+  const dir = dependencyCacheDir(config);
+  return dir === null ? {} : { cacheDir: dir };
+}

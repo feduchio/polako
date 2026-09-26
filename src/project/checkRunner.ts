@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   normalizeAcceptancePath,
   protectedPaths,
@@ -30,6 +30,7 @@ import { PolishError } from "../shared/errors.js";
 import { canonicalJson, sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import { installCommandFor, untrustedForMissingDependencies } from "../shared/projectDependencies.js";
+import { dependencyCacheKey, restoreDependencies, storeDependencies } from "./dependencyCache.js";
 import { inspectManifestHashes } from "./discovery.js";
 import { parseTestOutput, statusFromProcess } from "./parsers.js";
 import type { ProjectProfile } from "./profile.js";
@@ -66,6 +67,8 @@ export interface DependencyPreparation {
   onStart?: (info: { command: readonly string[]; timeoutMs: number }) => void;
   /** Fired once preparation has settled, ready or not, for forensics. */
   onResult?: (result: EnsureDependenciesResult) => void;
+  /** Where installed trees are kept by lockfile; absent means install in every checkout. */
+  cacheDir?: string;
 }
 
 /**
@@ -274,11 +277,29 @@ export async function ensureProjectDependencies(
     signal?: AbortSignal;
     /** Fired before the command runs, so a crash mid-install still leaves a record of it. */
     onStart?: (info: { command: readonly string[]; timeoutMs: number }) => void;
+    /** See `DependencyPreparation.cacheDir`. */
+    cacheDir?: string;
   },
 ): Promise<EnsureDependenciesResult> {
   const missing = dependenciesUnavailableFor(sandbox, profile);
   if (missing === null) return { attempted: false, ready: true, detail: null };
   if (!options.enabled) return { attempted: false, ready: false, detail: "dependency install is disabled" };
+  const cacheKey = options.cacheDir === undefined ? null : dependencyCacheKey(sandbox.path, profile.packageManager);
+  if (options.cacheDir !== undefined && cacheKey !== null) {
+    const untracked = await topLevelUntracked(sandbox);
+    if (restoreDependencies(options.cacheDir, cacheKey, sandbox.path)) {
+      const installedPaths = await excludeInstalledPaths(sandbox, untracked);
+      if (dependenciesUnavailableFor(sandbox, profile) === null) {
+        return {
+          attempted: false,
+          ready: true,
+          detail: `dependencies restored from cache ${cacheKey}`,
+          ...(installedPaths.length === 0 ? {} : { installedPaths }),
+        };
+      }
+      rmSync(join(sandbox.path, "node_modules"), { recursive: true, force: true });
+    }
+  }
   const argv = installCommandFor(profile.packageManager);
   if (argv === null) {
     return {
@@ -316,6 +337,7 @@ export async function ensureProjectDependencies(
   }
   const installedPaths = await excludeInstalledPaths(sandbox, untrackedBefore);
   const stillMissing = dependenciesUnavailableFor(sandbox, profile);
+  if (stillMissing === null && options.cacheDir !== undefined && cacheKey !== null) storeDependencies(options.cacheDir, cacheKey, sandbox.path);
   return stillMissing === null
     ? { attempted: true, ready: true, detail: null, output: result, ...(installedPaths.length === 0 ? {} : { installedPaths }) }
     : {
@@ -374,6 +396,7 @@ function prepareSandbox(
     timeoutMs: prepare?.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS,
     ...(signal === undefined ? {} : { signal }),
     ...(prepare?.onStart === undefined ? {} : { onStart: prepare.onStart }),
+    ...(prepare?.cacheDir === undefined ? {} : { cacheDir: prepare.cacheDir }),
   }).then((result) => {
     prepare?.onResult?.(result);
     return result;
