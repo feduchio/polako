@@ -148,7 +148,12 @@ async function executeCodingTask(ctx: PhaseContext, options: CandidateDriverOpti
   const n = candidateCount(ctx.config, running.complexity);
   const sandbox = await resolveValue(options.sandbox, ctx);
   const policy = await resolveValue(options.policy, ctx);
-  const workerFactory = options.workerFactory(ctx);
+  const factory = options.workerFactory(ctx);
+  // A retry starts past the slots the earlier attempts used, so it goes to the next models on the
+  // shortlist instead of back to the ones that just failed: run_01m3dm6eaz7evkv4wp3t16 sent both
+  // attempts to the same worker, which stalled the same way twice.
+  const offset = (running.attempts - 1) * n;
+  const workerFactory = (index: number) => factory(index + offset);
   const gates = await resolveGates(ctx, options, running);
   const corpus = await resolveCorpus(ctx, options);
   const results = await runCandidatesParallel({

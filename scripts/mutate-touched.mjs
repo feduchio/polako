@@ -41,7 +41,9 @@ for (const line of diff.split("\n")) {
   if (!line.startsWith("+")) continue;
   const lineNumber = nextLine;
   nextLine += 1;
-  if (!file.endsWith(".ts") || file.endsWith(".test.ts")) continue;
+  // src/e2e is the scenario harness only tests import: flipping its guards changes how a broken
+  // test fails, not what the product does.
+  if (!file.endsWith(".ts") || file.endsWith(".test.ts") || file.startsWith("src/e2e/")) continue;
   const match = line.slice(1).match(/if\s*\(([^()]*)\)/);
   if (match === null) continue;
   touched.push({ file, line: lineNumber, condition: match[1], from: match[0] });
