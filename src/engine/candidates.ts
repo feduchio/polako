@@ -1,10 +1,12 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../agents/types.js";
 import type { AcceptanceArtifact, MissionAcceptanceCorpus } from "../domain/acceptance.js";
 import type { ArtifactRef, ModelRef } from "../domain/common.js";
 import type { BaselineSnapshot } from "../domain/checks.js";
 import { DEFAULT_INSTALL_DEPENDENCIES, DEFAULT_INSTALL_TIMEOUT_MS } from "../domain/config.js";
 import type { ProtectedChangeScope, ProtectedChangeWaiver } from "../domain/protectedChangeWaiver.js";
-import type { Task } from "../domain/task.js";
+import { pathsNamedByAcceptance, type Task } from "../domain/task.js";
 import type { CheckOutputPersister, DependencyPreparation, EnsureDependenciesResult, GateResult } from "../project/checkRunner.js";
 import { ensureProjectDependencies, runIndependentGates } from "../project/checkRunner.js";
 import type { ProjectProfile } from "../project/profile.js";
@@ -226,7 +228,8 @@ async function runOneCandidate<TTask>(
         ...(input.corpus === undefined ? {} : { corpus: input.corpus }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
-      const verdict = noChangeVerdict(gateResult, input.gates.profile);
+      const verdict = noChangeVerdict(gateResult, input.gates.profile) ??
+        (hasAcceptance(input.task) ? await acceptanceOnBase(input.task, gate, input.policy, input.signal) : null);
       return {
         id: candidateId,
         index,
@@ -325,6 +328,40 @@ export function noChangeVerdict(gate: GateResult, profile: ProjectProfile): stri
     check.status === "skipped" ? mandatory.has(check.name) : check.status !== "pass");
   if (failing.length > 0) {
     return `checks do not pass on the unchanged base: ${failing.map((check) => `${check.name}=${check.status}`).join(", ")}`;
+  }
+  return null;
+}
+
+const ACCEPTANCE_CHECK_TIMEOUT_MS = 120_000;
+
+function hasAcceptance(task: unknown): task is Pick<Task, "acceptance" | "acceptanceChecks"> {
+  return typeof task === "object" && task !== null && Array.isArray((task as { acceptance?: unknown }).acceptance);
+}
+
+/**
+ * Whether the task's own acceptance holds on the unchanged base; null if it does, else why not.
+ * Passing gates show the project still works, not that this task's criterion was already met: a
+ * mission to add a file ended `no_change_required` with the file absent (council round 4, S8).
+ */
+export async function acceptanceOnBase(
+  task: Pick<Task, "acceptance" | "acceptanceChecks">,
+  checkout: SandboxHandle,
+  policy: CommandPolicy,
+  signal: AbortSignal | undefined,
+): Promise<string | null> {
+  const present = (path: string) => existsSync(resolve(checkout.path, path));
+  for (const path of pathsNamedByAcceptance(task.acceptance)) {
+    if (!present(path)) return `the task's acceptance names ${path}, which is absent on the unchanged base`;
+  }
+  for (const check of task.acceptanceChecks ?? []) {
+    if (check.kind !== "command" && !present(check.path)) return `acceptance check ${check.kind} ${check.path}: absent on the unchanged base`;
+    if (check.kind === "file_exists") continue;
+    const argv = check.kind === "command" ? check.argv : policy.testFileCommand(check.path);
+    if (argv === null) return `acceptance check ${check.kind}: the project has no command that runs one test file`;
+    const refused = policy.check(argv);
+    if (refused !== null) return `acceptance check \`${argv.join(" ")}\` is refused by the command policy: ${refused}`;
+    const result = await checkout.run(argv, { timeoutMs: ACCEPTANCE_CHECK_TIMEOUT_MS, ...(signal === undefined ? {} : { signal }) });
+    if (result.exitCode !== 0) return `acceptance check \`${argv.join(" ")}\` exits ${String(result.exitCode)} on the unchanged base`;
   }
   return null;
 }

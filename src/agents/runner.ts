@@ -3,7 +3,9 @@ import type { ChatMessage } from "../broker/types.js";
 import { isBudgetError } from "../broker/quota.js";
 import { estimateTokens } from "../context/types.js";
 import { BasicIntel } from "../intel/basic.js";
-import type { Task } from "../domain/task.js";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathsNamedByAcceptance, type Task } from "../domain/task.js";
 import { PolishError, errorToString } from "../shared/errors.js";
 import { buildWireWindow, loopDigestCap } from "./loopWindow.js";
 import type { SandboxHandle } from "../sandbox/worktree.js";
@@ -42,7 +44,14 @@ interface FinishArgs {
  * "Nothing to change" is a claim like any other. The worker has to have watched a check pass on
  * the code as it stands, and must not have changed that code; the engine still re-runs the gates.
  */
-function validateNoChange(value: unknown, diff: string, loopEvidence: LoopEvidence, diffTokens: number): WorkerNoChange {
+function validateNoChange(
+  value: unknown,
+  diff: string,
+  loopEvidence: LoopEvidence,
+  diffTokens: number,
+  task: Task,
+  worktreePath: string,
+): WorkerNoChange {
   const reason = record(value, "finish noChange")["reason"];
   if (typeof reason !== "string" || reason.trim() === "") {
     throw new PolishError("INVALID_ARGUMENT", "finish rejected: noChange.reason must be a non-empty string");
@@ -61,7 +70,21 @@ function validateNoChange(value: unknown, diff: string, loopEvidence: LoopEviden
       "finish rejected: noChange needs an acceptance check run with run_command in this loop that exited 0",
     );
   }
+  const missing = acceptancePaths(task).filter((path) => !existsSync(resolve(worktreePath, path)));
+  if (missing.length > 0) {
+    throw new PolishError(
+      "INVALID_ARGUMENT",
+      `finish rejected: noChange, but the task's acceptance names ${missing.join(", ")}, which does not exist. ` +
+        "A criterion about a file that is not there does not already hold: create it, then finish without noChange.",
+    );
+  }
   return { reason };
+}
+
+/** Paths the task's acceptance says must be there: named in its lines or in its structured checks. */
+function acceptancePaths(task: Task): string[] {
+  const checked = (task.acceptanceChecks ?? []).flatMap((check) => (check.kind === "command" ? [] : [check.path]));
+  return [...new Set([...pathsNamedByAcceptance(task.acceptance), ...checked])];
 }
 
 /**
@@ -383,7 +406,10 @@ export class AgentRunner implements CandidateWorker {
     if (task.touchesProductCode) {
       const diff = await worktree.git.diffAgainst(worktree.baseCommit);
       if (args["noChange"] !== undefined) {
-        return { summary, noChange: validateNoChange(args["noChange"], diff, loopEvidence, toolResultTokenBudget(this.deps.contextWindow)) };
+        return {
+          summary,
+          noChange: validateNoChange(args["noChange"], diff, loopEvidence, toolResultTokenBudget(this.deps.contextWindow), task, worktree.path),
+        };
       }
       if (diff.trim() === "") {
         throw new PolishError(

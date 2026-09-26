@@ -138,7 +138,7 @@ export function systemPrompt(role: CouncilRole): string {
         : "";
   const decompose =
     role === "planner"
-      ? ' During decomposition (the payload has interpretation), return proposal.tasks as [{"requirementRef":"R1","title":"...","description":"...","acceptance":["..."],"files":["..."],"dependsOn":[],"complexity":"normal"}]; every task names by requirementRef the payload.interpretation.requirements entry it delivers.'
+      ? ' During decomposition (the payload has interpretation), return proposal.tasks as [{"requirementRef":"R1","title":"...","description":"...","acceptance":["..."],"checks":[{"kind":"file_exists","path":"..."}],"files":["..."],"dependsOn":[],"complexity":"normal"}]; every task names by requirementRef the payload.interpretation.requirements entry it delivers. checks lists the acceptance criteria the engine can verify itself: {"kind":"file_exists","path":"relative/path"}, {"kind":"test_file","path":"relative/test/file"} (runs alone and passes) or {"kind":"command","argv":["npm","run","test"]} (exits 0); omit checks you cannot state that way.'
       : "";
   const split =
     role === "planner"

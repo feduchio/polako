@@ -40,6 +40,13 @@ const JEST_REPRO = [
   'test("add(1, 2) is 3", () => { expect(add(1, 2)).toBe(3); });',
   "",
 ].join("\n");
+const NEG_TEST = [
+  'import assert from "node:assert/strict";',
+  'import test from "node:test";',
+  'import { add } from "../src/add.mjs";',
+  'test("add(-1, 1) is 0", () => { assert.equal(add(-1, 1), 0); });',
+  "",
+].join("\n");
 const KILLED_REPRO = [
   'import test from "node:test";',
   'test("heavy", () => { process.kill(process.pid, "SIGKILL"); });',
@@ -269,7 +276,7 @@ describe("acceptance: a model's words neither run code nor decide a blocking fin
 });
 
 describe("acceptance: a no-change DONE shows the task's acceptance holds", () => {
-  it.fails("a mission to add a test file does not end no_change_required without the file", async () => {
+  it("a mission to add a test file does not end no_change_required without the file: the claim is refused and the file gets written", async () => {
     env = await startScenario("nothing-to-do", { models: MODELS });
     const requirement = {
       ref: "R1",
@@ -284,6 +291,9 @@ describe("acceptance: a no-change DONE shows the task's acceptance holds", () =>
         calls: [
           { name: "run_command", arguments: { argv: ["npm", "run", "test"] } },
           { name: "finish", arguments: { summary: "negatives already work", noChange: { reason: "add already handles negative numbers; npm run test passes" } } },
+          { name: "write", arguments: { path: "tests/neg.test.mjs", content: NEG_TEST } },
+          { name: "run_command", arguments: { argv: ["npm", "run", "test"] } },
+          { name: "finish", arguments: { summary: "added tests/neg.test.mjs" } },
         ],
       }],
       review: () => [],
@@ -332,5 +342,8 @@ describe("acceptance: a no-change DONE shows the task's acceptance holds", () =>
     const { run } = await drive(env, (created as { id: string }).id, 120);
     const noChangeDone = run.phase === "DONE" && run.terminalReason?.code === "no_change_required";
     expect(noChangeDone && (await runBranchFile(env, run, "tests/neg.test.mjs")) === "(absent)").toBe(false);
+    expect(run.phase).toBe("DONE");
+    expect(run.terminalReason?.code).toBe("converged");
+    expect(await runBranchFile(env, run, "tests/neg.test.mjs")).toBe(NEG_TEST.trim());
   });
 });

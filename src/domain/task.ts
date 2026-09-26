@@ -99,6 +99,31 @@ export function isTerminalTaskState(state: TaskState): boolean {
 
 export const ComplexitySchema = z.enum(["trivial", "normal", "complex"]);
 
+/**
+ * An acceptance criterion the engine can check on a checkout by itself: the file exists, the
+ * command exits 0 under the project's policy, the test file runs alone and passes.
+ */
+export const AcceptanceCheckSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file_exists"), path: z.string().min(1) }),
+  z.object({ kind: z.literal("command"), argv: z.array(z.string().min(1)).min(1) }),
+  z.object({ kind: z.literal("test_file"), path: z.string().min(1) }),
+]);
+export type AcceptanceCheck = z.infer<typeof AcceptanceCheckSchema>;
+
+const NAMED_PATH = /(?:^|[\s`'"(])((?:\.{1,2}\/)?[\w@.-]+(?:\/[\w@.-]+)+\.[A-Za-z0-9]{1,6}|[\w-]+(?:\.[\w-]+)+\.[cm]?[jt]sx?)(?=$|[\s`'"),:;]|\.(?:\s|$))/g;
+
+/** File paths an acceptance line names, as written: what a no-change claim has to find on the base. */
+export function pathsNamedByAcceptance(lines: readonly string[]): string[] {
+  const paths = new Set<string>();
+  for (const line of lines) {
+    for (const match of line.matchAll(NAMED_PATH)) {
+      const path = (match[1] ?? "").replace(/^\.\//, "");
+      if (path !== "" && !path.startsWith("../") && !/^\d+(?:\.\d+)+$/.test(path)) paths.add(path);
+    }
+  }
+  return [...paths];
+}
+
 export const TaskSchema = z.object({
   id: IdSchema,
   runId: IdSchema,
@@ -108,6 +133,8 @@ export const TaskSchema = z.object({
   kind: TaskKindSchema,
   origin: TaskOriginSchema,
   acceptance: z.array(z.string().min(1)).min(1),
+  /** Checks the engine runs itself; absent when the planner gave none. */
+  acceptanceChecks: z.array(AcceptanceCheckSchema).optional(),
   complexity: ComplexitySchema,
   /** checkpoint the task's candidates start from; stale relative to run head => integration gates decide */
   baseCheckpointHash: GitHashSchema,
@@ -146,6 +173,7 @@ export interface TaskDraft {
   description: string;
   kind: Exclude<TaskKind, "investigation">;
   acceptance: string[];
+  acceptanceChecks?: AcceptanceCheck[];
   complexity: z.infer<typeof ComplexitySchema>;
   baseCheckpointHash: string;
   dependsOn?: string[];
@@ -347,6 +375,7 @@ function baseTask(draft: TaskDraft): Omit<Task, "kind" | "origin" | "touchesProd
     title: draft.title,
     description: draft.description,
     acceptance: draft.acceptance,
+    ...(draft.acceptanceChecks === undefined || draft.acceptanceChecks.length === 0 ? {} : { acceptanceChecks: draft.acceptanceChecks }),
     complexity: draft.complexity,
     baseCheckpointHash: draft.baseCheckpointHash,
     dependsOn: draft.dependsOn ?? [],

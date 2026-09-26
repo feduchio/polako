@@ -22,6 +22,7 @@ import {
   createInvestigationTask,
   createTaskFromRequirement,
   createSplitSubtask,
+  pathsNamedByAcceptance,
   createTaskFromValidFinding,
   dependenciesSettled,
   resolveWorkClassProvenance,
@@ -510,5 +511,16 @@ describe("mission immutability", () => {
     expect(missionIsIntact(m)).toBe(true);
     expect(missionIsIntact({ ...m, text: "fix it and add dark mode" })).toBe(false);
     expect(missionIsIntact({ ...m, userConstraints: [] })).toBe(false);
+  });
+});
+
+describe("pathsNamedByAcceptance", () => {
+  it("reads the file paths an acceptance line names, and nothing that only looks like one", () => {
+    expect(pathsNamedByAcceptance([
+      "tests/neg.test.mjs exists and asserts add(-1, 1) === 0",
+      "`src/add.mjs` returns the sum.",
+      "add.test.mjs passes under Node.js 24.20.0",
+      "npm run test passes",
+    ])).toEqual(["tests/neg.test.mjs", "src/add.mjs", "add.test.mjs"]);
   });
 });

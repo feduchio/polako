@@ -11,9 +11,11 @@ import {
 } from "../domain/mission.js";
 import type { SplitRequest } from "../domain/candidate.js";
 import {
+  AcceptanceCheckSchema,
   createSplitSubtask,
   createTaskFromRequirement,
   workClassDraftFields,
+  type AcceptanceCheck,
   type Task,
   type TaskKind,
 } from "../domain/task.js";
@@ -65,6 +67,7 @@ interface TaskProposal {
   kind?: unknown;
   requirementRef?: unknown;
   acceptance?: unknown;
+  checks?: unknown;
   complexity?: unknown;
   dependsOn?: unknown;
   workClass?: unknown;
@@ -235,6 +238,7 @@ export class SupervisorCouncil {
         ),
         kind,
         acceptance: nonEmptyStrings(draft.acceptance, requirement.acceptance),
+        acceptanceChecks: acceptanceChecks(draft.checks),
         complexity: complexity(draft.complexity),
         baseCheckpointHash,
         dependsOn: dependencies,
@@ -650,4 +654,13 @@ function firstConcern(opinions: RoleOpinion[]): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The planner's structured checks that parse; a malformed one is dropped, not guessed at. */
+function acceptanceChecks(value: unknown): AcceptanceCheck[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const parsed = AcceptanceCheckSchema.safeParse(item);
+    return parsed.success ? [parsed.data] : [];
+  });
 }
