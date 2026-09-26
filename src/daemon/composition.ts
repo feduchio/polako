@@ -488,9 +488,9 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
       pinnedModels,
       costEligibility: costEligibilityFromConfig(deps.config.routing),
       capabilityProbe: (adapter, model) => {
-        const review = observations.latestStrictProbe(model.ref, "review", reviewSchemaHash);
-        const score = observations.latestStrictProbe(model.ref, "score", scoreSchemaHash);
-        const progress = observations.latestStrictProbe(model.ref, "progress", progressSchemaHash);
+        const review = observations.settledStrictProbe(model.ref, "review", reviewSchemaHash);
+        const score = observations.settledStrictProbe(model.ref, "score", scoreSchemaHash);
+        const progress = observations.settledStrictProbe(model.ref, "progress", progressSchemaHash);
         return probeModelCapabilities(adapter, model, {
           runId: ctx.run.id,
           maxTokens: deps.config.discovery.probeMaxTokens,
@@ -507,29 +507,32 @@ export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): 
     const probesByRef = new Map(discovery.probes.map((probe) => [modelRefKey(probe.info.ref), probe]));
     for (const model of discovery.shortlisted) {
       const probe = probesByRef.get(modelRefKey(model.ref));
-      if (observations.latestStrictProbe(model.ref, "review", reviewSchemaHash) === null) {
+      if (observations.settledStrictProbe(model.ref, "review", reviewSchemaHash) === null) {
         observations.recordStrictProbe(model.ref, {
           schema: "review",
           schemaHash: reviewSchemaHash,
           supported: probe?.checks.strictReview.verdict === "supported",
+          verdict: probe?.checks.strictReview.verdict ?? "probe_failed",
           ...(probe === undefined ? { detail: "capability probe failed before strict review result" } : {}),
           at: ctx.clock.now(),
         });
       }
-      if (observations.latestStrictProbe(model.ref, "score", scoreSchemaHash) === null) {
+      if (observations.settledStrictProbe(model.ref, "score", scoreSchemaHash) === null) {
         observations.recordStrictProbe(model.ref, {
           schema: "score",
           schemaHash: scoreSchemaHash,
           supported: probe?.checks.strictScore.verdict === "supported",
+          verdict: probe?.checks.strictScore.verdict ?? "probe_failed",
           ...(probe === undefined ? { detail: "capability probe failed before strict score result" } : {}),
           at: ctx.clock.now(),
         });
       }
-      if (observations.latestStrictProbe(model.ref, "progress", progressSchemaHash) === null) {
+      if (observations.settledStrictProbe(model.ref, "progress", progressSchemaHash) === null) {
         observations.recordStrictProbe(model.ref, {
           schema: "progress",
           schemaHash: progressSchemaHash,
           supported: probe?.checks.strictProgress.verdict === "supported",
+          verdict: probe?.checks.strictProgress.verdict ?? "probe_failed",
           ...(probe === undefined ? { detail: "capability probe failed before strict progress result" } : {}),
           at: ctx.clock.now(),
         });

@@ -7,6 +7,7 @@ import { id } from "../shared/ids.js";
 import type { Db } from "../store/db.js";
 import type { EventLog } from "../store/eventLog.js";
 import type { ModelCatalog } from "./catalog.js";
+import type { ProbeVerdict } from "./capabilityProbe.js";
 import {
   EMPIRICAL_SCORE_RESPONSE_SCHEMA,
   PROGRESS_SCORE_RESPONSE_SCHEMA,
@@ -56,6 +57,7 @@ export type ModelObservation =
       schema: "review" | "score" | "progress";
       schemaHash: string;
       supported: boolean;
+      verdict?: ProbeVerdict;
       detail?: string;
     };
 
@@ -140,6 +142,7 @@ export class ModelObservationRepository {
       schema: "review" | "score" | "progress";
       schemaHash: string;
       supported: boolean;
+      verdict?: ProbeVerdict;
       detail?: string;
       at: number;
     },
@@ -152,6 +155,7 @@ export class ModelObservationRepository {
       schema: input.schema,
       schemaHash: input.schemaHash,
       supported: input.supported,
+      ...(input.verdict === undefined ? {} : { verdict: input.verdict }),
       ...(input.detail === undefined ? {} : { detail: input.detail }),
     };
     this.record(observation);
@@ -169,6 +173,16 @@ export class ModelObservationRepository {
       observation.schema === schema &&
       observation.schemaHash === schemaHash);
     return matches.at(-1) ?? null;
+  }
+
+  /** The latest strict probe that is a verdict on the model, which is what discovery may reuse. */
+  settledStrictProbe(
+    model: ModelRef,
+    schema: "review" | "score" | "progress",
+    schemaHash: string,
+  ): Extract<ModelObservation, { kind: "strict_probe" }> | null {
+    const latest = this.latestStrictProbe(model, schema, schemaHash);
+    return latest !== null && settledStrictProbe(latest) ? latest : null;
   }
 
   list(): ModelObservation[] {
@@ -253,4 +267,15 @@ export class ModelObservationRepository {
     };
     this.store.events.append([event]);
   }
+}
+
+/**
+ * A pass, or a refusal the model gave. A rate limit or a timeout says nothing about the schema,
+ * and an observation from before the verdict was stored may be one: run_01m3dj62292cedzxr6py40
+ * recorded three `probe_failed` probes as unsupported, and no later discovery asked cohere,
+ * nemotron or gemma again, and after the canary and the author's family a round had one
+ * reviewer family of the three it needs (run_01m3dnyx3fb4p2fbagzs3d).
+ */
+function settledStrictProbe(observation: Extract<ModelObservation, { kind: "strict_probe" }>): boolean {
+  return observation.supported || observation.verdict === "unsupported";
 }

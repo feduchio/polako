@@ -83,6 +83,7 @@ const ModelObservationSchema = z.union([
     schema: z.enum(["review", "score", "progress"]),
     schemaHash: z.string().regex(/^[0-9a-f]{64}$/),
     supported: z.boolean(),
+    verdict: z.enum(["supported", "unsupported", "inconclusive", "probe_failed"]).optional(),
     detail: z.string().optional(),
   }),
 ]);

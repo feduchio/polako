@@ -115,6 +115,7 @@ describe("A12 global model observations", () => {
       schema: "score",
       schemaHash: hashJson(EMPIRICAL_SCORE_RESPONSE_SCHEMA),
       supported: false,
+      verdict: "unsupported",
       at: 12,
     });
     observations.recordStrictProbe(model, {

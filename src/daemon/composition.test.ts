@@ -1,7 +1,7 @@
 import { estimateTokens } from "../context/types.js";
 import type { Finding } from "../domain/finding.js";
 import { findingFingerprint } from "../domain/finding.js";
-import type { CompletionRequest } from "../broker/types.js";
+import { ProviderError, type CompletionRequest } from "../broker/types.js";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -831,6 +831,77 @@ describe("production composition", () => {
     expect(discovery.probes).toHaveLength(2);
     expect(deps.catalog.get({ provider: "scripted", model: "worker" })?.info.source).toBe("probe");
     expect(deps.catalog.get({ provider: "scripted", model: "worker" })?.available).toBe(true);
+  });
+
+  it("asks a model again about a strict schema its earlier probe could not settle, but not one that refused it", async () => {
+    const names = ["flaky", "refuser", "legacy"];
+    const reviewProbes: string[] = [];
+    let flakyAnswered = false;
+    const provider = new ScriptedProvider("scripted", names.map((name, index) => ({
+      name,
+      capabilities: { ...FAKE_CAPABILITIES.strong, family: `family-${String(index)}`, supportsJson: true, supportsTools: true, inputCostPerM: 0, outputCostPerM: 0 },
+    })), {
+      autoStrictProbes: false,
+      fallback: {
+        kind: "fn",
+        fn: (request) => {
+          if (request.metadata.purpose === "capability_probe_strict_review") {
+            reviewProbes.push(request.model.model);
+            if (request.model.model === "refuser") throw new ProviderError("scripted", "bad_request", "response_format is not supported");
+            if (request.model.model === "flaky" && !flakyAnswered) {
+              flakyAnswered = true;
+              throw new ProviderError("scripted", "server", "upstream unavailable");
+            }
+          }
+          const content = request.responseSchema?.name === "empirical_pair_score"
+            ? JSON.stringify({ scoreA: 4, scoreB: 0 })
+            : request.responseSchema === undefined ? '{"probe":"ok"}' : '{"findings":[],"scoreA":0,"scoreB":0,"progress":0}';
+          return {
+            message: { role: "assistant" as const, content, ...(request.tools === undefined ? {} : { toolCalls: [{ id: "t", name: "probe_ping", arguments: "{}" }] }) },
+            usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+            finishReason: request.tools === undefined ? "stop" as const : "tool_calls" as const,
+            latencyMs: 1,
+          };
+        },
+      },
+    });
+    const config = defaultConfig();
+    config.audition = { ...config.audition, enabled: false };
+    const deps = buildProductionDeps({ store, clock, config, home: join(dir, "home"), providers: [provider] });
+    const reviewSchemaHash = hashJson(REVIEW_FINDINGS_RESPONSE_SCHEMA);
+    new ModelObservationRepository(store).recordStrictProbe({ provider: "scripted", model: "legacy" }, {
+      schema: "review",
+      schemaHash: reviewSchemaHash,
+      supported: false,
+      at: clock.now(),
+    });
+    const engine = new RunEngine({ store, clock, scheduler: new Scheduler(store, clock, { workerId: "w", laneLimits: config.lanes, leaseMs: 60_000 }), config, assertProjectClean: () => undefined }, false);
+    installProductionDrivers(engine, deps);
+    const discover = engine.getRegisteredDriver("DISCOVERING_MODELS");
+    if (discover === undefined) throw new Error("no DISCOVERING_MODELS driver");
+    const discoverOnce = async (): Promise<void> => {
+      await clock.advance(1_000);
+      await discover({
+        run: { id: id("run", clock.now()) } as PhaseContext["run"],
+        store,
+        scheduler: new Scheduler(store, clock, { workerId: "w", laneLimits: config.lanes, leaseMs: 60_000 }),
+        clock,
+        config,
+      });
+    };
+
+    await discoverOnce();
+    expect(reviewProbes.sort()).toEqual(["flaky", "legacy", "refuser"]);
+    const strictReviewer = (model: string): boolean | undefined =>
+      deps.catalog.get({ provider: "scripted", model })?.info.capabilities.supportsStrictReviewSchema;
+    expect(strictReviewer("flaky")).toBe(false);
+    expect(strictReviewer("legacy")).toBe(true);
+
+    reviewProbes.length = 0;
+    await discoverOnce();
+    expect(reviewProbes).toEqual(["flaky"]);
+    expect(strictReviewer("flaky")).toBe(true);
+    expect(strictReviewer("refuser")).toBe(false);
   });
 
   /**
