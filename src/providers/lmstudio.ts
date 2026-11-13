@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CompletionRequest, CompletionResponse, ModelInfo, ModelTier, ProviderAdapter, ProviderHealth } from "../broker/types.js";
+import { localLineage } from "../broker/lineage.js";
 import { OpenAICompatProvider, type FetchLike } from "./openaiCompat.js";
 
 export const LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1";
@@ -87,13 +88,19 @@ export class LmStudioProvider implements ProviderAdapter {
 
   async listModels(signal?: AbortSignal): Promise<ModelInfo[]> {
     const served = await this.inner.listModels(signal);
-    // Metadata is a refinement: without the CLI the listing still works from `/v1/models` alone.
-    const meta = await this.catalog(signal).catch((): LmsModelMeta[] => []);
-    const index = indexCatalog(meta);
+    const catalog = await this.catalog(signal).catch((): LmsModelMeta[] => []);
+    const index = indexCatalog(catalog);
     const out: ModelInfo[] = [];
     for (const model of served) {
       const row = index.get(model.ref.model);
-      if (isEmbedding(model.ref.model, row)) continue;
+      if (catalog.length > 0) {
+        // `/v1/models` also lists the identifiers of loaded instances (`--identifier night`) and
+        // models that are not language models; only a downloaded LLM's own key is a model here.
+        if (row?.type !== "llm") continue;
+      } else if (/embed/i.test(model.ref.model)) {
+        // No `lms` metadata at all: the listing is all there is, minus the obvious non-LLMs.
+        continue;
+      }
       out.push(toLmStudioModelInfo(this.id, model.ref.model, row, this.contextLength, this.hints[model.ref.model]));
     }
     return out;
@@ -122,15 +129,12 @@ export function adaptLmStudioPayload(payload: Record<string, unknown>): Record<s
 }
 
 /**
- * Diversity family for a local model. Every installed model is Qwen-lineage, so the vendor rule
- * (`inferFamily`: every `qwen*` id is `qwen`) would see one family. The policy (docs/LOCAL.md §c)
- * is that each distinct fine-tune is its own family: architecture + model key. Two quants of one
- * key share a key and therefore a family; `capabilityHints[model].family` overrides it, which is
- * how a user declares that two fine-tunes should count as one.
+ * Diversity family for a local model: its lineage (`localLineage`), so two fine-tunes of Qwen are
+ * one family and a gpt-oss, Gemma or Granite model is another. `capabilityHints[model].family`
+ * overrides it, which is how a user declares that two models are, or are not, the same lineage.
  */
-export function lmStudioFamily(modelKey: string, meta?: Pick<LmsModelMeta, "architecture">): string {
-  const arch = slug(meta?.architecture ?? "unknown");
-  return `local-${arch}-${slug(modelKey)}`;
+export function lmStudioFamily(modelKey: string, meta?: Pick<LmsModelMeta, "architecture" | "publisher" | "displayName" | "path">): string {
+  return localLineage({ modelKey, architecture: meta?.architecture, publisher: meta?.publisher, displayName: meta?.displayName, path: meta?.path });
 }
 
 export function toLmStudioModelInfo(
@@ -162,24 +166,14 @@ function localTier(meta: LmsModelMeta | undefined): ModelTier {
   return Number.isFinite(params) && params >= 20 ? "strong" : "fast";
 }
 
-function isEmbedding(modelKey: string, meta: LmsModelMeta | undefined): boolean {
-  return meta !== undefined ? meta.type === "embedding" : /embed/i.test(modelKey);
-}
-
 /**
  * Keys are not unique per file (two quants of one model can share one); the first row wins, since
- * `lms load` takes only a key and cannot choose between them either. A loaded model served under
- * a custom `--identifier` is found by its path.
+ * `lms load` takes only a key and cannot choose between them either.
  */
 function indexCatalog(rows: readonly LmsModelMeta[]): Map<string, LmsModelMeta> {
   const index = new Map<string, LmsModelMeta>();
   for (const row of rows) if (!index.has(row.modelKey)) index.set(row.modelKey, row);
-  for (const row of rows) if (row.path !== undefined && !index.has(row.path)) index.set(row.path, row);
   return index;
-}
-
-function slug(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 }
 
 /** Parse `lms ls --json`; tolerant of banners around the JSON and of rows missing a key. */

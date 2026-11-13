@@ -6,7 +6,6 @@ import {
   adaptLmStudioPayload,
   LMSTUDIO_DEFAULT_TIMEOUT_MS,
   LmStudioProvider,
-  lmStudioFamily,
   parseLmsCatalog,
   type LmsModelMeta,
 } from "./lmstudio.js";
@@ -70,23 +69,27 @@ describe("LmStudioProvider", () => {
       inputCostPerM: 0,
       outputCostPerM: 0,
       tier: "strong",
-      family: "local-qwen35moe-ornith-1.5-35b-a3b",
+      family: "qwen",
     });
     expect(byModel["huihui-qwen3.8-27b-abliterated"]?.capabilities).toMatchObject({ supportsTools: false, contextWindow: 32_768 });
     expect(byModel["tiny-3b"]?.capabilities.tier).toBe("fast");
   });
 
-  it("leaves embedding models out of the listing", async () => {
-    const ids = (await provider().listModels()).map((m) => m.ref.model);
-    expect(ids).not.toContain("text-embedding-nomic-embed-text-v1.5");
-    expect(ids).toContain("unlisted-model");
+  it("keeps only downloaded LLMs: no embeddings, no loaded-instance aliases, no non-LLMs", async () => {
+    const p = provider({
+      fetch: fakeFetch(() => ({ status: 200, body: { data: [...SERVED.data, { id: "night" }, { id: "phonon-40m-multilingual" }] } })),
+      catalog: () => Promise.resolve([...CATALOG, { type: "tts", modelKey: "phonon-40m-multilingual", architecture: "phonon" }]),
+    });
+    const ids = (await p.listModels()).map((m) => m.ref.model);
+    expect(ids).toEqual(["ornith-1.5-35b-a3b", "swift-1.5-qwen3.8-27b", "huihui-qwen3.8-27b-abliterated", "tiny-3b"]);
   });
 
   it("degrades to /v1/models alone when the lms CLI is unavailable", async () => {
     const p = provider({ catalog: () => Promise.reject(new Error("lms not found")) });
     const models = await p.listModels();
     const unlisted = models.find((m) => m.ref.model === "unlisted-model");
-    expect(unlisted?.capabilities).toMatchObject({ supportsTools: false, contextWindow: 65_536, inputCostPerM: 0, tier: "fast", family: "local-unknown-unlisted-model" });
+    expect(unlisted?.capabilities).toMatchObject({ supportsTools: false, contextWindow: 65_536, inputCostPerM: 0, tier: "fast", family: "unknown" });
+    expect(models.find((m) => m.ref.model === "ornith-1.5-35b-a3b")?.capabilities.family).toBe("qwen");
     expect(models.map((m) => m.ref.model)).not.toContain("text-embedding-nomic-embed-text-v1.5");
   });
 
@@ -97,13 +100,14 @@ describe("LmStudioProvider", () => {
     expect(byModel["swift-1.5-qwen3.8-27b"]?.capabilities).toMatchObject({ contextWindow: 50_000, family: "swift" });
   });
 
-  it("treats distinct fine-tunes as distinct families so the diversity rule can pick several", async () => {
-    const models = (await provider().listModels()).filter((m) => m.capabilities.family.startsWith("local-qwen"));
-    expect(models.length).toBe(3);
-    expect(distinctFamilies(models, (m) => m.capabilities.family)).toHaveLength(3);
-    // ...whereas the vendor rule alone would have seen one family.
-    expect(lmStudioFamily("qwen3.8-27b-splash-abliterated", { architecture: "qwen3_5" })).toBe("local-qwen3-5-qwen3.8-27b-splash-abliterated");
-    expect(lmStudioFamily("x", { architecture: "qwen35" })).not.toBe(lmStudioFamily("y", { architecture: "qwen35" }));
+  it("puts every Qwen-lineage fine-tune in one family", async () => {
+    const families = Object.fromEntries((await provider().listModels()).map((m) => [m.ref.model, m.capabilities.family]));
+    expect(families["ornith-1.5-35b-a3b"]).toBe("qwen");
+    expect(families["swift-1.5-qwen3.8-27b"]).toBe("qwen");
+    expect(families["huihui-qwen3.8-27b-abliterated"]).toBe("qwen");
+    expect(families["tiny-3b"]).toBe("meta");
+    const models = (await provider().listModels()).filter((m) => m.capabilities.family === "qwen");
+    expect(distinctFamilies(models, (m) => m.capabilities.family)).toHaveLength(1);
   });
 
   it("keeps one family for one model key even if two quants share it", async () => {
