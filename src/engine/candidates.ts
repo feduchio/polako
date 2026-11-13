@@ -201,7 +201,9 @@ async function runOneCandidate<TTask>(
       });
     }
 
-    const committed = await candidate.commitAll(`polish: candidate ${candidateId}`);
+    // A card's id travels with its commit, so `git log` on the run branch reads as the ledger does.
+    const cardId = (input.task as { cardId?: unknown } | null)?.cardId;
+    const committed = await candidate.commitAll(typeof cardId === "string" ? `polako: card ${cardId} candidate ${candidateId}` : `polish: candidate ${candidateId}`);
     headCommit = committed ?? await candidate.headCommit();
     if (headCommit === input.baseCheckpoint) {
       if (workerOutcome.noChange === undefined) {

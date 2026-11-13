@@ -6,6 +6,7 @@ import { projectRunStatus } from "../observe/project.js";
 import { renderActivityFeed, renderRunStatus } from "../observe/render.js";
 import { BRAND } from "../shared/brand.js";
 import { isMainModule } from "../shared/cliEntry.js";
+import { loadCardSpecs, parseOnly, projectForCards, readBrief, resolveRunTarget } from "./cards.js";
 import { callDaemon } from "./client.js";
 import { runWatch } from "./watch.js";
 
@@ -37,10 +38,20 @@ export async function runCli(
         json,
         stdoutIsTTY: process.stdout.isTTY,
       });
-      const positional = withoutFlags(args, ["--mission", "--runtime", "--budget-tokens", "--budget-usd"]);
-      const run = await callDaemon<Run>("run", {
-        project: positional[0] ?? process.cwd(),
-        mission: mission ?? positional.slice(1).join(" "),
+      const positional = withoutFlags(args, ["--mission", "--runtime", "--budget-tokens", "--budget-usd", "--brief", "--only"]);
+      const target = resolveRunTarget(positional, mission);
+      const cards = target.cardSpecs.length === 0 ? undefined : loadCardSpecs(target.cardSpecs);
+      const only = parseOnly(flag(args, "--only"));
+      const brief = readBrief(flag(args, "--brief"));
+      if (cards === undefined && (only !== undefined || brief !== undefined)) {
+        throw new Error("--only and --brief apply to task cards: pass a card file, directory or glob");
+      }
+      const run = await (deps.callDaemon ?? callDaemon)<Run>("run", {
+        project: target.project ?? (target.cardSpecs[0] === undefined ? process.cwd() : projectForCards(target.cardSpecs[0])),
+        mission: target.mission,
+        ...(cards === undefined ? {} : { cards }),
+        ...(only === undefined ? {} : { only }),
+        ...(brief === undefined ? {} : brief),
         ...(runtime === undefined ? {} : { runtime }),
         ...(budgetTokens === undefined ? {} : { budgetTokens: positiveInteger(budgetTokens, "--budget-tokens") }),
         ...(budgetUsd === undefined ? {} : { budgetUsd: Number(budgetUsd) }),
@@ -275,7 +286,8 @@ function print(value: unknown): void {
 const usage = `Usage:
   ${BRAND.cli} project add [path] [--name name]
   ${BRAND.cli} run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n] [--detach|-d] [--json]
-  ${BRAND.cli} status [run-id] [--json]
+  ${BRAND.cli} run [project] <cards> [--brief file] [--only id,id] [--detach|-d] [--json]   cards: a .md file, a directory of cards, or a glob
+  ${BRAND.cli} status [run-id] [--json]            (a card run lists every card's state)
   ${BRAND.cli} watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   ${BRAND.cli} log <run-id> [--follow] [--json]
   ${BRAND.cli} cost <run-id> [--json]
