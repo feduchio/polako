@@ -70,7 +70,7 @@ function mergeUnder(defaults: Raw, user: Raw): Raw {
 /** The raw config with the local defaults underneath it, or the raw config itself outside the profile. */
 export function applyLocalProfile(raw: Raw): Raw {
   if (!isLocalProfile(raw)) return raw;
-  const merged = mergeUnder(LOCAL_PROFILE_DEFAULTS as Raw, raw);
+  const merged = mergeUnder(LOCAL_PROFILE_DEFAULTS, raw);
   if (Array.isArray(raw["providers"])) {
     merged["providers"] = raw["providers"].map((entry: unknown) =>
       isRecord(entry) && entry["kind"] === "lmstudio" ? mergeUnder(LOCAL_PROVIDER_DEFAULTS as Raw, entry) : entry,

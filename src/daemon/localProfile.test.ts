@@ -2,9 +2,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadPolishConfig } from "../daemon/configLoad.js";
-import { applyLocalProfile, isLocalProfile } from "./localProfile.js";
-import { defaultConfig } from "./config.js";
+import { loadPolishConfig } from "./configLoad.js";
+import { applyLocalProfile, isLocalProfile } from "../domain/localProfile.js";
+import { defaultConfig } from "../domain/config.js";
 
 describe("local profile", () => {
   const dirs: string[] = [];
