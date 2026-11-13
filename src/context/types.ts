@@ -89,6 +89,8 @@ export interface BuildWorkerInput {
   extraHits?: readonly IntelHit[];
   /** The head of an existing test file, for a task that writes tests. */
   testExample?: { path: string; head: string } | null;
+  /** Project brief and per-model notes from the user (card runs); protected like the task itself. */
+  guidance?: string;
   maxPackTokens: number;
 }
 

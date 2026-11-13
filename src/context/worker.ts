@@ -68,6 +68,9 @@ export function buildWorkerContextPack(input: BuildWorkerInput): WorkerContextPa
     .filter((part): part is string => part !== null)
     .join("\n\n");
 
+  const guidance = input.guidance?.trim() ?? "";
+  if (guidance.length > 0) sections["projectBrief"] = guidance;
+
   sections["task"] = [
     `Task ${input.task.id} (${input.task.kind})`,
     input.task.title,

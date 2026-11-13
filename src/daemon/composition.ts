@@ -17,7 +17,8 @@ import { ModelCatalog } from "../broker/catalog.js";
 import { costEligibilityFromConfig, isCostEligible } from "../broker/costEligibility.js";
 import { ModelObservationRepository } from "../broker/observations.js";
 import { DEFAULT_ROUTER_POLICY, ModelRouter, type Ranked } from "../broker/router.js";
-import { withCardInterpretation, withCardPlanning } from "../engine/cardDrivers.js";
+import { composeGuidance, modelNotesFor, readGuidanceFile } from "../cards/index.js";
+import { cardRegistration, withCardInterpretation, withCardPlanning } from "../engine/cardDrivers.js";
 import { distinctFamilies } from "../broker/diversity.js";
 import type { EnsembleOption } from "../convergence/tracker.js";
 import { BudgetTracker, QuotaTracker, type BudgetLimits } from "../broker/quota.js";
@@ -945,6 +946,7 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
           profile,
           tools: [...AGENT_TOOL_NAMES],
           maxPackTokens,
+          guidance: cardGuidance(deps, ctx, model),
         }),
       createProgressTracker: (task) => {
         if (
@@ -1411,6 +1413,19 @@ export { syntheticCheckpoint };
 function cacheDirOf(config: PolishConfig): { cacheDir?: string } {
   const dir = dependencyCacheDir(config);
   return dir === null ? {} : { cacheDir: dir };
+}
+
+/**
+ * What a card worker is told besides its card: the project brief frozen at run start, then the
+ * notes the config keys to this model (by key, key prefix or lineage). Empty outside card runs.
+ */
+export function cardGuidance(deps: Pick<ProductionDeps, "config" | "catalog">, ctx: Pick<PhaseContext, "run" | "store">, model: ModelRef): string {
+  const registration = cardRegistration(ctx);
+  if (registration === null) return "";
+  const notes = modelNotesFor(deps.config.cards.modelNotes, model.model, familyOfModel(deps, model))
+    .map((path) => readGuidanceFile(ctx.run.projectPath, path))
+    .filter((text): text is string => text !== null);
+  return composeGuidance(registration.brief, notes);
 }
 
 const MAX_WORKER_FALLBACKS = 3;

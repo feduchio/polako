@@ -37,6 +37,8 @@ export interface ComposeWorkerInstructionInput {
   profile: ProjectProfile | null;
   tools: readonly string[];
   maxPackTokens: number;
+  /** The user's project brief and the notes for this model; empty or absent outside card runs. */
+  guidance?: string;
 }
 
 /**
@@ -65,6 +67,7 @@ export function composeWorkerInstruction(
     attemptNumber: input.task.attempts,
     tools: input.tools,
     ...(input.profile !== null && writesTests(input.task) ? { testExample: findTestExample(input.profile.projectPath, input.profile.framework) } : {}),
+    ...(input.guidance === undefined || input.guidance === "" ? {} : { guidance: input.guidance }),
     maxPackTokens: input.maxPackTokens,
   });
 
