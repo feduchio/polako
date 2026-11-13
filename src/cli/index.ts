@@ -6,7 +6,8 @@ import { projectRunStatus } from "../observe/project.js";
 import { renderActivityFeed, renderRunStatus } from "../observe/render.js";
 import { BRAND } from "../shared/brand.js";
 import { isMainModule } from "../shared/cliEntry.js";
-import { loadCardSpecs, parseOnly, projectForCards, readBrief, resolveRunTarget } from "./cards.js";
+import { registerCards } from "../cards/index.js";
+import { loadCardSpecs, renderCardPlan, parseOnly, projectOf, readBrief, resolveRunTarget } from "./cards.js";
 import { callDaemon } from "./client.js";
 import { runWatch } from "./watch.js";
 
@@ -46,12 +47,17 @@ export async function runCli(
       if (cards === undefined && (only !== undefined || brief !== undefined)) {
         throw new Error("--only and --brief apply to task cards: pass a card file, directory or glob");
       }
+      if (args.includes("--dry-run")) {
+        if (cards === undefined) throw new Error("--dry-run applies to task cards: pass a card file, directory or glob");
+        process.stdout.write(renderCardPlan(registerCards(cards, { ...(only === undefined ? {} : { only }) })));
+        return;
+      }
       const run = await (deps.callDaemon ?? callDaemon)<Run>("run", {
-        project: target.project ?? (target.cardSpecs[0] === undefined ? process.cwd() : projectForCards(target.cardSpecs[0])),
+        project: projectOf(target),
         mission: target.mission,
         ...(cards === undefined ? {} : { cards }),
         ...(only === undefined ? {} : { only }),
-        ...(brief === undefined ? {} : brief),
+        ...brief,
         ...(runtime === undefined ? {} : { runtime }),
         ...(budgetTokens === undefined ? {} : { budgetTokens: positiveInteger(budgetTokens, "--budget-tokens") }),
         ...(budgetUsd === undefined ? {} : { budgetUsd: Number(budgetUsd) }),
@@ -286,7 +292,7 @@ function print(value: unknown): void {
 const usage = `Usage:
   ${BRAND.cli} project add [path] [--name name]
   ${BRAND.cli} run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n] [--detach|-d] [--json]
-  ${BRAND.cli} run [project] <cards> [--brief file] [--only id,id] [--detach|-d] [--json]   cards: a .md file, a directory of cards, or a glob
+  ${BRAND.cli} run [project] <cards> [--brief file] [--only id,id] [--dry-run] [--detach|-d] [--json]   cards: a .md file, a directory of cards, or a glob
   ${BRAND.cli} status [run-id] [--json]            (a card run lists every card's state)
   ${BRAND.cli} watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   ${BRAND.cli} log <run-id> [--follow] [--json]

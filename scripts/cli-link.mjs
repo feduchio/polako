@@ -92,10 +92,10 @@ if (polish === null || daemon === null) {
   process.exit(1);
 }
 if (polish.real !== expectedPolish) {
-  console.error("polish on PATH is not this repository's current build (stale link).");
+  console.error("polako on PATH is not this repository's current build (stale link).");
   console.error(`  which polako → ${polish.path} (${polish.real})`);
   console.error(`  expected     → ${expectedPolish}`);
-  console.error(`Put ${localBin} ahead of other polish installs on PATH and retry.`);
+  console.error(`Put ${localBin} ahead of other polako installs on PATH and retry.`);
   process.exit(1);
 }
 if (daemon.real !== expectedDaemon) {
@@ -114,5 +114,5 @@ if (mcp === null || mcp.real !== expectedMcp) {
 console.log(`linked polako     → ${polish.path}`);
 console.log(`linked polakod    → ${daemon.path}`);
 console.log(`linked polako-mcp → ${mcp.path}`);
-console.log("Everyday use from any directory: polish run ...");
+console.log("Everyday use from any directory: polako run ...");
 console.log("pnpm cli:link is an install/update step, not part of ordinary product usage.");

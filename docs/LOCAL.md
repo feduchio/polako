@@ -12,6 +12,70 @@ Remotes: `origin` — polako, `upstream` — оригинал. Рабочая в
   40–60k токенов у dense — минуты до первого токена.
 - Все установленные модели — Qwen-лайнейдж (Ornith, Swift, Huihui, Splash); докачиваются gpt-oss, Gemma, Granite.
 
+## Как запускать
+
+**1. Установка (один раз и после обновления):** `pnpm cli:link` собирает проект и кладёт `polako`, `polakod`, `polako-mcp` в глобальный
+каталог pnpm или (если `pnpm bin -g` пуст) в `~/.local/bin` симлинками. Установленный `polish` не затрагивается: другие имена, другой
+пакет (`polako`), другой дом (`~/.polako`, `POLAKO_HOME`). Проверено на изолированном `HOME`: рядом лежащий `polish` остался как был.
+Убрать: `pnpm cli:unlink`. Если `polako` не находится — добавьте `~/.local/bin` в `PATH`.
+
+**2. Карточки.** Формат — как в td (`docs/agents/tasks/N03-….md`): шапка, пустая строка, тело, абзац `Accept:`.
+
+```
+id: N03
+title: Placement rules
+depends: N02
+files: domain/placement/*.ts
+
+Что сделать и почему.
+
+Accept: тесты на каждую причину отказа; успешная проверка не меняет кошелёк.
+```
+
+- `depends:` — id карточек через запятую; неизвестный id и цикл — ошибка **до** старта (`polako run` ничего не создаёт).
+- `files:` — глобы разрешённой записи (`*` внутри каталога, `**` через каталоги, как в td). Любой изменённый файл вне списка
+  отклоняет кандидата детерминированным гейтом (`scope_violation`), независимо от тестов.
+- `Accept:` — критерии (абзац делится по `;`, либо список `- …`, либо раздел `## Acceptance`); они идут и воркеру, и ревьюерам
+  как требования, и в проверки движка (литеральный `*.test.ts` из `files:` должен существовать и проходить).
+- Необязательно: `Notes:` / `## Notes`.
+
+**3. Запуск.**
+
+```bash
+polako run ~/td/docs/agents/tasks                         # все карточки каталога (проект = git-репозиторий карточек)
+cd ~/td && polako run "docs/agents/tasks/N0*.md"           # glob (пути относительно текущего каталога)
+polako run ~/td/docs/agents/tasks/N03-placement-rules.md  # одна карточка
+polako run ~/td/docs/agents/tasks --only N01,N02 --brief ~/td/docs/agents/night-brief.md --detach
+polako run ~/td/docs/agents/tasks --dry-run               # только проверить карточки и показать DAG; демон не нужен
+```
+
+Путь к существующему `.md`-файлу, каталогу с карточками (без `.git`) или glob по `.md` — карточки; иначе работает прежний
+`polako run [project] [--mission "…"]`. `--only` берёт подмножество (зависимость от невыбранной карточки снимается и записывается в
+событие: считается, что она уже в коде). Модель-оркестратор не участвует: интерпретация и DAG строятся прямо из карточек
+(requirement на карточку, `depends` → рёбра), декомпозиции миссии нет; baseline, гейты, ревью, сходимость — прежние.
+
+**Бриф и заметки под модель.** `--brief файл` (или `[cards] brief = "docs/agents/night-brief.md"` в `polako.toml`, путь от проекта)
+замораживается в запуске и добавляется каждому воркеру. Заметки под модель:
+
+```toml
+[cards]
+brief = "docs/agents/night-brief.md"
+[cards.modelNotes]
+ornith = "docs/agents/model-notes/ornith.md"   # ключ: модель целиком, начало ключа модели, или лайнейдж (qwen)
+```
+
+**4. Наблюдение.** `polako watch <run>`, `polako status <run>` (раздел CARDS: по строке на карточку — результат, коммит, минуты,
+секунды смены модели, независимость ревью, кто отклонил и первая претензия), `polako log <run> -f`, `polako pause|resume|stop <run>`,
+`polako answer <run> "…"` при NEEDS_HUMAN.
+
+**5. Результат.** Работа идёт в ветке запуска `polako/<run>/run` (коммиты карточек: `polako: card N03 candidate …`); рабочее дерево
+проекта не трогается. После DONE: `polako diff <run>` и `polako apply <run>` (fast-forward текущей ветки проекта; нужна чистая
+рабочая копия и та же ветка, с которой начинали). Итоговый отчёт с таблицей карточек — `~/.polako/runs/<run>/report.md`. Карточка,
+упавшая 5 раз, — `failed`; зависящие от неё — `skipped`; независимые идут дальше, запуск в итоге заканчивается FAILED с причиной.
+
+Ограничения: независимость ревью в таблице берётся из ревью, покрывшего чекпоинт карточки (или первого более позднего
+проверенного чекпоинта, если свой не ревьюился); смена модели считается по окну времени карточки; MCP-инструмент `run` карточки пока не принимает.
+
 ## 1. Что изменилось в форке
 
 | Область | Что | Файлы |
@@ -22,6 +86,7 @@ Remotes: `origin` — polako, `upstream` — оригинал. Рабочая в
 | Резидентность | планировщик одной резидентной модели | `src/broker/residency.ts`, `src/providers/lmstudioControl.ts` |
 | Ревью | `review.sameModelFallback`, изолированное ревью | `src/engine/reviewDrivers.ts`, `src/review/*`, `src/convergence/antiFakeDone.ts` |
 | Профиль | локальные дефолты | `src/domain/localProfile.ts` |
+| Карточки | `polako run <cards>`: формат, DAG из карточек, scope-гейт, бриф и заметки, ledger | `src/cards/*`, `src/engine/cardDrivers.ts`, `src/cli/cards.ts` |
 
 Файл конфига: `~/.polako/polako.toml` (если его нет, читается `polish.toml`). Имена файлов внутри каталога
 (`polish.db`, `polish.sock`, `polish.pid`, `polish.lock`) не менялись: каталог уже разводит инструменты, а diff с upstream меньше.

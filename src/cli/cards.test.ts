@@ -113,6 +113,21 @@ describe("polako run <cards>", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("--dry-run validates and prints the plan without calling the daemon", async () => {
+    const { tasks } = repoWithCards();
+    const written: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    const calls: string[] = [];
+    await runCli(["run", tasks, "--dry-run", "--only", "N02"], { callDaemon: <T>(method: string) => { calls.push(method); return Promise.resolve({} as T); } });
+    expect(calls).toEqual([]);
+    expect(written.join("")).toContain("1 card(s), no dependency problems:");
+    expect(written.join("")).toContain("N02    -  files: src/N02.ts  accept: 1  Title N02");
+    expect(written.join("")).toContain("(N02 depends on N01, not selected: assumed already in the code)");
+  });
+
   it("leaves a mission run unchanged", async () => {
     const { repo } = repoWithCards();
     const { calls, daemonCall } = capture();

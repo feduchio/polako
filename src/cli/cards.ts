@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { cardsDirectory, loadCards, looksLikeCards, validateCards, type Card } from "../cards/index.js";
+import { cardsDirectory, loadCards, looksLikeCards, validateCards, type Card, type CardRegistration } from "../cards/index.js";
 import { PolishError } from "../shared/errors.js";
 
 export interface RunTarget {
@@ -49,6 +49,13 @@ export function projectForCards(spec: string, cwd = process.cwd()): string {
   }
 }
 
+/** The project a run is for: the one named, else the cards' repository, else the cwd. */
+export function projectOf(target: RunTarget, cwd = process.cwd()): string {
+  if (target.project !== null) return target.project;
+  const first = target.cardSpecs[0];
+  return first === undefined ? cwd : projectForCards(first, cwd);
+}
+
 export function loadCardSpecs(specs: readonly string[], cwd = process.cwd()): Card[] {
   const cards = specs.flatMap((spec) => loadCards(spec, cwd));
   validateCards(cards);
@@ -69,4 +76,15 @@ export function readBrief(path: string | undefined, cwd = process.cwd()): { brie
   const full = isAbsolute(path) ? path : resolve(cwd, path);
   if (!existsSync(full)) throw new PolishError("NOT_FOUND", `--brief file not found: ${path}`);
   return { brief: readFileSync(full, "utf8").trim(), briefSource: path };
+}
+
+/** What `--dry-run` prints: each card, what it waits for, its write scope, and what was left out. */
+export function renderCardPlan(registration: CardRegistration): string {
+  const lines = registration.cards.map(
+    (card) => `${card.id.padEnd(6)} ${card.depends.length === 0 ? "-" : `after ${card.depends.join(", ")}`}  files: ${card.files.join(", ")}  accept: ${String(card.acceptance.length)}  ${card.title}`,
+  );
+  for (const dropped of registration.droppedDependencies) {
+    lines.push(`(${dropped.card} depends on ${dropped.dependsOn}, not selected: assumed already in the code)`);
+  }
+  return `${String(registration.cards.length)} card(s), no dependency problems:\n${lines.join("\n")}\n`;
 }
