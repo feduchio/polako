@@ -17,6 +17,7 @@ import { ModelCatalog } from "../broker/catalog.js";
 import { costEligibilityFromConfig, isCostEligible } from "../broker/costEligibility.js";
 import { ModelObservationRepository } from "../broker/observations.js";
 import { DEFAULT_ROUTER_POLICY, ModelRouter, type Ranked } from "../broker/router.js";
+import { withCardInterpretation, withCardPlanning } from "../engine/cardDrivers.js";
 import { distinctFamilies } from "../broker/diversity.js";
 import type { EnsembleOption } from "../convergence/tracker.js";
 import { BudgetTracker, QuotaTracker, type BudgetLimits } from "../broker/quota.js";
@@ -391,12 +392,14 @@ export function installProductionDrivers(engine: RunEngine, deps: ProductionDeps
   engine.registerPhase("BASELINING", createBaseliningDriver(deps));
   engine.registerPhase(
     "INTERPRETING_MISSION",
-    createInterpretingMissionDriver({ roles: councilRoles, resolveProfile: profileResolver }),
+    withCardInterpretation(createInterpretingMissionDriver({ roles: councilRoles, resolveProfile: profileResolver }), {
+      resolveProfile: profileResolver,
+    }),
   );
   engine.registerPhase("DISCOVERING_MODELS", createDiscoveringModelsDriverFromCatalog(deps));
   engine.registerPhase(
     "PLANNING",
-    withReadyPromotion(createPlanningDriver({ roles: councilRoles, resolveProfile: profileResolver })),
+    withReadyPromotion(withCardPlanning(createPlanningDriver({ roles: councilRoles, resolveProfile: profileResolver }))),
   );
   engine.registerPhase("EXECUTING", withReadyPromotion(createExecutingDriver(candidateOptions)));
   engine.registerPhase("GATING", createGatingDriver(candidateOptions));

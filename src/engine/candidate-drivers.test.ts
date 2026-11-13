@@ -429,6 +429,28 @@ describe("B2 production candidate drivers", () => {
     }
   });
 
+  it("GATING rejects every candidate that changed a file outside its card's files, whatever the checks say", async () => {
+    const { runId, taskId } = seedRun(store, clock, fixture, { cardId: "N01", allowedFiles: ["src/**"] });
+    await engine.tickRun(runId);
+    await engine.tickRun(runId);
+    const candidates = store.repos.candidates.listByTask(taskId);
+    expect(candidates.map((candidate) => candidate.state)).toEqual(["FAILED_GATES", "FAILED_GATES"]);
+    for (const candidate of candidates) {
+      expect(candidate.gateReport?.passed).toBe(false);
+      expect(candidate.gateReport?.failures).toContainEqual({ reason: "scope_violation", detail: "outcome.txt: not allowed by the task card's files" });
+    }
+    expect(store.repos.runs.get(runId)?.phase).not.toBe("COMPARING");
+  });
+
+  it("GATING lets a card's own files through", async () => {
+    const { runId, taskId } = seedRun(store, clock, fixture, { cardId: "N01", allowedFiles: ["outcome.txt"] });
+    await engine.tickRun(runId);
+    await engine.tickRun(runId);
+    const candidates = store.repos.candidates.listByTask(taskId);
+    expect(candidates.map((candidate) => candidate.state).sort()).toEqual(["FAILED_GATES", "PASSED_GATES"]);
+    expect(candidates.flatMap((candidate) => candidate.gateReport?.failures ?? []).some((failure) => failure.reason === "scope_violation")).toBe(false);
+  });
+
   it("INTEGRATING advances the run head only when integration gates pass", async () => {
     const { runId, taskId } = seedRun(store, clock, fixture);
     await engine.tickRun(runId);
@@ -1567,6 +1589,7 @@ function seedRun(
   store: Store,
   clock: FakeClock,
   fixture: Awaited<ReturnType<typeof repositoryFixture>>,
+  taskExtras: { cardId?: string; allowedFiles?: string[] } = {},
 ): { runId: string; taskId: string } {
   const runId = id("run", clock.now());
   const interpretationId = id("interp", clock.now());
@@ -1622,7 +1645,7 @@ function seedRun(
       runId,
       ts: clock.now() + 2,
       type: "task.created",
-      payload: { task: { ...task, state: "READY" as const } },
+      payload: { task: { ...task, ...taskExtras, state: "READY" as const } },
       causedBy: [],
       actor: { kind: "system" },
       artifacts: [],

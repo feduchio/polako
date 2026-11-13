@@ -26,6 +26,8 @@ export const GateFailureReasonSchema = z.enum([
   "protected_path_modified",
   "test_silencing_detected",
   "config_weakened",
+  /** A task card limits the files a change may touch, and the candidate changed others. */
+  "scope_violation",
   "check_scripts_modified",
   "no_changes",
   "gate_error",

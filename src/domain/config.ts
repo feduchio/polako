@@ -363,6 +363,18 @@ export const ProviderConfigSchema = z.object({
 });
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 
+/** `polako run <cards>`: the project brief and per-model notes every card worker is given. */
+export const CardsConfigSchema = z.object({
+  /** Brief file, relative to the project (td: `docs/agents/night-brief.md`); `--brief` overrides it. */
+  brief: z.string().min(1).optional(),
+  /**
+   * Notes files appended to the brief for a model, keyed by model key, key prefix (`ornith`) or
+   * lineage family (`qwen`); paths are relative to the project.
+   */
+  modelNotes: z.record(z.string().min(1), z.string().min(1)).default({}),
+});
+export type CardsConfig = z.infer<typeof CardsConfigSchema>;
+
 export const PolishConfigSchema = z.object({
   home: z.string().default(`~/${BRAND.homeDir}`),
   /**
@@ -386,6 +398,7 @@ export const PolishConfigSchema = z.object({
   sandbox: SandboxConfigSchema.prefault({}),
   runtimeValidation: RuntimeValidationConfigSchema.prefault({}),
   council: CouncilRetryConfigSchema.prefault({}),
+  cards: CardsConfigSchema.prefault({}),
   supervisors: z.array(SupervisorRoleConfigSchema).default([]),
   providers: z.array(ProviderConfigSchema).default([]),
 });

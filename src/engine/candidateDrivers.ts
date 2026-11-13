@@ -8,6 +8,7 @@ import {
 } from "../domain/acceptance.js";
 import type { GateReport, Candidate, CandidateState } from "../domain/candidate.js";
 import type { GateFailureReason } from "../domain/candidate.js";
+import { scopeViolations } from "../cards/glob.js";
 import { emptyFindingCounts, type Checkpoint, type EvidenceVector } from "../domain/checkpoint.js";
 import { SYSTEM_ACTOR, type ArtifactRef } from "../domain/common.js";
 import { dependencyCacheDir, type PolishConfig } from "../domain/config.js";
@@ -260,7 +261,11 @@ export function createGatingDriver(options: CandidateDriverOptions): PhaseDriver
           `${candidate.baseCheckpointHash}..${headCommit}`,
           ctx.clock.now(),
         );
-        gated.push({ ...applyGateResult(ctx, candidate, headCommit, gateResult), diffRef });
+        // A card's `files:` is a hard scope: anything else the candidate changed rejects it, whatever the checks say.
+        const outsideScope = task.allowedFiles === undefined
+          ? []
+          : scopeViolations(await checkout.git.changedFilesBetween(candidate.baseCheckpointHash, headCommit), task.allowedFiles);
+        gated.push({ ...applyGateResult(ctx, candidate, headCommit, gateResult, outsideScope), diffRef });
       } catch (error) {
         if (!(error instanceof EnvironmentNotReadyError)) throw error;
         // Not a verdict on the work, so not FAILED_GATES; and terminal, so not INTERRUPTED,
@@ -916,16 +921,23 @@ function resultStatusToCandidateState(result: CandidateResult): CandidateState {
   }
 }
 
-function applyGateResult(ctx: PhaseContext, candidate: Candidate, headCommit: string, gateResult: GateResult): Candidate {
+function applyGateResult(
+  ctx: PhaseContext,
+  candidate: Candidate,
+  headCommit: string,
+  gateResult: GateResult,
+  outsideScope: readonly string[] = [],
+): Candidate {
   const gateReport = toGateReport(
     headCommit,
     gateResult,
     ctx.clock.now(),
     candidate.gateReport?.diffStat ?? { files: 0, insertions: 0, deletions: 0 },
+    outsideScope,
   );
   return {
     ...candidate,
-    state: gateResult.passed ? "PASSED_GATES" : "FAILED_GATES",
+    state: gateReport.passed ? "PASSED_GATES" : "FAILED_GATES",
     gateReport,
     updatedAt: ctx.clock.now(),
   };
@@ -936,8 +948,10 @@ function toGateReport(
   gate: GateResult,
   createdAt: number,
   diffStat: GateReport["diffStat"],
+  outsideScope: readonly string[] = [],
 ): GateReport {
   const failures: { reason: GateFailureReason; detail: string }[] = [];
+  for (const path of outsideScope) failures.push({ reason: "scope_violation", detail: `${path}: not allowed by the task card's files` });
   if (gate.candidateProtectedPathProblems.length > 0) {
     for (const problem of gate.candidateProtectedPathProblems) {
       failures.push({ reason: "protected_path_modified", detail: `${problem.path}: ${problem.reason}` });
@@ -969,7 +983,7 @@ function toGateReport(
     checks: gate.checks,
     injectedAcceptance: [],
     failures,
-    passed: gate.passed,
+    passed: gate.passed && outsideScope.length === 0,
     diffStat,
     createdAt,
   };

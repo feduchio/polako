@@ -152,6 +152,10 @@ export const TaskSchema = z.object({
   classificationEventId: IdSchema.optional(),
   /** The task this one was split from; it carries the parent's origin. */
   splitFrom: IdSchema.optional(),
+  /** The user's task card this task was made from (`polako run <cards>`); absent for mission runs. */
+  cardId: z.string().min(1).optional(),
+  /** Write scope from the card's `files:`; the gate rejects any changed file outside these globs. */
+  allowedFiles: z.array(z.string().min(1)).optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 
@@ -182,6 +186,8 @@ export interface TaskDraft {
   classifiedBy?: string;
   sourceRef?: string;
   classificationEventId?: string;
+  cardId?: string;
+  allowedFiles?: string[];
 }
 
 /** The only way to create a coding task from a finding. Throws unless the finding is VALID + blocking with a VALID validation. */
@@ -379,6 +385,8 @@ function baseTask(draft: TaskDraft): Omit<Task, "kind" | "origin" | "touchesProd
     complexity: draft.complexity,
     baseCheckpointHash: draft.baseCheckpointHash,
     dependsOn: draft.dependsOn ?? [],
+    ...(draft.cardId === undefined ? {} : { cardId: draft.cardId }),
+    ...(draft.allowedFiles === undefined ? {} : { allowedFiles: draft.allowedFiles }),
     state: "PENDING",
     attempts: 0,
     selectedCandidateId: null,
