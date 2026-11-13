@@ -89,6 +89,15 @@ export const ReviewStrategySchema = z.object({
    * 1500 = 3x the ~115-token rendered size of one finding, times a 4-finding allowance. An estimate.
    */
   maxOutputTokens: z.number().int().min(1).default(1500),
+  /**
+   * When fewer model lineages than the round needs are available besides the author's, let the
+   * author's own lineage (even the same model) review in isolation instead of stopping for a human.
+   * The review is then `same-model-isolated`, the report says so, and convergence additionally
+   * requires passing deterministic gates (docs/LOCAL.md §c). Off by default; the local profile turns it on.
+   */
+  sameModelFallback: z.boolean().default(false),
+  /** Sampling temperature of an isolated review; the normal reviewers use 0, so this one differs. */
+  isolatedTemperature: z.number().min(0).max(2).default(0.7),
 });
 
 export const ConvergenceStrategySchema = z.object({

@@ -1,5 +1,7 @@
 export {
   assertCodeChangeMissionMayComplete,
+  assertDeterministicGatesPassed,
+  checkpointReviewIndependence,
   missionSatisfiedWithoutChange,
   hasContinuableCodingWork,
   incompleteCodingWorkTerminal,

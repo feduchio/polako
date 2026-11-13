@@ -1,4 +1,5 @@
 import type { PolishConfig } from "../domain/config.js";
+import { reviewIndependenceOf } from "../domain/review.js";
 import type { Run, TerminalReason } from "../domain/run.js";
 import type { Clock } from "../shared/clock.js";
 import type { Store } from "../store/index.js";
@@ -107,6 +108,16 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
       const reason = typeof record["reason"] === "string" ? ` (${record["reason"]})` : "";
       evidence.push(`Mechanism ${record["name"]}: ${record["on"] ? "on" : "off"}${reason}`);
     }
+  }
+  const independenceEvents = events.filter((event) => event.type === "review.independence");
+  if (independenceEvents.length > 0) {
+    const isolated = independenceEvents.filter((event) => event.payload["reviewIndependence"] === "same-model-isolated").length;
+    const independence = reviewIndependenceOf(reviews.filter((execution) => execution.checkpointHash === checkpointHash));
+    evidence.push(
+      independence === "same-model-isolated"
+        ? `reviewIndependence: same-model-isolated (${isolated} of ${independenceEvents.length} review rounds had a reviewer of the author's own lineage, kept apart by fresh context, adversarial protocol and sampling only; a weaker guarantee than a reviewer of another lineage, so passing deterministic gates were required)`
+        : `reviewIndependence: lineage (every reviewer of the final checkpoint is of another lineage than its author)`,
+    );
   }
   for (const entry of corpus.entries) {
     const runtime = entry.runtimeEvidence;

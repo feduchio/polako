@@ -1,7 +1,7 @@
 import type { Candidate } from "../domain/candidate.js";
 import type { Checkpoint } from "../domain/checkpoint.js";
 import type { CleanRound } from "../domain/convergence.js";
-import type { ReviewExecution } from "../domain/review.js";
+import { reviewIndependenceOf, type ReviewExecution, type ReviewIndependence } from "../domain/review.js";
 import type { Task } from "../domain/task.js";
 import { cleanRoundsHaveReviewProof } from "./record.js";
 
@@ -20,6 +20,35 @@ export interface MissionCompletionEvidence {
   requiredReviewers: number;
   /** `config.retry.maxAttempts`; used to distinguish continuable vs exhausted incompletes. */
   maxAttempts?: number;
+  /**
+   * Weakest independence of the reviews of the current checkpoint. `same-model-isolated` means a
+   * model of the author's own lineage reviewed it, and then deterministic gates must carry the DONE.
+   */
+  reviewIndependence?: ReviewIndependence;
+}
+
+/**
+ * The deterministic part of a same-model-isolated DONE: the checkpoint's own gates ran and passed.
+ * Model verdicts alone never converge such a run: at least one gate passed, none failed, errored
+ * or timed out, and no test failed. (A gate that was `skipped` proves nothing and is not counted.)
+ */
+export function assertDeterministicGatesPassed(evidence: MissionCompletionEvidence): MissionMayCompleteResult {
+  if (evidence.reviewIndependence !== "same-model-isolated") return { ok: true };
+  const current = evidence.checkpoints.find((checkpoint) => checkpoint.commitHash === evidence.currentCheckpointHash);
+  if (current === undefined) return fail("same-model-isolated review needs deterministic gates, but the current checkpoint has no evidence", "NEEDS_HUMAN");
+  const statuses = Object.entries(current.evidence.gates);
+  const broken = statuses.filter(([, status]) => status === "fail" || status === "error" || status === "timeout").map(([name]) => name);
+  if (broken.length > 0) return fail(`same-model-isolated review needs passing deterministic gates; failing: ${broken.join(", ")}`, "NEEDS_HUMAN");
+  if (current.evidence.testsFailed > 0) return fail("same-model-isolated review needs passing deterministic gates; tests are failing", "NEEDS_HUMAN");
+  if (!statuses.some(([, status]) => status === "pass")) {
+    return fail("same-model-isolated review cannot converge on model verdicts alone: no deterministic gate passed on the current checkpoint", "NEEDS_HUMAN");
+  }
+  return { ok: true };
+}
+
+/** Independence of the reviews of `checkpointHash`; `lineage` when there are none. */
+export function checkpointReviewIndependence(executions: readonly ReviewExecution[], checkpointHash: string | null): ReviewIndependence {
+  return reviewIndependenceOf(executions.filter((execution) => execution.checkpointHash === checkpointHash && execution.completed));
 }
 
 export type MissionMayCompleteResult =
@@ -91,6 +120,8 @@ const CANDIDATE_WORKER_STATES = new Set<Candidate["state"]>([
  * Incomplete coding tasks (including valid_finding) block DONE; continuable incompletes route to PLANNING.
  */
 export function assertCodeChangeMissionMayComplete(evidence: MissionCompletionEvidence): MissionMayCompleteResult {
+  const gates = assertDeterministicGatesPassed(evidence);
+  if (!gates.ok) return gates;
   if (!missionRequiresCodeChange(evidence.tasks)) return { ok: true };
 
   const codingTasks = evidence.tasks.filter(isOwnCodingWork);

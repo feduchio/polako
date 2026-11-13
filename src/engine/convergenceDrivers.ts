@@ -8,6 +8,7 @@ import type { Run } from "../domain/run.js";
 import { currentReviewRoundIndex } from "../domain/review.js";
 import {
   assertCodeChangeMissionMayComplete,
+  checkpointReviewIndependence,
   missionSatisfiedWithoutChange,
   ConvergenceController,
   createRollbackCheckpoint,
@@ -495,6 +496,10 @@ export function gatherCompletionEvidence(ctx: PhaseContext): MissionCompletionEv
     currentCheckpointHash: ctx.run.currentCheckpointHash,
     requiredReviewers: ctx.config.review.reviewersPerRound,
     maxAttempts: ctx.config.retry.maxAttempts,
+    reviewIndependence: checkpointReviewIndependence(
+      ctx.store.repos.reviewExecutions.listByRun(ctx.run.id),
+      ctx.run.currentCheckpointHash,
+    ),
   };
 }
 

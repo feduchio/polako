@@ -17,6 +17,15 @@ export function reviewAxesForRound(reviewersPerRound: number, extraAxes: readonl
   });
 }
 
+/**
+ * How independent a review is of the model that wrote the code. `lineage`: the reviewer is of a
+ * different model lineage than every author. `same-model-isolated`: the reviewer is of the
+ * author's own lineage (possibly the same model), kept apart only by context, protocol and
+ * sampling, which is a weaker guarantee and is reported as such.
+ */
+export const ReviewIndependenceSchema = z.enum(["lineage", "same-model-isolated"]);
+export type ReviewIndependence = z.infer<typeof ReviewIndependenceSchema>;
+
 /** One independent reviewer execution against a checkpoint. */
 export const ReviewExecutionSchema = z.object({
   id: IdSchema,
@@ -27,6 +36,8 @@ export const ReviewExecutionSchema = z.object({
   requestedModel: ModelRefSchema,
   completed: z.boolean(),
   findings: z.array(RawFindingSchema),
+  /** Absent on executions recorded before the field existed: those are `lineage` reviews. */
+  independence: ReviewIndependenceSchema.optional(),
   /** sha256 of the fenced user prompt (isolation / replay checks) */
   promptDigest: z.string().min(1).optional(),
   error: z.string().optional(),
@@ -80,4 +91,9 @@ export function assertExecutionCheckpoint(execution: Pick<ReviewExecution, "chec
   if (execution.checkpointHash !== expected) {
     throw new Error(`review execution checkpoint ${execution.checkpointHash} does not match expected ${expected}`);
   }
+}
+
+/** The weakest independence among the executions: one isolated review makes the round isolated. */
+export function reviewIndependenceOf(executions: readonly Pick<ReviewExecution, "independence" | "completed">[]): ReviewIndependence {
+  return executions.some((execution) => execution.independence === "same-model-isolated") ? "same-model-isolated" : "lineage";
 }

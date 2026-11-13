@@ -40,6 +40,7 @@ import {
   currentReviewRoundIndex,
   isReviewRoundComplete,
   reviewAxesForRound,
+  reviewIndependenceOf,
   reviewRoundExecutions,
   type ReviewExecution,
 } from "../domain/review.js";
@@ -138,6 +139,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
     const roundIndex = currentReviewRoundIndex(allExecutions, required, hash);
 
     if (isReviewRoundComplete(allExecutions, hash, roundIndex, required)) {
+      recordReviewIndependence(ctx, hash, roundIndex, allExecutions);
       return { status: "complete", nextPhase: "VALIDATING" };
     }
 
@@ -188,10 +190,15 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
     const authors = options.authorFamilies?.(ctx) ?? new Set<string>();
     // Author families start covered: the walk passes over them exactly as over a family that answered.
     const coveredFamilies = new Set([...authors, ...familiesThatAnswered(roundExecutions, familyOf)]);
+    // With `review.sameModelFallback` the author's lineage may still review, in isolation, once every
+    // other lineage is used up: it is no longer "covered", and is reached only after the others.
+    const isolatedFamilies: ReadonlySet<string> = ctx.config.review.sameModelFallback ? authors : new Set<string>();
+    if (isolatedFamilies.size > 0) for (const family of isolatedFamilies) coveredFamilies.delete(family);
     if (familyOf !== null) {
       const missing = missingAxes(axes, roundExecutions, required).length;
-      const fresh = new Set(reviewers.map((reviewer) => familyOf(reviewer.model)).filter((family) => !coveredFamilies.has(family)));
-      if (fresh.size < missing) {
+      const fresh = new Set(reviewers.map((reviewer) => familyOf(reviewer.model)).filter((family) => !coveredFamilies.has(family) && !isolatedFamilies.has(family)));
+      const isolatedAvailable = reviewers.some((reviewer) => isolatedFamilies.has(familyOf(reviewer.model)));
+      if (fresh.size < missing && !isolatedAvailable) {
         // Waiting helps only when a rate-limited model would bring a family the round still lacks.
         if (transientlyExcludedReviewModels(ctx).some((model) => !coveredFamilies.has(familyOf(model)))) {
           return { status: "waiting" };
@@ -236,7 +243,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
         if (adversarialSkipApplies(ctx, hash, roundIndex, axis)) {
           // The row must name the model that would actually have been called, which is the first
           // reviewer `reviewAxisWithFallback` would not have passed over.
-          const skipReviewer = nextUsableReviewer(reviewers, preferredIndex, rateLimited, familyOf, coveredFamilies);
+          const skipReviewer = reviewerCandidates(reviewers, preferredIndex, rateLimited, familyOf, coveredFamilies, isolatedFamilies)[0]?.reviewer;
           if (skipReviewer !== undefined) {
             skipExecution(ctx, hash, roundIndex, axis, skipReviewer, SKIP_REASON);
             continue;
@@ -254,6 +261,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
           rateLimited,
           familyOf,
           coveredFamilies,
+          isolatedFamilies,
           protocols,
           review: options.runAxisReview ?? runAxisReview,
         });
@@ -262,6 +270,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
 
       const refreshed = ctx.store.repos.reviewExecutions.listByRun(ctx.run.id);
       if (isReviewRoundComplete(refreshed, hash, roundIndex, required)) {
+        recordReviewIndependence(ctx, hash, roundIndex, refreshed);
         return { status: "complete", nextPhase: "VALIDATING" };
       }
       return { status: "waiting" };
@@ -852,9 +861,12 @@ async function verifyReviewersOrExplain(
   const familyOf = reviewerFamilyLookup(reviewers, options.familyOf);
   if (familyOf !== null) {
     const authors = options.authorFamilies?.(ctx) ?? new Set<string>();
-    const families = [...familiesThatAnswered(producing, familyOf)].filter((family) => !authors.has(family));
-    if (families.length < producing.length) {
-      return insufficientFamiliesReason(families.length, producing.length, families, authors);
+    // Isolated executions are the author's own lineage by design (`review.sameModelFallback`); they
+    // are exempt from "one family per axis, none the author's", and the round is reported as isolated.
+    const lineageProducing = producing.filter((execution) => execution.independence !== "same-model-isolated");
+    const families = [...familiesThatAnswered(lineageProducing, familyOf)].filter((family) => !authors.has(family));
+    if (families.length < lineageProducing.length) {
+      return insufficientFamiliesReason(families.length, lineageProducing.length, families, authors);
     }
   }
 
@@ -1090,21 +1102,27 @@ async function reviewAxisWithFallback(
         rateLimited: Set<string>;
         familyOf: ReviewerFamilyLookup | null;
         coveredFamilies: Set<string>;
+        /** Author-lineage families that may review in isolation once no other lineage is left. */
+        isolatedFamilies?: ReadonlySet<string>;
         protocols: ProtocolRegistry;
         review: (input: RunAxisReviewInput) => Promise<RunAxisReviewResult>;
       },
 ): Promise<"ok" | "waiting"> {
-  const count = input.reviewers.length;
-  for (let offset = 0; offset < count; offset++) {
-    const reviewer = input.reviewers[(input.preferredIndex + offset) % count];
-    if (reviewer === undefined) continue;
+  const candidates = reviewerCandidates(
+    input.reviewers,
+    input.preferredIndex,
+    input.rateLimited,
+    input.familyOf,
+    input.coveredFamilies,
+    input.isolatedFamilies ?? new Set<string>(),
+  );
+  for (const { reviewer, isolated } of candidates) {
     const key = modelRefKey(reviewer.model);
     if (input.rateLimited.has(key)) continue;
     // A family that already answered an axis of this round would make the round two opinions
     // dressed as three.
     const family = input.familyOf?.(reviewer.model);
-    if (family !== undefined && input.coveredFamilies.has(family)) continue;
-    const started = startExecution(ctx, input.hash, input.roundIndex, input.axis, reviewer);
+    const started = startExecution(ctx, input.hash, input.roundIndex, input.axis, reviewer, isolated ? "same-model-isolated" : undefined);
     try {
       const result = await input.review({
         checkpoint: input.checkpoint,
@@ -1116,12 +1134,14 @@ async function reviewAxisWithFallback(
         now: ctx.clock.now(),
         maxOutputTokens: ctx.config.review.maxOutputTokens,
         trusted: reviewTrustedContext(ctx, input.checkpoint),
+        ...(isolated ? { isolation: { temperature: ctx.config.review.isolatedTemperature } } : {}),
       });
       finishExecution(ctx, started, result.findings, result.model, result.promptDigest);
       for (const finding of result.findings) {
         raiseFinding(ctx, finding, started.id);
       }
-      if (family !== undefined) input.coveredFamilies.add(family);
+      // An isolated family may answer again: it is the author's lineage, kept apart by context, not by family.
+      if (family !== undefined && !isolated) input.coveredFamilies.add(family);
       return "ok";
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1453,6 +1473,7 @@ function startExecution(
   roundIndex: number,
   axis: ReviewAxis,
   reviewer: ReviewProvider,
+  independence?: ReviewExecution["independence"],
 ): ReviewExecution {
   const now = ctx.clock.now();
   const execution: ReviewExecution = {
@@ -1462,6 +1483,7 @@ function startExecution(
     roundIndex,
     axis,
     requestedModel: reviewer.model,
+    ...(independence === undefined ? {} : { independence }),
     completed: false,
     findings: [],
     startedAt: now,
@@ -1499,25 +1521,36 @@ function isSkippedExecution(execution: ReviewExecution): boolean {
 }
 
 /**
- * The reviewer `reviewAxisWithFallback` would actually reach: its first choice, then the ring, passing
- * over models already rate-limited in this pass. `undefined` when every model is excluded, in which
- * case there is nothing to attribute a skip to and the normal path must run.
+ * The reviewers `reviewAxisWithFallback` would try, in order: its first choice, then the ring,
+ * passing over models already rate-limited in this pass and families that already answered; then,
+ * only when `review.sameModelFallback` made them eligible, the author's own lineage in list order
+ * (composition puts a sibling fine-tune before the author's own model), each marked `isolated`.
+ * Empty when every model is excluded, in which case there is nothing to attribute a skip to and the
+ * normal path must run.
  */
-function nextUsableReviewer(
+function reviewerCandidates(
   reviewers: readonly ReviewProvider[],
   preferredIndex: number,
   rateLimited: ReadonlySet<string>,
   familyOf: ReviewerFamilyLookup | null,
   coveredFamilies: ReadonlySet<string>,
-): ReviewProvider | undefined {
+  isolatedFamilies: ReadonlySet<string>,
+): { reviewer: ReviewProvider; isolated: boolean }[] {
+  const out: { reviewer: ReviewProvider; isolated: boolean }[] = [];
   for (let offset = 0; offset < reviewers.length; offset++) {
     const reviewer = reviewers[(preferredIndex + offset) % reviewers.length];
     if (reviewer === undefined) continue;
     if (rateLimited.has(modelRefKey(reviewer.model))) continue;
-    if (familyOf !== null && coveredFamilies.has(familyOf(reviewer.model))) continue;
-    return reviewer;
+    const family = familyOf?.(reviewer.model);
+    if (family !== undefined && (coveredFamilies.has(family) || isolatedFamilies.has(family))) continue;
+    out.push({ reviewer, isolated: false });
   }
-  return undefined;
+  for (const reviewer of reviewers) {
+    if (rateLimited.has(modelRefKey(reviewer.model))) continue;
+    const family = familyOf?.(reviewer.model);
+    if (family !== undefined && isolatedFamilies.has(family)) out.push({ reviewer, isolated: true });
+  }
+  return out;
 }
 
 type ReviewerFamilyLookup = (model: ModelRef) => string;
@@ -1645,6 +1678,39 @@ function raiseFinding(ctx: PhaseContext, finding: Finding, causedBy: string): vo
     artifacts: [],
   };
   ctx.store.events.append([event]);
+}
+
+const REVIEW_INDEPENDENCE_EVENT = "review.independence";
+
+/**
+ * Once per review round, in a run that may use the same-model fallback: how independent of the
+ * author the round was. The weakest execution decides, and the report states it.
+ */
+function recordReviewIndependence(
+  ctx: PhaseContext,
+  checkpointHash: string,
+  roundIndex: number,
+  executions: readonly ReviewExecution[],
+): void {
+  const round = executions.filter(
+    (execution) => execution.checkpointHash === checkpointHash && execution.roundIndex === roundIndex && execution.completed && !isSkippedExecution(execution),
+  );
+  const independence = reviewIndependenceOf(round);
+  if (independence === "lineage" && !ctx.config.review.sameModelFallback) return;
+  const recorded = ctx.store.events
+    .list(ctx.run.id, { types: [REVIEW_INDEPENDENCE_EVENT] })
+    .some((event) => event.payload["checkpointHash"] === checkpointHash && event.payload["roundIndex"] === roundIndex);
+  if (recorded) return;
+  ctx.store.events.append([{
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: REVIEW_INDEPENDENCE_EVENT,
+    payload: { checkpointHash, roundIndex, reviewIndependence: independence },
+    causedBy: [],
+    actor: SYSTEM_ACTOR,
+    artifacts: [],
+  }]);
 }
 
 function appendReviewEvent(ctx: PhaseContext, type: "review.started" | "review.finished", execution: ReviewExecution): void {

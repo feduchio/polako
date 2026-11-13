@@ -1,6 +1,6 @@
 import type { ProtocolRegistry } from "../protocols/loader.js";
 import { PolishError } from "../shared/errors.js";
-import { reviewerSystemPrompt } from "./reviewerProtocol.js";
+import { isolatedReviewerSystemPrompt, reviewerSystemPrompt } from "./reviewerProtocol.js";
 import { realpath, readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ProviderAdapter } from "../broker/types.js";
@@ -53,6 +53,11 @@ export interface RunAxisReviewInput {
   maxOutputTokens?: number;
   /** What the engine itself knows about the change; see `ReviewTrustedContext`. */
   trusted?: ReviewTrustedContext;
+  /**
+   * Set when the reviewer is of the author's own lineage: a different system prompt (adversarial
+   * stance) and sampling temperature. The context is the same fresh pack either way.
+   */
+  isolation?: { temperature: number };
 }
 
 /**
@@ -101,7 +106,7 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
   const response = await selection.provider.complete({
     model,
     messages: [
-      { role: "system", content: reviewerSystemPrompt(input.protocols, input.axis) },
+      { role: "system", content: input.isolation === undefined ? reviewerSystemPrompt(input.protocols, input.axis) : isolatedReviewerSystemPrompt(input.protocols, input.axis) },
       { role: "user", content: userContent },
     ],
       ...(input.responseMode === "legacy_json_object"
@@ -110,7 +115,7 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
             responseSchema: REVIEW_FINDINGS_RESPONSE_SCHEMA,
             reasoning: DISABLED_REASONING,
           }),
-    temperature: 0,
+    temperature: input.isolation?.temperature ?? 0,
     ...(input.maxOutputTokens === undefined ? {} : { maxTokens: input.maxOutputTokens }),
     metadata: {
       runId: input.checkpoint.runId,

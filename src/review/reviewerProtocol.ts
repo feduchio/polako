@@ -90,3 +90,22 @@ export function reviewerSystemPrompt(registry: ProtocolRegistry, axis: ReviewAxi
     REVIEWER_OUTPUT_CONTRACT,
   ].join("\n\n");
 }
+
+/**
+ * What an isolated reviewer is told on top of its axis protocol: that it is checking work of its
+ * own lineage, so its blind spots are probably the author's. It reuses the adversarial reviewer
+ * protocol rather than inventing one, and differs from the ordinary prompt in stance, not only in
+ * wording.
+ */
+export const ISOLATED_REVIEW_PREAMBLE =
+  "You did not write this change and you have not seen the reasoning, report or conversation behind it; " +
+  "you have only the mission, the engine's own check results and the diff. The change was produced by a model " +
+  "of your own lineage, so mistakes that look natural to you are the ones it probably made: do not give it the " +
+  "benefit of the doubt. Treat it as wrong until the diff, the cited code and the check results show otherwise. " +
+  "Look first for what the author's own tests would not exercise.";
+
+/** The isolated reviewer's system message: preamble, axis prompt, then the adversarial protocol. */
+export function isolatedReviewerSystemPrompt(registry: ProtocolRegistry, axis: ReviewAxis): string {
+  const adversarial = registry.get(REVIEW_AXIS_ROLE.adversarial);
+  return [ISOLATED_REVIEW_PREAMBLE, reviewerSystemPrompt(registry, axis), `Adversarial stance:\n${adversarial.body.trim()}`].join("\n\n");
+}

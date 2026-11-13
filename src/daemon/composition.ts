@@ -721,7 +721,8 @@ export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseCon
   // One reviewer per family: the fallback walk in REVIEWING then reaches a different family, not a
   // second model of one it already asked. REVIEWING itself passes over the author's families.
   const diverse = distinctFamilies(ranked, (row) => row.entry.info.capabilities.family);
-  return diverse.map((row) => {
+  const selected = ctx !== undefined && deps.config.review.sameModelFallback ? withIsolatedSiblings(deps, ctx, diverse, ranked) : diverse;
+  return selected.map((row) => {
     const ref = row.entry.info.ref;
     const adapter = deps.catalog.provider(ref.provider) ?? deps.providers.find((provider) => provider.id === ref.provider);
     if (adapter === undefined) {
@@ -740,6 +741,33 @@ export async function selectReviewProviders(deps: ProductionDeps, ctx?: PhaseCon
       model: ref,
     };
   });
+}
+
+/**
+ * `review.sameModelFallback`: besides one reviewer per family, the author lineage's other models,
+ * a sibling fine-tune before the author's own model. REVIEWING reaches them only once every other
+ * lineage has answered, and reviews with them in isolation (docs/LOCAL.md §c). A different
+ * fine-tune has different weights, so it is preferred to the author model itself, though it is
+ * still the same lineage and is reported as `same-model-isolated`.
+ */
+function withIsolatedSiblings<T extends { entry: { info: { ref: ModelRef; capabilities: { family: string } } } }>(
+  deps: Pick<ProductionDeps, "catalog">,
+  ctx: PhaseContext,
+  diverse: readonly T[],
+  ranked: readonly T[],
+): T[] {
+  const authors = authorFamilies(deps, ctx);
+  if (authors.size === 0) return [...diverse];
+  const authorModels = new Set(
+    ctx.store.repos.candidates.listByRun(ctx.run.id).filter((candidate) => candidate.state === "WINNER").map((candidate) => modelRefKey(candidate.model)),
+  );
+  const lineage = diverse.filter((row) => !authors.has(row.entry.info.capabilities.family));
+  const sameLineage = ranked.filter((row) => authors.has(row.entry.info.capabilities.family));
+  const siblingsFirst = [
+    ...sameLineage.filter((row) => !authorModels.has(modelRefKey(row.entry.info.ref))),
+    ...sameLineage.filter((row) => authorModels.has(modelRefKey(row.entry.info.ref))),
+  ];
+  return [...lineage, ...siblingsFirst];
 }
 
 export function strictProbeEpochComplete(deps: ProductionDeps, ctx: PhaseContext): boolean {
