@@ -153,7 +153,7 @@ describe("card runs: interpretation and plan from the cards", () => {
       transitionTask(store, clock, ctx.run.id, { ...(store.repos.tasks.get(a.id) ?? a), state, updatedAt: clock.now() });
     }
     expect(cancelUnreachableCards(refresh(ctx)).sort()).toEqual(["B", "C"]);
-    expect([...byCard().entries()].map(([cardId, task]) => [cardId, task?.state]).sort()).toEqual([["A", "BLOCKED"], ["B", "CANCELLED"], ["C", "CANCELLED"], ["D", "PENDING"]]);
+    expect([...byCard().entries()].map(([cardId, task]) => [cardId, task.state]).sort()).toEqual([["A", "BLOCKED"], ["B", "CANCELLED"], ["C", "CANCELLED"], ["D", "PENDING"]]);
   });
 
   it("reads nothing for a mission run", () => {

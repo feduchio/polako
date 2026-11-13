@@ -815,7 +815,7 @@ function optionalStringList(params: Record<string, unknown>, key: string): strin
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
     throw new PolishError("CONFIG_ERROR", `${key} must be an array of strings`);
   }
-  return value as string[];
+  return value;
 }
 
 function requiredString(params: Record<string, unknown>, key: string): string {

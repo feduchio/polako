@@ -1,3 +1,4 @@
+import { renderCardLedger } from "../cards/ledger.js";
 import type { Run } from "../domain/run.js";
 import { formatAge, formatDuration, projectActivity, projectRunStatus } from "./project.js";
 import type { ActivityLine, CouncilRoleStatus, RunStatusView } from "./types.js";
@@ -23,6 +24,7 @@ export function renderRunStatus(view: RunStatusView): string {
     `Counts  pending ${view.progress.tasks.pending} · running ${view.progress.tasks.running} · completed ${view.progress.tasks.completed} · blocked ${view.progress.tasks.blocked}`,
     `Check   ${view.progress.checkpoint ?? DASH}${view.progress.baseline !== null ? ` (baseline ${view.progress.baseline})` : ""}`,
     view.progress.diff !== null ? `Diff    ${view.progress.diff}` : null,
+    ...(view.cards === undefined ? [] : ["", "CARDS", ...renderCardLedger(view.cards)]),
     "",
     "ACTIVE",
     view.active === null

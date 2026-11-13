@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CARDS_REGISTERED_EVENT, registerCards } from "../cards/index.js";
+import { registerCards } from "../cards/index.js";
 import { composeWorkerInstruction } from "../context/workerInstruction.js";
 import { defaultConfig } from "../domain/config.js";
 import { createTaskFromRequirement } from "../domain/task.js";

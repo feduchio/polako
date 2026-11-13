@@ -1,3 +1,4 @@
+import type { CardLedgerRow } from "../cards/ledger.js";
 import type { RunControl, RunPhase } from "../domain/run.js";
 
 export interface CouncilRoleStatus {
@@ -47,6 +48,8 @@ export interface TaskCounts {
 }
 
 export interface RunStatusView {
+  /** Per-card ledger of a `polako run <cards>` run; absent for a mission run. */
+  cards?: CardLedgerRow[];
   runId: string;
   target: string;
   elapsedMs: number;

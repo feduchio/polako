@@ -7,10 +7,10 @@ export function globToRegExp(glob: string): RegExp {
   const normalized = normalizePath(glob);
   const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, "\\$&");
   const source = escaped
-    .replace(/\*\*/g, "\u0000")
+    .replace(/\*\*/g, "\uE000")
     .replace(/\*/g, "[^/]*")
     .replace(/\?/g, "[^/]")
-    .replace(/\u0000/g, ".*");
+    .replace(/\uE000/g, ".*");
   return new RegExp(`^${source}$`);
 }
 

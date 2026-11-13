@@ -90,20 +90,20 @@ describe("file scope globs (td semantics)", () => {
 
 describe("validateCards", () => {
   it("accepts a DAG", () => {
-    expect(() => validateCards([card("A"), card("B", ["A"]), card("C", ["A", "B"])])).not.toThrow();
+    expect(() => { validateCards([card("A"), card("B", ["A"]), card("C", ["A", "B"])]); }).not.toThrow();
   });
 
   it("names unknown dependency ids", () => {
-    expect(() => validateCards([card("A", ["Z"])])).toThrow(/card A depends on unknown card Z/);
+    expect(() => { validateCards([card("A", ["Z"])]); }).toThrow(/card A depends on unknown card Z/);
   });
 
   it("names the cycle", () => {
-    expect(() => validateCards([card("A", ["C"]), card("B", ["A"]), card("C", ["B"])])).toThrow(/dependency cycle: A -> C -> B -> A/);
-    expect(() => validateCards([card("A", ["A"])])).toThrow(/depends on itself/);
+    expect(() => { validateCards([card("A", ["C"]), card("B", ["A"]), card("C", ["B"])]); }).toThrow(/dependency cycle: A -> C -> B -> A/);
+    expect(() => { validateCards([card("A", ["A"])]); }).toThrow(/depends on itself/);
   });
 
   it("names duplicate ids", () => {
-    expect(() => validateCards([card("A"), card("A")])).toThrow(/duplicate card id A/);
+    expect(() => { validateCards([card("A"), card("A")]); }).toThrow(/duplicate card id A/);
   });
 });
 

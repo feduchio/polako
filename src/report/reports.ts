@@ -17,6 +17,8 @@ export interface FinalReportInput {
   validation?: readonly string[];
   convergence?: readonly string[];
   evidence?: readonly string[];
+  /** Per-card ledger of a card run: card, result, commit, minutes, swap seconds, review independence, rejecting reviewer. */
+  cards?: readonly string[];
 }
 
 export interface NeedsHumanReportInput {
@@ -44,6 +46,7 @@ export function renderFinalReport(input: FinalReportInput): string {
   appendNumbered(lines, "Verified", input.checks ?? []);
   appendNumbered(lines, "Findings", input.findings ?? []);
   appendNumbered(lines, "Validation", input.validation ?? []);
+  appendNumbered(lines, "Cards", input.cards ?? []);
   appendNumbered(lines, "Convergence", input.convergence ?? []);
   appendNumbered(lines, "Evidence", input.evidence ?? []);
   return lines.join("\n");

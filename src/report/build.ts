@@ -1,4 +1,5 @@
 import type { PolishConfig } from "../domain/config.js";
+import { projectCardLedger, renderCardLedger } from "../cards/ledger.js";
 import { reviewIndependenceOf } from "../domain/review.js";
 import type { Run, TerminalReason } from "../domain/run.js";
 import type { Clock } from "../shared/clock.js";
@@ -53,7 +54,7 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
   if (mission !== null) changes.push(`Mission: ${mission.text}`);
   if (run.interpretationId !== null) changes.push(`Interpretation: ${run.interpretationId}`);
   if (baseline !== undefined) changes.push(`Baseline checkpoint: ${baseline.commitHash}`);
-  for (const task of tasks) changes.push(`Task ${task.id}`);
+  for (const task of tasks) changes.push(`Task ${task.id}${task.cardId === undefined ? "" : ` (card ${task.cardId})`}`);
   for (const candidate of candidates) {
     if (candidate.headCommit !== null) {
       changes.push(`Candidate ${candidate.id} commit ${candidate.headCommit}`);
@@ -158,6 +159,7 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
   }
 
   const reasons = whyChainLines(ctx, seedEntityId(candidates, checkpointHash));
+  const ledger = projectCardLedger(events, ctx.clock.now());
 
   return {
     ...(failure === null ? {} : { outcome: "failed" as const }),
@@ -170,6 +172,7 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
     validation,
     convergence,
     evidence,
+    ...(ledger === null ? {} : { cards: renderCardLedger(ledger) }),
   };
 }
 

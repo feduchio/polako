@@ -1,3 +1,4 @@
+import { projectCardLedger } from "../cards/ledger.js";
 import type { ModelRef } from "../domain/common.js";
 import type { Event } from "../domain/event.js";
 import type { Run } from "../domain/run.js";
@@ -37,7 +38,9 @@ export function projectRunStatus(run: Run, events: readonly Event[], now: number
           : "provider unavailable; resume when the endpoint recovers"
         : null;
 
+  const cards = projectCardLedger(ordered, now);
   return {
+    ...(cards === null ? {} : { cards }),
     runId: run.id,
     target: run.projectPath,
     elapsedMs: Math.max(0, now - run.createdAt),
