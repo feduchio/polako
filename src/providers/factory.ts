@@ -3,7 +3,7 @@ import type { ProviderConfig } from "../domain/config.js";
 import type { ModelInfo, ProviderAdapter } from "../broker/types.js";
 import { GeminiProvider } from "./gemini.js";
 import { GroqProvider } from "./groq.js";
-import { ResidencyScheduler } from "../broker/residency.js";
+import { ResidencyScheduler, type ResidencyEvent } from "../broker/residency.js";
 import { LmStudioProvider, LMSTUDIO_DEFAULT_CONTEXT_LENGTH } from "./lmstudio.js";
 import { lmsResidencyControl } from "./lmstudioControl.js";
 import { OpenRouterProvider } from "./openrouter.js";
@@ -16,6 +16,8 @@ export interface CreateProviderOptions {
   timeoutMs?: number;
   /** Polish home — required for record-replay cassette resolution */
   home?: string;
+  /** Told about every model swap a managed LM Studio provider makes. */
+  onResidencyEvent?: (event: ResidencyEvent) => void;
 }
 
 /** Instantiate a real provider adapter from config + resolved secret value. */
@@ -49,6 +51,7 @@ export function createProviderFromConfig(
         ...(entry.manageResidency === true
           ? {
               residency: new ResidencyScheduler({
+                ...(opts.onResidencyEvent === undefined ? {} : { onEvent: opts.onResidencyEvent }),
                 control: lmsResidencyControl({
                   contextLength: entry.contextLength ?? LMSTUDIO_DEFAULT_CONTEXT_LENGTH,
                   ...(entry.lmsPath !== undefined ? { lmsPath: entry.lmsPath } : {}),

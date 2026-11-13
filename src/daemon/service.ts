@@ -1,6 +1,9 @@
 import { BRAND } from "../shared/brand.js";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { z } from "zod";
+import { CARDS_REGISTERED_EVENT, CardSchema, readGuidanceFile, registerCards, type CardRegistration } from "../cards/index.js";
+import type { ResidencyEvent } from "../broker/residency.js";
 import { attemptTokenCap, withRuntimeValidationMode, type PolishConfig } from "../domain/config.js";
 import { createMission } from "../domain/mission.js";
 import type { NewEvent } from "../domain/event.js";
@@ -129,6 +132,9 @@ export class DaemonService implements RpcHandler {
       config: this.config,
       home: this.home,
       resolveRunSettings: (runId) => this.resolveRunSettings(runId),
+      onResidencyEvent: (event) => {
+        this.recordResidencyEvent(event);
+      },
       ...(options.providers === undefined ? {} : { providers: options.providers }),
     });
     this.engine = new RunEngine({
@@ -199,6 +205,10 @@ export class DaemonService implements RpcHandler {
           runtime: nullableString(params, "runtime"),
           budgetTokens: optionalNumber(params, "budgetTokens"),
           budgetUsd: optionalNumber(params, "budgetUsd"),
+          cards: optionalCards(params),
+          only: optionalStringList(params, "only"),
+          brief: optionalString(params, "brief"),
+          briefSource: optionalString(params, "briefSource"),
         });
       case "status":
         return this.status(optionalString(params, "runId"));
@@ -315,6 +325,10 @@ export class DaemonService implements RpcHandler {
     runtime: string | null;
     budgetTokens: number | undefined;
     budgetUsd: number | undefined;
+    cards?: z.infer<typeof CardSchema>[] | undefined;
+    only?: string[] | undefined;
+    brief?: string | undefined;
+    briefSource?: string | undefined;
   }): Promise<Run> {
     // Resolved once, here, and persisted: a run's mode is a property of the run, so editing
     // polish.toml later cannot move a run that is already going.
@@ -329,6 +343,9 @@ export class DaemonService implements RpcHandler {
     }
 
     const project = this.resolveProject(input.project);
+    // Before anything exists: a broken card set, an unknown `--only` id or a cycle is an error at
+    // the prompt, not a run that never becomes ready.
+    const cardRun = input.cards === undefined ? null : this.registerCardRun(input.cards, project.path, input);
     const git = new Git(project.path);
     const [baselineCommit, targetBranch] = await Promise.all([
       git.revParse("HEAD"),
@@ -346,7 +363,9 @@ export class DaemonService implements RpcHandler {
     const mission = createMission({
       id: run.missionId,
       projectPath: project.path,
-      text: input.mission.trim() === "" ? "Improve the project according to repository context." : input.mission,
+      text: cardRun !== null
+        ? cardMissionText(cardRun)
+        : input.mission.trim() === "" ? "Improve the project according to repository context." : input.mission,
       createdAt: this.clock.now(),
     });
     const missionEvent: NewEvent = {
@@ -360,6 +379,18 @@ export class DaemonService implements RpcHandler {
       artifacts: [],
     };
     this.store.events.append([missionEvent]);
+    if (cardRun !== null) {
+      this.store.events.append([{
+        id: id("evt", this.clock.now()),
+        runId: run.id,
+        ts: this.clock.now(),
+        type: CARDS_REGISTERED_EVENT,
+        payload: { registration: cardRun },
+        causedBy: [missionEvent.id],
+        actor: { kind: "user" },
+        artifacts: [],
+      }]);
+    }
 
     await git.createBranch(run.runBranch, baselineCommit);
     this.engine.setCurrentCheckpoint(run.id, baselineCommit);
@@ -369,7 +400,7 @@ export class DaemonService implements RpcHandler {
     const metadata: FacadeRunMetadata = {
       runId: run.id,
       projectPath: project.path,
-      mission: input.mission,
+      mission: cardRun === null ? input.mission : cardMissionText(cardRun),
       baselineCommit,
       targetBranch,
       runBranch: run.runBranch,
@@ -382,6 +413,45 @@ export class DaemonService implements RpcHandler {
     this.writeMetadata(metadata);
     await this.tick();
     return this.requireRun(run.id);
+  }
+
+  /** The cards, the brief (`--brief`, else `cards.brief` in the config) and `--only`, validated as one registration. */
+  private registerCardRun(
+    cards: z.infer<typeof CardSchema>[],
+    projectPath: string,
+    input: { only?: string[] | undefined; brief?: string | undefined; briefSource?: string | undefined },
+  ): CardRegistration {
+    const configured = this.config.cards.brief;
+    const brief = input.brief ?? (configured === undefined ? null : readGuidanceFile(projectPath, configured));
+    if (input.brief === undefined && configured !== undefined && brief === null) {
+      throw new PolishError("CONFIG_ERROR", `cards.brief ${configured} is missing or empty in ${projectPath}`);
+    }
+    return registerCards(cards, {
+      ...(input.only === undefined || input.only.length === 0 ? {} : { only: input.only }),
+      brief: brief ?? "",
+      briefSource: input.briefSource ?? (brief === null ? null : configured ?? null),
+    });
+  }
+
+  /**
+   * A model swap is the server's, not a run's: it is written to every run that is going, so each
+   * card's swap seconds can be read from its own log.
+   */
+  private recordResidencyEvent(event: ResidencyEvent): void {
+    if (event.type !== "swap") return;
+    for (const run of this.store.repos.runs.listAll()) {
+      if (run.phase === "DONE" || run.phase === "FAILED" || run.phase === "NEEDS_HUMAN" || run.control !== "RUNNING") continue;
+      this.store.events.append([{
+        id: id("evt", this.clock.now()),
+        runId: run.id,
+        ts: this.clock.now(),
+        type: "local.model_swap",
+        payload: { from: event.from, to: event.to, ms: event.ms },
+        causedBy: [],
+        actor: SYSTEM_ACTOR,
+        artifacts: [],
+      }]);
+    }
   }
 
   private status(runId: string | undefined): Run | Run[] {
@@ -722,6 +792,30 @@ export class DaemonService implements RpcHandler {
     mkdirSync(this.runDir(metadata.runId), { recursive: true });
     writeFileSync(this.metadataPath(metadata.runId), `${JSON.stringify(metadata, null, 2)}\n`);
   }
+}
+
+function cardMissionText(registration: CardRegistration): string {
+  const lines = registration.cards.map((card) => `${card.id}: ${card.title}`);
+  return `Execute the task cards:\n${lines.join("\n")}`;
+}
+
+function optionalCards(params: Record<string, unknown>): z.infer<typeof CardSchema>[] | undefined {
+  const value = params["cards"];
+  if (value === undefined || value === null) return undefined;
+  const parsed = z.array(CardSchema).min(1).safeParse(value);
+  if (!parsed.success) {
+    throw new PolishError("CONFIG_ERROR", `invalid task cards: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+  }
+  return parsed.data;
+}
+
+function optionalStringList(params: Record<string, unknown>, key: string): string[] | undefined {
+  const value = params[key];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new PolishError("CONFIG_ERROR", `${key} must be an array of strings`);
+  }
+  return value as string[];
 }
 
 function requiredString(params: Record<string, unknown>, key: string): string {

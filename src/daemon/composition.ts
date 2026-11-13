@@ -17,6 +17,7 @@ import { ModelCatalog } from "../broker/catalog.js";
 import { costEligibilityFromConfig, isCostEligible } from "../broker/costEligibility.js";
 import { ModelObservationRepository } from "../broker/observations.js";
 import { DEFAULT_ROUTER_POLICY, ModelRouter, type Ranked } from "../broker/router.js";
+import type { ResidencyEvent } from "../broker/residency.js";
 import { composeGuidance, modelNotesFor, readGuidanceFile } from "../cards/index.js";
 import { cardRegistration, withCardInterpretation, withCardPlanning } from "../engine/cardDrivers.js";
 import { distinctFamilies } from "../broker/diversity.js";
@@ -151,6 +152,8 @@ export interface BuildProductionDepsOptions {
   resolveRunSettings?: (runId: string) => ResolvedRunSettings;
   /** Defaults to `defaultProtocolsRoot()`; `ProtocolRegistry.load` already takes a root. */
   protocolsRoot?: string;
+  /** Told about every model swap a managed LM Studio provider makes (for the report's swap seconds). */
+  onResidencyEvent?: (event: ResidencyEvent) => void;
 }
 
 /** True when a run carries neither budget flag, so it uses the daemon-wide limits. */
@@ -201,7 +204,7 @@ function loadProtocolsOrExplain(root: string): ProtocolRegistry {
 export function buildProductionDeps(options: BuildProductionDepsOptions): ProductionDeps {
   const secrets = SecretStore.fromFile(join(options.home, "secrets.env"));
   const catalog = new ModelCatalog();
-  const providers = options.providers ?? loadConfiguredProviders(options.config, secrets, options.home);
+  const providers = options.providers ?? loadConfiguredProviders(options.config, secrets, options.home, options.onResidencyEvent);
   for (const provider of providers) catalog.register(provider);
   const observations = new ModelObservationRepository(options.store, {
     minScoresForRouting: options.config.audition.minScoresForRouting,
@@ -1363,7 +1366,12 @@ function resolveSandbox(deps: ProductionDeps, ctx: PhaseContext): Sandbox {
   );
 }
 
-export function loadConfiguredProviders(config: PolishConfig, secrets: SecretStore, home: string): ProviderAdapter[] {
+export function loadConfiguredProviders(
+  config: PolishConfig,
+  secrets: SecretStore,
+  home: string,
+  onResidencyEvent?: (event: ResidencyEvent) => void,
+): ProviderAdapter[] {
   const providers: ProviderAdapter[] = [];
   for (const entry of config.providers) {
     if (!entry.enabled) continue;
@@ -1375,7 +1383,7 @@ export function loadConfiguredProviders(config: PolishConfig, secrets: SecretSto
     if (entry.kind === "lmstudio") {
       // A local server needs no key; one is used only when configured and present (token auth).
       const key = entry.apiKeyEnv !== undefined && secrets.has(entry.apiKeyEnv) ? secrets.get(entry.apiKeyEnv) : "";
-      const adapter = createProviderFromConfig(entry, key, { home });
+      const adapter = createProviderFromConfig(entry, key, { home, ...(onResidencyEvent === undefined ? {} : { onResidencyEvent }) });
       if (adapter !== null) providers.push(adapter);
       continue;
     }
