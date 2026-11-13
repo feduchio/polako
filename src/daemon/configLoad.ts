@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parse } from "smol-toml";
 import { z } from "zod";
+import { applyLocalProfile } from "../domain/localProfile.js";
 import { defaultConfig, PolishConfigSchema, type PolishConfig } from "../domain/config.js";
 import { BRAND } from "../shared/brand.js";
 import { PolishError } from "../shared/errors.js";
@@ -25,7 +26,7 @@ export function loadPolishConfig(home: string): PolishConfig {
   if (path === undefined) return defaultConfig();
   try {
     const raw = parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-    return PolishConfigSchema.parse({ ...raw, home });
+    return PolishConfigSchema.parse({ ...applyLocalProfile(raw), home });
   } catch (error) {
     if (error instanceof z.ZodError) {
       throw new PolishError("CONFIG_ERROR", `invalid ${basename(path)}`, {

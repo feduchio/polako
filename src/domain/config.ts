@@ -365,6 +365,11 @@ export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 
 export const PolishConfigSchema = z.object({
   home: z.string().default(`~/${BRAND.homeDir}`),
+  /**
+   * `local` (or `auto` with only `lmstudio` providers) lays the local-model defaults of
+   * `domain/localProfile.ts` under this file before parsing; `cloud` never does.
+   */
+  profile: z.enum(["auto", "local", "cloud"]).default("auto"),
   lanes: LaneLimitsSchema.prefault({}),
   agent: AgentConfigSchema.prefault({}),
   discovery: DiscoveryConfigSchema.prefault({}),
