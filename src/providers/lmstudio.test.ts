@@ -9,6 +9,7 @@ import {
   parseLmsCatalog,
   type LmsModelMeta,
 } from "./lmstudio.js";
+import { ResidencyScheduler, type ResidentInstance } from "../broker/residency.js";
 import { fakeFetch } from "./providers.test.js";
 
 const CATALOG: LmsModelMeta[] = [
@@ -199,5 +200,48 @@ describe("createProviderFromConfig lmstudio", () => {
     expect(adapter?.concurrency).toBe(2);
     await adapter?.listModels();
     expect(urls).toEqual(["http://192.168.1.5:1234/v1/models"]);
+  });
+});
+
+describe("LmStudioProvider with managed residency", () => {
+  it("runs each call with its model loaded under the identifier the server uses", async () => {
+    const loaded: ResidentInstance[] = [{ modelKey: "ornith-1.5-35b-a3b", identifier: "night" }];
+    const log: string[] = [];
+    const residency = new ResidencyScheduler({
+      control: {
+        loaded: () => Promise.resolve([...loaded]),
+        load: (key, identifier) => {
+          log.push(`load:${key}`);
+          loaded.splice(0, loaded.length, { modelKey: key, identifier });
+          return Promise.resolve();
+        },
+        unload: (identifier) => {
+          log.push(`unload:${identifier}`);
+          loaded.splice(0, loaded.length);
+          return Promise.resolve();
+        },
+      },
+    });
+    const requestedModels: string[] = [];
+    const p = provider({
+      residency,
+      fetch: fakeFetch((_url, init) => {
+        requestedModels.push((JSON.parse(init.body ?? "{}") as { model: string }).model);
+        return { status: 200, body: { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } };
+      }),
+    });
+    expect(p.concurrency).toBeGreaterThan(1);
+    const ask = (model: string) => p.complete({ model: { provider: "local", model }, messages: [{ role: "user", content: "x" }], metadata: META });
+    await ask("ornith-1.5-35b-a3b");
+    await ask("swift-1.5-qwen3.8-27b");
+    expect(requestedModels).toEqual(["night", "swift-1.5-qwen3.8-27b"]);
+    expect(log).toEqual(["unload:night", "load:swift-1.5-qwen3.8-27b"]);
+  });
+
+  it("builds a scheduler from config only when manageResidency is true", () => {
+    const off = createProviderFromConfig({ id: "local", kind: "lmstudio", enabled: true }, "");
+    const on = createProviderFromConfig({ id: "local", kind: "lmstudio", enabled: true, manageResidency: true }, "");
+    expect(off?.concurrency).toBe(1);
+    expect(on?.concurrency).toBeGreaterThan(1);
   });
 });

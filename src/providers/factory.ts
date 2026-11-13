@@ -3,7 +3,9 @@ import type { ProviderConfig } from "../domain/config.js";
 import type { ModelInfo, ProviderAdapter } from "../broker/types.js";
 import { GeminiProvider } from "./gemini.js";
 import { GroqProvider } from "./groq.js";
-import { LmStudioProvider } from "./lmstudio.js";
+import { ResidencyScheduler } from "../broker/residency.js";
+import { LmStudioProvider, LMSTUDIO_DEFAULT_CONTEXT_LENGTH } from "./lmstudio.js";
+import { lmsResidencyControl } from "./lmstudioControl.js";
 import { OpenRouterProvider } from "./openrouter.js";
 import { canonicalFamily, inferFamily, type FetchLike } from "./openaiCompat.js";
 import { RecordReplayProvider } from "./recordReplay.js";
@@ -42,9 +44,18 @@ export function createProviderFromConfig(
       return new LmStudioProvider({
         ...base,
         // LM Studio takes no key unless token auth is on; an empty `apiKey` means "none".
-        concurrency: entry.concurrency ?? 1,
         ...(entry.contextLength !== undefined ? { contextLength: entry.contextLength } : {}),
         ...(entry.lmsPath !== undefined ? { lmsPath: entry.lmsPath } : {}),
+        ...(entry.manageResidency === true
+          ? {
+              residency: new ResidencyScheduler({
+                control: lmsResidencyControl({
+                  contextLength: entry.contextLength ?? LMSTUDIO_DEFAULT_CONTEXT_LENGTH,
+                  ...(entry.lmsPath !== undefined ? { lmsPath: entry.lmsPath } : {}),
+                }),
+              }),
+            }
+          : {}),
       });
     case "scripted": {
       const models = (entry.models ?? ["default"]).map((name) => ({

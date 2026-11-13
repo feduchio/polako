@@ -1,9 +1,8 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { CompletionRequest, CompletionResponse, ModelInfo, ModelTier, ProviderAdapter, ProviderHealth } from "../broker/types.js";
 import { localLineage } from "../broker/lineage.js";
+import type { ResidencyScheduler } from "../broker/residency.js";
+import { defaultLmsPath } from "./lmstudioControl.js";
 import { OpenAICompatProvider, type FetchLike } from "./openaiCompat.js";
 
 export const LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1";
@@ -13,6 +12,8 @@ export const LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1";
  */
 export const LMSTUDIO_DEFAULT_TIMEOUT_MS = 30 * 60_000;
 /** Context length the models are loaded with (`lms load -c`); LM Studio's own maximum is never used. */
+/** Calls the lane admits at once when residency is managed; the scheduler still runs them one by one. */
+export const LMSTUDIO_QUEUE_DEPTH = 4;
 export const LMSTUDIO_DEFAULT_CONTEXT_LENGTH = 65_536;
 /** `apiKey` the OpenAI-compatible client sends when none is configured; LM Studio ignores it. */
 const PLACEHOLDER_API_KEY = "lm-studio";
@@ -50,6 +51,11 @@ export interface LmStudioProviderOptions {
   catalog?: LmsCatalogSource;
   /** Path of the `lms` CLI used when `catalog` is not given. */
   lmsPath?: string;
+  /**
+   * Owns which model is loaded: every call waits its turn and runs under the model's own name
+   * with that model resident. Without it LM Studio's own just-in-time loading decides.
+   */
+  residency?: ResidencyScheduler;
 }
 
 /**
@@ -65,12 +71,16 @@ export class LmStudioProvider implements ProviderAdapter {
   readonly concurrency: number | null;
   private readonly inner: OpenAICompatProvider;
   private readonly catalog: LmsCatalogSource;
+  private readonly residency: ResidencyScheduler | undefined;
   private readonly contextLength: number;
   private readonly hints: Record<string, Partial<ModelInfo["capabilities"]>>;
 
   constructor(opts: LmStudioProviderOptions) {
     this.id = opts.id;
-    this.concurrency = opts.concurrency ?? 1;
+    this.residency = opts.residency;
+    // With residency the scheduler is the one-at-a-time gate; the lane must be wide enough for it
+    // to see several queued calls and batch them by model.
+    this.concurrency = opts.concurrency ?? (opts.residency === undefined ? 1 : LMSTUDIO_QUEUE_DEPTH);
     this.contextLength = opts.contextLength ?? LMSTUDIO_DEFAULT_CONTEXT_LENGTH;
     this.hints = opts.capabilityHints ?? {};
     this.catalog = opts.catalog ?? lmsCliCatalog(opts.lmsPath);
@@ -107,7 +117,13 @@ export class LmStudioProvider implements ProviderAdapter {
   }
 
   complete(request: CompletionRequest): Promise<CompletionResponse> {
-    return this.inner.complete(request);
+    const residency = this.residency;
+    if (residency === undefined) return this.inner.complete(request);
+    return residency.run(
+      request.model.model,
+      (identifier) => this.inner.complete({ ...request, model: { ...request.model, model: identifier } }),
+      request.signal,
+    );
   }
 
   health(signal?: AbortSignal): Promise<ProviderHealth> {
@@ -202,9 +218,4 @@ export function lmsCliCatalog(lmsPath?: string): LmsCatalogSource {
         resolve(error === null ? parseLmsCatalog(stdout) : []);
       });
     });
-}
-
-function defaultLmsPath(): string {
-  const standard = join(homedir(), ".lmstudio", "bin", "lms");
-  return existsSync(standard) ? standard : "lms";
 }

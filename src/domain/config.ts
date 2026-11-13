@@ -336,6 +336,12 @@ export const ProviderConfigSchema = z.object({
   contextLength: z.number().int().min(1).optional(),
   /** `lmstudio`: path of the `lms` CLI used for model metadata (default `~/.lmstudio/bin/lms`, then PATH). */
   lmsPath: z.string().min(1).optional(),
+  /**
+   * `lmstudio`: let the tool load/unload models (one resident at a time, calls batched by model).
+   * Off leaves loading to LM Studio. It unloads whatever else is loaded, so it is on only when
+   * the tool is meant to own the machine's model memory.
+   */
+  manageResidency: z.boolean().optional(),
   /** Scripted provider model names (relative to polish home for record-replay cassettes) */
   models: z.array(z.string().min(1)).optional(),
   cassette: z.string().optional(),
