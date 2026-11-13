@@ -18,13 +18,13 @@ afterEach(() => {
   if (home !== null) rmSync(home, { recursive: true, force: true });
   daemonPid = null;
   home = null;
-  delete process.env["POLISH_HOME"];
+  delete process.env["POLAKO_HOME"];
 });
 
 describe("polish-mcp", () => {
   it("speaks stdio to a real daemon and does not answer notifications", async () => {
     home = mkdtempSync(join(tmpdir(), "polish-mcp-"));
-    process.env["POLISH_HOME"] = home;
+    process.env["POLAKO_HOME"] = home;
     await autostartDaemon();
     daemonPid = Number(readFileSync(polishPidPath(home), "utf8").trim());
 
@@ -57,7 +57,7 @@ describe("polish-mcp", () => {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" })}\n`);
     const initialized = await next();
     expect(initialized["id"]).toBe(1);
-    expect(JSON.stringify(initialized["result"])).toContain("polish");
+    expect(JSON.stringify(initialized["result"])).toContain("polako");
 
     const before = lines.length;
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);

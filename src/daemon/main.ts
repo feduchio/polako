@@ -4,19 +4,20 @@ import { join, resolve } from "node:path";
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { PolishError } from "../shared/errors.js";
 import { isMainModule } from "../shared/cliEntry.js";
+import { BRAND } from "../shared/brand.js";
 import { RpcServer } from "./rpc.js";
 import { DaemonService } from "./service.js";
 
 export function polishHome(env: NodeJS.ProcessEnv = process.env): string {
-  const configured = env["POLISH_HOME"];
-  if (configured === undefined || configured === "") return join(homedir(), ".polish");
+  const configured = env[BRAND.homeEnv];
+  if (configured === undefined || configured === "") return join(homedir(), BRAND.homeDir);
   if (configured === "~") return homedir();
   if (configured.startsWith("~/")) return join(homedir(), configured.slice(2));
   return resolve(configured);
 }
 
 export function polishSocketPath(home = polishHome()): string {
-  return process.env["POLISH_SOCKET"] ?? join(home, "polish.sock");
+  return process.env[BRAND.socketEnv] ?? join(home, "polish.sock");
 }
 
 export function polishPidPath(home = polishHome()): string {
@@ -43,7 +44,7 @@ export function claimDaemonLock(home: string, pid = process.pid): void {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const holder = Number(readFileSync(lockPath, "utf8"));
       if (Number.isInteger(holder) && holder > 0 && pidAlive(holder)) {
-        throw new PolishError("CONFLICT", `polishd is already running as pid ${String(holder)}`);
+        throw new PolishError("CONFLICT", `${BRAND.daemon} is already running as pid ${String(holder)}`);
       }
       rmSync(lockPath, { force: true });
     }

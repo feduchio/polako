@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { BRAND } from "../shared/brand.js";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { callDaemon } from "../cli/client.js";
@@ -16,7 +17,7 @@ export class McpFacade {
       return {
         protocolVersion: "2025-06-18",
         capabilities: { tools: {} },
-        serverInfo: { name: "polish", version: "0.1.0" },
+        serverInfo: { name: BRAND.cli, version: "0.1.0" },
       };
     }
     if (request.method === "ping") return {};

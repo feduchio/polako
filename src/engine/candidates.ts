@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.js";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { CandidateWorker, CandidateWorkerFactory, WorkerOutcome } from "../agents/types.js";
@@ -143,7 +144,7 @@ async function runOneCandidate<TTask>(
   index: number,
 ): Promise<CandidateResult> {
   const candidateId = id("cand");
-  const branch = `${input.branchPrefix ?? `polish/${input.runId}/candidates`}/${candidateId}`;
+  const branch = `${input.branchPrefix ?? `${BRAND.branchPrefix}/${input.runId}/candidates`}/${candidateId}`;
   let candidate: SandboxHandle | null = null;
   let gate: SandboxHandle | null = null;
   let workerOutcome: WorkerOutcome | null = null;

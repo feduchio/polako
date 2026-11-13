@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { BRAND } from "../shared/brand.js";
 
 /**
  * User-configurable strategies and defaults. Nothing here is an architectural invariant:
@@ -348,7 +349,7 @@ export const ProviderConfigSchema = z.object({
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 
 export const PolishConfigSchema = z.object({
-  home: z.string().default("~/.polish"),
+  home: z.string().default(`~/${BRAND.homeDir}`),
   lanes: LaneLimitsSchema.prefault({}),
   agent: AgentConfigSchema.prefault({}),
   discovery: DiscoveryConfigSchema.prefault({}),

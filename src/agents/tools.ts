@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.js";
 import {
   existsSync,
   lstatSync,
@@ -57,7 +58,7 @@ export interface TextPage {
 export type PagedText = TextPage & { outputRef?: string };
 
 /** Never the project's own source: git's store, installed dependencies, and Polish's scratch. */
-const SKIP_LIST_DIRS = new Set([".git", "node_modules", ".polish"]);
+const SKIP_LIST_DIRS = new Set([".git", "node_modules", ...BRAND.ignoredDirs]);
 /** Room left in a page for the fields around its content. */
 const PAGE_ENVELOPE_TOKENS = 200;
 

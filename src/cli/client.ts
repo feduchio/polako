@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.js";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -44,7 +45,7 @@ export async function autostartDaemon(): Promise<void> {
       lastError = error;
     }
   }
-  throw new Error(`polishd did not start: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  throw new Error(`${BRAND.daemon} did not start: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
 function isConnectionError(error: unknown): boolean {

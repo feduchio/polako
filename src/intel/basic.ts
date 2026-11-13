@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { runProcess } from "../sandbox/process.js";
@@ -17,7 +18,7 @@ const SKIP_DIRS = new Set([
   "build",
   ".codegraph",
   "coverage",
-  ".polish",
+  ...BRAND.ignoredDirs,
 ]);
 
 const CODE_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);

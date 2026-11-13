@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.js";
 import { SYSTEM_ACTOR } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
 import {
@@ -89,8 +90,8 @@ export class RunEngine {
       id: runId,
       missionId,
       projectPath: input.projectPath,
-      // Must not equal `polish/${runId}` — candidate worktrees use `polish/${runId}/candidates/…` branches.
-      runBranch: input.runBranch ?? `polish/${runId}/run`,
+      // Must not equal `${BRAND.branchPrefix}/${runId}` — candidate worktrees use `${BRAND.branchPrefix}/${runId}/candidates/…` branches.
+      runBranch: input.runBranch ?? `${BRAND.branchPrefix}/${runId}/run`,
       phase: "CREATED",
       control: "RUNNING",
       currentCheckpointHash: null,

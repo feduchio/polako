@@ -1,8 +1,9 @@
+import { BRAND } from "../shared/brand.js";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { testFileOperandDenial } from "../sandbox/allowlist.js";
 
-const SKIP = new Set(["node_modules", ".git", "dist", "build", "coverage", ".polish"]);
+const SKIP = new Set(["node_modules", ".git", "dist", "build", "coverage", ...BRAND.ignoredDirs]);
 const MAX_DEPTH = 6;
 const MAX_ENTRIES = 5_000;
 const HEAD_LINES = 25;

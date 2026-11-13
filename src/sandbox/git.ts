@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.js";
 import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { PolishError } from "../shared/errors.js";
@@ -7,9 +8,9 @@ const GIT_ENV: Record<string, string> = {
   GIT_TERMINAL_PROMPT: "0",
   GIT_CONFIG_NOSYSTEM: "1",
   LC_ALL: "C",
-  GIT_AUTHOR_NAME: "polish",
+  GIT_AUTHOR_NAME: BRAND.gitIdentity,
   GIT_AUTHOR_EMAIL: "polish@localhost",
-  GIT_COMMITTER_NAME: "polish",
+  GIT_COMMITTER_NAME: BRAND.gitIdentity,
   GIT_COMMITTER_EMAIL: "polish@localhost",
 };
 

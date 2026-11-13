@@ -21,13 +21,13 @@ afterEach(async () => {
   if (home !== null) rmSync(home, { recursive: true, force: true });
   daemonPid = null;
   home = null;
-  delete process.env["POLISH_HOME"];
+  delete process.env["POLAKO_HOME"];
 });
 
 describe("daemon autostart", () => {
   it("leaves a detached daemon, PID file, and socket after the launcher returns", async () => {
     home = mkdtempSync(join(tmpdir(), "polish-daemon-home-"));
-    process.env["POLISH_HOME"] = home;
+    process.env["POLAKO_HOME"] = home;
     await autostartDaemon();
     daemonPid = Number(readFileSync(polishPidPath(home), "utf8").trim());
     expect(existsSync(polishSocketPath(home))).toBe(true);

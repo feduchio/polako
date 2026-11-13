@@ -4,6 +4,7 @@ import type { Run } from "../domain/run.js";
 import { projectRunEconomics, renderRunEconomics } from "../observe/economics.js";
 import { projectRunStatus } from "../observe/project.js";
 import { renderActivityFeed, renderRunStatus } from "../observe/render.js";
+import { BRAND } from "../shared/brand.js";
 import { isMainModule } from "../shared/cliEntry.js";
 import { callDaemon } from "./client.js";
 import { runWatch } from "./watch.js";
@@ -56,7 +57,7 @@ export async function runCli(
         isTTY: true,
       });
       if (reason === "detached") {
-        process.stderr.write(`Observing detached. Run continues as ${run.id}.\nReattach: polish watch ${run.id}\n`);
+        process.stderr.write(`Observing detached. Run continues as ${run.id}.\nReattach: ${BRAND.cli} watch ${run.id}\n`);
       }
       return;
     }
@@ -143,7 +144,7 @@ async function benchmarkReviewCommand(args: string[], daemonCall: CliDaemonCall)
 }
 
 async function projectCommand(args: string[]): Promise<void> {
-  if (args[0] !== "add") throw new Error("usage: polish project add [path] [--name name]");
+  if (args[0] !== "add") throw new Error(`usage: ${BRAND.cli} project add [path] [--name name]`);
   const rest = args.slice(1);
   const name = flag(rest, "--name");
   const positional = withoutFlags(rest, ["--name"]);
@@ -195,7 +196,7 @@ async function watchCommand(args: string[]): Promise<void> {
     isTTY: process.stdout.isTTY && !json && !plain,
   });
   if (reason === "detached") {
-    process.stderr.write(`Observing detached. Run continues as ${id}.\nReattach: polish watch ${id}\n`);
+    process.stderr.write(`Observing detached. Run continues as ${id}.\nReattach: ${BRAND.cli} watch ${id}\n`);
   }
 }
 
@@ -272,22 +273,22 @@ function print(value: unknown): void {
 }
 
 const usage = `Usage:
-  polish project add [path] [--name name]
-  polish run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n] [--detach|-d] [--json]
-  polish status [run-id] [--json]
-  polish watch <run-id> [--verbose] [--json] [--plain] [--no-color]
-  polish log <run-id> [--follow] [--json]
-  polish cost <run-id> [--json]
-  polish benchmark-review [--seed n] [--transport strict|legacy] [--configuration original|operational] [--live-abort] [--json]
-  polish diff <run-id>
-  polish pause|resume|stop|kill <run-id>
-  polish answer <run-id> <answer>
-  polish apply <run-id>
+  ${BRAND.cli} project add [path] [--name name]
+  ${BRAND.cli} run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n] [--detach|-d] [--json]
+  ${BRAND.cli} status [run-id] [--json]
+  ${BRAND.cli} watch <run-id> [--verbose] [--json] [--plain] [--no-color]
+  ${BRAND.cli} log <run-id> [--follow] [--json]
+  ${BRAND.cli} cost <run-id> [--json]
+  ${BRAND.cli} benchmark-review [--seed n] [--transport strict|legacy] [--configuration original|operational] [--live-abort] [--json]
+  ${BRAND.cli} diff <run-id>
+  ${BRAND.cli} pause|resume|stop|kill <run-id>
+  ${BRAND.cli} answer <run-id> <answer>
+  ${BRAND.cli} apply <run-id>
 
 Everyday use (after install):
-  polish run [project] --mission "..."
+  ${BRAND.cli} run [project] --mission "..."
 
-Development install/update only (from the polish repo, Node >= 24):
+Development install/update only (from the polako repo, Node >= 24):
   pnpm cli:link
 `;
 

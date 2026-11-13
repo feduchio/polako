@@ -21,10 +21,10 @@ describe("CLI invocation outside the repository cwd", () => {
     const output = execFileSync(process.execPath, ["--import", tsxLoader, cliSource, "--help"], {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, POLISH_HOME: cwd },
+      env: { ...process.env, POLAKO_HOME: cwd },
     });
-    expect(output).toContain("polish status");
-    expect(output).toContain("polish watch");
+    expect(output).toContain("polako status");
+    expect(output).toContain("polako watch");
     expect(output).toContain("pnpm cli:link");
   });
 
@@ -37,9 +37,9 @@ describe("CLI invocation outside the repository cwd", () => {
     const output = execFileSync(process.execPath, ["--import", tsxLoader, shim, "--help"], {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, POLISH_HOME: cwd },
+      env: { ...process.env, POLAKO_HOME: cwd },
     });
-    expect(output).toContain("polish log <run-id>");
+    expect(output).toContain("polako log <run-id>");
   });
 
   it("resolves the polish command name from PATH in an unrelated directory", () => {
@@ -55,9 +55,9 @@ describe("CLI invocation outside the repository cwd", () => {
     const output = execFileSync("polish", ["--help"], {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, PATH: `${bin}:${process.env["PATH"] ?? ""}`, POLISH_HOME: cwd },
+      env: { ...process.env, PATH: `${bin}:${process.env["PATH"] ?? ""}`, POLAKO_HOME: cwd },
     });
-    expect(output).toContain("polish watch <run-id>");
+    expect(output).toContain("polako watch <run-id>");
   });
 
   it("help mentions polishd via the documented link path rather than a cwd-relative binary", async () => {

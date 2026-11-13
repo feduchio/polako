@@ -10,13 +10,13 @@ if (binDir.length > 0) env.PATH = `${binDir}:${env.PATH ?? ""}`;
 
 let status = 0;
 if (binDir.length > 0) {
-  const result = spawnSync("pnpm", ["remove", "--global", "polish"], { stdio: "inherit", env });
+  const result = spawnSync("pnpm", ["remove", "--global", "polako"], { stdio: "inherit", env });
   status = result.status ?? 1;
 }
 
 const localBin = join(homedir(), ".local", "bin");
 let removedLocal = false;
-for (const name of ["polish", "polishd", "polish-mcp"]) {
+for (const name of ["polako", "polakod", "polako-mcp"]) {
   const dest = join(localBin, name);
   if (!existsSync(dest)) continue;
   try {

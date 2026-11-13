@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.js";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { attemptTokenCap, withRuntimeValidationMode, type PolishConfig } from "../domain/config.js";
@@ -118,7 +119,7 @@ export class DaemonService implements RpcHandler {
       this.config.convergence.requiredCleanRounds = options.requiredCleanRounds;
     }
     this.scheduler = new Scheduler(this.store, this.clock, {
-      workerId: `polishd-${process.pid}`,
+      workerId: `${BRAND.daemon}-${process.pid}`,
       laneLimits: this.config.lanes,
       leaseMs: 60_000,
     });

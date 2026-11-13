@@ -1,7 +1,7 @@
 {
-  "name": "polish",
+  "name": "polako",
   "version": "0.1.0",
-  "description": "Autonomous verification-driven coding orchestrator",
+  "description": "Autonomous verification-driven coding orchestrator (local-model fork of polish)",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -10,9 +10,9 @@
   },
   "packageManager": "pnpm@11.25.0",
   "bin": {
-    "polish": "dist/cli/index.js",
-    "polishd": "dist/daemon/main.js",
-    "polish-mcp": "dist/mcp/index.js"
+    "polako": "dist/cli/index.js",
+    "polakod": "dist/daemon/main.js",
+    "polako-mcp": "dist/mcp/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

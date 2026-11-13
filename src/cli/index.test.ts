@@ -6,9 +6,9 @@ describe("CLI parsing", () => {
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     await runCli(["help"]);
     const output = write.mock.calls.map((call) => String(call[0])).join("");
-    expect(output).toContain("polish project add");
-    expect(output).toContain("polish apply");
-    expect(output).toContain("polish watch");
+    expect(output).toContain("polako project add");
+    expect(output).toContain("polako apply");
+    expect(output).toContain("polako watch");
     write.mockRestore();
   });
 
