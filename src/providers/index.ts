@@ -7,6 +7,8 @@ export { OpenRouterProvider } from "./openrouter.js";
 export type { OpenRouterProviderOptions } from "./openrouter.js";
 export { GroqProvider } from "./groq.js";
 export type { GroqProviderOptions } from "./groq.js";
+export { LmStudioProvider, lmStudioFamily, parseLmsCatalog } from "./lmstudio.js";
+export type { LmStudioProviderOptions, LmsCatalogSource, LmsModelMeta } from "./lmstudio.js";
 export { GeminiProvider } from "./gemini.js";
 export type { GeminiProviderOptions } from "./gemini.js";
 export { createProviderFromConfig } from "./factory.js";

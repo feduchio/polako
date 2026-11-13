@@ -12,7 +12,7 @@ export type FetchLike = (input: string, init: { method: string; headers: Record<
 
 export interface OpenAICompatOptions {
   id: string;
-  kind: "openrouter" | "groq" | "gemini" | "openai-compat";
+  kind: "openrouter" | "groq" | "gemini" | "lmstudio" | "openai-compat";
   baseUrl: string;
   apiKey: string;
   fetch?: FetchLike;
@@ -22,6 +22,8 @@ export interface OpenAICompatOptions {
   headers?: Record<string, string>;
   /** override/extend capability inference for models the provider under-describes */
   capabilityHints?: Record<string, Partial<ModelInfo["capabilities"]>>;
+  /** last-moment rewrite of the chat-completions body for servers that accept a dialect of it */
+  adaptPayload?: (payload: Record<string, unknown>) => Record<string, unknown>;
 }
 
 interface OpenAIModelRow {
@@ -78,7 +80,8 @@ export class OpenAICompatProvider implements ProviderAdapter {
     if (request.maxTokens !== undefined) payload["max_tokens"] = request.maxTokens;
     if (request.temperature !== undefined) payload["temperature"] = request.temperature;
 
-    const text = await this.request("POST", "/chat/completions", JSON.stringify(payload), request.signal);
+    const body = this.opts.adaptPayload ? this.opts.adaptPayload(payload) : payload;
+    const text = await this.request("POST", "/chat/completions", JSON.stringify(body), request.signal);
     const parsed = JSON.parse(text) as {
       id?: string;
       choices?: { message?: { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] }; finish_reason?: string }[];

@@ -1339,6 +1339,13 @@ export function loadConfiguredProviders(config: PolishConfig, secrets: SecretSto
       if (adapter !== null) providers.push(adapter);
       continue;
     }
+    if (entry.kind === "lmstudio") {
+      // A local server needs no key; one is used only when configured and present (token auth).
+      const key = entry.apiKeyEnv !== undefined && secrets.has(entry.apiKeyEnv) ? secrets.get(entry.apiKeyEnv) : "";
+      const adapter = createProviderFromConfig(entry, key, { home });
+      if (adapter !== null) providers.push(adapter);
+      continue;
+    }
     if (entry.apiKeyEnv === undefined || !secrets.has(entry.apiKeyEnv)) continue;
     const apiKey = secrets.get(entry.apiKeyEnv);
     const adapter = createProviderFromConfig(entry, apiKey, { home });

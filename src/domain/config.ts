@@ -323,12 +323,18 @@ const CapabilityHintSchema = z.object({
 
 export const ProviderConfigSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(["openrouter", "gemini", "groq", "scripted", "record-replay", "cursor-agent"]),
+  kind: z.enum(["openrouter", "gemini", "groq", "lmstudio", "scripted", "record-replay", "cursor-agent"]),
   enabled: z.boolean().default(true),
   /** env var name holding the key in secrets.env; never the key itself */
   apiKeyEnv: z.string().optional(),
   baseUrl: z.url().optional(),
   concurrency: z.number().int().min(1).optional(),
+  /** Per-request timeout in ms; a local model may take minutes before its first token. */
+  timeoutMs: z.number().int().min(1_000).optional(),
+  /** `lmstudio`: context length the model is loaded with; caps the advertised context window. */
+  contextLength: z.number().int().min(1).optional(),
+  /** `lmstudio`: path of the `lms` CLI used for model metadata (default `~/.lmstudio/bin/lms`, then PATH). */
+  lmsPath: z.string().min(1).optional(),
   /** Scripted provider model names (relative to polish home for record-replay cassettes) */
   models: z.array(z.string().min(1)).optional(),
   cassette: z.string().optional(),
