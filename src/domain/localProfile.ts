@@ -26,6 +26,9 @@ export const LOCAL_PROFILE_DEFAULTS: Readonly<Record<string, unknown>> = {
   // 80 turns: a 6-criterion card needed more than the default 32 (read, edit, fix a bad anchor, re-run the gate)
   // and a worker that runs out of turns loses all its work.
   agent: { progressEnabled: false, maxTurns: 80 },
+  // Ornith spends part of any budget on thought: at the default 256 its strict-review probe was cut off
+  // (`length`), recorded probe_failed, and the model dropped out of the reviewer pool (1024 passes).
+  discovery: { probeMaxTokens: 2048 },
   // Prompt processing is the slow part (110-500 tok/s): keep packs well under the 64k load.
   contextBudget: { maxPackTokens: 24_000 },
   // One call at a time on the one resident model; tests and builds must not fight it for memory.

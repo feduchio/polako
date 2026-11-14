@@ -82,6 +82,19 @@ describe("projectCardLedger", () => {
     expect(byCard["D"]).toMatchObject({ result: "failed", note: "blocked after 5 attempt(s)", rejectedBy: { by: "gate", first: "scope_violation: package.json: not allowed by the task card's files" } });
   });
 
+  it("starts a card's clock when its worker starts, not when its first candidate lands", () => {
+    seq = 0;
+    const events: Event[] = [
+      event(CARDS_REGISTERED_EVENT, T0, { registration: { cards: [card("A")], brief: "", briefSource: null, droppedDependencies: [] } }),
+      event("task.created", T0, { task: task("t_a", "A", "READY") }),
+      event("worker.started", T0 + MIN, { taskId: "t_a", candidateId: "c1" }),
+      event("worker.started", T0 + 9 * MIN, { taskId: "t_a", candidateId: "c2" }),
+      event("candidate.created", T0 + 10 * MIN, { candidate: candidate("t_a") }),
+      event("task.state_changed", T0 + 11 * MIN, { task: task("t_a", "A", "INTEGRATED") }),
+    ];
+    expect(projectCardLedger(events, T0 + 20 * MIN)?.[0]?.minutes).toBe(10);
+  });
+
   it("calls a READY card waiting, not running: only one card runs at a time", () => {
     seq = 0;
     const events: Event[] = [

@@ -465,6 +465,8 @@ export function createIntegratingDriver(options: CandidateDriverOptions): PhaseD
       result = await integrateWinner({
       runId: ctx.run.id,
       winnerCommit: winner.headCommit,
+      // The commit on the run branch names its card, so `git log` reads like the ledger.
+      ...(task.cardId === undefined ? {} : { commitMessage: `polako: card ${task.cardId}: ${task.title}\n\ncandidate ${winner.id} (${winner.headCommit})` }),
       sandbox,
       policy,
       gates,

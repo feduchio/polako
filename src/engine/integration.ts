@@ -67,6 +67,8 @@ export interface IntegrateWinnerInput {
   runHead: RunHead;
   projectEnv?: Record<string, string>;
   signal?: AbortSignal;
+  /** Commit message of the integration commit; defaults to `polish: integrate <winner>`. */
+  commitMessage?: string;
   /** Runs after integration gates pass, still on the temporary workspace, before CAS. */
   afterGates?: (input: { commitHash: string; workspace: SandboxHandle }) => Promise<boolean>;
 }
@@ -120,7 +122,7 @@ async function integrateWinnerExclusive(input: IntegrateWinnerInput): Promise<In
       };
     }
 
-    integratedCommit = await workspace.commitAll(`polish: integrate ${input.winnerCommit}`);
+    integratedCommit = await workspace.commitAll(input.commitMessage ?? `polish: integrate ${input.winnerCommit}`);
     integratedCommit ??= previousHead;
     const gateResult = await runGates({
       runId: input.runId,

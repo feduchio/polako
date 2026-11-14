@@ -59,6 +59,8 @@ export function projectCardLedger(events: readonly Event[], now: number): CardLe
 
   const tasks = new Map<string, Task>();
   const candidates: { ts: number; view: CandidateView }[] = [];
+  /** First `worker.started` per task: the card's wall clock starts when its worker does, not when its first candidate lands. */
+  const workerStarts = new Map<string, number>();
   const checkpoints: { seq: number; hash: string; taskId: string | null; source: string }[] = [];
   const taskEnds = new Map<string, number>();
   const swaps: { ts: number; ms: number }[] = [];
@@ -85,6 +87,11 @@ export function projectCardLedger(events: readonly Event[], now: number): CardLe
       case "checkpoint.created": {
         const checkpoint = (event.payload["checkpoint"] as { commitHash: string; taskId: string | null; source: string } | undefined);
         if (checkpoint !== undefined) checkpoints.push({ seq: event.seq, hash: checkpoint.commitHash, taskId: checkpoint.taskId, source: checkpoint.source });
+        break;
+      }
+      case "worker.started": {
+        const taskId = event.payload["taskId"];
+        if (typeof taskId === "string" && !workerStarts.has(taskId)) workerStarts.set(taskId, event.ts);
         break;
       }
       case "local.model_swap": {
@@ -121,7 +128,7 @@ export function projectCardLedger(events: readonly Event[], now: number): CardLe
       return { card: card.id, title: card.title, result: "waiting", state: "UNPLANNED", commit: null, minutes: null, swapSeconds: 0, reviewIndependence: null, rejectedBy: null, note: "" };
     }
     const own = candidates.filter((entry) => entry.view.taskId === task.id);
-    const start = own[0]?.ts ?? null;
+    const start = workerStarts.get(task.id) ?? own[0]?.ts ?? null;
     const end = taskEnds.get(task.id) ?? (start === null ? null : now);
     const integration = [...checkpoints].reverse().find((checkpoint) => checkpoint.taskId === task.id && checkpoint.source === "integration");
     const commit = integration?.hash ?? null;
