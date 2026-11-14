@@ -183,8 +183,8 @@ function resultOf(state: TaskState): CardResult {
     case "CANCELLED":
       return "skipped";
     case "PENDING":
-      return "waiting";
     case "READY":
+      return "waiting";
     case "RUNNING":
     case "GATED":
     case "SELECTED":

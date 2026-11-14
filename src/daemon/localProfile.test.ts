@@ -41,6 +41,7 @@ describe("local profile", () => {
     expect(config.review.maxOutputTokens).toBe(4096);
     expect(config.review.falsifiabilityAudit).toBe(true);
     expect(config.agent.progressEnabled).toBe(false);
+    expect(config.agent.maxTurns).toBe(80);
     expect(config.lanes["llm.default"]).toBe(1);
     expect(config.providers[0]).toMatchObject({ manageResidency: true, timeoutMs: 1_800_000, contextLength: 65_536 });
   });

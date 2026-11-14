@@ -23,7 +23,9 @@ export const LOCAL_PROFILE_DEFAULTS: Readonly<Record<string, unknown>> = {
   },
   // The progress tracker scores each worker turn with two models of different families; with one
   // resident model that would swap it in and out in the middle of a worker's loop.
-  agent: { progressEnabled: false },
+  // 80 turns: a 6-criterion card needed more than the default 32 (read, edit, fix a bad anchor, re-run the gate)
+  // and a worker that runs out of turns loses all its work.
+  agent: { progressEnabled: false, maxTurns: 80 },
   // Prompt processing is the slow part (110-500 tok/s): keep packs well under the 64k load.
   contextBudget: { maxPackTokens: 24_000 },
   // One call at a time on the one resident model; tests and builds must not fight it for memory.

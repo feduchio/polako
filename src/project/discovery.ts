@@ -140,9 +140,14 @@ function detectTestRunner(projectPath: string, pkg: Record<string, unknown>, scr
 function invocationIn(script: string): Invocation | null {
   for (const segment of script.split(/&&|\|\||;|\|/)) {
     const words = shellWords(segment).filter((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-    const start = words.findIndex((word) => word === "node" || word === "vitest" || word === "jest");
+    const start = words.findIndex((word) => word === "node" || word === "vitest" || word === "jest" || word === "tsx");
     if (start === -1) continue;
     const program = words[start];
+    // `tsx --test <globs>` is node's own test runner through tsx: one file is `node --import tsx --test <file>`.
+    if (program === "tsx") {
+      if (words.indexOf("--test", start + 1) === -1) continue;
+      return { framework: "node-test", fileArgv: ["node", "--import", "tsx", "--test"] };
+    }
     if (program === "vitest") return { framework: "vitest", fileArgv: ["node_modules/.bin/vitest", "run"] };
     if (program === "jest") return { framework: "jest", fileArgv: ["node_modules/.bin/jest"] };
     const test = words.indexOf("--test", start + 1);

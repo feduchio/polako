@@ -134,6 +134,21 @@ describe("Project discovery", () => {
     expect(p.testRunner).toEqual({ fileArgv: ["node", "--import", "tsx", "--test"], script: "test" });
   });
 
+  it("recognizes `tsx --test <globs>` (td's test script) and derives how to run one file", () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "td", scripts: { test: 'tsx --test "data/**/*.test.ts" "domain/**/*.test.ts"', check: "npm run typecheck && npm test" }, devDependencies: { tsx: "^4" } }),
+    );
+    const p = discoverProject(dir);
+    expect(p.framework).toBe("node-test");
+    expect(p.testRunner).toEqual({ fileArgv: ["node", "--import", "tsx", "--test"], script: "test" });
+  });
+
+  it("does not take a bare `tsx script.ts` for a test runner", () => {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "tsx scripts/run.ts" } }));
+    expect(discoverProject(dir).testRunner).toBeNull();
+  });
+
   it("takes the runner from the test script's own segment of a compound script", () => {
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "tsc -p . && node --test tests/add.test.mjs" } }));
     const p = discoverProject(dir);

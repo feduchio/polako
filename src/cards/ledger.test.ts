@@ -82,6 +82,17 @@ describe("projectCardLedger", () => {
     expect(byCard["D"]).toMatchObject({ result: "failed", note: "blocked after 5 attempt(s)", rejectedBy: { by: "gate", first: "scope_violation: package.json: not allowed by the task card's files" } });
   });
 
+  it("calls a READY card waiting, not running: only one card runs at a time", () => {
+    seq = 0;
+    const events: Event[] = [
+      event(CARDS_REGISTERED_EVENT, T0, { registration: { cards: [card("A"), card("B")], brief: "", briefSource: null, droppedDependencies: [] } }),
+      event("task.created", T0, { task: task("t_a", "A", "READY") }),
+      event("task.created", T0, { task: task("t_b", "B", "READY") }),
+      event("task.state_changed", T0 + MIN, { task: task("t_a", "A", "RUNNING") }),
+    ];
+    expect((projectCardLedger(events, T0 + 2 * MIN) ?? []).map((row) => [row.card, row.result])).toEqual([["A", "running"], ["B", "waiting"]]);
+  });
+
   it("calls a card skipped when its dependency failed", () => {
     seq = 0;
     const events: Event[] = [
