@@ -1246,6 +1246,9 @@ describe("B2 production candidate drivers", () => {
       expect(recorded[0]?.payload["error"]).toContain("council exploded");
       // Paused, and now the pause has a cause an operator can read.
       expect(emptyStore.repos.runs.get(runId)?.control).toBe("PAUSED");
+      // ...and the pause is the engine's, not a user's: nobody ran `pause`.
+      const pauses = emptyStore.events.list(runId, { types: ["run.control_changed"] }).filter((event) => event.actor.kind === "user");
+      expect(pauses).toEqual([]);
       emptyStore.close();
     });
 

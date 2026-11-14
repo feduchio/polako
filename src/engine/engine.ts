@@ -1,5 +1,5 @@
 import { BRAND } from "../shared/brand.js";
-import { SYSTEM_ACTOR } from "../domain/common.js";
+import { SYSTEM_ACTOR, type Actor } from "../domain/common.js";
 import type { NewEvent } from "../domain/event.js";
 import {
   applyControlCommand,
@@ -107,7 +107,7 @@ export class RunEngine {
   }
 
   /** User control command. Returns the updated run projection. */
-  control(runId: string, command: Exclude<ControlCommand, "quiesced" | "stopped">): Run {
+  control(runId: string, command: Exclude<ControlCommand, "quiesced" | "stopped">, actor: Actor = { kind: "user" }): Run {
     const run = this.requireRun(runId);
     if (isTerminal(RUN_CONTROL_TABLE, run.control) && command !== "kill") {
       return run;
@@ -123,7 +123,7 @@ export class RunEngine {
         ? { terminalReason: null }
         : {}),
     };
-    this.append(runId, "run.control_changed", { run: updated }, { kind: "user" });
+    this.append(runId, "run.control_changed", { run: updated }, actor);
 
     if (next === "STOP_REQUESTED" || next === "KILLED") {
       this.driving.get(runId)?.controller.abort(new PolishError("CANCELLED", `${command} requested`));
@@ -273,7 +273,9 @@ export class RunEngine {
         // Same reason as the recorder above: pausing is a courtesy on the way out, and a courtesy
         // that throws replaces the error the caller needs.
         try {
-          if (this.requireRun(runId).control === "RUNNING") this.control(runId, "pause");
+          // Attributed to the system: this pause is the engine's, and an operator reading the log must
+          // not take it for one they issued (a failing council phase paused a run "by the user").
+          if (this.requireRun(runId).control === "RUNNING") this.control(runId, "pause", SYSTEM_ACTOR);
         } catch {
           // deliberately swallowed
         }

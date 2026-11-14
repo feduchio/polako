@@ -398,6 +398,23 @@ export const RolesConfigSchema = z.object({
 });
 export type RolesConfig = z.infer<typeof RolesConfigSchema>;
 
+/**
+ * Per-project settings, keyed by the project's absolute path (a leading `~/` is expanded). They
+ * live in the user's config, not in the repository: a worker must not be able to edit the commands
+ * that judge it.
+ */
+export const ProjectConfigSchema = z.object({
+  /**
+   * The project's own gate: shell-style commands, each run on a clean checkout as one mandatory
+   * check (named by its script when it is `npm run <script>`, else `gate<N>`). Replaces the checks
+   * guessed from package.json scripts, for the baseline and for every candidate gate.
+   */
+  gates: z.array(z.string().min(1)).min(1).optional(),
+  /** Timeout of each gate command; the default is 15 minutes. */
+  gateTimeoutMs: z.number().int().min(1_000).optional(),
+});
+export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
+
 /** `polako run <cards>`: the project brief and per-model notes every card worker is given. */
 export const CardsConfigSchema = z.object({
   /** Brief file, relative to the project (td: `docs/agents/night-brief.md`); `--brief` overrides it. */
@@ -435,6 +452,7 @@ export const PolishConfigSchema = z.object({
   council: CouncilRetryConfigSchema.prefault({}),
   cards: CardsConfigSchema.prefault({}),
   roles: RolesConfigSchema.prefault({}),
+  projects: z.record(z.string().min(1), ProjectConfigSchema).default({}),
   supervisors: z.array(SupervisorRoleConfigSchema).default([]),
   providers: z.array(ProviderConfigSchema).default([]),
 });

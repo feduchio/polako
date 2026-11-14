@@ -1,5 +1,5 @@
 import { BRAND } from "../shared/brand.js";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 import { CARDS_REGISTERED_EVENT, CardSchema, readGuidanceFile, registerCards, type CardRegistration } from "../cards/index.js";
@@ -47,7 +47,7 @@ import {
   parseRuntimeMode,
   type ProductionDeps,
 } from "./composition.js";
-import type { RpcHandler } from "./protocol.js";
+import { DAEMON_FEATURES, type RpcHandler } from "./protocol.js";
 import type { FacadeRunMetadata } from "./types.js";
 
 export type { FacadeRunMetadata } from "./types.js";
@@ -95,6 +95,7 @@ export class DaemonService implements RpcHandler {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
   private tickStartedAt: number | null = null;
+  private readonly startedAt = Date.now();
   private lastTickCompletedAt: number | null = null;
   private reportRenders = 0;
   private watchdog!: TickWatchdog;
@@ -191,6 +192,10 @@ export class DaemonService implements RpcHandler {
           tickInFlightMs: this.tickStartedAt === null ? 0 : Math.max(0, this.clock.now() - this.tickStartedAt),
           lastTickCompletedAt: this.lastTickCompletedAt,
           reportRenders: this.reportRenders,
+          features: [...DAEMON_FEATURES],
+          startedAt: this.startedAt,
+          entry: process.argv[1] ?? null,
+          builtAt: entryMtime(process.argv[1]),
         };
       case "project.add":
         return this.addProject(requiredString(params, "path"), optionalString(params, "name"));
@@ -791,6 +796,15 @@ export class DaemonService implements RpcHandler {
   private writeMetadata(metadata: FacadeRunMetadata): void {
     mkdirSync(this.runDir(metadata.runId), { recursive: true });
     writeFileSync(this.metadataPath(metadata.runId), `${JSON.stringify(metadata, null, 2)}\n`);
+  }
+}
+
+/** Modification time of the file this process was started from, or null when it cannot be read. */
+function entryMtime(path: string | undefined): number | null {
+  try {
+    return path === undefined ? null : statSync(path).mtimeMs;
+  } catch {
+    return null;
   }
 }
 

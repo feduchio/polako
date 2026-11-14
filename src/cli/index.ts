@@ -11,7 +11,7 @@ import { loadPolishConfig } from "../daemon/configLoad.js";
 import { polishHome } from "../daemon/main.js";
 import { loadInstalledModels, renderRolePlan, resolveRolePlan } from "../daemon/rolePlan.js";
 import { loadCardSpecs, renderCardPlan, parseOnly, projectOf, readBrief, resolveRunTarget } from "./cards.js";
-import { callDaemon } from "./client.js";
+import { autostartDaemon, callDaemon, requireDaemon, stopDaemon, type DaemonInfo } from "./client.js";
 import { runWatch } from "./watch.js";
 
 export type CliDaemonCall = <T>(method: string, params?: Record<string, unknown>) => Promise<T>;
@@ -24,6 +24,9 @@ export async function runCli(
   switch (command) {
     case "project":
       await projectCommand(args);
+      return;
+    case "daemon":
+      await daemonCommand(args);
       return;
     case "run": {
       const mission = flag(args, "--mission");
@@ -58,6 +61,8 @@ export async function runCli(
         process.stdout.write(`\n${renderRolePlan(resolveRolePlan(config, await loadInstalledModels(config)))}`);
         return;
       }
+      // Before the run exists: a daemon from an older build would ignore the cards and plan a mission.
+      if (cards !== undefined) await requireDaemon(["cards"], deps.callDaemon ?? callDaemon);
       const run = await (deps.callDaemon ?? callDaemon)<Run>("run", {
         project: projectOf(target),
         mission: target.mission,
@@ -164,6 +169,26 @@ async function benchmarkReviewCommand(args: string[], daemonCall: CliDaemonCall)
     return;
   }
   process.stdout.write(result.summary);
+}
+
+async function daemonCommand(args: string[]): Promise<void> {
+  const action = args[0];
+  if (action === "status") {
+    const info = await callDaemon<DaemonInfo>("daemon.ping");
+    print(info);
+    return;
+  }
+  if (action === "stop" || action === "restart") {
+    const stopped = await stopDaemon();
+    process.stderr.write(stopped === null ? `no ${BRAND.daemon} was running\n` : `stopped ${BRAND.daemon} pid ${String(stopped)}\n`);
+    if (action === "restart") {
+      await autostartDaemon();
+      const info = await callDaemon<DaemonInfo>("daemon.ping");
+      process.stderr.write(`started ${BRAND.daemon} pid ${String(info.pid)} (${info.entry ?? "?"})\n`);
+    }
+    return;
+  }
+  throw new Error(`usage: ${BRAND.cli} daemon status|stop|restart`);
 }
 
 async function projectCommand(args: string[]): Promise<void> {
@@ -299,6 +324,7 @@ const usage = `Usage:
   ${BRAND.cli} project add [path] [--name name]
   ${BRAND.cli} run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n] [--detach|-d] [--json]
   ${BRAND.cli} run [project] <cards> [--brief file] [--only id,id] [--dry-run] [--detach|-d] [--json]   cards: a .md file, a directory of cards, or a glob
+  ${BRAND.cli} daemon status|stop|restart          (restart after pnpm cli:link: the daemon keeps the old build until then)
   ${BRAND.cli} status [run-id] [--json]            (a card run lists every card's state)
   ${BRAND.cli} watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   ${BRAND.cli} log <run-id> [--follow] [--json]

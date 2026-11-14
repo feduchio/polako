@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { ADVISOR_SYSTEM_PROMPT, parseAdvisorReply, type Advise } from "../agents/advisor.js";
 import { AgentRunner, toolResultTokenBudget } from "../agents/runner.js";
 import { EmpiricalProgressTracker, type ProgressModel } from "../agents/progressTracker.js";
@@ -59,6 +60,7 @@ import { createProviderFromConfig } from "../providers/factory.js";
 import { inferFamily } from "../providers/openaiCompat.js";
 import type { ReviewProvider } from "../review/swarm.js";
 import {
+  applyProjectGates,
   buildBaselineSnapshot,
   createCheckOutputPersister,
   discoverProject,
@@ -257,13 +259,25 @@ export function routerPinsFromRoles(roles: PolishConfig["roles"]): Partial<Recor
   };
 }
 
+/** The `[projects]` entry for a project path; keys may start with `~/`. */
+export function projectConfigFor(projects: PolishConfig["projects"], projectPath: string): PolishConfig["projects"][string] | undefined {
+  const normalize = (path: string): string => resolve(path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
+  const wanted = normalize(projectPath);
+  return Object.entries(projects).find(([key]) => normalize(key) === wanted)?.[1];
+}
+
 /** Production DISCOVERING_PROJECT: manifest profile + runtime capability recording. */
-export function createDiscoveringProjectDriver(_deps: ProductionDeps): PhaseDriver {
+export function createDiscoveringProjectDriver(deps: Pick<ProductionDeps, "config">): PhaseDriver {
   return (ctx) => {
     const discovered = ctx.store.events.list(ctx.run.id, { types: ["project.discovered"] });
     if (discovered.length > 0) return { status: "complete", nextPhase: "BASELINING" };
 
-    const profile = discoverProject(ctx.run.projectPath);
+    const discoveredProfile = discoverProject(ctx.run.projectPath);
+    const project = projectConfigFor(deps.config.projects, ctx.run.projectPath);
+    // The project's own gate (`[projects."<path>"] gates`) replaces the checks guessed from its scripts.
+    const profile = project?.gates === undefined
+      ? discoveredProfile
+      : applyProjectGates(discoveredProfile, project.gates, project.gateTimeoutMs);
     const runtimeDiscovery = discoverProjectRuntime(ctx.run.projectPath);
     const event: NewEvent = {
       id: id("evt", ctx.clock.now()),

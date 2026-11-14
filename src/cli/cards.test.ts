@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseOnly, projectForCards, readBrief, resolveRunTarget } from "./cards.js";
+import { daemonProblem } from "./client.js";
 import { runCli } from "./index.js";
 
 const dirs: string[] = [];
@@ -70,6 +71,7 @@ describe("polako run <cards>", () => {
   function capture() {
     const calls: { method: string; params: Record<string, unknown> | undefined }[] = [];
     const daemonCall = <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
+      if (method === "daemon.ping") return Promise.resolve({ pid: 1, home: "/h", features: ["cards"] } as T);
       calls.push({ method, params });
       return Promise.resolve({ id: "run_x" } as T);
     };
@@ -99,6 +101,17 @@ describe("polako run <cards>", () => {
     expect(calls.map((call) => call.params?.["project"])).toEqual([repo, repo]);
     expect((calls[0]?.params?.["cards"] as unknown[]).length).toBe(1);
     expect((calls[1]?.params?.["cards"] as unknown[]).length).toBe(2);
+  });
+
+  it("refuses a daemon from a build that predates cards, before the run is created", async () => {
+    const { tasks } = repoWithCards();
+    const calls: string[] = [];
+    const stale = <T>(method: string): Promise<T> => {
+      calls.push(method);
+      return Promise.resolve({ pid: 4242, home: "/h", entry: "/x/src/daemon/main.ts" } as T);
+    };
+    await expect(runCli(["run", tasks], { callDaemon: stale })).rejects.toThrow(/running polakod \(pid 4242, \/x\/src\/daemon\/main.ts\) predates cards support.*polako daemon restart/);
+    expect(calls).toEqual(["daemon.ping"]);
   });
 
   it("fails at the prompt on a broken card set, before any daemon call", async () => {
@@ -146,5 +159,24 @@ describe("polako run <cards>", () => {
       [repo, "fix the bug", false],
       [repo, "add dark mode", false],
     ]);
+  });
+});
+
+describe("daemonProblem", () => {
+  const info = { pid: 7, home: "/h", features: ["cards", "roles"], builtAt: 1_000_000 };
+
+  it("passes a daemon that has every feature and is as new as the client", () => {
+    expect(daemonProblem(info, ["cards"], 1_000_000)).toEqual({ fatal: null, warning: null });
+    expect(daemonProblem(info, [], null)).toEqual({ fatal: null, warning: null });
+  });
+
+  it("is fatal when a feature is missing, naming the pid and the way out", () => {
+    const problem = daemonProblem({ pid: 7, home: "/h", features: [] }, ["cards", "roles"], null);
+    expect(problem.fatal).toMatch(/pid 7.*predates cards, roles support.*polako daemon restart/);
+  });
+
+  it("only warns when the daemon is older than the installed build", () => {
+    expect(daemonProblem(info, ["cards"], 5_000_000)).toMatchObject({ fatal: null, warning: expect.stringContaining("older than this polako build") as unknown });
+    expect(daemonProblem(info, ["cards"], 1_000_500).warning).toBeNull();
   });
 });

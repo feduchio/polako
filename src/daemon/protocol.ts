@@ -18,6 +18,14 @@ export type RpcResponse =
   | { jsonrpc: "2.0"; id: string | number; result: unknown }
   | { jsonrpc: "2.0"; id: string | number | null; error: RpcError };
 
+/**
+ * What this build of the daemon understands beyond the original `run`. A client that needs one
+ * asks `daemon.ping` first: a daemon started before the feature existed ignores unknown `run`
+ * parameters, so a card run on it silently became a mission run with no mission.
+ */
+export const DAEMON_FEATURES = ["cards", "roles", "projects"] as const;
+export type DaemonFeature = (typeof DAEMON_FEATURES)[number];
+
 export const RPC_METHODS = [
   "daemon.ping",
   "project.add",

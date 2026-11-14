@@ -7,7 +7,7 @@ export {
   type ProjectProfile,
   type RegistryEntry,
 } from "./profile.js";
-export { discoverProject, inspectManifestHashes, ProfileCache, profileCacheKey } from "./discovery.js";
+export { applyProjectGates, discoverProject, inspectManifestHashes, ProfileCache, profileCacheKey, splitGateCommand } from "./discovery.js";
 export { parseTestOutput, parseNodeTest, parseTestReport, processEnd, statusFromProcess } from "./parsers.js";
 export type { FailureKind, ProcessEnd, TestFailure, TestReport } from "./parsers.js";
 export { buildBaselineEvidenceView } from "./baselineEvidence.js";

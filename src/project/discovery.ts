@@ -164,10 +164,35 @@ function onlyOptionsBetween(words: readonly string[], from: number, to: number):
   return true;
 }
 
-function shellWords(segment: string): string[] {
+export function shellWords(segment: string): string[] {
   const words: string[] = [];
   for (const match of segment.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) words.push(match[1] ?? match[2] ?? match[3] ?? "");
   return words;
+}
+
+/** `npm run check` → `["npm","run","check"]`; quotes group words, nothing else is interpreted. */
+export function splitGateCommand(command: string): string[] {
+  return shellWords(command).filter((word) => word !== "");
+}
+
+/**
+ * The profile with the project's own gate in place of the guessed checks. Each command becomes one
+ * mandatory check; `npm|pnpm|yarn|bun run <script>` is named after the script so baseline and
+ * candidate results line up by name.
+ */
+export function applyProjectGates(profile: ProjectProfile, gates: readonly string[], timeoutMs = 15 * 60_000): ProjectProfile {
+  const checks = gates.map((gate, index) => {
+    const command = splitGateCommand(gate);
+    const script = command.length === 3 && command[1] === "run" ? command[2] : undefined;
+    return {
+      name: script ?? `gate${String(index + 1)}`,
+      kind: "test" as const,
+      command,
+      mandatory: true,
+      timeoutMs,
+    };
+  });
+  return ProjectProfileSchema.parse({ ...profile, checks });
 }
 
 /** In-memory profile cache invalidated when manifest hashes change. */
