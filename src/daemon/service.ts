@@ -97,7 +97,7 @@ export class DaemonService implements RpcHandler {
   private ticking = false;
   private tickStartedAt: number | null = null;
   private readonly startedAt = Date.now();
-  private catalogHydrated = false;
+  private lastHydrateAttempt = Number.NEGATIVE_INFINITY;
   private lastTickCompletedAt: number | null = null;
   private reportRenders = 0;
   private watchdog!: TickWatchdog;
@@ -576,13 +576,19 @@ export class DaemonService implements RpcHandler {
    * a worker loop): the engine refuses to re-enter a run it is driving, and a run created meanwhile
    * sat in CREATED until another run's VALIDATING returned. Explicit callers wait for the pass.
    */
-  /** Once per process, and only when a run is already past model discovery (a restart mid-run). */
+  /**
+   * While the catalogue is empty and a run is already past model discovery (a daemon restarted
+   * mid-run, whatever the run's control state: a paused run is resumed into a driver that needs
+   * models at once). Retried every 15 s when the model server is not answering.
+   */
   private async hydrateCatalogForResumedRuns(): Promise<void> {
-    if (this.catalogHydrated) return;
+    if (this.productionDeps.catalog.list().length > 0) return;
+    if (this.clock.now() - this.lastHydrateAttempt < 15_000) return;
     const beyondDiscovery = this.store.repos.runs.listAll().some((run) =>
-      run.control === "RUNNING" && !["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "DONE", "FAILED", "NEEDS_HUMAN"].includes(run.phase));
+      !["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "DONE", "FAILED", "NEEDS_HUMAN"].includes(run.phase) &&
+      run.control !== "STOPPED" && run.control !== "KILLED");
     if (!beyondDiscovery) return;
-    this.catalogHydrated = true;
+    this.lastHydrateAttempt = this.clock.now();
     try {
       await hydrateCatalog(this.productionDeps);
     } catch {
