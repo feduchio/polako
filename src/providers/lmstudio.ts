@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import type { CompletionRequest, CompletionResponse, ModelInfo, ModelTier, ProviderAdapter, ProviderHealth } from "../broker/types.js";
 import { localLineage } from "../broker/lineage.js";
 import type { ResidencyScheduler } from "../broker/residency.js";
@@ -100,7 +102,7 @@ export class LmStudioProvider implements ProviderAdapter {
       concurrency: this.concurrency,
       timeoutMs: opts.timeoutMs ?? LMSTUDIO_DEFAULT_TIMEOUT_MS,
       adaptPayload: adaptLmStudioPayload,
-      ...(opts.fetch !== undefined ? { fetch: opts.fetch } : {}),
+      fetch: opts.fetch ?? patientFetch,
     });
   }
 
@@ -155,6 +157,44 @@ export class LmStudioProvider implements ProviderAdapter {
     return this.inner.health(signal);
   }
 }
+
+/**
+ * `fetch` for a local model server. Node's own `fetch` gives up on a response whose headers have
+ * not arrived within 300 s (undici's `headersTimeout`) whatever the caller's timeout is, and a
+ * non-streamed completion from a reasoning model on a 24k-token prompt takes longer: it failed as a
+ * "network" error after 301 s. `node:http` has no such limit; the provider's own timeout (30 min
+ * by default) and the caller's abort signal are the only clocks.
+ */
+export const patientFetch: FetchLike = (input, init) =>
+  new Promise((resolve, reject) => {
+    const url = new URL(input);
+    const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+    const req = send(url, { method: init.method, headers: init.headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("error", reject);
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          status: res.statusCode ?? 0,
+          headers: { get: (name: string) => {
+            const value = res.headers[name.toLowerCase()];
+            return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
+          } },
+          text: () => Promise.resolve(text),
+        });
+      });
+    });
+    req.on("error", reject);
+    const abort = (): void => {
+      req.destroy(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    };
+    if (init.signal?.aborted === true) abort();
+    init.signal?.addEventListener("abort", abort, { once: true });
+    req.on("close", () => init.signal?.removeEventListener("abort", abort));
+    if (init.body !== undefined) req.write(init.body);
+    req.end();
+  });
 
 /** A model-key pattern: literal text with `*` standing for any run of characters. */
 function keyPattern(pattern: string): RegExp {

@@ -1,3 +1,5 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 import { ProviderError } from "../broker/types.js";
 import { distinctFamilies } from "../broker/diversity.js";
@@ -6,6 +8,7 @@ import {
   adaptLmStudioPayload,
   LMSTUDIO_DEFAULT_TIMEOUT_MS,
   LmStudioProvider,
+  patientFetch,
   parseLmsCatalog,
   type LmsModelMeta,
 } from "./lmstudio.js";
@@ -294,5 +297,59 @@ describe("LmStudioProvider model allow and deny lists", () => {
     expect((adapter as LmStudioProvider).permits("a")).toBe(true);
     expect((adapter as LmStudioProvider).permits("c")).toBe(false);
     expect((adapter as LmStudioProvider).permits("bad")).toBe(false);
+  });
+});
+
+describe("patientFetch (node:http, no 300 s header timeout)", () => {
+  async function withServer<T>(handler: (req: IncomingMessage, res: ServerResponse) => void, run: (base: string) => Promise<T>): Promise<T> {
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      return await run(`http://127.0.0.1:${String((server.address() as AddressInfo).port)}`);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it("posts a body and returns status, headers and text, however late the answer is", async () => {
+    await withServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        setTimeout(() => {
+          res.writeHead(201, { "x-echo": req.headers["content-type"] ?? "", "retry-after": "7" });
+          res.end(JSON.stringify({ got: Buffer.concat(chunks).toString() }));
+        }, 150);
+      });
+    }, async (base) => {
+      const res = await patientFetch(`${base}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"a":1}' });
+      expect(res.status).toBe(201);
+      expect(res.headers.get("Retry-After")).toBe("7");
+      expect(res.headers.get("x-echo")).toBe("application/json");
+      expect(res.headers.get("nope")).toBeNull();
+      expect(JSON.parse(await res.text())).toEqual({ got: '{"a":1}' });
+    });
+  });
+
+  it("aborts when the signal fires, and reports a refused connection", async () => {
+    await withServer(() => undefined, async (base) => {
+      const controller = new AbortController();
+      const pending = patientFetch(`${base}/x`, { method: "GET", headers: {}, signal: controller.signal });
+      setTimeout(() => controller.abort(), 50);
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      await expect(patientFetch(`${base}/x`, { method: "GET", headers: {}, signal: AbortSignal.abort() })).rejects.toMatchObject({ name: "AbortError" });
+    });
+    await expect(patientFetch("http://127.0.0.1:1/x", { method: "GET", headers: {} })).rejects.toThrow();
+  });
+
+  it("is what an LmStudioProvider uses when no fetch is given", async () => {
+    await withServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "ornith-1.5-35b-a3b" }] }));
+    }, async (base) => {
+      const p = new LmStudioProvider({ id: "local", baseUrl: `${base}/v1`, catalog: () => Promise.resolve(CATALOG) });
+      expect((await p.listModels()).map((m) => m.ref.model)).toEqual(["ornith-1.5-35b-a3b"]);
+    });
   });
 });
