@@ -204,7 +204,7 @@ export function createReviewingDriver(options: ReviewDriverOptions = {}): PhaseD
           return { status: "waiting" };
         }
         const answered = [...coveredFamilies].filter((family) => !authors.has(family));
-        const terminalReason = insufficientFamiliesReason(answered.length + fresh.size, required, [...answered, ...fresh], authors);
+        const terminalReason = insufficientFamiliesReason(answered.length + fresh.size, required, [...answered, ...fresh], authors, deterministicallyExcludedReviewModels(ctx));
         emitNeedsHumanReport(ctx, terminalReason);
         return { status: "complete", nextPhase: "NEEDS_HUMAN", terminalReason };
       }
@@ -1586,12 +1586,18 @@ function insufficientFamiliesReason(
   required: number,
   families: readonly string[],
   authors: ReadonlySet<string>,
+  excluded: readonly { model: ModelRef; error: string }[] = [],
 ): TerminalReason {
   const listed = families.length === 0 ? "none" : [...families].sort().join(", ");
   const author = authors.size === 0 ? "" : `; author families excluded: ${[...authors].sort().join(", ")}`;
+  // A reviewer that failed for a reason that recurs is out of the pool for good; saying which and
+  // why is the difference between "insufficient families" and "raise review.maxOutputTokens".
+  const why = excluded.length === 0
+    ? ""
+    : `; reviewers excluded after a failure that recurs: ${excluded.map((entry) => `${entry.model.provider}:${entry.model.model} (${entry.error})`).join("; ")}`;
   return {
     code: "review_unverifiable",
-    summary: `insufficient_families: ${String(available)} of ${String(required)} (${listed})${author}; a clean round needs one reviewer family per axis, none of them the author's`,
+    summary: `insufficient_families: ${String(available)} of ${String(required)} (${listed})${author}${why}; a clean round needs one reviewer family per axis, none of them the author's`,
   };
 }
 

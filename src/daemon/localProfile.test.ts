@@ -38,7 +38,8 @@ describe("local profile", () => {
     expect(config.candidates).toEqual({ trivial: 1, normal: 1, complex: 2 });
     expect(config.review.reviewersPerRound).toBe(2);
     expect(config.review.sameModelFallback).toBe(true);
-    expect(config.review.maxOutputTokens).toBe(4096);
+    expect(config.review.maxOutputTokens).toBe(12288);
+    expect(config.convergence.requiredCleanRounds).toBe(2);
     expect(config.review.falsifiabilityAudit).toBe(true);
     expect(config.agent.progressEnabled).toBe(false);
     expect(config.agent.maxTurns).toBe(80);
@@ -52,7 +53,7 @@ describe("local profile", () => {
     expect(config.execution.maxParallelTasks).toBe(3);
     expect(config.review.reviewersPerRound).toBe(3);
     expect(config.review.sameModelFallback).toBe(false);
-    expect(config.review.maxOutputTokens).toBe(4096);
+    expect(config.review.maxOutputTokens).toBe(12288);
     expect(config.providers[0]).toMatchObject({ manageResidency: false, timeoutMs: 60_000, contextLength: 65_536 });
   });
 

@@ -149,12 +149,31 @@ describe("REVIEWING with the same-model fallback", () => {
     expect(store.events.list(runId, { types: ["review.independence"] }).map((event) => event.payload["reviewIndependence"])).toEqual(["same-model-isolated"]);
   });
 
-  async function setup(models: readonly ModelSpec[], review: { sameModelFallback: boolean; reviewersPerRound: number; falsifiabilityAudit?: boolean; reviewers?: string[] }) {
+  it("says why a reviewer left the pool when the round then lacks families", async () => {
+    const { provider, engine } = await setup(
+      [{ name: "q-author", family: "qwen" }, { name: "g-reviewer", family: "google" }],
+      { sameModelFallback: true, reviewersPerRound: 2, truncated: ["q-author"] },
+    );
+    expect(provider.calls).toHaveLength(0);
+    const { runId } = seedRun(store, clock, fixture, "q-author");
+    await engine.tickRun(runId);
+    await engine.tickRun(runId);
+    const run = store.repos.runs.get(runId);
+    expect(run?.phase).toBe("NEEDS_HUMAN");
+    expect(run?.terminalReason?.summary).toContain("reviewers excluded after a failure that recurs: local:q-author (");
+    expect(run?.terminalReason?.summary).toContain("truncated at the configured token cap");
+  });
+
+  async function setup(models: readonly ModelSpec[], review: { sameModelFallback: boolean; reviewersPerRound: number; falsifiabilityAudit?: boolean; reviewers?: string[]; truncated?: string[] }) {
     const provider = new ScriptedProvider("local", models.map(({ name, family }) => ({
       name,
       capabilities: { ...FAKE_CAPABILITIES.fast, family, supportsJson: true, supportsStrictReviewSchema: true, inputCostPerM: 0, outputCostPerM: 0 },
     })));
-    for (const { name } of models) provider.script(name, [{ kind: "reply", content: '{"findings": []}' }, { kind: "reply", content: '{"findings": []}' }]);
+    for (const { name } of models) {
+      provider.script(name, review.truncated?.includes(name) === true
+        ? [{ kind: "reply", content: '{"findings": [', finishReason: "length" }]
+        : [{ kind: "reply", content: '{"findings": []}' }, { kind: "reply", content: '{"findings": []}' }]);
+    }
     const config = defaultConfig();
     config.review.sameModelFallback = review.sameModelFallback;
     config.review.reviewersPerRound = review.reviewersPerRound;

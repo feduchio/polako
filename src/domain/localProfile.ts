@@ -19,7 +19,8 @@ export const LOCAL_PROFILE_DEFAULTS: Readonly<Record<string, unknown>> = {
     // The local reviewers all missed tests that could not fail; the audit makes that a blocking finding.
     falsifiabilityAudit: true,
     // A reasoning model spends part of max_tokens on thought; upstream's 1500 truncates it.
-    maxOutputTokens: 4096,
+    // Ornith thinks before it answers; a review it was cut off in (at 4096) counted as a failed reviewer.
+    maxOutputTokens: 12288,
   },
   // The progress tracker scores each worker turn with two models of different families; with one
   // resident model that would swap it in and out in the middle of a worker's loop.
@@ -31,6 +32,9 @@ export const LOCAL_PROFILE_DEFAULTS: Readonly<Record<string, unknown>> = {
   discovery: { probeMaxTokens: 2048 },
   // Prompt processing is the slow part (110-500 tok/s): keep packs well under the 64k load.
   contextBudget: { maxPackTokens: 24_000 },
+  // Two clean rounds, not three: with two reviewers (one deterministic at temperature 0) a third identical
+  // round costs ~10 minutes and says nothing new; DONE still needs passing deterministic gates.
+  convergence: { requiredCleanRounds: 2 },
   // One call at a time on the one resident model; tests and builds must not fight it for memory.
   lanes: { "llm.default": 1, "local.shell": 2, "local.test": 1, "local.build": 1, supervisor: 1, verifier: 1 },
   // A failed call costs minutes, not a rate-limit window: one attempt per council model, short backoff.
