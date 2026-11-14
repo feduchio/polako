@@ -118,7 +118,38 @@ describe("REVIEWING with the same-model fallback", () => {
     expect(store.events.list(runId, { types: ["review.independence"] }).map((event) => event.payload["reviewIndependence"])).toEqual(["lineage"]);
   });
 
-  async function setup(models: readonly ModelSpec[], review: { sameModelFallback: boolean; reviewersPerRound: number }) {
+  it("with the falsifiability audit on, every reviewer is asked for it and its audit is recorded", async () => {
+    const { provider, engine } = await setup(
+      [{ name: "q-author", family: "qwen" }, { name: "g-reviewer", family: "google" }],
+      { sameModelFallback: true, reviewersPerRound: 2, falsifiabilityAudit: true },
+    );
+    const { runId } = seedRun(store, clock, fixture, "q-author");
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
+    expect(provider.calls.every((call) => String(call.messages[0]?.content).includes("MANDATORY TEST AUDIT"))).toBe(true);
+    const audits = store.events.list(runId, { types: ["review.test_audit"] });
+    expect(audits).toHaveLength(2);
+    expect(audits.map((event) => event.payload["model"]).map((model) => (model as { model: string }).model).sort()).toEqual(["g-reviewer", "q-author"]);
+  });
+
+  it("pinned reviewers: the other lineage first, then the author's own model in isolation, and nobody else", async () => {
+    const { provider, engine } = await setup(
+      [{ name: "ornith", family: "qwen" }, { name: "gpt-oss", family: "openai" }, { name: "swift", family: "qwen" }, { name: "gemma", family: "google" }],
+      { sameModelFallback: true, reviewersPerRound: 2, reviewers: ["local:gpt-oss", "local:ornith"] },
+    );
+    const { runId, checkpointHash } = seedRun(store, clock, fixture, "ornith");
+    await engine.tickRun(runId);
+    expect(store.repos.runs.get(runId)?.phase).toBe("VALIDATING");
+    const executions = store.repos.reviewExecutions.forCheckpoint(runId, checkpointHash);
+    expect(executions.map((execution) => [execution.axis, execution.requestedModel.model, execution.independence ?? "lineage"])).toEqual([
+      ["correctness", "gpt-oss", "lineage"],
+      ["regression", "ornith", "same-model-isolated"],
+    ]);
+    expect(provider.calls.map((call) => call.model.model)).toEqual(["gpt-oss", "ornith"]);
+    expect(store.events.list(runId, { types: ["review.independence"] }).map((event) => event.payload["reviewIndependence"])).toEqual(["same-model-isolated"]);
+  });
+
+  async function setup(models: readonly ModelSpec[], review: { sameModelFallback: boolean; reviewersPerRound: number; falsifiabilityAudit?: boolean; reviewers?: string[] }) {
     const provider = new ScriptedProvider("local", models.map(({ name, family }) => ({
       name,
       capabilities: { ...FAKE_CAPABILITIES.fast, family, supportsJson: true, supportsStrictReviewSchema: true, inputCostPerM: 0, outputCostPerM: 0 },
@@ -127,6 +158,8 @@ describe("REVIEWING with the same-model fallback", () => {
     const config = defaultConfig();
     config.review.sameModelFallback = review.sameModelFallback;
     config.review.reviewersPerRound = review.reviewersPerRound;
+    config.review.falsifiabilityAudit = review.falsifiabilityAudit ?? false;
+    if (review.reviewers !== undefined) config.roles.reviewers = review.reviewers;
     const home = join(fixture.root, "home");
     mkdirSync(home, { recursive: true });
     const sched = new Scheduler(store, clock, { workerId: "w1", laneLimits: config.lanes, leaseMs: 60_000 });

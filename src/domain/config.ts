@@ -96,6 +96,12 @@ export const ReviewStrategySchema = z.object({
    * requires passing deterministic gates (docs/LOCAL.md §c). Off by default; the local profile turns it on.
    */
   sameModelFallback: z.boolean().default(false),
+  /**
+   * Reviewers must audit every test or check the diff adds, changes or removes — would it fail if
+   * the feature were broken? — and a `no` blocks (docs/LOCAL.md). Off by default; the local
+   * profile turns it on.
+   */
+  falsifiabilityAudit: z.boolean().default(false),
   /** Sampling temperature of an isolated review; the normal reviewers use 0, so this one differs. */
   isolatedTemperature: z.number().min(0).max(2).default(0.7),
 });
@@ -351,8 +357,14 @@ export const ProviderConfigSchema = z.object({
    * the tool is meant to own the machine's model memory.
    */
   manageResidency: z.boolean().optional(),
-  /** Scripted provider model names (relative to polish home for record-replay cassettes) */
+  /**
+   * Scripted provider model names (relative to polish home for record-replay cassettes). For
+   * `lmstudio` it is an allowlist: only these model keys (`*` matches any run of characters) are
+   * ever listed, probed or selected.
+   */
   models: z.array(z.string().min(1)).optional(),
+  /** `lmstudio`: model keys (`*` wildcards allowed) that are never listed, probed or selected. */
+  excludeModels: z.array(z.string().min(1)).optional(),
   cassette: z.string().optional(),
   /**
    * What the provider's listing does not state, declared per model id. Gemini's OpenAI-compatible
@@ -362,6 +374,29 @@ export const ProviderConfigSchema = z.object({
   capabilityHints: z.record(z.string().min(1), CapabilityHintSchema).optional(),
 });
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
+
+const ModelRefStringSchema = z.string().regex(/^[^:\s]+:\S+$/, 'expected "provider:model", for example "local:ornith-ai/ornith-1.5-35b-a3b"');
+
+/**
+ * Model pins by role. Each is an ordered chain: the first model is preferred and the rest are the
+ * fallbacks, in order; a role that is pinned uses only its chain, never the rest of the catalogue.
+ * An unpinned role is chosen by the router as before.
+ */
+export const RolesConfigSchema = z.object({
+  /** Workers: candidate implementers and investigation workers (and their rate-limit fallbacks). */
+  implementer: z.array(ModelRefStringSchema).optional(),
+  /** Review axes, the seeded-defect canary and review-ensemble alternatives. */
+  reviewers: z.array(ModelRefStringSchema).optional(),
+  /** Pairwise comparison of several passing candidates; unused while a task has one candidate. */
+  verifier: z.array(ModelRefStringSchema).optional(),
+  /** Council roles; they run only when a worker asks for a split (a card run plans without a council). */
+  planner: z.array(ModelRefStringSchema).optional(),
+  scope_guardian: z.array(ModelRefStringSchema).optional(),
+  judge: z.array(ModelRefStringSchema).optional(),
+  /** Progress tracker: exactly two models of different families, or the tracker stays off. */
+  progress: z.array(ModelRefStringSchema).optional(),
+});
+export type RolesConfig = z.infer<typeof RolesConfigSchema>;
 
 /** `polako run <cards>`: the project brief and per-model notes every card worker is given. */
 export const CardsConfigSchema = z.object({
@@ -399,6 +434,7 @@ export const PolishConfigSchema = z.object({
   runtimeValidation: RuntimeValidationConfigSchema.prefault({}),
   council: CouncilRetryConfigSchema.prefault({}),
   cards: CardsConfigSchema.prefault({}),
+  roles: RolesConfigSchema.prefault({}),
   supervisors: z.array(SupervisorRoleConfigSchema).default([]),
   providers: z.array(ProviderConfigSchema).default([]),
 });

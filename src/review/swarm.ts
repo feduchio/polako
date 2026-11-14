@@ -1,6 +1,6 @@
 import type { ProtocolRegistry } from "../protocols/loader.js";
 import { PolishError } from "../shared/errors.js";
-import { isolatedReviewerSystemPrompt, reviewerSystemPrompt } from "./reviewerProtocol.js";
+import { auditedReviewerSystemPrompt, isolatedReviewerSystemPrompt, reviewerSystemPrompt } from "./reviewerProtocol.js";
 import { realpath, readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ProviderAdapter } from "../broker/types.js";
@@ -17,7 +17,7 @@ import {
 import { sha256Hex } from "../shared/hash.js";
 import { id } from "../shared/ids.js";
 import type { CheckpointReviewArtifact } from "./artifact.js";
-import { DISABLED_REASONING, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
+import { DISABLED_REASONING, REVIEW_FINDINGS_AUDIT_RESPONSE_SCHEMA, REVIEW_FINDINGS_RESPONSE_SCHEMA } from "../broker/responseSchemas.js";
 
 export interface ReviewProvider {
   provider: ProviderAdapter;
@@ -58,6 +58,19 @@ export interface RunAxisReviewInput {
    * stance) and sampling temperature. The context is the same fresh pack either way.
    */
   isolation?: { temperature: number };
+  /**
+   * Local mode: the reviewer must audit every test or check the diff touches (would it fail if the
+   * feature were broken?), and each `no` becomes a blocking finding. See `review.falsifiabilityAudit`.
+   */
+  falsifiabilityAudit?: boolean;
+}
+
+/** One line of the reviewer's test audit. */
+export interface TestAuditEntry {
+  path: string;
+  test: string;
+  wouldFailIfBroken: boolean;
+  because: string;
 }
 
 /**
@@ -84,6 +97,8 @@ export interface RunAxisReviewResult {
   suppressed: { claim: string; reason: string }[];
   promptDigest: string;
   rawContent: string;
+  /** The reviewer's falsifiability audit; empty unless `falsifiabilityAudit` was asked for. */
+  testAudit?: TestAuditEntry[];
 }
 
 export interface RunReviewSwarmInput {
@@ -103,16 +118,18 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
 
   const contextPack = freshContextPack(input.artifact, input.axis);
   const userContent = reviewUserContent(input.trusted, contextPack);
+  const audit = input.falsifiabilityAudit === true;
+  const basePrompt = input.isolation === undefined ? reviewerSystemPrompt(input.protocols, input.axis) : isolatedReviewerSystemPrompt(input.protocols, input.axis);
   const response = await selection.provider.complete({
     model,
     messages: [
-      { role: "system", content: input.isolation === undefined ? reviewerSystemPrompt(input.protocols, input.axis) : isolatedReviewerSystemPrompt(input.protocols, input.axis) },
+      { role: "system", content: audit ? auditedReviewerSystemPrompt(basePrompt) : basePrompt },
       { role: "user", content: userContent },
     ],
       ...(input.responseMode === "legacy_json_object"
         ? { responseFormat: "json" as const }
         : {
-            responseSchema: REVIEW_FINDINGS_RESPONSE_SCHEMA,
+            responseSchema: audit ? REVIEW_FINDINGS_AUDIT_RESPONSE_SCHEMA : REVIEW_FINDINGS_RESPONSE_SCHEMA,
             reasoning: DISABLED_REASONING,
           }),
     temperature: input.isolation?.temperature ?? 0,
@@ -133,7 +150,13 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
   }
 
   const now = input.now ?? Date.now();
-  const raws = parseRawFindings(response.message.content);
+  const parsedRaws = parseRawFindings(response.message.content);
+  const testAudit = audit ? parseTestAudit(response.message.content) : [];
+  if (audit && testAudit.length === 0 && diffTouchesTests(input.artifact.diff)) {
+    // Mandatory: an unaudited review of a diff that changes tests is not a review of those tests.
+    throw new PolishError("PROVIDER_ERROR", "reviewer returned no test audit for a diff that changes tests");
+  }
+  const raws = audit ? [...parsedRaws, ...auditFindings(testAudit, parsedRaws)] : parsedRaws;
   const findings = await Promise.all(
     raws.map(async (raw) => {
       const evidenceIssues = await checkEvidence(raw.evidence, input.repositoryRoot, removedLines(input.artifact.diff));
@@ -170,7 +193,60 @@ export async function runAxisReview(input: RunAxisReviewInput): Promise<RunAxisR
     suppressed: guarded.suppressed,
     promptDigest: sha256Hex(userContent),
     rawContent: response.message.content,
+    ...(audit ? { testAudit } : {}),
   };
+}
+
+const TEST_PATH = /(?:^|\/)(?:__tests__|tests?|spec)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)check[-_][\w.-]+\.[cm]?[jt]s$|(?:^|\/)[\w.-]*[-_]check\.[cm]?[jt]s$/i;
+
+/** Whether the diff adds, changes or removes a file that is a test or a check script. */
+export function diffTouchesTests(diff: string): boolean {
+  for (const match of diff.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)) {
+    if (TEST_PATH.test(match[1] ?? "") || TEST_PATH.test(match[2] ?? "")) return true;
+  }
+  return false;
+}
+
+function parseTestAudit(content: string): TestAuditEntry[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripFence(content));
+  } catch {
+    return [];
+  }
+  const list = isRecord(parsed) ? parsed["testAudit"] : undefined;
+  if (!Array.isArray(list)) return [];
+  const entries: TestAuditEntry[] = [];
+  for (const item of list as unknown[]) {
+    if (!isRecord(item) || typeof item["test"] !== "string" || typeof item["wouldFailIfBroken"] !== "boolean") continue;
+    entries.push({
+      path: typeof item["path"] === "string" ? item["path"] : "",
+      test: item["test"],
+      wouldFailIfBroken: item["wouldFailIfBroken"],
+      because: typeof item["because"] === "string" ? item["because"] : "",
+    });
+  }
+  return entries;
+}
+
+/**
+ * One blocking finding per audit entry answered `no`, unless the reviewer already reported that
+ * test as a falsifiability finding. The finding then takes the ordinary road: validation, and for
+ * an undemonstrated one an investigation that must show the test passing on broken code.
+ */
+function auditFindings(audit: readonly TestAuditEntry[], reported: readonly RawFinding[]): RawFinding[] {
+  return audit
+    .filter((entry) => !entry.wouldFailIfBroken)
+    .filter((entry) => !reported.some((finding) => /falsifi/i.test(finding.criterion) && finding.evidence.some((ref) => ref.path === entry.path)))
+    .map((entry): RawFinding => ({
+      criterion: "falsifiability",
+      severity: "high",
+      blocking: true,
+      claim: `${entry.test} would not fail if the feature were broken: ${entry.because || "the reviewer's audit says it cannot fail"}`,
+      evidence: entry.path === "" ? [] : [{ path: entry.path }],
+      reproduction: [],
+      suggestedCheck: `Break the code this test covers (revert the change, or remove the behaviour) and run ${entry.test}: it must fail.`,
+    }));
 }
 
 const MAX_ADVISORY_PER_REVIEWER = 5;

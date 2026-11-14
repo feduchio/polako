@@ -50,6 +50,37 @@ export const REVIEW_FINDINGS_RESPONSE_SCHEMA = {
   },
 } as const;
 
+/**
+ * The review schema plus a mandatory `testAudit`: one entry per test or check the diff adds,
+ * changes or removes. A separate schema, so the probed `review_findings` schema keeps its hash.
+ */
+export const REVIEW_FINDINGS_AUDIT_RESPONSE_SCHEMA = {
+  name: "review_findings_with_test_audit",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["findings", "testAudit"],
+    properties: {
+      findings: REVIEW_FINDINGS_RESPONSE_SCHEMA.schema.properties.findings,
+      testAudit: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["path", "test", "wouldFailIfBroken", "because"],
+          properties: {
+            path: { type: "string" },
+            test: { type: "string" },
+            wouldFailIfBroken: { type: "boolean" },
+            because: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
 export const EMPIRICAL_SCORE_RESPONSE_SCHEMA = {
   name: "empirical_pair_score",
   strict: true,

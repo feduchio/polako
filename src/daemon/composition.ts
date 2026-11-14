@@ -237,9 +237,23 @@ export function buildProductionDeps(options: BuildProductionDepsOptions): Produc
     router: new ModelRouter(catalog, {
       ...DEFAULT_ROUTER_POLICY,
       costEligibility: costEligibilityFromConfig(options.config.routing),
-    }),
+    }, routerPinsFromRoles(options.config.roles)),
     providers,
     resolveSandbox: sandbox,
+  };
+}
+
+/** The `[roles]` chains the router serves: implementer → worker, reviewers → reviewer, verifier → verifier. */
+export function routerPinsFromRoles(roles: PolishConfig["roles"]): Partial<Record<"worker" | "reviewer" | "verifier", ModelRef[]>> {
+  const chain = (values: readonly string[] | undefined): ModelRef[] | undefined =>
+    values === undefined || values.length === 0 ? undefined : values.map((value) => parseModelRefString(value));
+  const worker = chain(roles.implementer);
+  const reviewer = chain(roles.reviewers);
+  const verifier = chain(roles.verifier);
+  return {
+    ...(worker === undefined ? {} : { worker }),
+    ...(reviewer === undefined ? {} : { reviewer }),
+    ...(verifier === undefined ? {} : { verifier }),
   };
 }
 
@@ -482,9 +496,11 @@ export function resolveEnsembleAlternatives(deps: ProductionDeps, ctx?: PhaseCon
 }
 
 export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
-  const pinnedModels = deps.config.supervisors.flatMap((entry) =>
-    supervisorModelChain(entry).map((value) => parseModelRefString(value)),
-  );
+  const pinnedModels = [
+    ...deps.config.supervisors.flatMap((entry) => supervisorModelChain(entry).map((value) => parseModelRefString(value))),
+    // A role's chain is probed whatever the discovery cap is: the run depends on exactly these.
+    ...Object.values(deps.config.roles).flatMap((chain) => (chain ?? []).map((value) => parseModelRefString(value))),
+  ];
   return async (ctx) => {
     const observations = new ModelObservationRepository(deps.store, {
       minScoresForRouting: deps.config.audition.minScoresForRouting,
@@ -814,15 +830,21 @@ export async function resolveProductionVerifier(
     });
     new ModelObservationRepository(deps.store).restoreCatalog(deps.catalog);
   }
+  // `[roles] verifier` is the user's chain: only those models, in that order. Unpinned, the first
+  // model of each of two families, alphabetically.
+  const pins = deps.config.roles.verifier?.map((value) => modelRefKey(parseModelRefString(value)));
   const eligible = deps.catalog.list()
     .filter((entry) =>
       entry.available &&
       entry.info.capabilities.supportsStrictScoreSchema === true &&
       entry.info.capabilities.inputCostPerM === 0 &&
-      entry.info.capabilities.outputCostPerM === 0)
+      entry.info.capabilities.outputCostPerM === 0 &&
+      (pins === undefined || pins.includes(modelRefKey(entry.info.ref))))
     .sort((a, b) =>
-      compareText(a.info.capabilities.family, b.info.capabilities.family) ||
-      compareText(modelRefKey(a.info.ref), modelRefKey(b.info.ref)));
+      pins !== undefined
+        ? pins.indexOf(modelRefKey(a.info.ref)) - pins.indexOf(modelRefKey(b.info.ref))
+        : compareText(a.info.capabilities.family, b.info.capabilities.family) ||
+          compareText(modelRefKey(a.info.ref), modelRefKey(b.info.ref)));
   const selected: typeof eligible = [];
   const families = new Set<string>();
   for (const entry of eligible) {
@@ -1010,14 +1032,18 @@ export function createWorkerFactory(deps: ProductionDeps, ctx: PhaseContext) {
 
 function selectProgressModels(deps: ProductionDeps): ProgressModel[] {
   const policy = costEligibilityFromConfig(deps.config.routing);
+  const pins = deps.config.roles.progress?.map((value) => modelRefKey(parseModelRefString(value)));
   const eligible = deps.catalog.list()
     .filter((entry) =>
       entry.available &&
       entry.info.capabilities.supportsStrictProgressSchema === true &&
-      isCostEligible(entry.info.capabilities, policy))
+      isCostEligible(entry.info.capabilities, policy) &&
+      (pins === undefined || pins.includes(modelRefKey(entry.info.ref))))
     .sort((a, b) =>
-      compareText(a.info.capabilities.family, b.info.capabilities.family) ||
-      compareText(modelRefKey(a.info.ref), modelRefKey(b.info.ref)));
+      pins !== undefined
+        ? pins.indexOf(modelRefKey(a.info.ref)) - pins.indexOf(modelRefKey(b.info.ref))
+        : compareText(a.info.capabilities.family, b.info.capabilities.family) ||
+          compareText(modelRefKey(a.info.ref), modelRefKey(b.info.ref)));
   const selected: ProgressModel[] = [];
   const families = new Set<string>();
   for (const entry of eligible) {
@@ -1101,6 +1127,20 @@ function reviewerFamilies(deps: ProductionDeps, strict: boolean): string[] {
 /** Once per run. A later caller, including the worker factory, does not write a second copy. */
 export function appendRunMechanisms(deps: ProductionDeps, ctx: PhaseContext): void {
   if (ctx.store.events.list(ctx.run.id, { types: ["run.mechanisms"] }).length > 0) return;
+  const pinned = Object.fromEntries(Object.entries(deps.config.roles).filter(([, chain]) => chain !== undefined && chain.length > 0));
+  if (Object.keys(pinned).length > 0) {
+    // What the run was told to use, frozen with the run, so a later config edit cannot rewrite its report.
+    ctx.store.events.append([{
+      id: id("evt", ctx.clock.now()),
+      runId: ctx.run.id,
+      ts: ctx.clock.now(),
+      type: "run.roles",
+      payload: { roles: pinned },
+      causedBy: [],
+      actor: SYSTEM_ACTOR,
+      artifacts: [],
+    }]);
+  }
   ctx.store.events.append([{
     id: id("evt", ctx.clock.now()),
     runId: ctx.run.id,
@@ -1122,10 +1162,13 @@ export function resolveCouncilRoles(deps: ProductionDeps, ctx?: PhaseContext): C
     routerRole: "supervisor" | "judge",
   ): CouncilRoleConfigs["planner"] => {
     const pinned = deps.config.supervisors.find((entry) => entry.role === role);
+    const rolePin = deps.config.roles[role];
     const models =
       pinned !== undefined
         ? supervisorModelChain(pinned).map((value) => parseModelRefString(value))
-        : undefined;
+        : rolePin !== undefined && rolePin.length > 0
+          ? rolePin.map((value) => parseModelRefString(value))
+          : undefined;
     let model;
     let source: { configSource: "pinned" } | { fallbackReason: string };
     if (models?.[0] !== undefined) {

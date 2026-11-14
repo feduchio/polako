@@ -113,8 +113,12 @@ describe("polako run <cards>", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("--dry-run validates and prints the plan without calling the daemon", async () => {
-    const { tasks } = repoWithCards();
+  it("--dry-run validates and prints the plan and the role resolution without calling the daemon", async () => {
+    const { repo, tasks } = repoWithCards();
+    const home = join(repo, "home");
+    mkdirSync(home);
+    writeFileSync(join(home, "polako.toml"), '[[providers]]\nid = "local"\nkind = "lmstudio"\nlmsPath = "/nonexistent/lms"\n[roles]\nimplementer = ["local:ornith"]\nreviewers = ["local:gpt-oss", "local:ornith"]\n');
+    vi.stubEnv("POLAKO_HOME", home);
     const written: string[] = [];
     vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
       written.push(String(chunk));
@@ -126,6 +130,11 @@ describe("polako run <cards>", () => {
     expect(written.join("")).toContain("1 card(s), no dependency problems:");
     expect(written.join("")).toContain("N02    -  files: src/N02.ts  accept: 1  Title N02");
     expect(written.join("")).toContain("(N02 depends on N01, not selected: assumed already in the code)");
+    const text = written.join("");
+    expect(text).toContain("Roles:");
+    expect(text).toContain("implementer    local:ornith");
+    expect(text).toContain("EXECUTING: the worker of every candidate");
+    vi.unstubAllEnvs();
   });
 
   it("leaves a mission run unchanged", async () => {

@@ -1135,8 +1135,10 @@ async function reviewAxisWithFallback(
         maxOutputTokens: ctx.config.review.maxOutputTokens,
         trusted: reviewTrustedContext(ctx, input.checkpoint),
         ...(isolated ? { isolation: { temperature: ctx.config.review.isolatedTemperature } } : {}),
+        ...(ctx.config.review.falsifiabilityAudit ? { falsifiabilityAudit: true } : {}),
       });
       finishExecution(ctx, started, result.findings, result.model, result.promptDigest);
+      if (result.testAudit !== undefined) recordTestAudit(ctx, input.hash, input.roundIndex, input.axis, started.id, result);
       for (const finding of result.findings) {
         raiseFinding(ctx, finding, started.id);
       }
@@ -1678,6 +1680,27 @@ function raiseFinding(ctx: PhaseContext, finding: Finding, causedBy: string): vo
     artifacts: [],
   };
   ctx.store.events.append([event]);
+}
+
+/** The reviewer's falsifiability audit, kept whole: the report and the next reader can see every yes and no. */
+function recordTestAudit(
+  ctx: PhaseContext,
+  checkpointHash: string,
+  roundIndex: number,
+  axis: ReviewAxis,
+  executionId: string,
+  result: RunAxisReviewResult,
+): void {
+  ctx.store.events.append([{
+    id: id("evt", ctx.clock.now()),
+    runId: ctx.run.id,
+    ts: ctx.clock.now(),
+    type: "review.test_audit",
+    payload: { checkpointHash, roundIndex, axis, executionId, model: result.model, audit: result.testAudit ?? [] },
+    causedBy: [],
+    actor: SYSTEM_ACTOR,
+    artifacts: [],
+  }]);
 }
 
 const REVIEW_INDEPENDENCE_EVENT = "review.independence";

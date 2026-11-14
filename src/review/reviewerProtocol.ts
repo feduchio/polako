@@ -109,3 +109,26 @@ export function isolatedReviewerSystemPrompt(registry: ProtocolRegistry, axis: R
   const adversarial = registry.get(REVIEW_AXIS_ROLE.adversarial);
   return [ISOLATED_REVIEW_PREAMBLE, reviewerSystemPrompt(registry, axis), `Adversarial stance:\n${adversarial.body.trim()}`].join("\n\n");
 }
+
+/**
+ * The per-test falsifiability audit (local mode). Every local reviewer missed exactly these:
+ * a test that swallowed the error it was meant to catch, and a bounds check deleted from a checker.
+ */
+export const REVIEWER_FALSIFIABILITY_AUDIT =
+  "MANDATORY TEST AUDIT. For every test or check the diff adds, changes or removes, put one entry in testAudit: " +
+  '{path, test, wouldFailIfBroken, because}, meaning "<test> would fail if the feature were broken: yes/no, because ...". ' +
+  "Decide it by reading the test against the changed code, not by trusting its name. Answer false (no) when: " +
+  "the code under test sits inside try/catch (or .catch, or a rejects/throws helper) that lets the test pass when it throws; " +
+  "an assertion, a loop branch or a bounds/validity check was removed or weakened, in a test or in a validator or checker; " +
+  "the test's inputs never reach the changed code; the assertion compares a value with itself or with something the test just computed from the same code; " +
+  "or the test cannot fail for another reason you can state. Every false entry is a defect: also report it in findings as a blocking finding " +
+  "(criterion \"falsifiability\", evidence the test's lines). One false blocks the change. testAudit may be empty only when the diff touches no test and no check.";
+
+export const REVIEWER_AUDIT_OUTPUT_CONTRACT =
+  'Return JSON only as {"findings": [...], "testAudit": [...]}. ' +
+  "findings follows the contract above; testAudit has one {path, test, wouldFailIfBroken, because} per test or check the diff adds, changes or removes.";
+
+/** The reviewer prompt with the audit: the ordinary prompt, the audit rule and the audit's output contract. */
+export function auditedReviewerSystemPrompt(base: string): string {
+  return [base, REVIEWER_FALSIFIABILITY_AUDIT, REVIEWER_AUDIT_OUTPUT_CONTRACT].join("\n\n");
+}

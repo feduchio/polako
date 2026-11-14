@@ -110,6 +110,11 @@ export function buildFinalReportInput(ctx: ReportContext): FinalReportInput {
       evidence.push(`Mechanism ${record["name"]}: ${record["on"] ? "on" : "off"}${reason}`);
     }
   }
+  for (const recorded of events.filter((event) => event.type === "run.roles")) {
+    const roles = recorded.payload["roles"];
+    if (typeof roles !== "object" || roles === null) continue;
+    evidence.push(`Roles: ${Object.entries(roles).map(([role, chain]) => `${role}=${Array.isArray(chain) ? chain.join(" > ") : String(chain)}`).join("; ")}`);
+  }
   const independenceEvents = events.filter((event) => event.type === "review.independence");
   if (independenceEvents.length > 0) {
     const isolated = independenceEvents.filter((event) => event.payload["reviewIndependence"] === "same-model-isolated").length;

@@ -48,6 +48,8 @@ export function createProviderFromConfig(
         // LM Studio takes no key unless token auth is on; an empty `apiKey` means "none".
         ...(entry.contextLength !== undefined ? { contextLength: entry.contextLength } : {}),
         ...(entry.lmsPath !== undefined ? { lmsPath: entry.lmsPath } : {}),
+        ...(entry.models !== undefined ? { models: entry.models } : {}),
+        ...(entry.excludeModels !== undefined ? { excludeModels: entry.excludeModels } : {}),
         ...(entry.manageResidency === true
           ? {
               residency: new ResidencyScheduler({

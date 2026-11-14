@@ -51,6 +51,10 @@ export interface LmStudioProviderOptions {
   catalog?: LmsCatalogSource;
   /** Path of the `lms` CLI used when `catalog` is not given. */
   lmsPath?: string;
+  /** Allowlist of model keys (`*` wildcard): nothing else is listed, probed or selected. */
+  models?: readonly string[];
+  /** Model keys (`*` wildcard) that are never listed, probed or selected. */
+  excludeModels?: readonly string[];
   /**
    * Owns which model is loaded: every call waits its turn and runs under the model's own name
    * with that model resident. Without it LM Studio's own just-in-time loading decides.
@@ -72,12 +76,16 @@ export class LmStudioProvider implements ProviderAdapter {
   private readonly inner: OpenAICompatProvider;
   private readonly catalog: LmsCatalogSource;
   private readonly residency: ResidencyScheduler | undefined;
+  private readonly allow: readonly RegExp[] | null;
+  private readonly deny: readonly RegExp[];
   private readonly contextLength: number;
   private readonly hints: Record<string, Partial<ModelInfo["capabilities"]>>;
 
   constructor(opts: LmStudioProviderOptions) {
     this.id = opts.id;
     this.residency = opts.residency;
+    this.allow = opts.models === undefined || opts.models.length === 0 ? null : opts.models.map(keyPattern);
+    this.deny = (opts.excludeModels ?? []).map(keyPattern);
     // With residency the scheduler is the one-at-a-time gate; the lane must be wide enough for it
     // to see several queued calls and batch them by model.
     this.concurrency = opts.concurrency ?? (opts.residency === undefined ? 1 : LMSTUDIO_QUEUE_DEPTH);
@@ -97,7 +105,7 @@ export class LmStudioProvider implements ProviderAdapter {
   }
 
   async listModels(signal?: AbortSignal): Promise<ModelInfo[]> {
-    const served = await this.inner.listModels(signal);
+    const served = (await this.inner.listModels(signal)).filter((model) => this.permits(model.ref.model));
     const catalog = await this.catalog(signal).catch((): LmsModelMeta[] => []);
     const index = indexCatalog(catalog);
     const out: ModelInfo[] = [];
@@ -116,6 +124,23 @@ export class LmStudioProvider implements ProviderAdapter {
     return out;
   }
 
+  /** Whether `models` / `excludeModels` let this model key be used at all. */
+  permits(modelKey: string): boolean {
+    return (this.allow === null || this.allow.some((rule) => rule.test(modelKey))) && !this.deny.some((rule) => rule.test(modelKey));
+  }
+
+  /**
+   * The installed LLMs from `lms ls --json` alone, after the allow/deny lists: no request to the
+   * server, so it is safe while a run owns the GPU. Empty when the CLI is unavailable.
+   */
+  async installedModels(signal?: AbortSignal): Promise<ModelInfo[]> {
+    const catalog = await this.catalog(signal).catch((): LmsModelMeta[] => []);
+    const index = indexCatalog(catalog);
+    return [...index.values()]
+      .filter((row) => row.type === "llm" && this.permits(row.modelKey))
+      .map((row) => toLmStudioModelInfo(this.id, row.modelKey, row, this.contextLength, this.hints[row.modelKey]));
+  }
+
   complete(request: CompletionRequest): Promise<CompletionResponse> {
     const residency = this.residency;
     if (residency === undefined) return this.inner.complete(request);
@@ -129,6 +154,11 @@ export class LmStudioProvider implements ProviderAdapter {
   health(signal?: AbortSignal): Promise<ProviderHealth> {
     return this.inner.health(signal);
   }
+}
+
+/** A model-key pattern: literal text with `*` standing for any run of characters. */
+function keyPattern(pattern: string): RegExp {
+  return new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\?]/g, "\\$&").replace(/\*/g, ".*")}$`);
 }
 
 /**

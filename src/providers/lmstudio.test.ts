@@ -245,3 +245,54 @@ describe("LmStudioProvider with managed residency", () => {
     expect(on?.concurrency).toBeGreaterThan(1);
   });
 });
+
+describe("LmStudioProvider model allow and deny lists", () => {
+  const served = { data: [...SERVED.data, { id: "granite-4.2-8b" }, { id: "gemma-4-12b" }] };
+  const catalog = [
+    ...CATALOG,
+    { type: "llm", modelKey: "granite-4.2-8b", architecture: "granitehybrid", paramsString: "8B", trainedForToolUse: true, maxContextLength: 131072 },
+    { type: "llm", modelKey: "gemma-4-12b", architecture: "gemma4", paramsString: "12B", trainedForToolUse: true, maxContextLength: 131072 },
+  ];
+  const listed = async (extra: Partial<ConstructorParameters<typeof LmStudioProvider>[0]>) =>
+    (await provider({ fetch: fakeFetch(() => ({ status: 200, body: served })), catalog: () => Promise.resolve(catalog), ...extra }).listModels()).map((m) => m.ref.model);
+
+  it("lists everything without lists", async () => {
+    expect(await listed({})).toContain("granite-4.2-8b");
+  });
+
+  it("excludeModels removes keys, with wildcards", async () => {
+    const out = await listed({ excludeModels: ["granite-*", "tiny-3b"] });
+    expect(out).not.toContain("granite-4.2-8b");
+    expect(out).not.toContain("tiny-3b");
+    expect(out).toContain("gemma-4-12b");
+  });
+
+  it("models is an allowlist; excludeModels still wins over it", async () => {
+    expect(await listed({ models: ["ornith-1.5-35b-a3b", "gemma-*"] })).toEqual(["ornith-1.5-35b-a3b", "gemma-4-12b"]);
+    expect(await listed({ models: ["gemma-*"], excludeModels: ["gemma-4-12b"] })).toEqual([]);
+  });
+
+  it("installedModels uses lms alone (no request to the server) and honours the lists", async () => {
+    let requests = 0;
+    const p = provider({
+      fetch: fakeFetch(() => {
+        requests += 1;
+        return { status: 200, body: served };
+      }),
+      catalog: () => Promise.resolve(catalog),
+      excludeModels: ["granite-*"],
+    });
+    const installed = await p.installedModels();
+    expect(requests).toBe(0);
+    expect(installed.map((m) => m.ref.model)).toEqual(["ornith-1.5-35b-a3b", "swift-1.5-qwen3.8-27b", "huihui-qwen3.8-27b-abliterated", "tiny-3b", "gemma-4-12b"]);
+    expect(installed.find((m) => m.ref.model === "gemma-4-12b")?.capabilities.family).toBe("google");
+  });
+
+  it("is built from the provider config", async () => {
+    const adapter = createProviderFromConfig({ id: "local", kind: "lmstudio", enabled: true, models: ["a"], excludeModels: ["b*"], lmsPath: "/nonexistent/lms" }, "");
+    expect(adapter).toBeInstanceOf(LmStudioProvider);
+    expect((adapter as LmStudioProvider).permits("a")).toBe(true);
+    expect((adapter as LmStudioProvider).permits("c")).toBe(false);
+    expect((adapter as LmStudioProvider).permits("bad")).toBe(false);
+  });
+});

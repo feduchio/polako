@@ -24,9 +24,10 @@ export function parseModelRefString(value: string): { provider: string; model: s
 export function loadPolishConfig(home: string): PolishConfig {
   const path = BRAND.configFiles.map((name) => join(home, name)).find((candidate) => existsSync(candidate));
   if (path === undefined) return defaultConfig();
+  let config: PolishConfig;
   try {
     const raw = parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-    return PolishConfigSchema.parse({ ...applyLocalProfile(raw), home });
+    config = PolishConfigSchema.parse({ ...applyLocalProfile(raw), home });
   } catch (error) {
     if (error instanceof z.ZodError) {
       throw new PolishError("CONFIG_ERROR", `invalid ${basename(path)}`, {
@@ -39,4 +40,21 @@ export function loadPolishConfig(home: string): PolishConfig {
       cause: errorToString(error),
     });
   }
+  assertRolePins(config);
+  return config;
+}
+
+/** Every role pin must name a provider that is configured and enabled; checked when the config loads. */
+export function assertRolePins(config: PolishConfig): void {
+  const enabled = new Set(config.providers.filter((entry) => entry.enabled).map((entry) => entry.id));
+  const problems: string[] = [];
+  for (const [role, values] of Object.entries(config.roles)) {
+    for (const value of values ?? []) {
+      const ref = parseModelRefString(value);
+      if (!enabled.has(ref.provider)) {
+        problems.push(`roles.${role}: ${value} names provider "${ref.provider}", which is not an enabled [[providers]] id (${[...enabled].join(", ") || "none"})`);
+      }
+    }
+  }
+  if (problems.length > 0) throw new PolishError("CONFIG_ERROR", `invalid [roles]:\n- ${problems.join("\n- ")}`, { problems });
 }

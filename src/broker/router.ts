@@ -70,7 +70,19 @@ export class ModelRouter {
   constructor(
     private readonly catalog: ModelCatalog,
     private readonly policy: RouterPolicy = DEFAULT_ROUTER_POLICY,
+    /**
+     * Role pins from the config: an ordered chain per role. A pinned role is served by its chain
+     * alone, in the chain's order (first is preferred, the rest are fallbacks), under the same
+     * capability and cost filters; the rest of the catalogue is not offered to it.
+     */
+    private readonly rolePins: Partial<Record<ModelRole, readonly ModelRef[]>> = {},
   ) {}
+
+  /** The pinned chain for a role, or undefined when the role is chosen by ranking. */
+  pinnedChain(role: ModelRole): readonly ModelRef[] | undefined {
+    const chain = this.rolePins[role];
+    return chain === undefined || chain.length === 0 ? undefined : chain;
+  }
 
   rank(req: SelectionRequest): Ranked[] {
     const excluded = new Set((req.exclude ?? []).map(modelRefKey));
@@ -88,7 +100,10 @@ export class ModelRouter {
       return true;
     });
 
-    return eligible
+    const chain = this.pinnedChain(req.role);
+    const order = chain === undefined ? null : new Map(chain.map((ref, index) => [modelRefKey(ref), index]));
+    const pinnedOnly = order === null ? eligible : eligible.filter((e) => order.has(modelRefKey(e.info.ref)));
+    return pinnedOnly
       .map((entry) => {
         const reasons: string[] = [];
         const base = this.expectedQuality(entry);
@@ -111,7 +126,13 @@ export class ModelRouter {
         }
         return { entry, score, reasons };
       })
-      .sort((a, b) => b.score - a.score || modelRefKey(a.entry.info.ref).localeCompare(modelRefKey(b.entry.info.ref)));
+      .sort((a, b) => {
+        if (order !== null) {
+          // Chain order is the preference; quality only breaks ties that cannot occur (refs are unique).
+          return (order.get(modelRefKey(a.entry.info.ref)) ?? 0) - (order.get(modelRefKey(b.entry.info.ref)) ?? 0);
+        }
+        return b.score - a.score || modelRefKey(a.entry.info.ref).localeCompare(modelRefKey(b.entry.info.ref));
+      });
   }
 
   /**
@@ -120,6 +141,8 @@ export class ModelRouter {
    */
   select(req: SelectionRequest): Ranked[] {
     const ranked = this.rank(req);
+    // A pinned chain is already the user's order; spreading families would reorder it.
+    if (this.pinnedChain(req.role) !== undefined) return ranked.slice(0, req.count);
     const picked: Ranked[] = [];
     const pinnedKeys = new Set((req.pinned ?? []).map(modelRefKey));
     for (const r of ranked) if (pinnedKeys.has(modelRefKey(r.entry.info.ref)) && picked.length < req.count) picked.push(r);

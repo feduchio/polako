@@ -16,9 +16,14 @@ export const LOCAL_PROFILE_DEFAULTS: Readonly<Record<string, unknown>> = {
     reviewersPerRound: 2,
     // Only one lineage may be installed; then the author's lineage reviews in isolation.
     sameModelFallback: true,
+    // The local reviewers all missed tests that could not fail; the audit makes that a blocking finding.
+    falsifiabilityAudit: true,
     // A reasoning model spends part of max_tokens on thought; upstream's 1500 truncates it.
     maxOutputTokens: 4096,
   },
+  // The progress tracker scores each worker turn with two models of different families; with one
+  // resident model that would swap it in and out in the middle of a worker's loop.
+  agent: { progressEnabled: false },
   // Prompt processing is the slow part (110-500 tok/s): keep packs well under the 64k load.
   contextBudget: { maxPackTokens: 24_000 },
   // One call at a time on the one resident model; tests and builds must not fight it for memory.

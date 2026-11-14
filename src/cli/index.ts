@@ -7,6 +7,9 @@ import { renderActivityFeed, renderRunStatus } from "../observe/render.js";
 import { BRAND } from "../shared/brand.js";
 import { isMainModule } from "../shared/cliEntry.js";
 import { registerCards } from "../cards/index.js";
+import { loadPolishConfig } from "../daemon/configLoad.js";
+import { polishHome } from "../daemon/main.js";
+import { loadInstalledModels, renderRolePlan, resolveRolePlan } from "../daemon/rolePlan.js";
 import { loadCardSpecs, renderCardPlan, parseOnly, projectOf, readBrief, resolveRunTarget } from "./cards.js";
 import { callDaemon } from "./client.js";
 import { runWatch } from "./watch.js";
@@ -50,6 +53,9 @@ export async function runCli(
       if (args.includes("--dry-run")) {
         if (cards === undefined) throw new Error("--dry-run applies to task cards: pass a card file, directory or glob");
         process.stdout.write(renderCardPlan(registerCards(cards, { ...(only === undefined ? {} : { only }) })));
+        // Which model each role resolves to under this config, from `lms ls` alone: no model server is contacted.
+        const config = loadPolishConfig(polishHome());
+        process.stdout.write(`\n${renderRolePlan(resolveRolePlan(config, await loadInstalledModels(config)))}`);
         return;
       }
       const run = await (deps.callDaemon ?? callDaemon)<Run>("run", {
