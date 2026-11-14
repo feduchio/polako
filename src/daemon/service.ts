@@ -41,6 +41,7 @@ import {
   applyRunBudgetOverrides,
   buildProductionDeps,
   hasNoRunBudget,
+  hydrateCatalog,
   type RunBudgetLimits,
   type ResolvedRunSettings,
   installProductionDrivers,
@@ -96,6 +97,7 @@ export class DaemonService implements RpcHandler {
   private ticking = false;
   private tickStartedAt: number | null = null;
   private readonly startedAt = Date.now();
+  private catalogHydrated = false;
   private lastTickCompletedAt: number | null = null;
   private reportRenders = 0;
   private watchdog!: TickWatchdog;
@@ -574,11 +576,26 @@ export class DaemonService implements RpcHandler {
    * a worker loop): the engine refuses to re-enter a run it is driving, and a run created meanwhile
    * sat in CREATED until another run's VALIDATING returned. Explicit callers wait for the pass.
    */
+  /** Once per process, and only when a run is already past model discovery (a restart mid-run). */
+  private async hydrateCatalogForResumedRuns(): Promise<void> {
+    if (this.catalogHydrated) return;
+    const beyondDiscovery = this.store.repos.runs.listAll().some((run) =>
+      run.control === "RUNNING" && !["CREATED", "DISCOVERING_PROJECT", "BASELINING", "INTERPRETING_MISSION", "DISCOVERING_MODELS", "DONE", "FAILED", "NEEDS_HUMAN"].includes(run.phase));
+    if (!beyondDiscovery) return;
+    this.catalogHydrated = true;
+    try {
+      await hydrateCatalog(this.productionDeps);
+    } catch {
+      // The drivers say what is missing, in the run's own log, when they need a model.
+    }
+  }
+
   private async tick(waitForDrives = true): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     this.tickStartedAt = this.clock.now();
     try {
+      await this.hydrateCatalogForResumedRuns();
       const round = this.engine.tick();
       if (waitForDrives) {
         await round;

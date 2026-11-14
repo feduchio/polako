@@ -179,7 +179,7 @@ async function daemonCommand(args: string[]): Promise<void> {
     return;
   }
   if (action === "stop" || action === "restart") {
-    const stopped = await stopDaemon();
+    const stopped = await stopDaemon(30_000, args.includes("--force"));
     process.stderr.write(stopped === null ? `no ${BRAND.daemon} was running\n` : `stopped ${BRAND.daemon} pid ${String(stopped)}\n`);
     if (action === "restart") {
       await autostartDaemon();
@@ -188,7 +188,7 @@ async function daemonCommand(args: string[]): Promise<void> {
     }
     return;
   }
-  throw new Error(`usage: ${BRAND.cli} daemon status|stop|restart`);
+  throw new Error(`usage: ${BRAND.cli} daemon status|stop|restart [--force]`);
 }
 
 async function projectCommand(args: string[]): Promise<void> {
@@ -324,7 +324,7 @@ const usage = `Usage:
   ${BRAND.cli} project add [path] [--name name]
   ${BRAND.cli} run [project] [mission] [--mission text] [--runtime auto|required|off] [--budget-tokens n] [--budget-usd n] [--detach|-d] [--json]
   ${BRAND.cli} run [project] <cards> [--brief file] [--only id,id] [--dry-run] [--detach|-d] [--json]   cards: a .md file, a directory of cards, or a glob
-  ${BRAND.cli} daemon status|stop|restart          (restart after pnpm cli:link: the daemon keeps the old build until then)
+  ${BRAND.cli} daemon status|stop|restart [--force]  (restart after pnpm cli:link: the daemon keeps the old build until then)
   ${BRAND.cli} status [run-id] [--json]            (a card run lists every card's state)
   ${BRAND.cli} watch <run-id> [--verbose] [--json] [--plain] [--no-color]
   ${BRAND.cli} log <run-id> [--follow] [--json]

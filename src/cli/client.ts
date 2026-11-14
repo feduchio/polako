@@ -1,8 +1,8 @@
 import { BRAND } from "../shared/brand.js";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { polishHome, polishSocketPath } from "../daemon/main.js";
+import { polishHome, polishLockPath, polishPidPath, polishSocketPath } from "../daemon/main.js";
 import { rpcCall } from "../daemon/rpc.js";
 
 export async function callDaemon<T>(
@@ -100,7 +100,7 @@ function ownBuildTime(): number | null {
 }
 
 /** Stop the daemon the CLI talks to and wait until its socket is gone. Returns the pid stopped, or null if none ran. */
-export async function stopDaemon(timeoutMs = 30_000): Promise<number | null> {
+export async function stopDaemon(timeoutMs = 30_000, force = false): Promise<number | null> {
   const socketPath = polishSocketPath();
   let pid: number;
   try {
@@ -119,5 +119,10 @@ export async function stopDaemon(timeoutMs = 30_000): Promise<number | null> {
       return pid;
     }
   }
-  throw new Error(`${BRAND.daemon} (pid ${String(pid)}) did not stop within ${String(timeoutMs / 1000)}s`);
+  if (!force) {
+    throw new Error(`${BRAND.daemon} (pid ${String(pid)}) did not stop within ${String(timeoutMs / 1000)}s: it waits for a model call in flight. Use "${BRAND.cli} daemon stop --force" (runs resume on the next start)`);
+  }
+  process.kill(pid, "SIGKILL");
+  for (const path of [polishLockPath(), polishPidPath(), socketPath]) rmSync(path, { force: true });
+  return pid;
 }

@@ -509,6 +509,17 @@ export function resolveEnsembleAlternatives(deps: ProductionDeps, ctx?: PhaseCon
   return options.length >= 2 ? options : [];
 }
 
+/**
+ * A daemon that restarts mid-run starts with an empty catalogue, and only DISCOVERING_MODELS fills
+ * it: a resumed EXECUTING run then found "no worker model is eligible" and paused. This lists the
+ * models again (no probes: their verdicts are in the observation log) and restores what was learned.
+ */
+export async function hydrateCatalog(deps: Pick<ProductionDeps, "catalog" | "config" | "store">): Promise<void> {
+  if (deps.catalog.list().length > 0) return;
+  await deps.catalog.discover({ costEligibility: costEligibilityFromConfig(deps.config.routing) });
+  new ModelObservationRepository(deps.store).restoreCatalog(deps.catalog);
+}
+
 export function createDiscoveringModelsDriverFromCatalog(deps: ProductionDeps): PhaseDriver {
   const pinnedModels = [
     ...deps.config.supervisors.flatMap((entry) => supervisorModelChain(entry).map((value) => parseModelRefString(value))),
