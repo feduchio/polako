@@ -48,6 +48,8 @@ export const LOCAL_PROVIDER_DEFAULTS: Readonly<Record<string, unknown>> = {
   // Minutes to the first token on a long prompt, then ~25 tok/s: the request is not streamed.
   timeoutMs: 30 * 60_000,
   contextLength: 65_536,
+  // One looping call held the GPU for 10+ minutes; 16k tokens is ~6 minutes at 45 tok/s and far above any real turn.
+  defaultMaxTokens: 16_384,
 };
 
 type Raw = Record<string, unknown>;

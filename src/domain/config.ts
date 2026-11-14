@@ -349,6 +349,8 @@ export const ProviderConfigSchema = z.object({
   timeoutMs: z.number().int().min(1_000).optional(),
   /** `lmstudio`: context length the model is loaded with; caps the advertised context window. */
   contextLength: z.number().int().min(1).optional(),
+  /** `lmstudio`: output cap for a request that sets none (a looping reasoning model otherwise generates until the context is full). */
+  defaultMaxTokens: z.number().int().min(1).optional(),
   /** `lmstudio`: path of the `lms` CLI used for model metadata (default `~/.lmstudio/bin/lms`, then PATH). */
   lmsPath: z.string().min(1).optional(),
   /**

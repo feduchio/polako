@@ -353,3 +353,23 @@ describe("patientFetch (node:http, no 300 s header timeout)", () => {
     });
   });
 });
+
+describe("LmStudioProvider defaultMaxTokens", () => {
+  it("caps a request that sets no limit, and leaves one that does", async () => {
+    const seen: unknown[] = [];
+    const p = provider({
+      defaultMaxTokens: 777,
+      fetch: fakeFetch((_url, init) => {
+        seen.push((JSON.parse(init.body ?? "{}") as { max_tokens?: number }).max_tokens);
+        return { status: 200, body: { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } };
+      }),
+    });
+    const base = { model: { provider: "local", model: "m" }, messages: [{ role: "user" as const, content: "x" }], metadata: META };
+    await p.complete(base);
+    await p.complete({ ...base, maxTokens: 50 });
+    expect(seen).toEqual([777, 50]);
+    const bare = provider({ fetch: fakeFetch((_url, init) => { seen.push((JSON.parse(init.body ?? "{}") as { max_tokens?: number }).max_tokens); return { status: 200, body: { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: {} } }; }) });
+    await bare.complete(base);
+    expect(seen[2]).toBeUndefined();
+  });
+});

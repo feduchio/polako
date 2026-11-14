@@ -45,7 +45,7 @@ describe("local profile", () => {
     expect(config.agent.maxTurns).toBe(80);
     expect(config.discovery.probeMaxTokens).toBe(2048);
     expect(config.lanes["llm.default"]).toBe(1);
-    expect(config.providers[0]).toMatchObject({ manageResidency: true, timeoutMs: 1_800_000, contextLength: 65_536 });
+    expect(config.providers[0]).toMatchObject({ manageResidency: true, timeoutMs: 1_800_000, contextLength: 65_536, defaultMaxTokens: 16_384 });
   });
 
   it("lets anything the user wrote win", () => {

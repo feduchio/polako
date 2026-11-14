@@ -53,6 +53,12 @@ export interface LmStudioProviderOptions {
   catalog?: LmsCatalogSource;
   /** Path of the `lms` CLI used when `catalog` is not given. */
   lmsPath?: string;
+  /**
+   * Output cap applied to a request that sets none. A reasoning model that loops in its thinking
+   * generates until the context is full (a worker call ran 10+ minutes on the one GPU, stalling the
+   * whole run); a cap turns that into a short, failed turn.
+   */
+  defaultMaxTokens?: number;
   /** Allowlist of model keys (`*` wildcard): nothing else is listed, probed or selected. */
   models?: readonly string[];
   /** Model keys (`*` wildcard) that are never listed, probed or selected. */
@@ -78,6 +84,7 @@ export class LmStudioProvider implements ProviderAdapter {
   private readonly inner: OpenAICompatProvider;
   private readonly catalog: LmsCatalogSource;
   private readonly residency: ResidencyScheduler | undefined;
+  private readonly defaultMaxTokens: number | undefined;
   private readonly allow: readonly RegExp[] | null;
   private readonly deny: readonly RegExp[];
   private readonly contextLength: number;
@@ -86,6 +93,7 @@ export class LmStudioProvider implements ProviderAdapter {
   constructor(opts: LmStudioProviderOptions) {
     this.id = opts.id;
     this.residency = opts.residency;
+    this.defaultMaxTokens = opts.defaultMaxTokens;
     this.allow = opts.models === undefined || opts.models.length === 0 ? null : opts.models.map(keyPattern);
     this.deny = (opts.excludeModels ?? []).map(keyPattern);
     // With residency the scheduler is the one-at-a-time gate; the lane must be wide enough for it
@@ -143,7 +151,8 @@ export class LmStudioProvider implements ProviderAdapter {
       .map((row) => toLmStudioModelInfo(this.id, row.modelKey, row, this.contextLength, this.hints[row.modelKey]));
   }
 
-  complete(request: CompletionRequest): Promise<CompletionResponse> {
+  complete(given: CompletionRequest): Promise<CompletionResponse> {
+    const request = given.maxTokens === undefined && this.defaultMaxTokens !== undefined ? { ...given, maxTokens: this.defaultMaxTokens } : given;
     const residency = this.residency;
     if (residency === undefined) return this.inner.complete(request);
     return residency.run(

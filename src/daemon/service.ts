@@ -488,7 +488,9 @@ export class DaemonService implements RpcHandler {
       });
       return this.store.repos.runs.get(run.id) ?? run;
     }
-    await this.tick();
+    // `resume` hands the run back to the drivers and returns: waiting for the tick meant waiting for
+    // a whole worker call (minutes), and the CLI's RPC gave up first ("RPC resume timed out").
+    await this.tick(command !== "resume");
     return this.store.repos.runs.get(run.id) ?? run;
   }
 
@@ -549,7 +551,7 @@ export class DaemonService implements RpcHandler {
       run: resumed,
       config: this.resolveRunSettings(runId).config,
     });
-    await this.tick();
+    await this.tick(false);
     return { accepted: true, runId, phase: this.requireRun(runId).phase };
   }
 
