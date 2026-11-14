@@ -308,7 +308,7 @@ describe("patientFetch (node:http, no 300 s header timeout)", () => {
       return await run(`http://127.0.0.1:${String((server.address() as AddressInfo).port)}`);
     } finally {
       server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => { resolve(); }));
     }
   }
 
@@ -336,7 +336,7 @@ describe("patientFetch (node:http, no 300 s header timeout)", () => {
     await withServer(() => undefined, async (base) => {
       const controller = new AbortController();
       const pending = patientFetch(`${base}/x`, { method: "GET", headers: {}, signal: controller.signal });
-      setTimeout(() => controller.abort(), 50);
+      setTimeout(() => { controller.abort(); }, 50);
       await expect(pending).rejects.toMatchObject({ name: "AbortError" });
       await expect(patientFetch(`${base}/x`, { method: "GET", headers: {}, signal: AbortSignal.abort() })).rejects.toMatchObject({ name: "AbortError" });
     });

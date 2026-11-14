@@ -145,7 +145,7 @@ function invocationIn(script: string): Invocation | null {
     const program = words[start];
     // `tsx --test <globs>` is node's own test runner through tsx: one file is `node --import tsx --test <file>`.
     if (program === "tsx") {
-      if (words.indexOf("--test", start + 1) === -1) continue;
+      if (!words.includes("--test", start + 1)) continue;
       return { framework: "node-test", fileArgv: ["node", "--import", "tsx", "--test"] };
     }
     if (program === "vitest") return { framework: "vitest", fileArgv: ["node_modules/.bin/vitest", "run"] };
